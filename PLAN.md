@@ -34,7 +34,7 @@ Full unit + scenario testing. React todo example validated in browser.
 - [ ] M6 auth: refresh tokens, magic codes, google OAuth
 - [x] M7 presence/rooms/broadcast via PG table + NOTIFY (refresh-presence snapshots; patch-presence TODO optional)
 - [x] M8 admin API: query (object tree, inference), transact (admin steps grammar incl lookups/links/auto-attrs), refresh_tokens, sign_out, users, magic codes, presence, storage upload/delete + local-disk blob serve
-- [ ] M9 react todo example wired to local server, browser-validated
+- [x] M9 react-todo example (examples/react-todo, official @instantdb/react built from LEGACY) browser-validated: two tabs live sync, presence=2, toggle/add/delete-completed sync, magic-code auth in-browser
 - [ ] M10 scenario tests matching legacy test suite level
 
 ## Validation loop
@@ -48,3 +48,4 @@ Full unit + scenario testing. React todo example validated in browser.
 - 2026-08-29: M3 done: instaql.rs (where ops incl $not/$isNull/comparators/or/and/paths, pagination+cursors+nulls, children, fields, aggregate, ws result shape).
 - 2026-08-29: M4/M7 smoke-tested end-to-end via scripts/smoke-ws.mjs (two clients, presence, broadcast). Server: crates/instant-server (state/service/ws/invalidator/presence/auth).
 - 2026-08-29: M6+M8 tested via curl: magic code lifecycle, admin query/transact/link/refresh_tokens all green. OAuth implemented but needs a mock-provider test.
+- 2026-08-29: M9 browser validation complete. Fixed cursor-direction bug found by scenario tests (forward=is_after). 50 core tests green.

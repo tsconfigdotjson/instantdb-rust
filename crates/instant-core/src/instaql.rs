@@ -1256,11 +1256,8 @@ async fn run_top_form(
     for (cursor, is_after) in [(&form.opts.after, true), (&form.opts.before, false)] {
         let Some(cursor) = cursor else { continue };
         let inclusive = if is_after { form.opts.after_inclusive } else { form.opts.before_inclusive };
-        // op relative to displayed order; after=forward, before=backward
-        let forward = matches!(
-            (order.dir, is_after),
-            (Dir::Asc, true) | (Dir::Desc, false)
-        );
+        // after = rows later in display order; before = rows earlier
+        let forward = is_after;
         push_cursor_filter(
             &mut qb,
             sort_col,
