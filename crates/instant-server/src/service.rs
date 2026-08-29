@@ -78,7 +78,59 @@ pub async fn run_query(
         };
         filter.filter(&mut conn, app_id, attrs, &mut result).await?;
     }
+    inject_file_urls(state, app_id, attrs, q, &mut result);
     Ok(result)
+}
+
+/// $files entities get a synthetic `url` triple; `location-id` triples are
+/// hidden unless explicitly requested via $.fields (legacy transform-$files-result).
+fn inject_file_urls(
+    state: &AppState,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    q: &Value,
+    result: &mut QueryResult,
+) {
+    let loc_attr = instant_core::system_catalog::attr_id("$files", "location-id");
+    let url_attr = instant_core::system_catalog::attr_id("$files", "url");
+    let _ = q;
+    fn walk(
+        node: &mut instant_core::instaql::EntityNode,
+        state: &AppState,
+        app_id: Uuid,
+        loc_attr: Uuid,
+        url_attr: Uuid,
+    ) {
+        if node.etype == "$files" {
+            let loc = node
+                .triples
+                .iter()
+                .find(|t| t.a == loc_attr)
+                .and_then(|t| t.v.as_str().map(|s| s.to_string()));
+            if let Some(loc) = loc {
+                let t0 = node.triples.first().map(|t| t.t).unwrap_or(0);
+                let url = crate::storage::download_url(state, app_id, &loc);
+                node.triples.push(instant_core::instaql::TripleOut {
+                    e: node.eid,
+                    a: url_attr,
+                    v: serde_json::Value::String(url),
+                    t: t0,
+                });
+            }
+            node.triples.retain(|t| t.a != loc_attr);
+        }
+        for c in &mut node.children {
+            for e in &mut c.entities {
+                walk(e, state, app_id, loc_attr, url_attr);
+            }
+        }
+    }
+    let _ = attrs;
+    for form in &mut result.forms {
+        for e in &mut form.entities {
+            walk(e, state, app_id, loc_attr, url_attr);
+        }
+    }
 }
 
 /// Runs tx-steps for an app: perms checks (unless admin), commit, notify.

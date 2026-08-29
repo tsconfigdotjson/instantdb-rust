@@ -80,6 +80,8 @@ pub struct AppState {
     pub app_sessions: DashMap<Uuid, HashSet<Uuid>>,
     /// (app id, room id) -> session ids on this node
     pub room_sessions: DashMap<(Uuid, String), HashSet<Uuid>>,
+    /// oauth discovery/JWKS cache
+    pub oauth_cache: DashMap<String, (Value, std::time::Instant)>,
 }
 
 impl AppState {
@@ -91,6 +93,7 @@ impl AppState {
             sessions: DashMap::new(),
             app_sessions: DashMap::new(),
             room_sessions: DashMap::new(),
+            oauth_cache: DashMap::new(),
         })
     }
 

@@ -1,13 +1,15 @@
 mod auth;
 mod invalidator;
 mod presence;
+mod routes;
 mod service;
 mod state;
+mod storage;
 mod ws;
 
 use std::sync::Arc;
 
-use axum::routing::get;
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use sqlx::postgres::PgPoolOptions;
 use state::{AppState, Config};
@@ -44,7 +46,37 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(|| async { "instant-server" }))
         .route("/health", get(|| async { "ok" }))
         .route("/runtime/session", get(ws::handler))
+        // runtime auth
+        .route("/runtime/auth/send_magic_code", post(routes::runtime::send_magic_code))
+        .route("/runtime/auth/verify_magic_code", post(routes::runtime::verify_magic_code))
+        .route("/runtime/auth/verify_refresh_token", post(routes::runtime::verify_refresh_token))
+        .route("/runtime/auth/sign_in_guest", post(routes::runtime::sign_in_guest))
+        .route("/runtime/signout", post(routes::runtime::signout))
+        // oauth
+        .route("/runtime/oauth/start", get(routes::oauth::start))
+        .route("/runtime/{app_id}/oauth/start", get(routes::oauth::start_with_app))
+        .route("/runtime/oauth/callback", get(routes::oauth::callback_get).post(routes::oauth::callback_post))
+        .route("/runtime/oauth/token", post(routes::oauth::token))
+        .route("/runtime/{app_id}/oauth/token", post(routes::oauth::token_with_app))
+        .route("/runtime/oauth/id_token", post(routes::oauth::id_token))
+        .route("/runtime/{app_id}/.well-known/openid-configuration", get(routes::oauth::well_known))
+        // admin
+        .route("/admin/query", post(routes::admin::query))
+        .route("/admin/transact", post(routes::admin::transact))
+        .route("/admin/refresh_tokens", post(routes::admin::refresh_tokens))
+        .route("/admin/sign_out", post(routes::admin::sign_out))
+        .route("/admin/users", get(routes::admin::get_user).delete(routes::admin::delete_user))
+        .route("/admin/magic_code", post(routes::admin::magic_code))
+        .route("/admin/send_magic_code", post(routes::admin::magic_code))
+        .route("/admin/verify_magic_code", post(routes::admin::admin_verify_magic_code))
+        .route("/admin/sign_in_guest", post(routes::admin::admin_sign_in_guest))
+        .route("/admin/rooms/presence", get(routes::admin::presence))
+        // storage
+        .route("/admin/storage/upload", put(routes::admin::storage_upload))
+        .route("/admin/storage/files", delete(routes::admin::storage_delete))
+        .route("/storage/serve/{app_id}/{location_id}", get(storage::serve))
         .layer(CorsLayer::very_permissive())
+        .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", cfg.port);
