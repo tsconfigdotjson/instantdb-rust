@@ -75,6 +75,9 @@ async fn session_loop(socket: WebSocket, state: Arc<AppState>) {
 
     // cleanup
     state.drop_session(session_id);
+    state.stream_subs.iter_mut().for_each(|mut e| {
+        e.value_mut().retain(|(sid, _)| *sid != session_id);
+    });
     crate::presence::leave_all(&state, session_id).await;
     writer.abort();
 }
@@ -107,6 +110,13 @@ pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>
         "leave-room" => handle_leave_room(state, session, &msg).await,
         "set-presence" => handle_set_presence(state, session, &msg).await,
         "client-broadcast" => handle_client_broadcast(state, session, &msg).await,
+        "start-sync" => crate::sync_table::handle_start_sync(state, session, &msg).await,
+        "resync-table" => crate::sync_table::handle_resync_table(state, session, &msg).await,
+        "remove-sync" => crate::sync_table::handle_remove_sync(state, session, &msg).await,
+        "start-stream" => crate::streams::handle_start_stream(state, session, &msg).await,
+        "append-stream" => crate::streams::handle_append_stream(state, session, &msg).await,
+        "subscribe-stream" => crate::streams::handle_subscribe_stream(state, session, &msg).await,
+        "unsubscribe-stream" => crate::streams::handle_unsubscribe_stream(state, session, &msg).await,
         _ => Ok(()), // unknown ops ignored (client tolerates)
     };
     if let Err(e) = result {

@@ -5,6 +5,8 @@ mod routes;
 mod service;
 mod state;
 mod storage;
+mod streams;
+mod sync_table;
 mod ws;
 
 

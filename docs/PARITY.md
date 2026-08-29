@@ -20,8 +20,8 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | `client-broadcast` / `server-broadcast` | ✅ | |
 | message batching (JSON array frames) | 🟡 | server sends single frames (clients accept both) |
 | SSE fallback transport (`/runtime/sse`) | ✅ | sse-init handshake + POST envelope (scripts/sse-test.mjs) |
-| sync tables (`start-sync`, `sync-load-batch`, …) | ❌ | experimental client feature |
-| streams (`start-stream`, `stream-append`, …) | ❌ | experimental client feature |
+| sync tables (`start-sync`, `sync-load-batch`, `sync-update-triples`, `resync-table`, `remove-sync`) | ✅ | trigger-based per-tx change log replaces the WAL feed; cross-session resync (scripts/synctable-test.mjs) |
+| streams (`start-stream`, `append-stream`, `subscribe-stream`, live tailing, resume) | ✅ | disk-backed bytes + NOTIFY fan-out; $streams perms enforced (scripts/streams-test.mjs) |
 
 ## InstaQL
 

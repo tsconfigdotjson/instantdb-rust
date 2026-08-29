@@ -52,6 +52,16 @@ pub struct SessionState {
     pub supports_patch_presence: bool,
     /// set for SSE-transport sessions; validates /runtime/sse pushes
     pub sse_token: Option<Uuid>,
+    /// active sync-table subscriptions: sub id -> state
+    pub sync_subs: HashMap<Uuid, SyncSub>,
+    /// stream ids this session is the writer for
+    pub writing_streams: HashSet<Uuid>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncSub {
+    pub etype: String,
+    pub last_tx: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +98,8 @@ pub struct AppState {
     pub oauth_cache: DashMap<String, (Value, std::time::Instant)>,
     /// last presence snapshot sent per (app, room) — for patch-presence diffs
     pub room_snapshots: DashMap<(Uuid, String), Value>,
+    /// live stream subscribers on this node: (app, stream) -> (session, subscribe event id)
+    pub stream_subs: DashMap<(Uuid, Uuid), HashSet<(Uuid, String)>>,
 }
 
 impl AppState {
@@ -101,6 +113,7 @@ impl AppState {
             room_sessions: DashMap::new(),
             oauth_cache: DashMap::new(),
             room_snapshots: DashMap::new(),
+            stream_subs: DashMap::new(),
         })
     }
 

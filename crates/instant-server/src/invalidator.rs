@@ -25,7 +25,7 @@ pub async fn run(state: Arc<AppState>) {
 async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
     let mut listener = PgListener::connect_with(&state.pool).await?;
     listener
-        .listen_all(["instant_tx", "instant_room", "instant_broadcast"])
+        .listen_all(["instant_tx", "instant_room", "instant_broadcast", "instant_stream"])
         .await?;
     loop {
         let notification = listener.recv().await?;
@@ -89,6 +89,9 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                     }
                 }
             }
+            "instant_stream" => {
+                crate::streams::deliver_append(state, &payload).await;
+            }
             _ => {}
         }
     }
@@ -125,6 +128,7 @@ async fn refresh_session(
     attrs: instant_core::attr::AttrMap,
 ) {
     let _guard = session.refresh_lock.lock().await;
+    crate::sync_table::push_updates(&state, &session, app_id, tx_id).await;
     // snapshot queries + auth under the state lock
     let (queries, perms) = {
         let st = session.state.lock().await;

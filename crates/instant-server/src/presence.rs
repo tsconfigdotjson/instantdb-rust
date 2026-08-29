@@ -239,6 +239,11 @@ pub async fn heartbeat_loop(state: std::sync::Arc<AppState>) {
         )
         .execute(&state.pool)
         .await;
+        let _ = sqlx::query(
+            "DELETE FROM rust_tx_changes WHERE logged_at < now() - interval '1 hour'",
+        )
+        .execute(&state.pool)
+        .await;
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     }
 }

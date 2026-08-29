@@ -179,6 +179,11 @@ pub async fn transact(
         .fetch_one(&mut *conn)
         .await?;
     let tx_id: i64 = row.get("id");
+    // tags triple writes in this tx for the change-capture trigger (sync tables)
+    sqlx::query("SELECT set_config('instant.rust_tx_id', $1, true)")
+        .bind(tx_id.to_string())
+        .execute(&mut *conn)
+        .await?;
 
     // Guard system-catalog triple writes unless explicitly allowed.
     if !opts.allow_system_catalog_writes {

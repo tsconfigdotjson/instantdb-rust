@@ -274,5 +274,68 @@ pub async fn ensure_server_tables(pool: &sqlx::PgPool) -> Result<()> {
     .execute(pool)
     .await
     .map_err(InstantError::from)?;
+    // per-tx triple change log for sync tables (replaces the legacy WAL feed)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rust_tx_changes (
+           tx_id bigint NOT NULL,
+           app_id uuid NOT NULL,
+           entity_id uuid NOT NULL,
+           attr_id uuid NOT NULL,
+           value jsonb NOT NULL,
+           created_at bigint,
+           action text NOT NULL,
+           logged_at timestamptz NOT NULL DEFAULT now())",
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS rust_tx_changes_app_tx_idx
+         ON rust_tx_changes (app_id, tx_id)",
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION rust_capture_triple_change() RETURNS trigger AS $fn$
+        DECLARE txid_setting text;
+        BEGIN
+          txid_setting := current_setting('instant.rust_tx_id', true);
+          IF txid_setting IS NULL OR txid_setting = '' THEN
+            RETURN NULL;
+          END IF;
+          IF TG_OP = 'INSERT' THEN
+            INSERT INTO rust_tx_changes (tx_id, app_id, entity_id, attr_id, value, created_at, action)
+            VALUES (txid_setting::bigint, NEW.app_id, NEW.entity_id, NEW.attr_id, NEW.value, NEW.created_at, 'added');
+          ELSIF TG_OP = 'DELETE' THEN
+            INSERT INTO rust_tx_changes (tx_id, app_id, entity_id, attr_id, value, created_at, action)
+            VALUES (txid_setting::bigint, OLD.app_id, OLD.entity_id, OLD.attr_id, OLD.value, OLD.created_at, 'removed');
+          ELSIF TG_OP = 'UPDATE' AND NEW.value IS DISTINCT FROM OLD.value THEN
+            INSERT INTO rust_tx_changes (tx_id, app_id, entity_id, attr_id, value, created_at, action)
+            VALUES (txid_setting::bigint, OLD.app_id, OLD.entity_id, OLD.attr_id, OLD.value, OLD.created_at, 'removed'),
+                   (txid_setting::bigint, NEW.app_id, NEW.entity_id, NEW.attr_id, NEW.value, NEW.created_at, 'added');
+          END IF;
+          RETURN NULL;
+        END $fn$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
+    sqlx::query(
+        "DROP TRIGGER IF EXISTS rust_capture_trigger ON triples",
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
+    sqlx::query(
+        "CREATE TRIGGER rust_capture_trigger
+         AFTER INSERT OR UPDATE OR DELETE ON triples
+         FOR EACH ROW EXECUTE FUNCTION rust_capture_triple_change()",
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
     Ok(())
 }

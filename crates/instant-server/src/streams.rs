@@ -1,0 +1,391 @@
+//! Streams: append-only text streams with live tailing (PROTOCOL.md §2.10 /
+//! §3.14). Stream metadata lives in the $streams system namespace; bytes live
+//! in the storage dir; live fan-out crosses nodes via pg NOTIFY.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use instant_core::error::{InstantError, Result};
+use instant_core::system_catalog as sc;
+use serde_json::{json, Value};
+use sqlx::Row;
+use uuid::Uuid;
+
+use crate::service;
+use crate::state::{AppState, Session};
+
+fn stream_path(app_id: Uuid, stream_id: Uuid) -> PathBuf {
+    crate::storage::storage_dir()
+        .join("streams")
+        .join(app_id.to_string())
+        .join(stream_id.to_string())
+}
+
+async fn stream_by_client_id(
+    state: &AppState,
+    app_id: Uuid,
+    client_id: &str,
+) -> Result<Option<Uuid>> {
+    let attr = sc::attr_id("$streams", "clientId");
+    let row = sqlx::query(
+        "SELECT entity_id FROM triples
+         WHERE app_id = $1 AND attr_id = $2 AND av AND value = to_jsonb($3::text) LIMIT 1",
+    )
+    .bind(app_id)
+    .bind(attr)
+    .bind(client_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(InstantError::from)?;
+    Ok(row.map(|r| r.get("entity_id")))
+}
+
+async fn stream_field(state: &AppState, app_id: Uuid, stream_id: Uuid, label: &str) -> Option<Value> {
+    let attr = sc::attr_id("$streams", label);
+    let row = sqlx::query(
+        "SELECT value FROM triples
+         WHERE app_id = $1 AND entity_id = $2 AND attr_id = $3 LIMIT 1",
+    )
+    .bind(app_id)
+    .bind(stream_id)
+    .bind(attr)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()??;
+    Some(row.get("value"))
+}
+
+async fn check_stream_perm(
+    state: &AppState,
+    app_id: Uuid,
+    session: &Arc<Session>,
+    action: &str,
+    rule_params: Option<&Value>,
+) -> Result<()> {
+    let (admin, user_id) = {
+        let st = session.state.lock().await;
+        (st.admin, st.user.as_ref().map(|u| u.id))
+    };
+    if admin {
+        return Ok(());
+    }
+    let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
+    let rules = instant_core::perms::Rules::load(&mut conn, app_id).await?;
+    let program = rules.program("$streams", action);
+    let auth_ctx = instant_core::perms::AuthCtx { user_id, user_map: None };
+    let attrs = service::load_attrs(state, app_id).await?;
+    let auth_val = if let Some(uid) = user_id {
+        instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$users", uid)
+            .await?
+            .map(Value::Object)
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let _ = auth_ctx;
+    let ok = instant_core::perms::eval_program(
+        &program,
+        &json!({}),
+        None,
+        &auth_val,
+        rule_params.unwrap_or(&json!({})),
+    )?;
+    if !ok {
+        return Err(InstantError::permission_denied(
+            json!(["$streams", action]),
+            "Permission denied: not perms-pass?",
+        ));
+    }
+    Ok(())
+}
+
+pub async fn handle_start_stream(
+    state: &Arc<AppState>,
+    session: &Arc<Session>,
+    msg: &Value,
+) -> std::result::Result<(), InstantError> {
+    let app_id = {
+        let st = session.state.lock().await;
+        st.app_id
+            .ok_or_else(|| InstantError::param_malformed("session not initialized"))?
+    };
+    let client_id = msg
+        .get("client-id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| InstantError::param_missing("missing client-id"))?;
+    let reconnect_token = msg.get("reconnect-token").and_then(|v| v.as_str());
+    check_stream_perm(state, app_id, session, "create", msg.get("rule-params")).await?;
+
+    let existing = stream_by_client_id(state, app_id, client_id).await?;
+    let (stream_id, offset) = match existing {
+        Some(sid) => {
+            // resume: reconnect token must match
+            let stored = stream_field(state, app_id, sid, "hashedReconnectToken").await;
+            let supplied_hash = reconnect_token.map(crate::auth::hash_string);
+            if stored.as_ref().and_then(|v| v.as_str()) != supplied_hash.as_deref() {
+                return Err(InstantError::validation_failed(
+                    "stream",
+                    "A stream with this client-id already exists.",
+                    json!([]),
+                ));
+            }
+            let size = stream_field(state, app_id, sid, "size")
+                .await
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            (sid, size)
+        }
+        None => {
+            let sid = Uuid::new_v4();
+            let mut steps = vec![
+                json!(["add-triple", sid, sc::attr_id("$streams", "id"), sid]),
+                json!(["add-triple", sid, sc::attr_id("$streams", "clientId"), client_id]),
+                json!(["add-triple", sid, sc::attr_id("$streams", "machineId"), state.node_id.to_string()]),
+                json!(["add-triple", sid, sc::attr_id("$streams", "size"), 0]),
+                json!(["add-triple", sid, sc::attr_id("$streams", "done"), false]),
+            ];
+            if let Some(t) = reconnect_token {
+                steps.push(json!(["add-triple", sid, sc::attr_id("$streams", "hashedReconnectToken"), crate::auth::hash_string(t)]));
+            }
+            service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
+            (sid, 0)
+        }
+    };
+
+    {
+        let mut st = session.state.lock().await;
+        st.writing_streams.insert(stream_id);
+    }
+    session.send(json!({
+        "op": "start-stream-ok",
+        "client-event-id": msg.get("client-event-id"),
+        "stream-id": stream_id,
+        "offset": offset,
+    }));
+    Ok(())
+}
+
+pub async fn handle_append_stream(
+    state: &Arc<AppState>,
+    session: &Arc<Session>,
+    msg: &Value,
+) -> std::result::Result<(), InstantError> {
+    let app_id = {
+        let st = session.state.lock().await;
+        st.app_id
+            .ok_or_else(|| InstantError::param_malformed("session not initialized"))?
+    };
+    let stream_id = msg
+        .get("stream-id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| InstantError::param_missing("missing stream-id"))?;
+    {
+        let st = session.state.lock().await;
+        if !st.writing_streams.contains(&stream_id) {
+            return Err(InstantError::validation_failed(
+                "stream",
+                "This session is not the stream's writer.",
+                json!([]),
+            ));
+        }
+    }
+    let chunks: Vec<String> = msg
+        .get("chunks")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|c| c.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let offset = msg.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
+    let done = msg.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+    let abort_reason = msg.get("abort-reason").and_then(|v| v.as_str());
+
+    let path = stream_path(app_id, stream_id);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| InstantError::internal(format!("stream mkdir: {e}")))?;
+    }
+    let current = tokio::fs::metadata(&path).await.map(|m| m.len() as i64).unwrap_or(0);
+    let content = chunks.concat();
+    let bytes = content.as_bytes();
+    if offset > current {
+        return Err(InstantError::validation_failed(
+            "stream",
+            "Append offset is past the end of the stream.",
+            json!([]),
+        ));
+    }
+    // overlap-tolerant: skip already-flushed bytes
+    let skip = (current - offset) as usize;
+    let new_bytes = if skip < bytes.len() { &bytes[skip..] } else { &[] };
+    if !new_bytes.is_empty() {
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await
+            .map_err(|e| InstantError::internal(format!("stream open: {e}")))?;
+        f.write_all(new_bytes)
+            .await
+            .map_err(|e| InstantError::internal(format!("stream write: {e}")))?;
+        f.flush().await.ok();
+    }
+    let new_size = current + new_bytes.len() as i64;
+
+    // update metadata
+    let mut steps = vec![
+        json!(["add-triple", stream_id, sc::attr_id("$streams", "size"), new_size]),
+        json!(["add-triple", stream_id, sc::attr_id("$streams", "done"), done]),
+    ];
+    if let Some(reason) = abort_reason {
+        steps.push(json!(["add-triple", stream_id, sc::attr_id("$streams", "abortReason"), reason]));
+    }
+    service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
+
+    session.send(json!({
+        "op": "stream-flushed",
+        "client-event-id": msg.get("client-event-id"),
+        "stream-id": stream_id,
+        "offset": new_size,
+        "done": done,
+    }));
+
+    // fan out to subscribers (all nodes)
+    let delivered_offset = current.min(offset + bytes.len() as i64) - (bytes.len() as i64 - new_bytes.len() as i64).min(0);
+    let _ = delivered_offset;
+    service::notify_json(
+        state,
+        "instant_stream",
+        json!({
+            "app_id": app_id,
+            "stream_id": stream_id,
+            "offset": new_size - new_bytes.len() as i64,
+            "content": String::from_utf8_lossy(new_bytes),
+            "done": done,
+            "error": abort_reason,
+        }),
+    )
+    .await;
+    Ok(())
+}
+
+pub async fn handle_subscribe_stream(
+    state: &Arc<AppState>,
+    session: &Arc<Session>,
+    msg: &Value,
+) -> std::result::Result<(), InstantError> {
+    let app_id = {
+        let st = session.state.lock().await;
+        st.app_id
+            .ok_or_else(|| InstantError::param_malformed("session not initialized"))?
+    };
+    check_stream_perm(state, app_id, session, "view", msg.get("rule-params")).await?;
+    let stream_id = match msg.get("stream-id").and_then(|v| v.as_str()) {
+        Some(s) => Uuid::parse_str(s)
+            .map_err(|_| InstantError::param_malformed("malformed stream-id"))?,
+        None => {
+            let client_id = msg
+                .get("client-id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| InstantError::param_missing("missing stream-id or client-id"))?;
+            stream_by_client_id(state, app_id, client_id)
+                .await?
+                .ok_or_else(|| InstantError::record_not_found("stream", "Unknown stream."))?
+        }
+    };
+    let subscribe_event_id = msg
+        .get("client-event-id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let offset = msg.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    // catch-up: send stored content from offset
+    let path = stream_path(app_id, stream_id);
+    let stored = tokio::fs::read(&path).await.unwrap_or_default();
+    let done = stream_field(state, app_id, stream_id, "done")
+        .await
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let error = stream_field(state, app_id, stream_id, "abortReason")
+        .await
+        .filter(|v| v.is_string());
+    let catchup = if (offset as usize) < stored.len() {
+        String::from_utf8_lossy(&stored[offset as usize..]).to_string()
+    } else {
+        String::new()
+    };
+    let mut reply = json!({
+        "op": "stream-append",
+        "client-event-id": subscribe_event_id,
+        "stream-id": stream_id,
+        "offset": offset.min(stored.len() as i64),
+        "content": catchup,
+        "done": done,
+    });
+    if let Some(e) = &error {
+        reply["error"] = e.clone();
+        reply["retry"] = json!(false);
+    }
+    session.send(reply);
+
+    if !done && error.is_none() {
+        state
+            .stream_subs
+            .entry((app_id, stream_id))
+            .or_default()
+            .insert((session.id, subscribe_event_id));
+    }
+    Ok(())
+}
+
+pub async fn handle_unsubscribe_stream(
+    state: &Arc<AppState>,
+    session: &Arc<Session>,
+    msg: &Value,
+) -> std::result::Result<(), InstantError> {
+    let target = msg
+        .get("subscribe-event-id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    state.stream_subs.iter_mut().for_each(|mut e| {
+        e.value_mut().retain(|(sid, ev)| !(*sid == session.id && *ev == target));
+    });
+    Ok(())
+}
+
+/// Deliver a live append to this node's subscribers (from the NOTIFY listener).
+pub async fn deliver_append(state: &Arc<AppState>, payload: &Value) {
+    let (Some(app_id), Some(stream_id)) = (
+        payload.get("app_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()),
+        payload.get("stream_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()),
+    ) else {
+        return;
+    };
+    let Some(subs) = state.stream_subs.get(&(app_id, stream_id)).map(|s| s.clone()) else {
+        return;
+    };
+    let done = payload.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+    for (session_id, event_id) in subs {
+        if let Some(session) = state.sessions.get(&session_id).map(|s| s.clone()) {
+            let mut msg = json!({
+                "op": "stream-append",
+                "client-event-id": event_id,
+                "stream-id": stream_id,
+                "offset": payload.get("offset").cloned().unwrap_or(json!(0)),
+                "content": payload.get("content").cloned().unwrap_or(json!("")),
+                "done": done,
+            });
+            if let Some(e) = payload.get("error").filter(|e| e.is_string()) {
+                msg["error"] = e.clone();
+                msg["retry"] = json!(false);
+            }
+            session.send(msg);
+        }
+    }
+    if done {
+        state.stream_subs.remove(&(app_id, stream_id));
+    }
+}
