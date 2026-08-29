@@ -4,7 +4,7 @@
 set -euo pipefail
 DATABASE_URL="${DATABASE_URL:-postgres://instant:instant@localhost:5432/instant}"
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
-MIG="$DIR/LEGACY/server/resources/migrations"
+MIG="${MIG_OVERRIDE:-$DIR/LEGACY/server/resources/migrations}"
 
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c \
   "CREATE TABLE IF NOT EXISTS schema_migrations (version int PRIMARY KEY, applied_at timestamptz DEFAULT now());"

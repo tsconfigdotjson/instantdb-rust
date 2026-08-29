@@ -1,0 +1,49 @@
+# Instant sync engine (Rust) + plain Postgres. Scale the server horizontally
+# with `docker compose up --scale server=3` behind any load balancer that
+# supports websockets — the nodes coordinate entirely through Postgres.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: instant
+      POSTGRES_PASSWORD: instant
+      POSTGRES_DB: instant
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U instant"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://instant:instant@postgres:5432/instant
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        cd / && MIG_OVERRIDE=/migrations bash /apply-migrations.sh
+
+  server:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://instant:instant@postgres:5432/instant
+      PORT: 8888
+      BASE_URL: http://localhost:8888
+      SERVER_SECRET: change-me-in-production
+      STORAGE_DIR: /data/storage
+    volumes:
+      - storage:/data/storage
+    ports:
+      - "8888:8888"
+
+volumes:
+  pgdata:
+  storage:

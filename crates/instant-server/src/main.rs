@@ -75,6 +75,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/storage/upload", put(routes::admin::storage_upload))
         .route("/admin/storage/files", delete(routes::admin::storage_delete))
         .route("/storage/serve/{app_id}/{location_id}", get(storage::serve))
+        .route("/storage/upload", put(routes::admin::client_storage_upload))
+        .route("/storage/files", delete(routes::admin::client_storage_delete))
+        .route("/storage/signed-download-url", get(routes::admin::client_signed_download_url))
         .layer(CorsLayer::very_permissive())
         .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024))
         .with_state(state);

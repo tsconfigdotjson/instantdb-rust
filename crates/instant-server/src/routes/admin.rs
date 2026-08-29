@@ -1134,3 +1134,220 @@ async fn admin_sign_in_guest_impl(
     let user = user_json(state, ctx.app_id, uid, Some(token)).await?;
     Ok(json!({"user": user}))
 }
+
+// ---------------------------------------------------------------------------
+// client-facing storage routes (browser SDK, refresh-token bearer)
+
+async fn client_storage_ctx(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> Result<(Uuid, PermsCtx)> {
+    let app_id = headers
+        .get("app-id")
+        .or_else(|| headers.get("app_id"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .or_else(|| params.get("app_id").cloned())
+        .and_then(|s| Uuid::parse_str(&s).ok())
+        .ok_or_else(|| InstantError::param_missing("Missing parameter: app-id"))?;
+    let bearer = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|s| s.trim().to_string());
+    let user_id = match bearer {
+        Some(token) => auth::user_by_refresh_token(state, app_id, &token)
+            .await?
+            .map(|u| u.id),
+        None => None,
+    };
+    Ok((
+        app_id,
+        PermsCtx { admin: false, user_id, user_map: None, rule_params: None },
+    ))
+}
+
+/// Evaluate a $files rule (create/delete/view) for a path. Default deny.
+async fn check_files_perm(
+    state: &AppState,
+    app_id: Uuid,
+    perms: &PermsCtx,
+    action: &str,
+    path: &str,
+) -> Result<()> {
+    let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
+    let rules = instant_core::perms::Rules::load(&mut conn, app_id).await?;
+    let program = rules.program("$files", action);
+    let auth_ctx = instant_core::perms::AuthCtx { user_id: perms.user_id, user_map: None };
+    let auth_val = if let Some(uid) = auth_ctx.user_id {
+        let attrs = service::load_attrs(state, app_id).await?;
+        instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$users", uid)
+            .await?
+            .map(Value::Object)
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    let data = json!({"path": path});
+    let ok = instant_core::perms::eval_program(&program, &data, None, &auth_val, &json!({}))?;
+    if !ok {
+        return Err(InstantError::permission_denied(
+            json!(["$files", action]),
+            "Permission denied: not perms-pass?",
+        ));
+    }
+    Ok(())
+}
+
+pub async fn client_storage_upload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Response {
+    json_or_err(client_storage_upload_impl(&state, &headers, &params, body).await)
+}
+
+async fn client_storage_upload_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+    body: Bytes,
+) -> Result<Value> {
+    let (app_id, perms) = client_storage_ctx(state, headers, params).await?;
+    let path = headers
+        .get("path")
+        .or_else(|| headers.get("filename"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| InstantError::param_missing("Missing parameter: path"))?;
+    check_files_perm(state, app_id, &perms, "create", &path).await?;
+    // reuse the admin upload path (system transact under the hood)
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty() && *s != "null" && *s != "undefined")
+        .map(|s| s.to_string());
+    let content_disposition = headers
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let location_id = Uuid::new_v4().to_string();
+    let size = crate::storage::put_blob(app_id, &location_id, &body).await?;
+    let path_attr = sc::attr_id("$files", "path");
+    let lookup = json!([path_attr, path]);
+    let mut steps = vec![
+        json!(["add-triple", lookup, sc::attr_id("$files", "id"), lookup]),
+        json!(["add-triple", lookup, sc::attr_id("$files", "path"), path]),
+        json!(["add-triple", lookup, sc::attr_id("$files", "size"), size]),
+        json!(["add-triple", lookup, sc::attr_id("$files", "location-id"), location_id]),
+        json!(["add-triple", lookup, sc::attr_id("$files", "key-version"), 1]),
+    ];
+    if let Some(ct) = &content_type {
+        steps.push(json!(["add-triple", lookup, sc::attr_id("$files", "content-type"), ct]));
+    }
+    if let Some(cd) = &content_disposition {
+        steps.push(json!(["add-triple", lookup, sc::attr_id("$files", "content-disposition"), cd]));
+    }
+    service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
+    use sqlx::Row;
+    let row = sqlx::query(
+        "SELECT entity_id FROM triples
+         WHERE app_id = $1 AND attr_id = $2 AND av AND value = to_jsonb($3::text) LIMIT 1",
+    )
+    .bind(app_id)
+    .bind(path_attr)
+    .bind(&path)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(InstantError::from)?;
+    let file_id: Uuid = row.get("entity_id");
+    Ok(json!({"data": {"id": file_id, "location-id": location_id, "size": size}}))
+}
+
+pub async fn client_storage_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    json_or_err(client_storage_delete_impl(&state, &headers, &params).await)
+}
+
+async fn client_storage_delete_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> Result<Value> {
+    let (app_id, perms) = client_storage_ctx(state, headers, params).await?;
+    let filename = params
+        .get("filename")
+        .ok_or_else(|| InstantError::param_missing("Missing parameter: filename"))?;
+    check_files_perm(state, app_id, &perms, "delete", filename).await?;
+    use sqlx::Row;
+    let path_attr = sc::attr_id("$files", "path");
+    let row = sqlx::query(
+        "SELECT entity_id FROM triples
+         WHERE app_id = $1 AND attr_id = $2 AND av AND value = to_jsonb($3::text) LIMIT 1",
+    )
+    .bind(app_id)
+    .bind(path_attr)
+    .bind(filename)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(InstantError::from)?;
+    match row {
+        Some(row) => {
+            let id: Uuid = row.get("entity_id");
+            service::run_system_transact(state, app_id, &json!([["delete-entity", id, "$files"]]))
+                .await?;
+            Ok(json!({"data": {"id": id}}))
+        }
+        None => Ok(json!({"data": {"id": null}})),
+    }
+}
+
+pub async fn client_signed_download_url(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    json_or_err(client_signed_download_url_impl(&state, &headers, &params).await)
+}
+
+async fn client_signed_download_url_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> Result<Value> {
+    let (app_id, perms) = client_storage_ctx(state, headers, params).await?;
+    let filename = params
+        .get("filename")
+        .ok_or_else(|| InstantError::param_missing("Missing parameter: filename"))?;
+    check_files_perm(state, app_id, &perms, "view", filename).await?;
+    use sqlx::Row;
+    let path_attr = sc::attr_id("$files", "path");
+    let loc_attr = sc::attr_id("$files", "location-id");
+    let row = sqlx::query(
+        "SELECT l.value AS loc FROM triples t
+         JOIN triples l ON l.app_id = t.app_id AND l.entity_id = t.entity_id AND l.attr_id = $3
+         WHERE t.app_id = $1 AND t.attr_id = $2 AND t.av AND t.value = to_jsonb($4::text) LIMIT 1",
+    )
+    .bind(app_id)
+    .bind(path_attr)
+    .bind(loc_attr)
+    .bind(filename)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(InstantError::from)?;
+    match row {
+        Some(r) => {
+            let loc: Value = r.get("loc");
+            let url = loc
+                .as_str()
+                .map(|l| crate::storage::download_url(state, app_id, l));
+            Ok(json!({"data": url}))
+        }
+        None => Ok(json!({"data": null})),
+    }
+}
