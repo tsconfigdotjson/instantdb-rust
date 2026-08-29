@@ -63,6 +63,58 @@ impl Rules {
         None
     }
 
+    fn binds_of(&self, etype: &str) -> Vec<(String, String)> {
+        let mut binds = vec![];
+        if let Some(Value::Array(b)) = self.code.get(etype).and_then(|ns| ns.get("bind")) {
+            let mut i = 0;
+            while i + 1 < b.len() {
+                if let (Some(name), Some(expr)) = (b[i].as_str(), b[i + 1].as_str()) {
+                    binds.push((name.to_string(), expr.to_string()));
+                }
+                i += 2;
+            }
+        }
+        binds
+    }
+
+    /// Explicit link/unlink rule for a link label on an etype:
+    /// [etype allow link <label>] -> [etype allow link $default]. None = no
+    /// explicit rule (use the update+view fallback).
+    pub fn link_program(&self, etype: &str, action: &str, label: &str) -> Option<Program> {
+        let rules = self.code.get(etype)?.get("allow")?.get(action)?;
+        for key in [label, "$default"] {
+            if let Some(expr) = rules.get(key) {
+                let expr = match expr {
+                    Value::String(s) => s.clone(),
+                    Value::Bool(b) => b.to_string(),
+                    _ => continue,
+                };
+                return Some(Program { expr, binds: self.binds_of(etype) });
+            }
+        }
+        None
+    }
+
+    /// Field-level view rule [etype fields <field>]. None = field always visible.
+    pub fn field_program(&self, etype: &str, field: &str) -> Option<Program> {
+        let expr = self.code.get(etype)?.get("fields")?.get(field)?;
+        let expr = match expr {
+            Value::String(s) => s.clone(),
+            Value::Bool(b) => b.to_string(),
+            _ => return None,
+        };
+        Some(Program { expr, binds: self.binds_of(etype) })
+    }
+
+    /// Does this etype have any field rules at all? (fast path)
+    pub fn has_field_rules(&self, etype: &str) -> bool {
+        self.code
+            .get(etype)
+            .and_then(|ns| ns.get("fields"))
+            .map(|f| f.is_object())
+            .unwrap_or(false)
+    }
+
     /// Effective program for etype+action: falls back to system defaults.
     pub fn program(&self, etype: &str, action: &str) -> Program {
         if let Some((expr, binds)) = self.rule_source(etype, action) {
@@ -275,6 +327,18 @@ pub fn eval_program(
     auth: &Value,
     rule_params: &Value,
 ) -> Result<bool> {
+    eval_program_full(program, data, new_data, auth, rule_params, None)
+}
+
+/// eval_program with the link-check `linkedData` binding.
+pub fn eval_program_full(
+    program: &Program,
+    data: &Value,
+    new_data: Option<&Value>,
+    auth: &Value,
+    rule_params: &Value,
+    linked_data: Option<&Value>,
+) -> Result<bool> {
     if program.is_true() {
         return Ok(true);
     }
@@ -306,6 +370,9 @@ pub fn eval_program(
         ctx.add_variable_from_value("newData", json_to_cel(nd));
     } else {
         ctx.add_variable_from_value("newData", json_to_cel(data));
+    }
+    if let Some(ld) = linked_data {
+        ctx.add_variable_from_value("linkedData", json_to_cel(ld));
     }
 
     // binds: evaluate in order, retrying to tolerate forward references
@@ -519,6 +586,45 @@ impl<'a> PermsFilter<'a> {
             if !ok {
                 return Ok(false);
             }
+            // field-level rules: drop triples whose field program fails
+            if self.rules.has_field_rules(&node.etype) {
+                let mut data = base_entity_map(attrs, &node.etype, node.eid);
+                for t in &node.triples {
+                    if let Some(a) = attrs.get(&t.a) {
+                        if a.value_type == ValueType::Blob {
+                            data.insert(a.label.clone(), t.v.clone());
+                        }
+                    }
+                }
+                let data_val = Value::Object(data);
+                let mut keep = Vec::with_capacity(node.triples.len());
+                for t in std::mem::take(&mut node.triples) {
+                    let label = attrs.get(&t.a).map(|a| a.label.clone());
+                    let allowed = match label.as_deref() {
+                        Some("id") | None => true,
+                        Some(label) => match self.rules.field_program(&node.etype, label) {
+                            None => true,
+                            Some(program) => {
+                                let auth_val = build_auth_value(
+                                    conn, app_id, attrs, self.auth, &[&program],
+                                )
+                                .await?;
+                                eval_program(
+                                    &program,
+                                    &data_val,
+                                    None,
+                                    &auth_val,
+                                    &self.rule_params,
+                                )?
+                            }
+                        },
+                    };
+                    if allowed {
+                        keep.push(t);
+                    }
+                }
+                node.triples = keep;
+            }
             for child in &mut node.children {
                 let mut kept = vec![];
                 let entities = std::mem::take(&mut child.entities);
@@ -552,6 +658,16 @@ enum Check {
     Update { etype: String, eid: Uuid, old: Map<String, Value> },
     Delete { etype: String, eid: Uuid, old: Map<String, Value> },
     ViewLinked { etype: String, eid: Uuid },
+    /// explicit [etype allow link/unlink <label>] rule on one link side
+    LinkRule {
+        action: &'static str, // "link" | "unlink"
+        etype: String,
+        eid: Uuid,
+        old: Option<Map<String, Value>>,
+        linked_etype: String,
+        linked_eid: Uuid,
+        program: Program,
+    },
 }
 
 /// Run tx-steps with permission checks. Must be called inside an open DB tx;
@@ -590,6 +706,11 @@ pub async fn permissioned_transact_checked(
     let mut old_maps: HashMap<(Uuid, String), Option<Map<String, Value>>> = HashMap::new();
     let mut link_targets: Vec<(Uuid, String)> = vec![]; // entities linked-to (view check)
     let mut delete_seeds: Vec<(Uuid, String)> = vec![];
+    // explicit link/unlink checks; (eid, etype) pairs whose only touches are
+    // explicitly-ruled ref steps skip the generic update fallback
+    let mut link_checks: Vec<Check> = vec![];
+    let mut explicit_ref_touch: HashSet<(Uuid, String)> = HashSet::new();
+    let mut other_touch: HashSet<(Uuid, String)> = HashSet::new();
 
     // resolve an EidRef without creating
     async fn peek_eid(
@@ -631,11 +752,60 @@ pub async fn permissioned_transact_checked(
                     }
                 }
                 if attr.value_type == ValueType::Ref {
-                    if let Some(target) = value.as_str().and_then(|s| Uuid::parse_str(s).ok()) {
-                        if let Some(retype) = &attr.reverse_etype {
-                            link_targets.push((target, retype.clone()));
+                    let action = if matches!(step, TxStep::RetractTriple { .. }) {
+                        "unlink"
+                    } else {
+                        "link"
+                    };
+                    let fwd_eid = peek_eid(conn, app_id, attrs, eid).await?;
+                    let target = value.as_str().and_then(|s| Uuid::parse_str(s).ok());
+                    let retype = attr.reverse_etype.clone().unwrap_or_default();
+                    let rlabel = attr.reverse_label.clone().unwrap_or_default();
+                    let fwd_prog = rules.link_program(&attr.etype, action, &attr.label);
+                    let rev_prog = rules.link_program(&retype, action, &rlabel);
+                    if fwd_prog.is_some() || rev_prog.is_some() {
+                        // explicit rule on at least one side: replaces fallback
+                        if let (Some(e), Some(t)) = (fwd_eid, target) {
+                            explicit_ref_touch.insert((e, attr.etype.clone()));
+                            // snapshot the linked side too
+                            let tkey = (t, retype.clone());
+                            if !old_maps.contains_key(&tkey) {
+                                let m = fetch_entity_map(conn, app_id, attrs, &retype, t).await?;
+                                old_maps.insert(tkey.clone(), m);
+                            }
+                            if let Some(p) = fwd_prog {
+                                link_checks.push(Check::LinkRule {
+                                    action,
+                                    etype: attr.etype.clone(),
+                                    eid: e,
+                                    old: old_maps.get(&(e, attr.etype.clone())).cloned().flatten(),
+                                    linked_etype: retype.clone(),
+                                    linked_eid: t,
+                                    program: p,
+                                });
+                            }
+                            if let Some(p) = rev_prog {
+                                link_checks.push(Check::LinkRule {
+                                    action,
+                                    etype: retype.clone(),
+                                    eid: t,
+                                    old: old_maps.get(&(t, retype.clone())).cloned().flatten(),
+                                    linked_etype: attr.etype.clone(),
+                                    linked_eid: e,
+                                    program: p,
+                                });
+                            }
+                        }
+                    } else if let Some(t) = target {
+                        if !retype.is_empty() {
+                            link_targets.push((t, retype.clone()));
+                        }
+                        if let Some(e) = fwd_eid {
+                            other_touch.insert((e, attr.etype.clone()));
                         }
                     }
+                } else if let Some(e) = peek_eid(conn, app_id, attrs, eid).await? {
+                    other_touch.insert((e, attr.etype.clone()));
                 }
             }
             TxStep::DeleteEntity { eid, etype } => {
@@ -693,6 +863,9 @@ pub async fn permissioned_transact_checked(
         if created.contains(&key) || deleted.contains(&key) || !update_seen.insert(key.clone()) {
             continue;
         }
+        if explicit_ref_touch.contains(&key) && !other_touch.contains(&key) {
+            continue; // link rule replaces the update fallback for this entity
+        }
         let old = old_maps
             .get(&key)
             .cloned()
@@ -700,6 +873,7 @@ pub async fn permissioned_transact_checked(
             .unwrap_or_else(|| base_entity_map(attrs, et, *e));
         checks.push(Check::Update { etype: et.clone(), eid: *e, old });
     }
+    checks.extend(link_checks);
     let mut linked_seen = HashSet::new();
     for (e, et) in link_targets {
         let key = (e, et.clone());
@@ -739,6 +913,64 @@ pub async fn permissioned_transact_checked(
                     .await?
                     .unwrap_or_else(|| base_entity_map(attrs, etype, *eid));
                 ("view", etype.clone(), *eid, Value::Object(m), None)
+            }
+            Check::LinkRule { action, etype, eid, old, linked_etype, linked_eid, program } => {
+                // legacy: check runs only when the entity existed pre-tx
+                let Some(old) = old else { continue };
+                let new = fetch_entity_map(conn, app_id, attrs, etype, *eid)
+                    .await?
+                    .unwrap_or_else(|| base_entity_map(attrs, etype, *eid));
+                let linked = fetch_entity_map(conn, app_id, attrs, linked_etype, *linked_eid)
+                    .await?
+                    .map(Value::Object)
+                    .unwrap_or(Value::Null);
+                let mut data = Value::Object(old.clone());
+                if let Value::Object(ref mut m) = data {
+                    let sources = program.all_sources();
+                    let paths = extract_ref_paths(&sources, "data");
+                    attach_refs(conn, app_id, attrs, etype, *eid, &paths, m).await?;
+                }
+                let auth_val = build_auth_value(conn, app_id, attrs, auth, &[program]).await?;
+                let mut rp = match global_rule_params {
+                    Value::Object(m) => m.clone(),
+                    _ => Map::new(),
+                };
+                if let Some(Value::Object(step_rp)) =
+                    report.rule_params.get(&(*eid, etype.clone()))
+                {
+                    for (k, v) in step_rp {
+                        rp.insert(k.clone(), v.clone());
+                    }
+                }
+                let ok = eval_program_full(
+                    program,
+                    &data,
+                    Some(&Value::Object(new)),
+                    &auth_val,
+                    &Value::Object(rp),
+                    Some(&linked),
+                )?;
+                check_results.push(json!({
+                    "scope": "object",
+                    "etype": etype,
+                    "action": action,
+                    "eid": eid,
+                    "check-result": ok,
+                    "check-pass?": ok,
+                    "program": {
+                        "etype": etype,
+                        "action": action,
+                        "code": program.expr,
+                        "display-code": program.expr,
+                    },
+                }));
+                if !ok && fail_fast {
+                    return Err(InstantError::permission_denied(
+                        json!([etype, action]),
+                        "Permission denied: not perms-pass?",
+                    ));
+                }
+                continue;
             }
         };
         let program = rules.program(&etype, action);

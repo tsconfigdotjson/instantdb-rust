@@ -64,8 +64,8 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | `data.ref` / `auth.ref` | ✅ | literal-path prefetch |
 | `ruleParams` (query `$$ruleParams` + `rule-params` steps) | ✅ | |
 | `$users` default rules (view/update self, create true, delete false) | 🟡 | linkedPrimaryUser guest clause simplified to `auth.id == data.id` |
-| link/unlink rules per label | 🟡 | uses legacy default fallback (update on forward entity + view on linked entity); explicit `allow.link` maps not read |
-| attr-level (field) rules | ❌ | |
+| link/unlink rules per label | ✅ | explicit `allow.link`/`allow.unlink` label maps with `linkedData` binding; update+view fallback otherwise |
+| attr-level (field) rules | ✅ | `[etype].fields.[field]` view programs filter triples per entity |
 | `request.*` / `rateLimit.*` CEL bindings | ❌ | |
 | rule-where query rewriting | ❌ | optimization only; per-entity evaluation gives the same results |
 | CEL null-safety (`missing key -> null`) | 🟡 | entity maps pre-populate all schema fields as null; unknown ad-hoc keys still error inside CEL |

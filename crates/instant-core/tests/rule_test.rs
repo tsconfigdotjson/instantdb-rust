@@ -427,3 +427,135 @@ async fn default_namespace_rule_applies() {
     let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"todos": {}})).await;
     assert_eq!(res.forms[0].entities.len(), 0);
 }
+
+#[tokio::test]
+async fn explicit_link_rules() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    // linking a todo to an owner is allowed only when linkedData.name == 'boss'
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"link": {"owner": "linkedData.name == 'boss'"}}}}),
+    )
+    .await;
+
+    let (boss, peon) = (Uuid::new_v4(), Uuid::new_v4());
+    let (t1, t2) = (Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", boss, ids.owners_id, boss],
+            ["add-triple", boss, ids.owners_name, "boss"],
+            ["add-triple", peon, ids.owners_id, peon],
+            ["add-triple", peon, ids.owners_name, "peon"],
+            ["add-triple", t1, ids.todos_id, t1],
+            ["add-triple", t2, ids.todos_id, t2]
+        ]),
+    )
+    .await
+    .unwrap();
+
+    // link to boss: allowed
+    transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["add-triple", t1, ids.todos_owner, boss]]),
+    )
+    .await
+    .unwrap();
+
+    // link to peon: denied by the explicit link rule
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["add-triple", t2, ids.todos_owner, peon]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+}
+
+#[tokio::test]
+async fn explicit_unlink_rules() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"unlink": {"$default": "false"}}}}),
+    )
+    .await;
+    let (owner, t1) = (Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", owner, ids.owners_id, owner],
+            ["add-triple", t1, ids.todos_id, t1],
+            ["add-triple", t1, ids.todos_owner, owner]
+        ]),
+    )
+    .await
+    .unwrap();
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["retract-triple", t1, ids.todos_owner, owner]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+}
+
+#[tokio::test]
+async fn field_rules_filter_columns() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    // title only visible when done == true
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"fields": {"title": "data.done == true"}}}),
+    )
+    .await;
+    let (e1, e2) = (Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", e1, ids.todos_id, e1],
+            ["add-triple", e1, ids.todos_title, "visible"],
+            ["add-triple", e1, ids.todos_done, true],
+            ["add-triple", e2, ids.todos_id, e2],
+            ["add-triple", e2, ids.todos_title, "hidden"],
+            ["add-triple", e2, ids.todos_done, false]
+        ]),
+    )
+    .await
+    .unwrap();
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"todos": {}})).await;
+    assert_eq!(res.forms[0].entities.len(), 2);
+    let titles: Vec<Option<&str>> = res.forms[0]
+        .entities
+        .iter()
+        .map(|e| {
+            e.triples
+                .iter()
+                .find(|t| t.a == ids.todos_title)
+                .and_then(|t| t.v.as_str())
+        })
+        .collect();
+    assert!(titles.contains(&Some("visible")));
+    assert!(!titles.contains(&Some("hidden")));
+}
