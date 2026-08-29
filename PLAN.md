@@ -28,7 +28,7 @@ Full unit + scenario testing. React todo example validated in browser.
 - [x] M0.5 postgres 18 (apt, port 5432, db=instant user=instant pw=instant), legacy migrations replayed via scripts/apply-migrations.sh (all 124 clean on stock PG18)
 - [x] M1 protocol specs extracted -> docs/{PROTOCOL,SERVER-SYNC,DATAMODEL,AUTH,ADMIN,PERMS,QUERY}.md
 - [x] M2 attrs+triples+transact in Rust + 14 tests green (tx_test.rs)
-- [ ] M3 instaql query engine + tests
+- [x] M3 instaql query engine + 14 tests green (query_test.rs); topics deferred (recompute-all + result-hash suppression is the invalidation baseline)
 - [ ] M4 WS session + refresh/invalidation loop
 - [ ] M5 permissions (CEL) + permissioned transact + perms-checked queries
 - [ ] M6 auth: refresh tokens, magic codes, google OAuth
@@ -45,3 +45,4 @@ Full unit + scenario testing. React todo example validated in browser.
 ## Status log
 - 2026-08-29: M0 survey done. 124 migrations found. Client packages enumerated. Nothing built yet.
 - 2026-08-29: M2 done: attr/triple/tx modules, system catalog encoder verified, 14 tests green against local PG.
+- 2026-08-29: M3 done: instaql.rs (where ops incl $not/$isNull/comparators/or/and/paths, pagination+cursors+nulls, children, fields, aggregate, ws result shape).
