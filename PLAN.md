@@ -29,10 +29,10 @@ Full unit + scenario testing. React todo example validated in browser.
 - [x] M1 protocol specs extracted -> docs/{PROTOCOL,SERVER-SYNC,DATAMODEL,AUTH,ADMIN,PERMS,QUERY}.md
 - [x] M2 attrs+triples+transact in Rust + 14 tests green (tx_test.rs)
 - [x] M3 instaql query engine + 14 tests green (query_test.rs); topics deferred (recompute-all + result-hash suppression is the invalidation baseline)
-- [ ] M4 WS session + refresh/invalidation loop
-- [ ] M5 permissions (CEL) + permissioned transact + perms-checked queries
+- [x] M4 WS session + refresh/invalidation via LISTEN/NOTIFY (smoke-ws.mjs passes: init/add-query/transact/refresh-ok/errors)
+- [x] M5 CEL perms wired into query+transact paths (cel crate; binds, data.ref/auth.ref prefetch; needs dedicated tests)
 - [ ] M6 auth: refresh tokens, magic codes, google OAuth
-- [ ] M7 presence/rooms via NOTIFY
+- [x] M7 presence/rooms/broadcast via PG table + NOTIFY (refresh-presence snapshots; patch-presence TODO optional)
 - [ ] M8 admin API
 - [ ] M9 react todo example wired to local server, browser-validated
 - [ ] M10 scenario tests matching legacy test suite level
@@ -46,3 +46,4 @@ Full unit + scenario testing. React todo example validated in browser.
 - 2026-08-29: M0 survey done. 124 migrations found. Client packages enumerated. Nothing built yet.
 - 2026-08-29: M2 done: attr/triple/tx modules, system catalog encoder verified, 14 tests green against local PG.
 - 2026-08-29: M3 done: instaql.rs (where ops incl $not/$isNull/comparators/or/and/paths, pagination+cursors+nulls, children, fields, aggregate, ws result shape).
+- 2026-08-29: M4/M7 smoke-tested end-to-end via scripts/smoke-ws.mjs (two clients, presence, broadcast). Server: crates/instant-server (state/service/ws/invalidator/presence/auth).
