@@ -96,7 +96,7 @@ fn err_msg(original: &Value, e: &InstantError) -> Value {
     m
 }
 
-async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>, msg: Value) {
+pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>, msg: Value) {
     let op = msg.get("op").and_then(|o| o.as_str()).unwrap_or("");
     let result = match op {
         "init" => handle_init(state, session, &msg).await,
@@ -115,6 +115,22 @@ async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>, msg: Valu
 }
 
 type HandlerResult = std::result::Result<(), InstantError>;
+
+/// patch-presence is accepted by @instantdb/core > 0.17.5.
+fn supports_patch_presence(versions: Option<&Value>) -> bool {
+    let Some(v) = versions
+        .and_then(|v| v.get("@instantdb/core"))
+        .and_then(|v| v.as_str())
+    else {
+        return false;
+    };
+    let v = v.trim_start_matches('v');
+    let parts: Vec<u64> = v.split('.').filter_map(|p| p.parse().ok()).collect();
+    if parts.len() < 3 {
+        return false;
+    }
+    (parts[0], parts[1], parts[2]) > (0, 17, 5)
+}
 
 async fn handle_init(state: &Arc<AppState>, session: &Arc<Session>, msg: &Value) -> HandlerResult {
     let app_id = msg
@@ -150,6 +166,7 @@ async fn handle_init(state: &Arc<AppState>, session: &Arc<Session>, msg: &Value)
         st.admin = admin;
         st.user = user.clone();
         st.versions = msg.get("versions").cloned();
+        st.supports_patch_presence = supports_patch_presence(msg.get("versions"));
     }
     state.register_app_session(app_id, session.id);
 

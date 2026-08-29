@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(|| async { "instant-server" }))
         .route("/health", get(|| async { "ok" }))
         .route("/runtime/session", get(ws::handler))
+        .route("/runtime/sse", get(routes::sse::stream).post(routes::sse::push))
         // runtime auth
         .route("/runtime/auth/send_magic_code", post(routes::runtime::send_magic_code))
         .route("/runtime/auth/verify_magic_code", post(routes::runtime::verify_magic_code))
@@ -71,6 +72,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/verify_magic_code", post(routes::admin::admin_verify_magic_code))
         .route("/admin/sign_in_guest", post(routes::admin::admin_sign_in_guest))
         .route("/admin/rooms/presence", get(routes::admin::presence))
+        .route("/admin/query_perms_check", post(routes::admin::query_perms_check))
+        .route("/admin/transact_perms_check", post(routes::admin::transact_perms_check))
         // storage
         .route("/admin/storage/upload", put(routes::admin::storage_upload))
         .route("/admin/storage/files", delete(routes::admin::storage_delete))

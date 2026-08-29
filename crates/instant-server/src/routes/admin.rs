@@ -1351,3 +1351,177 @@ async fn client_signed_download_url_impl(
         None => Ok(json!({"data": null})),
     }
 }
+
+// ---------------------------------------------------------------------------
+// perms-check debug endpoints (db.debugQuery / db.debugTransact)
+
+pub async fn query_perms_check(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    json_or_err(query_perms_check_impl(&state, &headers, &params, &body).await)
+}
+
+async fn query_perms_check_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+    body: &Value,
+) -> Result<Value> {
+    let ctx = authed(state, headers, params).await?;
+    if ctx.perms.admin {
+        return Err(InstantError::validation_failed(
+            "body",
+            "Cannot test perms as admin",
+            json!([{"message": "Cannot test perms as admin"}]),
+        ));
+    }
+    let q = body
+        .get("query")
+        .filter(|q| q.is_object())
+        .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"query\"]"))?;
+    let inference = body.get("inference?").and_then(|v| v.as_bool()).unwrap_or(false);
+    let attrs = service::load_attrs(state, ctx.app_id).await?;
+
+    // run unfiltered, then evaluate view per top-level entity for check-results
+    let admin_perms = PermsCtx { admin: true, user_id: None, user_map: None, rule_params: None };
+    let unfiltered = service::run_query(state, ctx.app_id, &attrs, &admin_perms, q).await?;
+
+    let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
+    let rules = match body.get("rules-override") {
+        Some(code) if code.is_object() => instant_core::perms::Rules { code: code.clone() },
+        _ => instant_core::perms::Rules::load(&mut conn, ctx.app_id).await?,
+    };
+    let auth_ctx = instant_core::perms::AuthCtx { user_id: ctx.perms.user_id, user_map: None };
+    let mut check_results = vec![];
+    for form in &unfiltered.forms {
+        let program = rules.program(&form.etype, "view");
+        for e in &form.entities {
+            let mut record = serde_json::Map::new();
+            record.insert("id".to_string(), json!(e.eid));
+            for t in &e.triples {
+                if let Some(a) = attrs.get(&t.a) {
+                    if a.value_type == ValueType::Blob && a.label != "id" && !t.v.is_null() {
+                        record.insert(a.label.clone(), t.v.clone());
+                    }
+                }
+            }
+            let mut data = instant_core::perms::base_entity_map(&attrs, &form.etype, e.eid);
+            for (k, v) in &record {
+                data.insert(k.clone(), v.clone());
+            }
+            let auth_val = if let Some(uid) = auth_ctx.user_id {
+                instant_core::perms::fetch_entity_map(&mut conn, ctx.app_id, &attrs, "$users", uid)
+                    .await?
+                    .map(Value::Object)
+                    .unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            };
+            let rule_params = q.get("$$ruleParams").cloned().unwrap_or(json!({}));
+            let ok = instant_core::perms::eval_program(
+                &program,
+                &Value::Object(data),
+                None,
+                &auth_val,
+                &rule_params,
+            )?;
+            check_results.push(json!({
+                "id": e.eid,
+                "entity": form.etype,
+                "record": record,
+                "program": {
+                    "etype": form.etype,
+                    "action": "view",
+                    "code": program.expr,
+                    "display-code": program.expr,
+                },
+                "check": ok,
+            }));
+        }
+    }
+
+    // the actual filtered result
+    let result = service::run_query(state, ctx.app_id, &attrs, &ctx.perms, q).await?;
+    let tree = object_tree(state, ctx.app_id, &result, &attrs, q, inference);
+    Ok(json!({
+        "check-results": check_results,
+        "result": tree,
+        "rule-wheres": [],
+    }))
+}
+
+pub async fn transact_perms_check(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    json_or_err(transact_perms_check_impl(&state, &headers, &params, &body).await)
+}
+
+async fn transact_perms_check_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+    body: &Value,
+) -> Result<Value> {
+    let ctx = authed(state, headers, params).await?;
+    if ctx.perms.admin {
+        return Err(InstantError::validation_failed(
+            "body",
+            "Cannot test perms as admin",
+            json!([{"message": "Cannot test perms as admin"}]),
+        ));
+    }
+    let steps = body
+        .get("steps")
+        .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"steps\"]"))?;
+    let throw_missing = body
+        .get("throw-on-missing-attrs?")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let commit = body
+        .get("dangerously-commit-tx")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut attrs = service::load_attrs(state, ctx.app_id).await?;
+    let tx_steps = translate_steps(&attrs, steps, throw_missing)?;
+    let parsed = instant_core::tx::parse_tx_steps(&tx_steps)?;
+
+    let mut dbtx = state.pool.begin().await.map_err(InstantError::from)?;
+    let rules = match body.get("rules-override") {
+        Some(code) if code.is_object() => instant_core::perms::Rules { code: code.clone() },
+        _ => instant_core::perms::Rules::load(&mut dbtx, ctx.app_id).await?,
+    };
+    let auth_ctx = instant_core::perms::AuthCtx { user_id: ctx.perms.user_id, user_map: None };
+    let (report, checks) = instant_core::perms::permissioned_transact_checked(
+        &mut dbtx,
+        ctx.app_id,
+        &mut attrs,
+        parsed,
+        &rules,
+        &auth_ctx,
+        &json!({}),
+        false,
+    )
+    .await?;
+    let all_ok = checks
+        .iter()
+        .all(|c| c.get("check-pass?").and_then(|v| v.as_bool()).unwrap_or(false));
+    let committed = commit && all_ok;
+    if committed {
+        dbtx.commit().await.map_err(InstantError::from)?;
+        service::notify_tx(state, ctx.app_id, report.tx_id).await;
+    } else {
+        dbtx.rollback().await.map_err(InstantError::from)?;
+    }
+    Ok(json!({
+        "tx-id": report.tx_id,
+        "all-checks-ok?": all_ok,
+        "committed?": committed,
+        "check-results": checks,
+    }))
+}

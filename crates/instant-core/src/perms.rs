@@ -565,6 +565,27 @@ pub async fn permissioned_transact(
     auth: &AuthCtx,
     global_rule_params: &Value,
 ) -> Result<TxReport> {
+    let (report, _checks) = permissioned_transact_checked(
+        conn, app_id, attrs, steps, rules, auth, global_rule_params, true,
+    )
+    .await?;
+    Ok(report)
+}
+
+/// Like permissioned_transact but returns per-check results; with
+/// `fail_fast` false, failing checks are recorded instead of aborting
+/// (used by /admin/transact_perms_check dry runs).
+#[allow(clippy::too_many_arguments)]
+pub async fn permissioned_transact_checked(
+    conn: &mut PgConnection,
+    app_id: Uuid,
+    attrs: &mut AttrMap,
+    steps: Vec<TxStep>,
+    rules: &Rules,
+    auth: &AuthCtx,
+    global_rule_params: &Value,
+    fail_fast: bool,
+) -> Result<(TxReport, Vec<Value>)> {
     // ---- pre-pass: snapshot old entity data + note link targets ----
     let mut old_maps: HashMap<(Uuid, String), Option<Map<String, Value>>> = HashMap::new();
     let mut link_targets: Vec<(Uuid, String)> = vec![]; // entities linked-to (view check)
@@ -689,6 +710,7 @@ pub async fn permissioned_transact(
     }
 
     // ---- evaluate ----
+    let mut check_results: Vec<Value> = vec![];
     for check in checks {
         let (action, etype, eid, data, new_data) = match &check {
             Check::Create { etype, eid } => {
@@ -721,6 +743,20 @@ pub async fn permissioned_transact(
         };
         let program = rules.program(&etype, action);
         if program.is_true() {
+            check_results.push(json!({
+                "scope": "object",
+                "etype": etype,
+                "action": action,
+                "eid": eid,
+                "check-result": true,
+                "check-pass?": true,
+                "program": {
+                    "etype": etype,
+                    "action": action,
+                    "code": program.expr,
+                    "display-code": program.expr,
+                },
+            }));
             continue;
         }
         // data refs prefetch
@@ -748,7 +784,21 @@ pub async fn permissioned_transact(
             &auth_val,
             &Value::Object(rp),
         )?;
-        if !ok {
+        check_results.push(json!({
+            "scope": "object",
+            "etype": etype,
+            "action": action,
+            "eid": eid,
+            "check-result": ok,
+            "check-pass?": ok,
+            "program": {
+                "etype": etype,
+                "action": action,
+                "code": program.expr,
+                "display-code": program.expr,
+            },
+        }));
+        if !ok && fail_fast {
             return Err(InstantError::permission_denied(
                 json!([etype, action]),
                 "Permission denied: not perms-pass?",
@@ -756,5 +806,5 @@ pub async fn permissioned_transact(
         }
     }
 
-    Ok(report)
+    Ok((report, check_results))
 }

@@ -137,22 +137,71 @@ pub async fn room_snapshot(state: &AppState, app_id: Uuid, room_id: &str) -> Res
     Ok(Value::Object(m))
 }
 
-/// Fan a room's snapshot to this node's local sessions in that room.
+/// Fan a room's presence change to this node's local sessions: incremental
+/// patch-presence for clients that support it, full refresh-presence otherwise.
 pub async fn broadcast_room_refresh(state: &AppState, app_id: Uuid, room_id: &str) {
     let sessions = state.sessions_for_room(app_id, room_id);
+    let key = (app_id, room_id.to_string());
     if sessions.is_empty() {
+        state.room_snapshots.remove(&key);
         return;
     }
     let Ok(snapshot) = room_snapshot(state, app_id, room_id).await else {
         return;
     };
-    let msg = json!({
+    let prev = state.room_snapshots.insert(key, snapshot.clone());
+    let edits = prev.as_ref().and_then(|p| diff_snapshots(p, &snapshot));
+    let refresh_msg = json!({
         "op": "refresh-presence",
         "room-id": room_id,
         "data": snapshot,
     });
+    let patch_msg = edits.map(|edits| {
+        json!({
+            "op": "patch-presence",
+            "room-id": room_id,
+            "edits": edits,
+        })
+    });
     for s in sessions {
-        s.send(msg.clone());
+        let use_patch = {
+            let st = s.state.try_lock();
+            match st {
+                Ok(st) => st.supports_patch_presence,
+                Err(_) => false,
+            }
+        };
+        match (&patch_msg, use_patch) {
+            (Some(p), true) => s.send(p.clone()),
+            _ => s.send(refresh_msg.clone()),
+        }
+    }
+}
+
+/// Edits transforming `prev` into `next`: [[path, op, value?], ...] with ops
+/// "+" (add peer), "-" (remove peer), "r" (replace a peer's data).
+fn diff_snapshots(prev: &Value, next: &Value) -> Option<Vec<Value>> {
+    let (prev, next) = (prev.as_object()?, next.as_object()?);
+    let mut edits = vec![];
+    for (sid, entry) in next {
+        match prev.get(sid) {
+            None => edits.push(json!([[sid], "+", entry])),
+            Some(old) => {
+                if old.get("data") != entry.get("data") {
+                    edits.push(json!([[sid, "data"], "r", entry.get("data")]));
+                }
+            }
+        }
+    }
+    for sid in prev.keys() {
+        if !next.contains_key(sid) {
+            edits.push(json!([[sid], "-"]));
+        }
+    }
+    if edits.is_empty() {
+        None
+    } else {
+        Some(edits)
     }
 }
 

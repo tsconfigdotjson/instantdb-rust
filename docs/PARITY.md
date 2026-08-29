@@ -16,10 +16,10 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | topic-based invalidation narrowing | 🟡 | legacy matches WAL topics against query topics as an optimization; this server recomputes registered queries per app tx and suppresses unchanged results (identical observable behavior, more compute per tx) |
 | error shapes (`type`, `hint`, `original-event` echo) | ✅ | |
 | rooms: join/leave/set-presence/refresh-presence | ✅ | cross-node via Postgres |
-| `patch-presence` incremental edits | 🟡 | server always sends full `refresh-presence` snapshots (protocol-valid for all client versions; less bandwidth-efficient) |
+| `patch-presence` incremental edits | ✅ | diff-based patches for core > 0.17.5; full snapshots for older clients and fresh joiners |
 | `client-broadcast` / `server-broadcast` | ✅ | |
 | message batching (JSON array frames) | 🟡 | server sends single frames (clients accept both) |
-| SSE fallback transport (`/runtime/sse`) | ❌ | ws-only; SSE used when websockets are blocked |
+| SSE fallback transport (`/runtime/sse`) | ✅ | sse-init handshake + POST envelope (scripts/sse-test.mjs) |
 | sync tables (`start-sync`, `sync-load-batch`, …) | ❌ | experimental client feature |
 | streams (`start-stream`, `stream-append`, …) | ❌ | experimental client feature |
 
@@ -96,7 +96,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | magic_code / send_magic_code / verify_magic_code / sign_in_guest | ✅ | |
 | rooms/presence | ✅ | |
 | storage upload/delete (admin + client routes) + signed download URLs | ✅ | local-disk adapter |
-| query_perms_check / transact_perms_check (debugQuery/debugTransact) | ❌ | |
+| query_perms_check / transact_perms_check (debugQuery/debugTransact) | ✅ | check-results with programs; dry-run/commit semantics |
 | /admin/subscribe-query + /admin/sse (SSE transports) | ❌ | |
 | schema endpoints (`/admin/schema`, `/dash/.../schema/*` CLI push) | ❌ | schema changes go through /admin/transact attr steps |
 | platform tokens (`per_`/`pat_`), dashboard routes | ❌ | out of scope (dashboard is a separate product) |

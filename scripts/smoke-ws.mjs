@@ -9,11 +9,27 @@ function connect(name) {
   const ws = new WebSocket(url);
   const inbox = [];
   const waiters = [];
+  const rooms = {}; // room-id -> {sid: {data...}} maintained like the client
+  function applyPresence(m) {
+    if (m.op === "refresh-presence") {
+      rooms[m["room-id"]] = m.data;
+    } else if (m.op === "patch-presence") {
+      const room = (rooms[m["room-id"]] ||= {});
+      for (const [path, op, value] of m.edits) {
+        if (op === "-") delete room[path[0]];
+        else if (path.length === 1) room[path[0]] = value;
+        else if (path.length === 2 && path[1] === "data") {
+          (room[path[0]] ||= {}).data = value;
+        }
+      }
+    }
+  }
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     const msgs = Array.isArray(msg) ? msg : [msg];
     for (const m of msgs) {
       console.log(`[${name}] <-`, m.op ?? m);
+      applyPresence(m);
       inbox.push(m);
       for (let i = waiters.length - 1; i >= 0; i--) {
         const [pred, resolve] = waiters[i];
@@ -37,7 +53,16 @@ function connect(name) {
       waiters.push([pred, (m) => { clearTimeout(t); resolve(m); }]);
     });
   const open = new Promise((resolve) => (ws.onopen = resolve));
-  return { ws, send, waitFor, open, inbox };
+  const waitRoom = (roomId, pred, timeout = 5000) =>
+    new Promise((resolve, reject) => {
+      if (pred(rooms[roomId] || {})) return resolve();
+      const t = setTimeout(() => reject(new Error(`room timeout (${name})`)), timeout);
+      waiters.push([
+        () => pred(rooms[roomId] || {}),
+        () => { clearTimeout(t); resolve(); },
+      ]);
+    });
+  return { ws, send, waitFor, waitRoom, open, inbox, rooms };
 }
 
 const a = connect("A");
@@ -88,16 +113,14 @@ a.send({ op: "join-room", "room-type": "chat", "room-id": "r1", data: { name: "A
 await a.waitFor((m) => m.op === "join-room-ok");
 b.send({ op: "join-room", "room-type": "chat", "room-id": "r1", data: { name: "B" } });
 await b.waitFor((m) => m.op === "join-room-ok");
-const presence = await a.waitFor(
-  (m) => m.op === "refresh-presence" && Object.keys(m.data).length >= 2
-);
-console.assert(Object.keys(presence.data).length === 2, "both peers in presence");
+await a.waitRoom("r1", (room) => Object.keys(room).length >= 2);
+console.log("both peers in presence");
 
 b.send({ op: "set-presence", "room-id": "r1", data: { name: "B", cursor: { x: 1 } } });
-await a.waitFor((m) => {
-  if (m.op !== "refresh-presence") return false;
-  return Object.values(m.data).some((v) => v.data?.cursor?.x === 1);
-});
+await a.waitRoom("r1", (room) =>
+  Object.values(room).some((v) => v.data?.cursor?.x === 1)
+);
+console.log("presence patch applied");
 
 // broadcast
 b.send({ op: "client-broadcast", "room-id": "r1", roomType: "chat", topic: "emoji", data: { emoji: "🔥" } });

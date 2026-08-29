@@ -48,6 +48,10 @@ pub struct SessionState {
     pub rooms: HashSet<String>,
     /// rule params attached via queries ($$ruleParams)
     pub versions: Option<Value>,
+    /// client accepts patch-presence (core > 0.17.5)
+    pub supports_patch_presence: bool,
+    /// set for SSE-transport sessions; validates /runtime/sse pushes
+    pub sse_token: Option<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +86,8 @@ pub struct AppState {
     pub room_sessions: DashMap<(Uuid, String), HashSet<Uuid>>,
     /// oauth discovery/JWKS cache
     pub oauth_cache: DashMap<String, (Value, std::time::Instant)>,
+    /// last presence snapshot sent per (app, room) — for patch-presence diffs
+    pub room_snapshots: DashMap<(Uuid, String), Value>,
 }
 
 impl AppState {
@@ -94,6 +100,7 @@ impl AppState {
             app_sessions: DashMap::new(),
             room_sessions: DashMap::new(),
             oauth_cache: DashMap::new(),
+            room_snapshots: DashMap::new(),
         })
     }
 
