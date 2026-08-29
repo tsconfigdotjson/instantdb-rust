@@ -2,7 +2,6 @@
 //! §3.14). Stream metadata lives in the $streams system namespace; bytes live
 //! in the storage dir; live fan-out crosses nodes via pg NOTIFY.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use instant_core::error::{InstantError, Result};
@@ -14,11 +13,9 @@ use uuid::Uuid;
 use crate::service;
 use crate::state::{AppState, Session};
 
-fn stream_path(app_id: Uuid, stream_id: Uuid) -> PathBuf {
-    crate::storage::storage_dir()
-        .join("streams")
-        .join(app_id.to_string())
-        .join(stream_id.to_string())
+/// blob key for a stream's bytes (prefix keeps it apart from $files blobs)
+fn stream_key(stream_id: Uuid) -> String {
+    format!("stream-{stream_id}")
 }
 
 async fn stream_by_client_id(
@@ -199,39 +196,17 @@ pub async fn handle_append_stream(
     let done = msg.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
     let abort_reason = msg.get("abort-reason").and_then(|v| v.as_str());
 
-    let path = stream_path(app_id, stream_id);
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| InstantError::internal(format!("stream mkdir: {e}")))?;
-    }
-    let current = tokio::fs::metadata(&path).await.map(|m| m.len() as i64).unwrap_or(0);
     let content = chunks.concat();
     let bytes = content.as_bytes();
-    if offset > current {
-        return Err(InstantError::validation_failed(
-            "stream",
-            "Append offset is past the end of the stream.",
-            json!([]),
-        ));
-    }
-    // overlap-tolerant: skip already-flushed bytes
-    let skip = (current - offset) as usize;
-    let new_bytes = if skip < bytes.len() { &bytes[skip..] } else { &[] };
-    if !new_bytes.is_empty() {
-        use tokio::io::AsyncWriteExt;
-        let mut f = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .await
-            .map_err(|e| InstantError::internal(format!("stream open: {e}")))?;
-        f.write_all(new_bytes)
-            .await
-            .map_err(|e| InstantError::internal(format!("stream write: {e}")))?;
-        f.flush().await.ok();
-    }
-    let new_size = current + new_bytes.len() as i64;
+    let prev_size = crate::storage::blob_size(state, app_id, &stream_key(stream_id)).await;
+    let new_size =
+        crate::storage::append_blob(state, app_id, &stream_key(stream_id), offset, bytes).await?;
+    let new_bytes_len = (new_size - prev_size).max(0) as usize;
+    let new_bytes = if new_bytes_len == 0 {
+        &[] as &[u8]
+    } else {
+        &bytes[bytes.len() - new_bytes_len..]
+    };
 
     // update metadata
     let mut steps = vec![
@@ -252,8 +227,6 @@ pub async fn handle_append_stream(
     }));
 
     // fan out to subscribers (all nodes)
-    let delivered_offset = current.min(offset + bytes.len() as i64) - (bytes.len() as i64 - new_bytes.len() as i64).min(0);
-    let _ = delivered_offset;
     service::notify_json(
         state,
         "instant_stream",
@@ -302,8 +275,9 @@ pub async fn handle_subscribe_stream(
     let offset = msg.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
 
     // catch-up: send stored content from offset
-    let path = stream_path(app_id, stream_id);
-    let stored = tokio::fs::read(&path).await.unwrap_or_default();
+    let stored = crate::storage::read_blob(state, app_id, &stream_key(stream_id))
+        .await
+        .unwrap_or_default();
     let done = stream_field(state, app_id, stream_id, "done")
         .await
         .and_then(|v| v.as_bool())

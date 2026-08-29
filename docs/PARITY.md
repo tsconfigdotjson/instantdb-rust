@@ -95,7 +95,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | refresh_tokens / sign_out / users GET+DELETE | ✅ | |
 | magic_code / send_magic_code / verify_magic_code / sign_in_guest | ✅ | |
 | rooms/presence | ✅ | |
-| storage upload/delete (admin + client routes) + signed download URLs | ✅ | local-disk adapter |
+| storage upload/delete (admin + client routes) + signed download URLs | ✅ | Postgres-backed blobs by default (multi-node correct; scripts/multinode-storage-test.mjs); STORAGE_BACKEND=disk optional; S3 would slot in beside them |
 | query_perms_check / transact_perms_check (debugQuery/debugTransact) | ✅ | check-results with programs; dry-run/commit semantics |
 | /admin/subscribe-query + /admin/sse (SSE transports) | ❌ | |
 | schema endpoints (`/admin/schema`, `/dash/.../schema/*` CLI push) | ❌ | schema changes go through /admin/transact attr steps |

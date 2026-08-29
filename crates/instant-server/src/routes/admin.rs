@@ -960,10 +960,11 @@ async fn storage_upload_impl(
         .map(|s| s.to_string());
 
     let location_id = Uuid::new_v4().to_string();
-    let size = crate::storage::put_blob(ctx.app_id, &location_id, &body).await?;
+    let size = crate::storage::put_blob(state, ctx.app_id, &location_id, &body).await?;
 
-    // upsert $files row by path lookup
+    // upsert $files row by path lookup (replacing a path orphans its old blob)
     let path_attr = sc::attr_id("$files", "path");
+    let old_location = file_location_by_path(state, ctx.app_id, &path).await;
     let lookup = json!([path_attr, path]);
     let mut steps = vec![
         json!(["add-triple", lookup, sc::attr_id("$files", "id"), lookup]),
@@ -993,7 +994,30 @@ async fn storage_upload_impl(
     .await
     .map_err(InstantError::from)?;
     let file_id: Uuid = row.get("entity_id");
+    if let Some(old) = old_location {
+        crate::storage::delete_blob(state, ctx.app_id, &old).await;
+    }
     Ok(json!({"data": {"id": file_id, "location-id": location_id, "size": size}}))
+}
+
+/// location-id of the $files row at `path`, if any.
+async fn file_location_by_path(state: &AppState, app_id: Uuid, path: &str) -> Option<String> {
+    use sqlx::Row;
+    let path_attr = sc::attr_id("$files", "path");
+    let loc_attr = sc::attr_id("$files", "location-id");
+    let row = sqlx::query(
+        "SELECT l.value AS loc FROM triples t
+         JOIN triples l ON l.app_id = t.app_id AND l.entity_id = t.entity_id AND l.attr_id = $3
+         WHERE t.app_id = $1 AND t.attr_id = $2 AND t.av AND t.value = to_jsonb($4::text) LIMIT 1",
+    )
+    .bind(app_id)
+    .bind(path_attr)
+    .bind(loc_attr)
+    .bind(path)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()??;
+    row.get::<Value, _>("loc").as_str().map(|s| s.to_string())
 }
 
 pub async fn storage_delete(
@@ -1028,12 +1052,16 @@ async fn storage_delete_impl(
     match row {
         Some(row) => {
             let id: Uuid = row.get("entity_id");
+            let old = file_location_by_path(state, ctx.app_id, filename).await;
             service::run_system_transact(
                 state,
                 ctx.app_id,
                 &json!([["delete-entity", id, "$files"]]),
             )
             .await?;
+            if let Some(old) = old {
+                crate::storage::delete_blob(state, ctx.app_id, &old).await;
+            }
             Ok(json!({"data": {"id": id}}))
         }
         None => Ok(json!({"data": {"id": null}})),
@@ -1234,8 +1262,9 @@ async fn client_storage_upload_impl(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     let location_id = Uuid::new_v4().to_string();
-    let size = crate::storage::put_blob(app_id, &location_id, &body).await?;
+    let size = crate::storage::put_blob(state, app_id, &location_id, &body).await?;
     let path_attr = sc::attr_id("$files", "path");
+    let old_location = file_location_by_path(state, app_id, &path).await;
     let lookup = json!([path_attr, path]);
     let mut steps = vec![
         json!(["add-triple", lookup, sc::attr_id("$files", "id"), lookup]),
@@ -1263,6 +1292,9 @@ async fn client_storage_upload_impl(
     .await
     .map_err(InstantError::from)?;
     let file_id: Uuid = row.get("entity_id");
+    if let Some(old) = old_location {
+        crate::storage::delete_blob(state, app_id, &old).await;
+    }
     Ok(json!({"data": {"id": file_id, "location-id": location_id, "size": size}}))
 }
 
@@ -1299,8 +1331,12 @@ async fn client_storage_delete_impl(
     match row {
         Some(row) => {
             let id: Uuid = row.get("entity_id");
+            let old = file_location_by_path(state, app_id, filename).await;
             service::run_system_transact(state, app_id, &json!([["delete-entity", id, "$files"]]))
                 .await?;
+            if let Some(old) = old {
+                crate::storage::delete_blob(state, app_id, &old).await;
+            }
             Ok(json!({"data": {"id": id}}))
         }
         None => Ok(json!({"data": {"id": null}})),

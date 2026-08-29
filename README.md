@@ -33,8 +33,9 @@ Built as a migration path for apps on the sunsetting hosted Instant service.
 - **Admin API**: `@instantdb/admin`-compatible (`/admin/query` object trees,
   `/admin/transact` with the admin steps grammar, `refresh_tokens`, users,
   magic codes, impersonation headers, presence, storage).
-- **Storage**: `$files` namespace with a local-disk adapter and HMAC-signed
-  download URLs (S3 adapter can slot into `storage.rs`).
+- **Storage**: `$files` namespace with HMAC-signed download URLs. Blobs live
+  in Postgres by default so every node can serve every file; a local-disk
+  backend is available and an S3 adapter can slot in beside them.
 - **The legacy database schema**: the exact Postgres schema from the original
   server (its migrations replay cleanly onto stock Postgres 16/17/18), so
   existing exported data drops straight in. System-catalog attr UUIDs are
@@ -80,7 +81,8 @@ works exactly as with the hosted service. A complete example lives in
 | `PORT` | `8888` | |
 | `BASE_URL` | `http://localhost:$PORT` | public URL (oauth redirects, file URLs) |
 | `SERVER_SECRET` | `dev-secret` | signs storage URLs — set in production |
-| `STORAGE_DIR` | `./storage-data` | file-blob directory |
+| `STORAGE_BACKEND` | `postgres` | blob store: `postgres` (multi-node correct) or `disk` |
+| `STORAGE_DIR` | `./storage-data` | blob directory for the `disk` backend |
 
 ### Horizontal scaling
 

@@ -31,12 +31,32 @@ async fn main() -> anyhow::Result<()> {
         .connect(&cfg.database_url)
         .await?;
 
-    instant_core::system_catalog::ensure_system_catalog(&pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("system catalog bootstrap failed: {e}"))?;
-    service::ensure_server_tables(&pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("server tables bootstrap failed: {e}"))?;
+    // Serialize bootstrap DDL across concurrently-starting nodes.
+    {
+        use sqlx::Executor;
+        let mut boot_conn = pool.acquire().await?;
+        boot_conn
+            .execute("SELECT pg_advisory_lock(772677321)")
+            .await?;
+        let result: anyhow::Result<()> = async {
+            instant_core::system_catalog::ensure_system_catalog(&pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("system catalog bootstrap failed: {e}"))?;
+            service::ensure_server_tables(&pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("server tables bootstrap failed: {e}"))?;
+            storage::ensure_blob_table(&pool)
+                .await
+                .map_err(|e| anyhow::anyhow!("blob table bootstrap failed: {e}"))?;
+            Ok(())
+        }
+        .await;
+        boot_conn
+            .execute("SELECT pg_advisory_unlock(772677321)")
+            .await
+            .ok();
+        result?;
+    }
 
     let state = AppState::new(cfg.clone(), pool);
 
