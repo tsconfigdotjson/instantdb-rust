@@ -1,0 +1,22 @@
+[package]
+name = "instant-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sqlx.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+md-5.workspace = true
+rand.workspace = true
+cel.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
