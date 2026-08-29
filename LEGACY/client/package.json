@@ -1,0 +1,35 @@
+{
+  "name": "instant-local-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Instant's local Monorepo",
+  "packageManager": "pnpm@10.2.0",
+  "workspaces": {
+    "packages": [
+      "sandbox/*",
+      "packages/*",
+      "www",
+      "www/_emails/replace-images"
+    ]
+  },
+  "scripts": {
+    "build": "turbo run build --cache-dir=.turbo --no-update-notifier",
+    "dev": "turbo run dev --filter=@instantdb/version --filter=@instantdb/core --filter=@instantdb/react-common --filter=@instantdb/react --filter=@instantdb/react-native --filter=@instantdb/admin --filter=@instantdb/platform --filter=@instantdb/react-native-mmkv --filter=@instantdb/expo-sqlite --filter=instant-www --filter=sb-react-nextjs --filter=sb-admin-sdk-express --filter=@instantdb/components --filter=instant-cli --filter=create-instant-app --filter=@instantdb/resumable-stream --filter=@instantdb/webhooks --concurrency=20 --no-update-notifier",
+    "test": "turbo run test:ci --no-update-notifier",
+    "clean": "turbo run clean",
+    "bench": "turbo run bench:ci --no-update-notifier",
+    "format": "prettier --write --ignore-path .prettierignore --ignore-path ../.gitignore \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "check-format": "prettier --check --ignore-path .prettierignore --ignore-path ../.gitignore \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "publish-packages": "turbo run publish-package --filter=\"./packages/*\" --no-update-notifier",
+    "build-packages": "turbo run build --filter=\"./packages/*\" --cache-dir=.turbo --no-update-notifier",
+    "build-sandbox": "turbo run build --filter=\"./sandbox/*\" --cache-dir=.turbo --no-update-notifier"
+  },
+  "devDependencies": {
+    "msw": "^2.14.6",
+    "prettier": "3.6.2",
+    "prettier-plugin-tailwindcss": "^0.7.1",
+    "tsx": "^4.19.3",
+    "turbo": "^2.5.4",
+    "typescript": "^5.9.3"
+  }
+}

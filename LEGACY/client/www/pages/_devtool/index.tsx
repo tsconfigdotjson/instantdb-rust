@@ -1,0 +1,647 @@
+import { TokenContext } from '@/lib/contexts';
+import { successToast } from '@/lib/toast';
+import { InstantApp } from '@/lib/types';
+import config, { isSelfHosted } from '@/lib/config';
+import { useSchemaQuery } from '@/lib/hooks/explorer';
+import { jsonFetch } from '@/lib/fetch';
+import { APIResponse, signOut, useAuthToken, useTokenFetch } from '@/lib/auth';
+import { Sandbox } from '@/components/dash/Sandbox';
+import { init } from '@instantdb/react';
+import { useEffect, useState, useContext, useMemo } from 'react';
+import {
+  Button,
+  Checkbox,
+  Dialog,
+  SectionHeading,
+  SubsectionHeading,
+  Stack,
+  TabBar,
+  Content,
+  twel,
+  useDialog,
+  ScreenHeading,
+  FullscreenLoading,
+} from '@/components/ui';
+import Auth from '@/components/dash/Auth';
+import { getRole, isMinRole } from '@/pages/dash/index';
+import { TrashIcon, XMarkIcon } from '@heroicons/react/24/solid';
+import { asClientOnlyPage, useReadyRouter } from '@/components/clientOnlyPage';
+import {
+  DashFetchProvider,
+  FetchedDash,
+  useFetchedDash,
+} from '@/components/dash/MainDashLayout';
+import { Explorer } from '@instantdb/components';
+
+type InstantReactClient = ReturnType<typeof init>;
+
+const Devtool = asClientOnlyPage(DevtoolComp);
+
+export default Devtool;
+
+function DevtoolComp() {
+  const router = useReadyRouter();
+  const authToken = useAuthToken();
+  const appId = router.query.appId as string | undefined;
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (appId && authToken) {
+      let cancel = false;
+      jsonFetch(`${config.apiURI}/dash/apps/${appId}`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${authToken}` },
+      })
+        .then((res) => {
+          if (cancel) return;
+          setWorkspaceId(res?.app?.org_id || 'personal');
+        })
+        .catch((e) => {
+          if (cancel) return;
+          setWorkspaceId('personal');
+        });
+
+      return () => {
+        cancel = true;
+      };
+    }
+  }, [appId, authToken]);
+  if (!authToken) {
+    return (
+      <DevtoolWindow>
+        <Auth
+          emailOnly
+          info={
+            <div className="rounded-sm border bg-gray-100 p-4">
+              <Help />
+            </div>
+          }
+        />
+      </DevtoolWindow>
+    );
+  }
+
+  if (!appId) {
+    return (
+      <DevtoolWindow>
+        <div className="flex h-full w-full items-center justify-center">
+          <div className="mx-auto max-w-md space-y-4">
+            <ScreenHeading>No app id provided</ScreenHeading>
+            <p>
+              We didn't receive an app ID. Double check that you passed an{' '}
+              <Code>appId</Code> paramater in your <Code>init</Code>. If you
+              continue experiencing issues,{' '}
+              {isSelfHosted
+                ? 'contact your deployment administrator.'
+                : 'ping us on Discord.'}
+            </p>
+            <Button
+              className="w-full"
+              size="mini"
+              variant="secondary"
+              onClick={() => {
+                signOut();
+              }}
+            >
+              Sign out
+            </Button>
+          </div>
+        </div>
+      </DevtoolWindow>
+    );
+  }
+
+  if (!workspaceId) {
+    return (
+      <DevtoolWindow>
+        <FullscreenLoading />
+      </DevtoolWindow>
+    );
+  }
+
+  return (
+    <TokenContext.Provider value={authToken}>
+      <DashFetchProvider
+        loading={
+          <DevtoolWindow>
+            <FullscreenLoading />
+          </DevtoolWindow>
+        }
+        error={(error) => {
+          const message = error?.message;
+          return (
+            <DevtoolWindow>
+              <div className="flex h-full w-full items-center justify-center">
+                <div className="mx-auto max-w-md space-y-4">
+                  <ScreenHeading>🤕 Failed to load your app</ScreenHeading>
+                  {message ? (
+                    <div className="mx-auto flex w-full max-w-2xl flex-col">
+                      <div className="rounded-sm bg-red-100 p-4 text-red-700">
+                        {message}
+                      </div>
+                    </div>
+                  ) : null}
+                  {isSelfHosted ? (
+                    <p>
+                      We had some trouble loading your app. Contact your
+                      deployment administrator with details.
+                    </p>
+                  ) : (
+                    <p>
+                      We had some trouble loading your app. Please ping us on{' '}
+                      <a
+                        className="font-bold text-blue-500"
+                        href="https://discord.com/invite/VU53p7uQcE"
+                        target="_blank"
+                      >
+                        discord
+                      </a>{' '}
+                      with details.
+                    </p>
+                  )}
+                  <Button
+                    className="w-full"
+                    size="mini"
+                    variant="secondary"
+                    onClick={() => {
+                      signOut();
+                    }}
+                  >
+                    Sign out
+                  </Button>
+                </div>
+              </div>
+            </DevtoolWindow>
+          );
+        }}
+        init={{ workspaceId }}
+      >
+        <DevtoolAuthorized appId={appId} />
+      </DashFetchProvider>
+    </TokenContext.Provider>
+  );
+}
+
+function DevtoolAuthorized({ appId }: { appId: string }) {
+  const dashResponse = useFetchedDash();
+
+  return <DevtoolWithData dashResponse={dashResponse} appId={appId} />;
+}
+
+function DevtoolWithData({
+  dashResponse,
+  appId,
+}: {
+  dashResponse: FetchedDash;
+  appId: string;
+}) {
+  const app = dashResponse.data?.apps?.find((a) => a.id === appId);
+  const [tab, setTab] = useState('explorer');
+  const [connection, setConnection] = useState<
+    | {
+        state: 'pending';
+      }
+    | {
+        state: 'error';
+        errorMessage: string | undefined;
+      }
+    | {
+        state: 'ready';
+        db: InstantReactClient;
+      }
+  >({ state: 'pending' });
+
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const isToggleShortcut = e.shiftKey && e.ctrlKey && e.code === 'Digit0';
+
+      if (isToggleShortcut) {
+        parent.postMessage(
+          {
+            type: 'close',
+          },
+          '*',
+        );
+      }
+    }
+
+    addEventListener('keydown', onKeyDown);
+
+    return () => removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  const adminToken = app?.admin_token;
+
+  useEffect(() => {
+    if (!appId || !adminToken) return;
+    if (typeof window === 'undefined') return;
+
+    try {
+      const db = init({
+        appId,
+        apiURI: config.apiURI,
+        websocketURI: config.websocketURI,
+        // @ts-expect-error
+        __adminToken: adminToken,
+        devtool: false,
+      });
+
+      setConnection({ state: 'ready', db });
+
+      return () => {
+        db._core.shutdown();
+      };
+    } catch (error) {
+      const message = (error as Error).message;
+      setConnection({ state: 'error', errorMessage: message });
+    }
+  }, [appId, adminToken]);
+
+  if (!app && dashResponse.fromCache) {
+    // We couldn't find this app. Perhaps the cache is stale. Let's
+    // wait for fresh data.
+    return (
+      <DevtoolWindow>
+        <FullscreenLoading />
+      </DevtoolWindow>
+    );
+  }
+
+  if (!app) {
+    const user = dashResponse.data?.user;
+    return (
+      <DevtoolWindow>
+        <div className="flex h-full w-full items-center justify-center">
+          <div className="mx-auto max-w-md space-y-4">
+            <ScreenHeading>🔎 We couldn't find your app</ScreenHeading>
+            <p>
+              {user ? (
+                <>
+                  You're logged in as <strong>{user.email}</strong>.{' '}
+                </>
+              ) : null}
+              We tried to access your app but couldn't.
+            </p>
+            <div className="bg-gray-50 p-2">
+              <AppIdLabel appId={appId} />
+            </div>
+            <p>
+              Are you sure you have access? Contact the app owner, or sign out
+              and log into a different account:
+            </p>
+            <Button
+              className="w-full"
+              size="mini"
+              variant="secondary"
+              onClick={() => {
+                signOut();
+              }}
+            >
+              Sign out
+            </Button>
+          </div>
+        </div>
+      </DevtoolWindow>
+    );
+  }
+
+  if (connection.state === 'error') {
+    const message = connection.errorMessage;
+    return (
+      <DevtoolWindow>
+        <div className="flex h-full w-full items-center justify-center">
+          <div className="mx-auto max-w-md space-y-4">
+            <ScreenHeading>
+              🤕 Failed connect to Instant's backend
+            </ScreenHeading>
+            {message ? (
+              <div className="mx-auto flex w-full max-w-2xl flex-col">
+                <div className="rounded-sm bg-red-100 p-4 text-red-700">
+                  {message}
+                </div>
+              </div>
+            ) : null}
+            <AppIdLabel appId={appId} />
+            {isSelfHosted ? (
+              <p>
+                We had some trouble connecting to Instant's backend. Contact
+                your deployment administrator with details.
+              </p>
+            ) : (
+              <p>
+                We had some trouble connecting to Instant's backend. Please ping
+                us on{' '}
+                <a
+                  className="font-bold text-blue-500"
+                  href="https://discord.com/invite/VU53p7uQcE"
+                  target="_blank"
+                >
+                  discord
+                </a>{' '}
+                with details.
+              </p>
+            )}
+            <Button
+              className="w-full"
+              size="mini"
+              variant="secondary"
+              onClick={() => {
+                signOut();
+              }}
+            >
+              Sign out
+            </Button>
+          </div>
+        </div>
+      </DevtoolWindow>
+    );
+  }
+
+  if (connection.state === 'pending') {
+    return (
+      <div className="flex h-full w-full items-center justify-center">
+        Connecting...
+      </div>
+    );
+  }
+
+  return (
+    <DevtoolWindow app={app}>
+      <div className="flex h-full w-full flex-col">
+        <div className="border-b bg-gray-50">
+          <AppIdLabel appId={app.id} />
+        </div>
+        <TabBar
+          className="text-sm"
+          selectedId={tab}
+          tabs={[
+            {
+              id: 'explorer',
+              label: 'Explorer',
+            },
+            {
+              id: 'sandbox',
+              label: 'Sandbox',
+            },
+            {
+              id: 'admin',
+              label: 'Admin',
+            },
+            {
+              id: 'help',
+              label: 'Help',
+            },
+          ]}
+          onSelect={(t) => {
+            setTab(t.id);
+          }}
+        />
+        <div className="flex w-full flex-1 overflow-auto">
+          {adminToken && (
+            <DevtoolContent
+              adminToken={adminToken}
+              connection={connection}
+              app={app}
+              appId={appId}
+              tab={tab}
+              dashResponse={dashResponse}
+            />
+          )}
+        </div>
+      </div>
+    </DevtoolWindow>
+  );
+}
+
+function DevtoolWindow({
+  app,
+  children,
+}: {
+  app?: InstantApp;
+  children: React.ReactNode;
+}) {
+  const isLocalHost =
+    typeof window !== 'undefined' &&
+    window.location.hostname === 'localhost' &&
+    false;
+
+  return (
+    <div className="h-full w-full">
+      <div className="flex h-full w-full flex-col">
+        <div className="flex border-b bg-gray-100 p-2 text-xs">
+          <div className="flex-1 font-mono">
+            Instant Devtools {app?.title ? `• ${app?.title}` : ''}
+            {isLocalHost ? ' • localhost' : ''}
+          </div>
+          <XMarkIcon
+            className="cursor-pointer"
+            height="1rem"
+            onClick={() => {
+              parent.postMessage(
+                {
+                  type: 'close',
+                },
+                '*',
+              );
+            }}
+          />
+        </div>
+        <div className="flex-1">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function AppIdLabel({ appId }: { appId: string }) {
+  return (
+    <div className="flex gap-2 px-2 py-1 font-mono text-xs">
+      <span>App ID</span>
+      <code
+        className="rounded-sm border bg-white px-2"
+        onClick={(e) => {
+          const node = e.currentTarget;
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+        }}
+      >
+        {appId}
+      </code>
+    </div>
+  );
+}
+
+// Component that manages schema subscription for devtool
+function DevtoolContent({
+  connection,
+  app,
+  appId,
+  tab,
+  adminToken,
+  dashResponse,
+}: {
+  connection: { state: 'ready'; db: InstantReactClient };
+  app: InstantApp;
+  appId: string;
+  adminToken: string;
+  tab: string;
+  dashResponse: FetchedDash;
+}) {
+  const schemaData = useSchemaQuery(connection.db);
+
+  return (
+    <>
+      {tab === 'explorer' ? (
+        <Explorer useShadowDOM={false} adminToken={adminToken} appId={appId} />
+      ) : tab === 'sandbox' ? (
+        <div className="w-full min-w-[960px]">
+          <Sandbox
+            app={app}
+            db={connection.db}
+            attrs={schemaData.attrs}
+            namespaces={schemaData.namespaces}
+          />
+        </div>
+      ) : tab === 'admin' ? (
+        <div className="w-full min-w-[960px] p-4">
+          <Admin dashResponse={dashResponse} app={app} />
+        </div>
+      ) : tab === 'help' ? (
+        <div className="w-full min-w-[960px] space-y-4 p-4">
+          <Help />
+          <Button
+            size="mini"
+            variant="secondary"
+            onClick={() => {
+              signOut();
+            }}
+          >
+            Sign out
+          </Button>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function Admin({
+  dashResponse,
+  app,
+}: {
+  dashResponse: FetchedDash;
+  app: InstantApp;
+}) {
+  const token = useContext(TokenContext);
+  const [clearAppOk, updateClearAppOk] = useState(false);
+  const clearDialog = useDialog();
+
+  const role = getRole(dashResponse.data, app);
+
+  return (
+    <Stack className="max-w-sm gap-2 text-sm">
+      {isMinRole('owner', role) ? (
+        <div className="space-y-2">
+          <SectionHeading>Danger zone</SectionHeading>
+          <Content>
+            These are destructive actions and will irreversibly delete
+            associated data.
+          </Content>
+          <div>
+            <div className="flex flex-col space-y-6">
+              <Button variant="destructive" onClick={clearDialog.onOpen}>
+                <TrashIcon height={'1rem'} /> Clear app
+              </Button>
+            </div>
+          </div>
+          <Dialog title="Clear App" {...clearDialog}>
+            <div className="flex flex-col gap-2">
+              <SubsectionHeading className="text-red-600">
+                Clear app
+              </SubsectionHeading>
+              <Content className="space-y-2">
+                <p>
+                  Clearing an app will irreversibly delete all namespaces,
+                  triples, and permissions.
+                </p>
+                <p>
+                  All other data like app id, admin token, users, billing, team
+                  members, etc. will remain.
+                </p>
+                <p>
+                  This is equivalent to deleting all your namespaces in the
+                  explorer and clearing your permissions.
+                </p>
+              </Content>
+              <Checkbox
+                checked={clearAppOk}
+                onChange={(c) => updateClearAppOk(c)}
+                label="I understand and want to clear this app."
+              />
+              <Button
+                disabled={!clearAppOk}
+                variant="destructive"
+                onClick={async () => {
+                  await jsonFetch(
+                    `${config.apiURI}/dash/apps/${app.id}/clear`,
+                    {
+                      method: 'POST',
+                      headers: {
+                        authorization: `Bearer ${token}`,
+                        'content-type': 'application/json',
+                      },
+                    },
+                  );
+
+                  clearDialog.onClose();
+                  dashResponse.mutate();
+                  successToast('App cleared!');
+                }}
+              >
+                Clear data
+              </Button>
+            </div>
+          </Dialog>
+        </div>
+      ) : (
+        <>
+          <SectionHeading>Insufficent Role</SectionHeading>
+          <Content>
+            Only app owners can use admin features in the devtool.
+          </Content>
+        </>
+      )}
+    </Stack>
+  );
+}
+
+function Help() {
+  return (
+    <Stack className="max-w-sm gap-2 text-sm">
+      <SectionHeading>Instant Devtools</SectionHeading>
+      <p>
+        This widget embeds a data explorer and sandbox for your Instant app. We
+        added it to make it easier to interact with your data and test
+        operations.
+      </p>
+      <p>
+        You can toggle this view with the keyboard shortcut
+        <Code>ctrl + shift + 0</Code>. To learn more, check out the{' '}
+        <a
+          className="font-bold text-blue-500"
+          href="https://instantdb.com/docs/devtool"
+          target="_blank"
+        >
+          docs.
+        </a>
+      </p>
+    </Stack>
+  );
+}
+
+const Code = twel('code', 'bg-gray-200 px-1 rounded-sm text-xs font-mono');
+
+function isEmptyObj(obj: object) {
+  return Object.keys(obj).length === 0;
+}

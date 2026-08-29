@@ -1,0 +1,387 @@
+@import 'tailwindcss';
+
+@theme {
+  --default-mono-font-family:
+    'Berkeley Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+  --font-mono: var(--default-mono-font-family);
+}
+
+@config '../tailwind.config.js';
+
+@plugin 'tailwindcss-animate';
+@plugin '@tailwindcss/typography';
+@plugin '@tailwindcss/forms';
+@plugin 'tailwindcss-animate';
+@custom-variant dark (&:is(.dark *));
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: oklch(92.8% 0.006 264.531);
+  }
+  *,
+  html {
+    --default-font-family: 'Switzer', 'IBM Plex Sans', sans-serif;
+    --default-mono-font-family:
+      'Berkeley Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+      'Liberation Mono', 'Courier New', monospace;
+  }
+  ::cue {
+    font-family: var(--default-font-family);
+  }
+}
+
+@utility landing-width {
+  @apply max-w-[1280px] px-8;
+}
+
+@utility no-scrollbar {
+  /* Hide scrollbar for Chrome, Safari and Opera */
+  &::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Hide scrollbar for IE, Edge and Firefox */
+  -ms-overflow-style: none;
+  /* IE and Edge */
+  scrollbar-width: none;
+  /* Firefox */
+}
+
+/* Mirrored in packages/components/src/style.css for the shadow-DOM path. */
+@keyframes filter-shadow-r-fade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes filter-shadow-l-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@utility filter-shadow-r {
+  opacity: 1;
+
+  @supports (animation-timeline: scroll()) {
+    @media (prefers-reduced-motion: no-preference) {
+      opacity: 0;
+      animation: filter-shadow-r-fade linear backwards;
+      animation-timeline: --filter-scroll;
+      animation-range: calc(100% - 16px) 100%;
+    }
+  }
+}
+
+@utility filter-shadow-l {
+  opacity: 0;
+
+  @supports (animation-timeline: scroll()) {
+    @media (prefers-reduced-motion: no-preference) {
+      animation: filter-shadow-l-fade linear forwards;
+      animation-timeline: --filter-scroll;
+      animation-range: 0% 16px;
+    }
+  }
+}
+
+@layer base {
+  @font-face {
+    font-family: 'Berkeley Mono';
+    font-weight: normal;
+    font-style: normal;
+    font-stretch: normal;
+    src: url('/fonts/BerkeleyMono-Regular.woff2') format('woff2');
+    font-display: block;
+  }
+
+  @font-face {
+    font-family: 'Berkeley Mono';
+    font-weight: normal;
+    font-style: italic;
+    font-stretch: normal;
+    src: url('/fonts/BerkeleyMono-Italic.woff2') format('woff2');
+    font-display: block;
+  }
+
+  @font-face {
+    font-family: 'Berkeley Mono';
+    font-weight: bold;
+    font-style: normal;
+    font-stretch: normal;
+    src: url('/fonts/BerkeleyMono-Bold.woff2') format('woff2');
+    font-display: block;
+  }
+
+  @font-face {
+    font-family: 'Berkeley Mono';
+    font-weight: bold;
+    font-style: italic;
+    font-stretch: normal;
+    src: url('/fonts/BerkeleyMono-BoldItalic.woff2') format('woff2');
+    font-display: block;
+  }
+
+  @font-face {
+    font-family: 'Switzer';
+    font-weight: 400;
+    font-style: normal;
+    src: url('/fonts/Switzer-Regular.woff') format('woff');
+    font-display: block;
+  }
+
+  @font-face {
+    font-family: 'Switzer';
+    font-weight: 400;
+    font-style: italic;
+    src: url('/fonts/Switzer-Italic.woff') format('woff');
+    font-display: block;
+  }
+
+  @font-face {
+    font-family: 'Switzer';
+    font-weight: 500;
+    font-style: normal;
+    src: url('/fonts/Switzer-Medium.woff') format('woff');
+    font-display: block;
+  }
+
+  @font-face {
+    font-family: 'Switzer';
+    font-weight: 600;
+    font-style: normal;
+    src: url('/fonts/Switzer-Semibold.woff') format('woff');
+    font-display: block;
+  }
+
+  @font-face {
+    font-family: 'Switzer';
+    font-weight: 700;
+    font-style: normal;
+    src: url('/fonts/Switzer-Bold.woff') format('woff');
+    font-display: block;
+  }
+}
+
+html {
+  height: 100%;
+  background-color: #fbf9f6;
+  --default-mono-font-family:
+    'Berkeley Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', 'Courier New', monospace;
+}
+
+body {
+  min-height: 100%;
+  background-color: #ffffff;
+}
+
+#__next {
+  min-height: 100%;
+}
+
+.animate-slow-pulse {
+  animation: slow-pulse 8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes slow-pulse {
+  0%,
+  100% {
+    opacity: 0;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+.bg-blue-1000 {
+  background-color: #070b1b;
+}
+
+@supports (-webkit-touch-callout: none) {
+  .h-screen {
+    height: -webkit-fill-available;
+  }
+}
+
+.hiddenscrollbar {
+  -ms-overflow-style: none;
+  /* Internet Explorer 10+ */
+  scrollbar-width: none;
+  /* Firefox */
+}
+
+.hiddenscrollbar::-webkit-scrollbar {
+  display: none;
+  /* Safari and Chrome */
+}
+
+@keyframes partyTime {
+  0% {
+    transform: scale(0) translateY(0px);
+    opacity: 0;
+  }
+
+  10% {
+    opacity: 1;
+  }
+
+  100% {
+    transform: scale(1) translateY(30vh);
+    opacity: 0;
+  }
+}
+
+.dots {
+  background-image: radial-gradient(rgb(220, 220, 220) 16%, transparent 16%);
+  background-position: 0px 0px;
+  background-size: 11px 11px;
+  background-color: rgb(255, 255, 255);
+}
+
+@keyframes bounce {
+  0%,
+  100% {
+    transform: translateY(0%);
+    animation-timing-function: cubic-bezier(0.8, 0, 1, 1);
+  }
+
+  50% {
+    transform: translateY(-25%);
+    animation-timing-function: cubic-bezier(0, 0, 0.2, 1);
+  }
+}
+
+@keyframes wiggle {
+  10% {
+    transform: rotate(0deg);
+  }
+
+  13% {
+    transform: rotate(3deg);
+  }
+
+  16% {
+    transform: rotate(-3deg);
+  }
+
+  19% {
+    transform: rotate(0deg);
+  }
+}
+
+/* Docsearch overrides */
+/* ----------- */
+input#docsearch-input {
+  box-shadow: none !important;
+}
+
+/* Default is row-reverse, but we want to start from the left */
+.DocSearch-Footer {
+  flex-direction: row !important;
+}
+
+/* Markdown video styles */
+/* ----------- */
+.md-video-container {
+  position: relative;
+  border: 1px solid #f8f9fa;
+  width: 100%;
+  padding-bottom: 56.25%;
+  /* 16:9 aspect ratio */
+}
+
+.md-video-container iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Toastify */
+
+div.Toastify__toast-body {
+  align-items: flex-start;
+}
+
+div.Toastify__toast-icon {
+  margin-top: 3px;
+}
+
+.debug {
+  outline: solid red 1px;
+}
+
+/* Katex */
+
+.katex-display {
+  background-color: white;
+  padding: 14px;
+  border-radius: 6px;
+  border: 1px solid #e5e7eb;
+  overflow-x: auto;
+}
+
+.katex-display > .katex {
+  background-color: transparent;
+}
+
+/* Essay breakout styles — elements inside .essay-content that break out
+   of the narrow prose column to the wider max-w-3xl width */
+.essay-content
+  :is(.essay-breakout, .essay-image-breakout, table, .essay-video-breakout),
+.essay-content > pre,
+.essay-content > iframe {
+  position: relative;
+  left: 50%;
+  width: min(100vw - 2rem, 48rem);
+  max-width: 48rem; /* 3xl */
+  transform: translateX(-50%);
+}
+
+.essay-content .essay-image-breakout {
+  border-radius: 0;
+}
+
+.essay-content > pre {
+  border-radius: 0;
+  border: 1px solid #e5e7eb;
+  padding: 1.25rem;
+}
+
+.essay-content .essay-video-breakout {
+  display: block;
+}
+
+.essay-content > iframe {
+  display: block;
+  width: min(100vw - 2rem, 48rem) !important;
+}
+
+.essay-content table .essay-image-breakout {
+  position: static;
+  width: auto;
+  max-width: 100%;
+  transform: translateX(0);
+}

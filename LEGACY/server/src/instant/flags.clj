@@ -1,0 +1,696 @@
+;; The flags are populated and kept up to date by instant.flag-impl
+;; We separate the namespaces so that this namespace has no dependencies
+;; and can be required from anywhere.
+(ns instant.flags
+  (:require
+   ;; Can't depend on tracer in this file
+   [clojure.string :as string]
+   [clojure.tools.logging :as log]
+   [clojure.walk :as w]
+   [instant.config :as config]
+   [instant.util.email :as email]
+   [instant.util.json :as json]
+   [instant.util.uuid :as uuid-util])
+  (:import
+   (inet.ipaddr IPAddressString)
+   (java.net InetAddress URI)))
+
+;; Map of query to {:result {result-tree}
+;;                  :tx-id int}
+(defonce query-results (atom {}))
+
+(def query {:friend-emails {}
+            :power-user-emails {}
+            :storage-whitelist {}
+            :storage-block-list {}
+            :storage-migration {}
+            :team-emails {}
+            :test-emails {}
+            :promo-emails {}
+            :rate-limited-apps {}
+            :log-sampled-apps {}
+            :welcome-email-config {}
+            :e2e-logging {}
+            :query-flags {}
+            :app-deletion-sweeper {}
+            :rule-wheres {}
+            :rule-where-testing {}
+            :toggles {}
+            :flags {}
+            :handle-receive-timeout {}
+            :query-modifiers {}})
+
+(def dashboard-signup-modes
+  #{"open" "restricted" "closed"})
+
+(def toggle-defaults {:pg-hints-by-default (= :test (config/get-env))})
+
+(defn parse-uuids-flag [vs]
+  (set (keep (fn [v]
+               (try
+                 (parse-uuid v)
+                 (catch Exception e
+                   (log/error e "Error parsing UUID" v))))
+             vs)))
+
+(defn parse-uuids-map-flag
+  "Useful when you want to do merge to update a flag."
+  [vs]
+  (try
+    (reduce-kv (fn [acc k v]
+                 (if-not v
+                   acc
+                   (try
+                     (conj acc (parse-uuid k))
+                     (catch Exception e
+                       (log/error e "Error parsing UUID" v)
+                       acc))))
+               #{}
+               vs)
+    (catch Throwable t
+      (log/error t "Error parsing uuids-map flag"))))
+
+(defn parse-ips-flag [vs]
+  (set (keep (fn [v]
+               (try
+                 (let [addr-str (IPAddressString. v)]
+                   (if (.isValid addr-str)
+                     (InetAddress/getByAddress
+                      (.getBytes (.toAddress addr-str)))
+                     (do (log/error "Invalid IP" v)
+                         nil)))
+                 (catch Exception e
+                   (log/error e "Error parsing IP" v))))
+             vs)))
+
+(defn- normalize-app-proxy-target [target]
+  ;; Targets are origins so the proxy can forward the incoming path unchanged.
+  (when (string? target)
+    (try
+      (let [uri (URI. target)
+            scheme (some-> (.getScheme uri) string/lower-case)
+            path (.getPath uri)]
+        (when (and (#{"http" "https"} scheme)
+                   (.getHost uri)
+                   (nil? (.getUserInfo uri))
+                   (nil? (.getQuery uri))
+                   (nil? (.getFragment uri))
+                   (or (string/blank? path)
+                       (= "/" path)))
+          (URI. scheme nil (.getHost uri) (.getPort uri) nil nil nil)))
+      (catch Exception _
+        nil))))
+
+(defn- parse-app-proxy-targets-flag [targets]
+  (if-not (map? targets)
+    {}
+    (reduce-kv
+     (fn [acc app-id-value target-value]
+       (if-let [app-id (uuid-util/coerce app-id-value)]
+         (if-let [target (normalize-app-proxy-target target-value)]
+           (assoc acc app-id target)
+           (do
+             (log/error "Ignoring invalid app proxy target" {:app-id app-id-value})
+             acc))
+         (do
+           (log/error "Ignoring invalid app proxy app id" {:app-id app-id-value})
+           acc)))
+     {}
+     targets)))
+
+(defn- parse-copy-files-bucket-flag [targets]
+  (if-not (map? targets)
+    {}
+    (reduce-kv
+     (fn [acc app-id-value target-value]
+       (if-let [app-id (uuid-util/coerce app-id-value)]
+         (assoc acc app-id target-value)
+         (do
+           (log/error "Ignoring invalid app proxy app id" {:app-id app-id-value})
+           acc)))
+     {}
+     targets)))
+
+(defn transform-query-result
+  "Function that is called on the query result before it is stored in the
+   query-result atom, to make look ups faster."
+  [result]
+  (let [emails
+        (reduce-kv (fn [acc key values]
+                     (if-let [email-key (case key
+                                          "friend-emails" :friend
+                                          "power-user-emails" :power-user
+                                          "team-emails" :team
+                                          "test-emails" :test
+                                          nil)]
+                       (assoc acc email-key (set (map #(get % "email") values)))
+                       acc))
+                   {:test #{}
+                    :team #{}
+                    :friend #{}
+                    :power-user #{}}
+                   result)
+
+        storage-enabled-whitelist
+        (set (keep (fn [o]
+                     (when (get o "isEnabled")
+                       (get o "appId")))
+                   (get result "storage-whitelist")))
+
+        storage-block-list
+        (set (keep (fn [o]
+                     (when (get o "isDisabled")
+                       (get o "appId")))
+                   (get result "storage-block-list")))
+
+        promo-code-emails (set (keep (fn [o]
+                                       (get o "email"))
+                                     (get result "promo-emails")))
+        rate-limited-apps (reduce (fn [acc {:strs [appId]}]
+                                    (conj acc (parse-uuid appId)))
+                                  #{}
+                                  (get result "rate-limited-apps"))
+
+        log-sampled-apps (reduce (fn [acc {:strs [appId sampleRate]}]
+                                   (assoc acc appId sampleRate))
+                                 {}
+                                 (get result "log-sampled-apps"))
+
+        app-deletion-sweeper (when-let [flag (->  (get result "app-deletion-sweeper")
+                                                  first)]
+                               {:disabled? (get flag "disabled" false)})
+        e2e-logging (when-let [flag (-> (get result "e2e-logging")
+                                        first)]
+                      {:invalidator-every-n (try (/ 1 (get flag "invalidator-rate"))
+                                                 (catch Exception _e
+                                                   10000))})
+        welcome-email-config (-> result (get "welcome-email-config") first w/keywordize-keys)
+        storage-migration (-> result (get "storage-migration") first w/keywordize-keys)
+        query-flags (reduce (fn [acc {:strs [query-hash setting value]}]
+                              (update acc query-hash (fnil conj []) {:setting setting
+                                                                     :value value}))
+                            {}
+                            (get result "query-flags"))
+        toggles (reduce (fn [acc {:strs [setting toggled]}]
+                          (assoc acc (keyword setting) toggled))
+                        toggle-defaults
+                        (get result "toggles"))
+        flags (-> (reduce (fn [acc {:strs [setting value]}]
+                            (assoc acc (keyword setting) value))
+                          {}
+                          (get result "flags"))
+                  (update :copy-file-bucket parse-copy-files-bucket-flag)
+                  (update :app-proxy-targets parse-app-proxy-targets-flag)
+                  (update :always-materialize-attr-ids parse-uuids-flag)
+                  (update :tika-enabled-apps parse-uuids-flag)
+
+                  (update :reserved-system-catalog-ident-names (fn [vs]
+                                                                 (set vs)))
+                  (update :disable-hint-query-hashes (fn [vs]
+                                                       (set vs)))
+                  (update :enable-store-batching-apps parse-uuids-flag)
+                  (update :enable-admin-transact-queue-apps parse-uuids-flag)
+                  (update :invalidator-drop-backpressure-apps parse-uuids-flag)
+                  (update :coarse-topics-apps parse-uuids-flag)
+                  (update :more-vfutures-instances (fn [vs]
+                                                     (set vs)))
+                  (update :enable-wal-entity-log-apps parse-uuids-flag)
+                  (update :enable-wal-entity-log-apps-map parse-uuids-map-flag)
+                  (update :cloudfront-signed-url-apps parse-uuids-flag)
+                  (update :smokescreen-whitelist-ips parse-ips-flag)
+                  (update :refresh-throttled-apps parse-uuids-flag)
+                  (update :use-reactive-cache-for-verify-token-apps parse-uuids-flag)
+                  (update :backup-skip-app-ids parse-uuids-flag))
+        handle-receive-timeout (reduce (fn [acc {:strs [appId timeoutMs]}]
+                                         (assoc acc (parse-uuid appId) timeoutMs))
+                                       {}
+                                       (get result "handle-receive-timeout"))
+        rule-wheres (if-let [rule-where-ent (-> result
+                                                (get "rule-wheres")
+                                                first)]
+                      {:app-ids (set (keep (fn [x]
+                                             (and (string? x)
+                                                  (parse-uuid x)))
+                                           (get rule-where-ent "app-ids")))
+                       :query-hashes (set (get rule-where-ent "query-hashes"))
+                       :query-hash-blacklist (set (get rule-where-ent "query-hash-blacklist"))}
+                      {:app-ids #{}
+                       :query-hashes #{}})
+        rule-where-testing (-> result
+                               (get "rule-where-testing")
+                               first
+                               (get "enabled")
+                               (or false))
+        query-modifiers (reduce (fn [acc {:strs [app-id query-hash etype dollar-params]}]
+                                  (update-in acc
+                                             [(parse-uuid app-id) query-hash]
+                                             (fnil conj [])
+                                             {:etype (keyword etype)
+                                              :params (-> dollar-params
+                                                          json/->json
+                                                          (json/<-json true))}))
+
+                                {}
+                                (get result "query-modifiers"))
+        dashboard-signups (some-> (get flags :dashboard-signups)
+                                  w/keywordize-keys)
+        dashboard-signup-mode
+        (let [mode (get dashboard-signups :mode)
+              mode-name (if (keyword? mode) (name mode) mode)]
+          (if (contains? dashboard-signup-modes mode-name)
+            (keyword mode-name)
+            :open))
+        dashboard-allowed-emails
+        (let [emails (get dashboard-signups :allowedEmails)]
+          (if-not (sequential? emails)
+            #{}
+            (set (keep (fn [email]
+                         (when (string? email)
+                           (some-> email
+                                   string/lower-case
+                                   string/trim
+                                   not-empty)))
+                       emails))))]
+    {:emails emails
+     :dashboard-allowed-emails dashboard-allowed-emails
+     :dashboard-signup-mode dashboard-signup-mode
+     :storage-enabled-whitelist storage-enabled-whitelist
+     :storage-block-list storage-block-list
+     :promo-code-emails promo-code-emails
+     :rate-limited-apps rate-limited-apps
+     :log-sampled-apps log-sampled-apps
+     :e2e-logging e2e-logging
+     :welcome-email-config welcome-email-config
+     :storage-migration storage-migration
+     :query-flags query-flags
+     :app-deletion-sweeper app-deletion-sweeper
+     :rule-wheres rule-wheres
+     :rule-where-testing rule-where-testing
+     :toggles toggles
+     :flags flags
+     :handle-receive-timeout handle-receive-timeout
+     :query-modifiers query-modifiers}))
+
+(def queries [{:query query :transform #'transform-query-result}])
+
+(defn add-change-listener [path f]
+  (let [watch-key (random-uuid)]
+    (add-watch query-results
+               watch-key
+               (fn [_key _ref old-value new-value]
+                 (let [old-key-value (get-in old-value (concat [query :result] path))
+                       new-key-value (get-in new-value (concat [query :result] path))]
+                   (when (not= old-key-value
+                               new-key-value)
+                     (f path
+                        old-key-value
+                        new-key-value)))))
+    (fn []
+      (remove-watch query-results watch-key))))
+
+(defn add-flag-listener [flag f]
+  (add-change-listener [:flags flag] f))
+
+(defn query-result []
+  (get-in @query-results [query :result]))
+
+(defn get-emails []
+  (get (query-result) :emails))
+
+(defn admin-email? [email]
+  (contains? (:team (get-emails))
+             email))
+
+(defn dashboard-signup-mode []
+  (or (:dashboard-signup-mode (query-result))
+      :open))
+
+(defn dashboard-allowed-emails []
+  (or (:dashboard-allowed-emails (query-result))
+      #{}))
+
+(defn dashboard-signup-allowed? [email]
+  (case (dashboard-signup-mode)
+    :open true
+    :restricted (contains? (dashboard-allowed-emails)
+                           (some-> email string/lower-case string/trim))
+    :closed false
+    true))
+
+;; (TODO) After storage is public for awhile we can remove this
+(defn storage-enabled-whitelist []
+  (get (query-result) :storage-enabled-whitelist))
+
+(defn storage-block-list []
+  (get (query-result) :storage-block-list))
+
+(defn promo-code-emails []
+  (get (query-result) :promo-code-emails))
+
+(defn welcome-email-config []
+  (get (query-result) :welcome-email-config))
+
+(defn storage-migration []
+  (get (query-result) :storage-migration))
+
+(defn promo-code-email? [email]
+  (contains? (promo-code-emails)
+             email))
+
+(defn storage-disabled? [app-id]
+  (let [app-id (str app-id)]
+    (contains? (storage-block-list) app-id)))
+
+(defn log-sampled-apps [app-id]
+  (get-in (query-result) [:log-sampled-apps app-id] nil))
+
+(defn app-rate-limited? [app-id]
+  (contains? (:rate-limited-apps (query-result))
+             app-id))
+
+(defn e2e-should-honeycomb-publish? [^Long tx-id]
+  (and tx-id
+       (zero? (mod tx-id (or (get-in (query-result)
+                                     [:e2e-logging :invalidator-every-n])
+                             10000)))))
+
+(defn query-flags
+  "Takes a query hash and returns the query settings that we should apply
+   to a query (e.g. set_nestloop = off) to work around bad query plans."
+  [query-hash]
+  (get-in (query-result) [:query-flags query-hash]))
+
+(defn use-rule-wheres?
+  "Returns true if either the app-id or the query hash is present in the
+   rule-wheres flag"
+  [{:keys [app-id query-hash]}]
+  (and (not (contains? (get-in (query-result) [:rule-wheres :query-hash-blacklist])
+                       query-hash))
+       (or (contains? (get-in (query-result) [:rule-wheres :app-ids])
+                      app-id)
+           (contains? (get-in (query-result) [:rule-wheres :query-hashes])
+                      query-hash))))
+
+(defn test-rule-wheres? []
+  (:rule-where-testing (query-result)))
+
+(def ^:dynamic *toggle-overrides* nil)
+
+(defn toggled?
+  ([key]
+   (if *toggle-overrides*
+     (-> (query-result)
+         (get :toggles)
+         (merge *toggle-overrides*)
+         (get key))
+     (get-in (query-result) [:toggles key])))
+  ([key not-found]
+   (if *toggle-overrides*
+     (-> (query-result)
+         (get :toggles)
+         (merge *toggle-overrides*)
+         (get key not-found))
+     (get-in (query-result) [:toggles key] not-found))))
+
+(def ^:dynamic *flag-overrides* nil)
+
+(defn flag
+  ([key]
+   (if *flag-overrides*
+     (-> (query-result)
+         (get :flags)
+         (merge *flag-overrides*)
+         (get key))
+     (get-in (query-result) [:flags key])))
+  ([key not-found]
+   (if *flag-overrides*
+     (-> (query-result)
+         (get :flags)
+         (merge *flag-overrides*)
+         (get key not-found))
+     (get-in (query-result) [:flags key] not-found))))
+
+(defn ephemeral-apps-enabled? []
+  (flag :ephemeral-apps-enabled true))
+
+(defn app-proxy-targets
+  "The app proxy routing table. Emptying the flag turns off all routing
+   without a deploy."
+  []
+  (flag :app-proxy-targets {}))
+
+(defn copy-file-bucket
+  "Bucket that files for an app should be copied to."
+  [app-id]
+  (get (flag :copy-file-bucket) app-id))
+
+(defn handle-receive-timeout [app-id]
+  (get-in (query-result) [:handle-receive-timeout app-id]))
+
+(defn pg-hint-testing-toggles []
+  (reduce-kv (fn [acc k v]
+               (if (= (namespace k) "pg-hint-test")
+                 (assoc acc k v)
+                 acc))
+             {}
+             (get (query-result) :toggles)))
+
+(defn hard-deletion-sweeper-disabled? []
+  (toggled? :hard-deletion-sweeper-disabled?))
+
+(defn custodian-disabled? []
+  (toggled? :custodian-disabled?))
+
+(defn conn-tx-reset-disabled? []
+  (toggled? :conn-tx-reset-disabled?))
+
+(defn rate-limit-tx-based-on-conn-pool? []
+  (toggled? :rate-limit-tx-based-on-conn-pool?))
+
+(defn rate-limit-tx-based-on-conn-pool-buffer []
+  (flag :rate-limit-tx-based-on-conn-pool-buffer 5))
+
+(defn admin-tx-queue-enabled? [app-id]
+  (contains? (flag :enable-admin-transact-queue-apps) app-id))
+
+(defn invalidator-drop-tx-latency-ms []
+  (flag :invalidator-drop-tx-latency-ms 30000))
+
+(defn invalidator-drop-backpressure? [app-id]
+  (contains? (flag :invalidator-drop-backpressure-apps) app-id))
+
+(defn use-coarse-topics? [app-id]
+  (contains? (flag :coarse-topics-apps) app-id))
+
+(defn use-get-datalog-queries-for-topics-v3? []
+  (toggled? :use-get-datalog-queries-for-topics-v3? true))
+
+(defn use-get-datalog-queries-for-topics-v2? []
+  (toggled? :use-get-datalog-queries-for-topics-v2? true))
+
+(defn enable-wal-entity-log? [app-id]
+  (or (toggled? :enable-wal-entity-log-globally)
+      (contains? (flag :enable-wal-entity-log-apps) app-id)
+      (contains? (flag :enable-wal-entity-log-apps-map) app-id)))
+
+(defn log-to-wal-log-table? []
+  (toggled? :log-to-wal-log-table false))
+
+(defn skip-noop-id-triple-updates?
+  "When true (the default), insert-multi! only re-writes an entity's id triple
+   when the entity actually changed in the tx. Flip the
+   :disable-skip-noop-id-triple-updates toggle to revert to insert-multi-old!."
+  []
+  (not (toggled? :disable-skip-noop-id-triple-updates false)))
+
+(def use-more-vfutures?
+  (case (config/get-env)
+    :dev
+    (fn []
+      (contains? (flag :more-vfutures-instances) @config/hostname))
+    :test
+    (fn [] true)
+    (fn []
+      (contains? (flag :more-vfutures-instances) @config/instance-id))))
+
+(defn statement-cancel-wait-ms []
+  (flag :statement-cancel-wait-ms 500))
+
+(defn query-modifiers [app-id query-hash]
+  (get-in (query-result) [:query-modifiers app-id query-hash]))
+
+(defn failing-over? []
+  (toggled? :failing-over))
+
+(defn backup-skip-app-ids
+  "App ids to exclude from the nightly backup, e.g. apps that have been
+   migrated to self-hosted. Add/remove ids here without a deploy."
+  []
+  (flag :backup-skip-app-ids #{}))
+
+(defn on-demand-backup-worker-count
+  "How many on-demand backups run concurrently per machine."
+  []
+  (flag :on-demand-backup-worker-count 3))
+
+(defn on-demand-backup-expiry-days
+  "How long an on-demand backup is retained before its S3 objects expire.
+   Capped at 30 here so every consumer stays under the storage `expire` tag
+   rule's 32-day hard limit."
+  []
+  (min 30 (flag :on-demand-backup-expiry-days 30)))
+
+(defn on-demand-backup-max-triples
+  "Apps whose estimated triple count is at or above this can't run a self-serve
+   backup--they're too large to stream on-demand, so we route them to us in
+   Discord. A nil or non-positive value disables the ceiling."
+  []
+  (flag :on-demand-backup-max-triples 25000000))
+
+(defn- rate-limit
+  "Builds a {:capacity n :window-minutes m} rate limit from a JSON flag value,
+   validating each field and falling back to the given defaults when it is
+   absent, non-integer, zero, or negative."
+  [v default-capacity default-window-minutes]
+  (let [capacity (get v "capacity")
+        window-minutes (get v "windowMinutes")]
+    {:capacity (if (pos-int? capacity) capacity default-capacity)
+     :window-minutes (if (pos-int? window-minutes) window-minutes default-window-minutes)}))
+
+(defn on-demand-backup-app-rate-limit
+  "Per-app throttle for on-demand backups, as {:capacity n :window-minutes m}
+   (default 1 per 5 minutes). Set the flag to a JSON object like
+   {\"capacity\": 1, \"windowMinutes\": 5} to tune without a deploy."
+  []
+  (rate-limit (flag :on-demand-backup-app-rate-limit) 1 5))
+
+(defn on-demand-backup-ip-rate-limit
+  "Per-IP throttle for on-demand backups, as {:capacity n :window-minutes m}
+   (default 2 per 5 minutes). Set the flag to a JSON object like
+   {\"capacity\": 2, \"windowMinutes\": 5} to tune without a deploy."
+  []
+  (rate-limit (flag :on-demand-backup-ip-rate-limit) 2 5))
+
+(defn use-cloudfront-signed-url? [app-id]
+  (when-not (toggled? :disable-cloudfront-signed-urls-globally)
+    (or (toggled? :enable-cloudfront-signed-urls-globally)
+        (contains? (flag :cloudfront-signed-url-apps)
+                   app-id))))
+
+(defn stream-flush-byte-limit
+  "Limit over which we flush the write stream buffer to a file"
+  []
+  (flag :stream-flush-byte-limit 1048576))
+
+(defn magic-code-rate-limit-per-hour
+  "Max number of magic code emails per email address per app per hour."
+  []
+  (let [limit (flag :magic-code-rate-limit-per-hour 20)]
+    (if (pos-int? limit)
+      limit
+      20)))
+
+(defn default-magic-code-expiry-minutes
+  []
+  (flag :default-magic-code-expiry-minutes 1440))
+
+(defn smokescreen-whitelist-ips []
+  (flag :smokescreen-whitelist-ips #{}))
+
+(defn combine-transacts? []
+  (flag :combine-transacts true))
+
+(defn throttle-refresh? [app-id]
+  (contains? (flag :refresh-throttled-apps) app-id))
+
+(defn refresh-throttle-ms []
+  (flag :refresh-throttle-ms 1000))
+
+(defn deregister-targets-drain-ms
+  "The number of milliseconds we should spend draining connections after we
+   get the DeregisterTargets notification from the load balancer."
+  []
+  (flag :deregister-targets-drain-ms (long (* 1000 60 4.5))))
+
+(defn send-with-sendgrid? []
+  (toggled? :send-with-sendgrid))
+
+(defn use-reactive-cache-for-verify-token? [app-id]
+  (contains? (flag :use-reactive-cache-for-verify-token-apps) app-id))
+
+(defn triples-size-collection-batch-size []
+  (flag :triples-size-collection-batch-size 5000))
+
+(defn triples-size-collection-max-loops []
+  (flag :triples-size-collection-max-loops 1000))
+
+(defn triples-size-collection-loop-limit-alert-threshold []
+  (flag :triples-size-collection-loop-limit-alert-threshold 10))
+
+(defn disable-triples-size-collection? []
+  ;; Defaults to disabled so that we can bootstrap before
+  ;; we start the process.
+  (flag :disable-triples-size-collection false))
+
+;; ----------
+;; Sunset
+
+(def sunset-stages
+  "Wind-down order; each stage includes everything before it."
+  [:none :signups-closed :read-only :disabled])
+
+(def ^:private sunset-stage-severity
+  (into {} (map-indexed (fn [i stage] [stage i]) sunset-stages)))
+
+(defn parse-sunset-stage
+  "Raw `sunset-stage` flag value -> stage keyword. Unknown values and
+   nil mean :none."
+  [value]
+  (case value
+    "signups-closed" :signups-closed
+    "read-only" :read-only
+    "disabled" :disabled
+    :none))
+
+(defn sunset-stage
+  "Global wind-down stage:
+   :signups-closed -> sign-ups close
+   :read-only -> writes to apps close as well
+   :disabled -> all apps get disabled"
+  []
+  (parse-sunset-stage (flag :sunset-stage)))
+
+(defn sunset-stage-at-least? [stage]
+  (>= (sunset-stage-severity (sunset-stage))
+      (sunset-stage-severity stage)))
+
+(defn signups-closed? []
+  (sunset-stage-at-least? :signups-closed))
+
+(defn sunset-app-creation-allowed-emails
+  "Emails that may keep using the dashboard app-creation route during the
+   signups-closed stage."
+  []
+  (set (keep email/coerce
+             (flag :sunset-app-creation-allowed-emails []))))
+
+(defn dash-app-creation-allowed?
+  "Whether an authenticated user may create an app through /dash/apps.
+   The allowlist bypasses signups-closed, but not read-only or disabled."
+  [email]
+  (case (sunset-stage)
+    :none true
+    :signups-closed (contains? (sunset-app-creation-allowed-emails)
+                               (email/coerce email))
+    false))
+
+(defn billing-closed?
+  "From announcement day on we stop selling Pro and Startup plans."
+  []
+  (sunset-stage-at-least? :signups-closed))
+
+(defn paid-features-free?
+  "From announcement day on every plan includes the paid features, so
+   users keep team access after we cancel their Stripe subscriptions."
+  []
+  (sunset-stage-at-least? :signups-closed))

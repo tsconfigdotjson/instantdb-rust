@@ -1,0 +1,205 @@
+import { User } from './clientTypes.ts';
+import { jsonFetch } from './utils/fetch.js';
+
+type SharedInput = {
+  apiURI: string;
+  appId: string;
+};
+
+export type SendMagicCodeParams = { email: string };
+export type SendMagicCodeResponse = {
+  sent: true;
+};
+
+export function sendMagicCode({
+  apiURI,
+  appId,
+  email,
+}: SharedInput & SendMagicCodeParams): Promise<SendMagicCodeResponse> {
+  return jsonFetch(`${apiURI}/runtime/auth/send_magic_code`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ 'app-id': appId, email }),
+  });
+}
+
+export type VerifyMagicCodeParams = {
+  email: string;
+  code: string;
+  refreshToken?: string | undefined;
+};
+export type VerifyResponse = {
+  user: User;
+};
+
+/**
+ * @deprecated Use {@link checkMagicCode} instead to get the `created` field
+ * and support `extraFields`.
+ */
+export async function verifyMagicCode({
+  apiURI,
+  appId,
+  email,
+  code,
+  refreshToken,
+}: SharedInput & VerifyMagicCodeParams): Promise<VerifyResponse> {
+  const res = await jsonFetch(`${apiURI}/runtime/auth/verify_magic_code`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      'app-id': appId,
+      email,
+      code,
+      ...(refreshToken ? { 'refresh-token': refreshToken } : {}),
+    }),
+  });
+  return res;
+}
+
+export type CheckMagicCodeParams = {
+  email: string;
+  code: string;
+  refreshToken?: string | undefined;
+  extraFields?: Record<string, any> | undefined;
+};
+export type CheckMagicCodeResponse = {
+  user: User;
+  created: boolean;
+};
+export async function checkMagicCode({
+  apiURI,
+  appId,
+  email,
+  code,
+  refreshToken,
+  extraFields,
+}: SharedInput & CheckMagicCodeParams): Promise<CheckMagicCodeResponse> {
+  const res = await jsonFetch(`${apiURI}/runtime/auth/verify_magic_code`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      'app-id': appId,
+      email,
+      code,
+      ...(refreshToken ? { 'refresh-token': refreshToken } : {}),
+      ...(extraFields ? { 'extra-fields': extraFields } : {}),
+    }),
+  });
+  return res;
+}
+
+export type VerifyRefreshTokenParams = { refreshToken: string };
+export async function verifyRefreshToken({
+  apiURI,
+  appId,
+  refreshToken,
+}: SharedInput & VerifyRefreshTokenParams): Promise<VerifyResponse> {
+  const res = await jsonFetch(`${apiURI}/runtime/auth/verify_refresh_token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      'app-id': appId,
+      'refresh-token': refreshToken,
+    }),
+  });
+  return res;
+}
+
+export type SignInAsGuestParams = {
+  extraFields?: Record<string, any> | undefined;
+};
+export async function signInAsGuest({
+  apiURI,
+  appId,
+  extraFields,
+}: SharedInput & SignInAsGuestParams): Promise<VerifyResponse> {
+  const res = await jsonFetch(`${apiURI}/runtime/auth/sign_in_guest`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      'app-id': appId,
+      ...(extraFields ? { 'extra-fields': extraFields } : {}),
+    }),
+  });
+  return res;
+}
+
+export type ExchangeCodeForTokenParams = {
+  code: string;
+  codeVerifier?: string;
+  refreshToken?: string | undefined;
+  extraFields?: Record<string, any> | undefined;
+};
+
+export async function exchangeCodeForToken({
+  apiURI,
+  appId,
+  code,
+  codeVerifier,
+  refreshToken,
+  extraFields,
+}: SharedInput & ExchangeCodeForTokenParams): Promise<CheckMagicCodeResponse> {
+  const res = await jsonFetch(`${apiURI}/runtime/oauth/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      app_id: appId,
+      code: code,
+      code_verifier: codeVerifier,
+      refresh_token: refreshToken,
+      ...(extraFields ? { extra_fields: extraFields } : {}),
+    }),
+  });
+  return res;
+}
+
+export type SignInWithIdTokenParams = {
+  nonce?: string | null | undefined;
+  idToken: string;
+  clientName: string;
+  refreshToken?: string;
+  extraFields?: Record<string, any> | undefined;
+};
+
+export async function signInWithIdToken({
+  apiURI,
+  appId,
+  nonce,
+  idToken,
+  clientName,
+  refreshToken,
+  extraFields,
+}: SharedInput & SignInWithIdTokenParams): Promise<CheckMagicCodeResponse> {
+  const res = await jsonFetch(`${apiURI}/runtime/oauth/id_token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      app_id: appId,
+      nonce,
+      id_token: idToken,
+      client_name: clientName,
+      refresh_token: refreshToken,
+      ...(extraFields ? { extra_fields: extraFields } : {}),
+    }),
+  });
+  return res;
+}
+
+export type SignoutParams = { refreshToken: string };
+export async function signOut({
+  apiURI,
+  appId,
+  refreshToken,
+}: SharedInput & SignoutParams): Promise<{}> {
+  const res = await jsonFetch(`${apiURI}/runtime/signout`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      app_id: appId,
+      refresh_token: refreshToken,
+    }),
+  });
+  return res;
+}

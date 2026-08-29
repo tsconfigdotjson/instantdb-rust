@@ -1,0 +1,86 @@
+{
+  "name": "@instantdb/core",
+  "version": "0.0.0",
+  "description": "Instant's core local abstraction",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/instantdb/instant/tree/main/client/packages/core",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/instantdb/instant.git",
+    "directory": "client/packages/core"
+  },
+  "type": "module",
+  "main": "./dist/commonjs/index.js",
+  "types": "./dist/commonjs/index.d.ts",
+  "module": "./dist/esm/index.js",
+  "unpkg": "standalone/index.umd.js",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "import": {
+        "types": "./dist/esm/index.d.ts",
+        "default": "./dist/esm/index.js"
+      },
+      "require": {
+        "types": "./dist/commonjs/index.d.ts",
+        "default": "./dist/commonjs/index.js"
+      }
+    }
+  },
+  "tshy": {
+    "selfLink": false,
+    "main": true,
+    "module": true,
+    "project": "./tsconfig.json",
+    "exports": {
+      "./package.json": "./package.json",
+      ".": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "test": "vitest",
+    "bench": "vitest bench",
+    "test:types": "tsc -p tsconfig.test.json --noEmit",
+    "test:ci": "vitest run && pnpm run test:types",
+    "test:e2e": "vitest run --project e2e",
+    "bench:ci": "vitest bench --run",
+    "check": "tsc --noEmit",
+    "check-exports": "attw --pack .",
+    "dev:module": "tsc --watch --preserveWatchOutput -p tsconfig.dev.json",
+    "dev:main": "tsc --watch --preserveWatchOutput -p tsconfig.cjs.dev.json",
+    "dev": "run-p dev:module dev:main",
+    "clean": "rm -rf dist",
+    "build": "rm -rf dist; npm run build:tshy && npm run build:standalone && npm run check-exports",
+    "build:tshy": "tshy",
+    "build:standalone": "vite build",
+    "publish-package": "pnpm pack && npm publish *.tgz --access public",
+    "sandbox": "pnpm vitest --includeTaskLocation --testNamePattern=__nothing__ --inspect --browser --browser.ui true --testTimeout 0 --no-file-parallelism --project \"e2e (chromium)\""
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@babel/core": "^7.17.9",
+    "@babel/preset-env": "^7.16.11",
+    "@types/node": "^18.19.74",
+    "@types/uuid": "^10.0.0",
+    "@types/websocket": "^1.0.5",
+    "@vitest/browser-playwright": "^4.0.18",
+    "@vitest/ui": "4.0.18",
+    "fake-indexeddb": "^6.0.0",
+    "npm-run-all": "^4.1.5",
+    "playwright": "^1.58.2",
+    "tshy": "^3.0.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18"
+  },
+  "dependencies": {
+    "@instantdb/version": "workspace:*",
+    "mutative": "^1.0.10",
+    "uuid": "^11.1.0"
+  },
+  "msw": {
+    "workerDirectory": [
+      "__tests__/msw"
+    ]
+  }
+}

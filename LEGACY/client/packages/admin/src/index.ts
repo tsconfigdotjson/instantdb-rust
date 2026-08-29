@@ -1,0 +1,1731 @@
+import type { Readable } from 'node:stream';
+import { validate as uuidValidate } from 'uuid';
+
+import {
+  tx,
+  lookup,
+  getOps,
+  i,
+  id,
+  txInit,
+  version as coreVersion,
+  InstantAPIError,
+  setInstantWarningsEnabled,
+  type InstantIssue,
+  type TransactionChunk,
+  type AuthToken,
+
+  // core types
+  type User,
+  type Query,
+  InstantError,
+
+  // query types
+  type QueryResponse,
+  type InstaQLResponse,
+  type InstaQLParams,
+  type ValidQuery,
+  type InstaQLFields,
+  type InstantQuery,
+  type InstantQueryResult,
+  type InstantSchema,
+  type InstantSchemaDatabase,
+  type InstantObject,
+  type InstantEntity,
+  type BackwardsCompatibleSchema,
+  type IInstantDatabase,
+
+  // schema types
+  type AttrsDefs,
+  type CardinalityKind,
+  type DataAttrDef,
+  type EntitiesDef,
+  type EntitiesWithLinks,
+  type EntityDef,
+  type InstantGraph,
+  type LinkAttrDef,
+  type LinkDef,
+  type InstantUnknownSchemaDef,
+  type LinksDef,
+  type RoomsOf,
+  type RoomsDef,
+  type PresenceOf,
+  type RoomHandle,
+  type ResolveAttrs,
+  type ValueTypes,
+  type InstantSchemaDef,
+  type InstantUnknownSchema,
+  type InstaQLEntity,
+  type InstaQLResult,
+  type InstaQLEntitySubquery,
+  type InstantRules,
+  type UpdateParams,
+  type CreateParams,
+  type LinkParams,
+  type RuleParams,
+  type TopicsOf,
+  type TopicOf,
+
+  // storage types
+  type FileOpts,
+  type UploadFileResponse,
+  type DeleteFileResponse,
+  validateQuery,
+  validateTransactions,
+  createInstantRouteHandler,
+  type InstantRouteHandlerPayloadByType,
+  type InstantRouteHandlerType,
+  type InstantRouteHandlerBody,
+  SSEConnection,
+  InstantStream,
+  EventSourceConstructor,
+  EventSourceType,
+  type WritableStreamCtor,
+  type ReadableStreamCtor,
+  InstantWritableStream,
+  InstantReadableStream,
+  type Logger,
+} from '@instantdb/core';
+
+import version from './version.ts';
+
+import {
+  subscribe,
+  SubscribeQueryCallback,
+  SubscribeQueryResponse,
+  SubscribeQueryPayload,
+  SubscriptionReadyState,
+} from './subscribe.ts';
+import { parseCookie } from 'cookie';
+import { EventSource } from '@instantdb/eventsource';
+import { MessageEventPolyfill } from './polyfill.ts';
+import {
+  Webhooks,
+  WebhooksManager,
+  type WebhookAction,
+  type WebhookStatus,
+  type WebhookEventStatus,
+  type WebhookInfo,
+  type WebhookAttempt,
+  type WebhookEventInfo,
+  type WebhookEventsPage,
+  type WebhookBody,
+  type WebhookEntity,
+  type WebhookPayload,
+  type WebhookPayloadRecord,
+  type WebhookPayloadRecordFor,
+  type WebhookHandlerFn,
+  type WebhookHandlers,
+  type WebhookHelpers,
+  type CreateWebhookParams,
+  type UpdateWebhookParams,
+} from '@instantdb/webhooks';
+
+type DebugCheckResult = {
+  /** The ID of the record. */
+  id: string;
+  /** The namespace/table of the record. */
+  entity: string;
+  /** The value of the record. */
+  record: Record<string, any>;
+  /** The result of evaluating the corresponding permissions rule for a record. */
+  check: any;
+};
+
+type Config = {
+  appId: string;
+  adminToken?: string;
+  apiURI?: string;
+  useDateObjects?: boolean;
+  disableValidation?: boolean;
+  verbose?: boolean;
+  logger?: Logger;
+};
+
+export type InstantConfig<
+  Schema extends InstantSchemaDef<any, any, any>,
+  UseDates extends boolean = false,
+> = {
+  appId: string;
+  adminToken?: string;
+  apiURI?: string;
+  schema?: Schema;
+  useDateObjects: UseDates;
+  disableValidation?: boolean;
+  verbose?: boolean;
+  logger?: Logger;
+  WritableStream?: WritableStreamCtor;
+  ReadableStream?: ReadableStreamCtor;
+};
+
+type InstantConfigFilled<
+  Schema extends InstantSchemaDef<any, any, any>,
+  UseDates extends boolean,
+> = InstantConfig<Schema, UseDates> & { apiURI: string };
+
+type FilledConfig = Config & { apiURI: string };
+
+type ImpersonationOpts =
+  | { email: string }
+  | { token: AuthToken }
+  | { guest: boolean };
+
+type DebugTransactResult = {
+  'tx-id': number;
+  'all-checks-ok?': boolean;
+};
+
+function configWithDefaults(config: Config): FilledConfig {
+  const defaultConfig = {
+    apiURI: 'https://api.instantdb.com',
+  };
+  const r = { ...defaultConfig, ...config };
+  return r;
+}
+
+function instantConfigWithDefaults<
+  Schema extends InstantSchemaDef<any, any, any>,
+  UseDates extends boolean,
+>(
+  config: InstantConfig<Schema, UseDates>,
+): InstantConfigFilled<Schema, UseDates> {
+  const defaultConfig = {
+    apiURI: 'https://api.instantdb.com',
+  };
+  const r = { ...defaultConfig, ...config };
+  if (!r.apiURI) {
+    r.apiURI = defaultConfig.apiURI;
+  }
+  return r;
+}
+
+function withImpersonation(
+  headers: { [key: string]: string },
+  opts: ImpersonationOpts,
+) {
+  if ('email' in opts) {
+    headers['as-email'] = opts.email;
+  } else if ('token' in opts) {
+    headers['as-token'] = opts.token;
+  } else if ('guest' in opts) {
+    headers['as-guest'] = 'true';
+  }
+  return headers;
+}
+
+function validateConfigAndImpersonation(
+  config: FilledConfig,
+  impersonationOpts: ImpersonationOpts | undefined,
+) {
+  if (
+    impersonationOpts &&
+    ('token' in impersonationOpts || 'guest' in impersonationOpts)
+  ) {
+    // adminToken is not required for `token` or `guest` impersonation
+    return;
+  }
+  if (config.adminToken) {
+    // An adminToken is provided.
+    return;
+  }
+  if (impersonationOpts && 'email' in impersonationOpts) {
+    throw new Error(
+      'Admin token required. To impersonate users with an email you must pass `adminToken` to `init`.',
+    );
+  }
+  throw new Error(
+    'Admin token required. To run this operation pass `adminToken` to `init`, or use `db.asUser`.',
+  );
+}
+
+function authorizedHeaders(
+  config: FilledConfig,
+  impersonationOpts?: ImpersonationOpts,
+): Record<string, string> {
+  validateConfigAndImpersonation(config, impersonationOpts);
+
+  const { adminToken, appId } = config;
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'app-id': appId,
+  };
+
+  if (adminToken) {
+    headers.authorization = `Bearer ${adminToken}`;
+  }
+
+  return impersonationOpts
+    ? withImpersonation(headers, impersonationOpts)
+    : headers;
+}
+
+// NextJS 13 and 14 cache fetch requests by default.
+//
+// Since adminDB.query uses fetch, this means that it would also cache by default.
+//
+// We don't want this behavior. `adminDB.query` should return the latest result by default.
+//
+// To get around this, we set an explicit `cache` header for NextJS 13 and 14.
+// This is no longer needed in NextJS 15 onwards, as the default is `no-store` again.
+// Once NextJS 13 and 14 are no longer common, we can remove this code.
+function isNextJSVersionThatCachesFetchByDefault() {
+  return (
+    // NextJS 13 onwards added a `__nextPatched` property to the fetch function
+    fetch['__nextPatched'] &&
+    // NextJS 15 onwards _also_ added a global `next-patch` symbol.
+    !globalThis[Symbol.for('next-patch')]
+  );
+}
+
+function getDefaultFetchOpts(): RequestInit {
+  return isNextJSVersionThatCachesFetchByDefault() ? { cache: 'no-store' } : {};
+}
+
+async function jsonReject(rejectFn, res) {
+  const body = await res.text();
+  try {
+    const json = JSON.parse(body);
+    return rejectFn(new InstantAPIError({ status: res.status, body: json }));
+  } catch (_e) {
+    return rejectFn(
+      new InstantAPIError({
+        status: res.status,
+        body: { type: undefined, message: body },
+      }),
+    );
+  }
+}
+
+async function jsonFetch(
+  input: RequestInfo,
+  init: RequestInit | undefined,
+): Promise<any> {
+  const defaultFetchOpts = getDefaultFetchOpts();
+  const headers = {
+    ...(init?.headers || {}),
+    'Instant-Admin-Version': version,
+    'Instant-Core-Version': coreVersion,
+  };
+  const res = await fetch(input, { ...defaultFetchOpts, ...init, headers });
+  if (res.status === 200) {
+    const json = await res.json();
+    return Promise.resolve(json);
+  }
+
+  return jsonReject((x) => Promise.reject(x), res);
+}
+
+function makeEventSourceWrapper(opts: {
+  headers: HeadersInit;
+  inference: boolean;
+}): EventSourceConstructor {
+  return class EventSourceWrapper {
+    source: EventSource;
+    static OPEN = EventSource.OPEN;
+    static CONNECTING = EventSource.CONNECTING;
+    static CLOSED = EventSource.CLOSED;
+    readonly url: string;
+
+    constructor(url: string) {
+      this.url = url;
+      this.source = this.#createEventSource(url);
+    }
+
+    get onopen(): EventSourceType['onopen'] {
+      return this.source.onopen;
+    }
+    set onopen(fn: EventSourceType['onopen']) {
+      this.source.onopen = fn;
+    }
+
+    get onmessage(): EventSourceType['onmessage'] {
+      return this.source.onmessage;
+    }
+    set onmessage(fn: EventSourceType['onmessage']) {
+      this.source.onmessage = fn;
+    }
+
+    get onerror(): EventSourceType['onerror'] {
+      return this.source.onerror;
+    }
+    set onerror(fn: EventSourceType['onerror']) {
+      this.source.onerror = fn;
+    }
+
+    public get readyState() {
+      return this.source.readyState;
+    }
+
+    public close() {
+      this.source.close();
+    }
+
+    #createEventSource(url: string): EventSource {
+      const es = new EventSource(url, {
+        messageEvent: MessageEventPolyfill,
+        fetch(input, init) {
+          return fetch(input, {
+            ...init,
+            method: 'POST',
+            headers: opts.headers,
+            body: JSON.stringify({
+              'inference?': opts.inference,
+              versions: {
+                '@instantdb/admin': version,
+                '@instantdb/core': coreVersion,
+              },
+            }),
+          });
+        },
+      });
+      return es;
+    }
+  };
+}
+
+/**
+ *
+ * The first step: init your application!
+ *
+ * Visit https://instantdb.com/dash to get your `appId` :)
+ *
+ * @example
+ *  import { init } from "@instantdb/admin"
+ *
+ *  const db = init({
+ *    appId: process.env.INSTANT_APP_ID!,
+ *    adminToken: process.env.INSTANT_APP_ADMIN_TOKEN
+ *  })
+ *
+ *  // You can also provide a schema for type safety and editor autocomplete!
+ *
+ *  import { init } from "@instantdb/admin"
+ *  import schema from ""../instant.schema.ts";
+ *
+ *  const db = init({
+ *    appId: process.env.INSTANT_APP_ID!,
+ *    adminToken: process.env.INSTANT_APP_ADMIN_TOKEN,
+ *    schema,
+ *  })
+ *  // To learn more: https://instantdb.com/docs/modeling-data
+ */
+function init<
+  Schema extends InstantSchemaDef<any, any, any> = InstantUnknownSchema,
+  UseDates extends boolean = false,
+>(
+  // Allows config with missing `useDateObjects`, but keeps `UseDates`
+  // as a non-nullable in the InstantConfig type.
+  config: Omit<InstantConfig<Schema, UseDates>, 'useDateObjects'> & {
+    useDateObjects?: UseDates;
+  },
+): InstantAdminDatabase<Schema, UseDates, InstantConfig<Schema, UseDates>> {
+  if (!config.appId || !uuidValidate(config.appId)) {
+    console.warn(
+      'warning: Instant Admin DB must be initialized with a valid appId. Received: ' +
+        JSON.stringify(config.appId),
+    );
+  }
+
+  const configStrict = {
+    ...config,
+    appId: config.appId?.trim(),
+    adminToken: config.adminToken?.trim(),
+    useDateObjects: (config.useDateObjects ?? false) as UseDates,
+  };
+
+  return new InstantAdminDatabase<
+    Schema,
+    UseDates,
+    InstantConfig<Schema, UseDates>
+  >(configStrict);
+}
+
+/**
+ * @deprecated
+ * `init_experimental` is deprecated. You can replace it with `init`.
+ *
+ * @example
+ *
+ * // Before
+ * import { init_experimental } from "@instantdb/admin"
+ * const db = init_experimental({  ...  });
+ *
+ * // After
+ * import { init } from "@instantdb/admin"
+ * const db = init({ ...  });
+ */
+const init_experimental = init;
+
+function steps(inputChunks) {
+  const chunks = Array.isArray(inputChunks) ? inputChunks : [inputChunks];
+  return chunks.flatMap(getOps);
+}
+
+type PresenceResult<Data> = {
+  [peerId: string]: { data: Data; 'peer-id': string; user: User | null };
+};
+
+class Rooms<Schema extends InstantSchemaDef<any, any, any>> {
+  config: FilledConfig;
+
+  constructor(config: FilledConfig) {
+    this.config = config;
+  }
+
+  async getPresence<RoomType extends string & keyof RoomsOf<Schema>>(
+    roomType: RoomType,
+    roomId: string,
+  ): Promise<PresenceResult<PresenceOf<Schema, RoomType>>> {
+    const res = await jsonFetch(
+      `${this.config.apiURI}/admin/rooms/presence?app_id=${this.config.appId}&room-type=${String(roomType)}&room-id=${roomId}`,
+      {
+        method: 'GET',
+        headers: authorizedHeaders(this.config),
+      },
+    );
+
+    return res.sessions || {};
+  }
+}
+
+class Auth<Schema extends InstantSchemaDef<any, any, any>> {
+  config: FilledConfig;
+
+  constructor(config: FilledConfig) {
+    this.config = config;
+    this.createToken = this.createToken.bind(this);
+  }
+
+  /**
+   * Generates a magic code for the user with the given email.
+   * This is useful if you want to use your own email provider
+   * to send magic codes.
+   *
+   * @example
+   *   // Generate a magic code
+   *   const { code } = await db.auth.generateMagicCode({ email })
+   *   // Send the magic code to the user with your own email provider
+   *   await customEmailProvider.sendMagicCode(email, code)
+   *
+   * @see https://instantdb.com/docs/backend#custom-magic-codes
+   */
+  generateMagicCode = async (email: string): Promise<{ code: string }> => {
+    return jsonFetch(
+      `${this.config.apiURI}/admin/magic_code?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: authorizedHeaders(this.config),
+        body: JSON.stringify({ email }),
+      },
+    );
+  };
+
+  /**
+   * Sends a magic code to the user with the given email.
+   * This uses Instant's built-in email provider.
+   *
+   * @example
+   *   // Send an email to user with magic code
+   *   await db.auth.sendMagicCode({ email })
+   *
+   * @see https://instantdb.com/docs/backend#custom-magic-codes
+   */
+  sendMagicCode = async (email: string): Promise<{ code: string }> => {
+    return jsonFetch(
+      `${this.config.apiURI}/admin/send_magic_code?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: authorizedHeaders(this.config),
+        body: JSON.stringify({ email }),
+      },
+    );
+  };
+
+  /**
+   * @deprecated Use {@link checkMagicCode} instead to get the `created` field
+   * and support `extraFields`.
+   *
+   * @see https://instantdb.com/docs/backend#custom-magic-codes
+   */
+  verifyMagicCode = async (email: string, code: string): Promise<User> => {
+    const { user } = await jsonFetch(
+      `${this.config.apiURI}/admin/verify_magic_code?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: authorizedHeaders(this.config),
+        body: JSON.stringify({ email, code }),
+      },
+    );
+    return user;
+  };
+
+  /**
+   * Verifies a magic code and returns the user along with whether
+   * the user was newly created. Supports `extraFields` to set custom
+   * `$users` properties at signup.
+   *
+   * @example
+   *   const { user, created } = await db.auth.checkMagicCode(
+   *     email,
+   *     code,
+   *     { extraFields: { nickname: 'ari' } },
+   *   );
+   *
+   * @see https://instantdb.com/docs/backend#custom-magic-codes
+   */
+  checkMagicCode = async (
+    email: string,
+    code: string,
+    options?: { extraFields?: UpdateParams<Schema, '$users'> },
+  ): Promise<{ user: User; created: boolean }> => {
+    const res = await jsonFetch(
+      `${this.config.apiURI}/admin/verify_magic_code?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: authorizedHeaders(this.config),
+        body: JSON.stringify({
+          email,
+          code,
+          ...(options?.extraFields
+            ? { 'extra-fields': options.extraFields }
+            : {}),
+        }),
+      },
+    );
+    return { user: res.user, created: res.created };
+  };
+
+  /**
+   * Creates a login token for the user with the given email.
+   * If that user does not exist, we create one.
+   *
+   * This is often useful for writing custom auth flows.
+   *
+   * @example
+   *   app.post('/custom_sign_in', async (req, res) => {
+   *     // ... your custom flow for users
+   *     const token = await db.auth.createToken({ email })
+   *     return res.status(200).send({ token })
+   *   })
+   *
+   * @see https://instantdb.com/docs/backend#custom-auth
+   */
+  createToken(email: { email: string } | { id: string }): Promise<AuthToken>;
+
+  /**
+   *
+   * @deprecated Passing an email string directly is deprecated.
+   *
+   * Use an object with the `email` key instead.
+   *
+   * @example
+   * // Before
+   * const token = await auth.createToken(email)
+   * // After
+   * const token = await auth.createToken({ email })
+   */
+  createToken(email: string): Promise<AuthToken>;
+
+  async createToken(
+    input: string | { email: string } | { id: string },
+  ): Promise<AuthToken> {
+    const body = typeof input === 'string' ? { email: input } : input;
+    const ret: { user: { refresh_token: string } } = await jsonFetch(
+      `${this.config.apiURI}/admin/refresh_tokens?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: authorizedHeaders(this.config),
+        body: JSON.stringify(body),
+      },
+    );
+    return ret.user.refresh_token;
+  }
+
+  /**
+   * Verifies a given token and returns the associated user.
+   *
+   * This is often useful for writing custom endpoints, where you need
+   * to authenticate users.
+   *
+   * @example
+   *   app.post('/custom_endpoint', async (req, res) => {
+   *     const user = await db.auth.verifyToken(req.headers['token'])
+   *     if (!user) {
+   *       return res.status(401).send('Uh oh, you are not authenticated')
+   *     }
+   *     // ...
+   *   })
+   * @see https://instantdb.com/docs/backend#custom-endpoints
+   */
+  verifyToken = async (token: AuthToken): Promise<User> => {
+    const res = await jsonFetch(
+      `${this.config.apiURI}/runtime/auth/verify_refresh_token?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          'app-id': this.config.appId,
+          'refresh-token': token,
+        }),
+      },
+    );
+    return res.user;
+  };
+
+  /**
+   * Retrieves an app user by id, email, or refresh token.
+   * Resolves to `null` when no user matches; throws on malformed
+   * input or auth errors.
+   *
+   * @example
+   *   const user = await db.auth.getUser({ email });
+   *   if (!user) {
+   *     console.log("No user found");
+   *     return;
+   *   }
+   *   console.log("Found user:", user);
+   *
+   * @see https://instantdb.com/docs/backend#retrieve-a-user
+   */
+  getUser = async (
+    params: { email: string } | { id: string } | { refresh_token: string },
+  ): Promise<Omit<User, 'refresh_token'> | null> => {
+    const qs = new URLSearchParams(Object.entries(params)).toString();
+
+    const response: { user: User | null } = await jsonFetch(
+      `${this.config.apiURI}/admin/users?app_id=${this.config.appId}&${qs}`,
+      {
+        method: 'GET',
+        headers: authorizedHeaders(this.config),
+      },
+    );
+
+    return response.user;
+  };
+
+  /**
+   * Deletes an app user by id, email, or refresh token.
+   * Resolves to `null` when no user matches; throws on malformed
+   * input or auth errors.
+   *
+   * NB: This _only_ deletes the user; it does not delete all user data.
+   * You will need to handle this manually.
+   *
+   * @example
+   *   const deletedUser = await db.auth.deleteUser({ email });
+   *   if (!deletedUser) {
+   *     console.log("No user found to delete");
+   *     return;
+   *   }
+   *   console.log("Deleted user:", deletedUser);
+   *
+   * @see https://instantdb.com/docs/backend#delete-a-user
+   */
+  deleteUser = async (
+    params: { email: string } | { id: string } | { refresh_token: string },
+  ): Promise<User | null> => {
+    const qs = new URLSearchParams(Object.entries(params)).toString();
+    const response: { deleted: User | null } = await jsonFetch(
+      `${this.config.apiURI}/admin/users?app_id=${this.config.appId}&${qs}`,
+      {
+        method: 'DELETE',
+        headers: authorizedHeaders(this.config),
+      },
+    );
+
+    return response.deleted;
+  };
+
+  /**
+   * Signs out the user with the given email.
+   * This invalidates any tokens associated with the user.
+   * If the user is not found, an error will be thrown.
+   *
+   * @example
+   *   try {
+   *     await auth.signOut({ email: "alyssa_p_hacker@instantdb.com" });
+   *     console.log("Successfully signed out");
+   *   } catch (err) {
+   *     console.error("Sign out failed:", err.message);
+   *   }
+   *
+   * @see https://instantdb.com/docs/backend#sign-out
+   */
+  async signOut(
+    params: { email: string } | { id: string } | { refresh_token: string },
+  ): Promise<void>;
+
+  /**
+   * @deprecated Passing an email string directly is deprecated.
+   * Use an object with the `email` key instead.
+   *
+   * @example
+   * // Before
+   * auth.signOut(email)
+   *
+   * // After
+   * auth.signOut({ email })
+   */
+  async signOut(email: string): Promise<void>;
+
+  async signOut(
+    input:
+      | string
+      | { email: string }
+      | { id: string }
+      | { refresh_token: string },
+  ): Promise<void> {
+    // If input is a string, we assume it's an email.
+    // This is because of backwards compatibility: we used to only
+    // accept email strings. Eventually we can remove this
+    const params = typeof input === 'string' ? { email: input } : input;
+    const config = this.config;
+    await jsonFetch(
+      `${config.apiURI}/admin/sign_out?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: authorizedHeaders(config),
+        body: JSON.stringify(params),
+      },
+    );
+  }
+
+  /**
+   * Get instant user from Request
+   *
+   * Reads cookies and gets a validated user
+   * @param req The request containing a cookie synced with createInstantRouteHandler
+   * @param opts Allow disabling validation of refresh token
+   */
+  getUserFromRequest = async (
+    req: Request,
+    opts?: { disableValidation?: boolean },
+  ): Promise<User | null> => {
+    const cookieHeader = req.headers.get('cookie') || '';
+
+    const parsedCookie = parseCookie(cookieHeader);
+
+    const cookieName = 'instant_user_' + this.config.appId;
+    if (!parsedCookie[cookieName]) {
+      return null;
+    }
+    const value = parsedCookie[cookieName];
+    const user = JSON.parse(value);
+    if (!user?.refresh_token) {
+      return null;
+    }
+    if (opts?.disableValidation) {
+      return user;
+    }
+    const verified = await this.verifyToken(user.refresh_token);
+    return verified;
+  };
+}
+
+type StorageFile = {
+  key: string;
+  name: string;
+  size: number;
+  etag: string;
+  last_modified: number;
+};
+
+type DeleteManyFileResponse = {
+  data: {
+    ids: string[] | null;
+  };
+};
+
+const isNodeReadable = (v: any): v is Readable =>
+  v &&
+  typeof v === 'object' &&
+  typeof v.pipe === 'function' &&
+  typeof v.read === 'function';
+
+const isWebReadable = (v: any): v is ReadableStream =>
+  v && typeof v.getReader === 'function';
+
+/**
+ * Functions to manage file storage.
+ */
+class Storage {
+  config: FilledConfig;
+  impersonationOpts?: ImpersonationOpts;
+
+  constructor(config: FilledConfig, impersonationOpts?: ImpersonationOpts) {
+    this.config = config;
+    this.impersonationOpts = impersonationOpts;
+  }
+
+  /**
+   * Uploads file at the provided path. Accepts a Buffer or a Readable stream.
+   *
+   * @see https://instantdb.com/docs/storage
+   * @example
+   *   const buffer = fs.readFileSync('demo.png');
+   *   const isSuccess = await db.storage.uploadFile('photos/demo.png', buffer);
+   */
+  uploadFile = async (
+    path: string,
+    file: Buffer | Readable | ReadableStream | Uint8Array,
+    metadata: FileOpts = {},
+  ): Promise<UploadFileResponse> => {
+    const headers = {
+      ...authorizedHeaders(this.config, this.impersonationOpts),
+      path,
+    };
+    if (metadata.contentDisposition) {
+      headers['content-disposition'] = metadata.contentDisposition;
+    }
+
+    // headers.content-type will become "undefined" (string)
+    // if not removed from the object
+    delete headers['content-type'];
+
+    if (metadata.contentType) {
+      headers['content-type'] = metadata.contentType;
+    }
+
+    let duplex: 'half' | undefined;
+    if (isNodeReadable(file)) {
+      duplex = 'half'; // one-way stream
+    }
+    if (isNodeReadable(file) || isWebReadable(file)) {
+      if (!metadata.fileSize) {
+        throw new Error(
+          'fileSize is required in metadata when uploading streams',
+        );
+      }
+      headers['content-length'] = metadata.fileSize.toString();
+    }
+
+    let options = {
+      method: 'PUT',
+      headers,
+      body: file as unknown as BodyInit,
+      ...(duplex && { duplex }),
+    };
+
+    return jsonFetch(
+      `${this.config.apiURI}/admin/storage/upload?app_id=${this.config.appId}`,
+      options,
+    );
+  };
+
+  /**
+   * Deletes a file by its path name (e.g. "photos/demo.png").
+   *
+   * @deprecated Use `db.transact` to delete files instead:
+   * @example
+   *   // Delete by id
+   *   await db.transact(db.tx.$files[fileId].delete());
+   *
+   *   // Delete by path
+   *   await db.transact(db.tx.$files[lookup('path', 'photos/demo.png')].delete());
+   *
+   * @see https://instantdb.com/docs/storage
+   */
+  delete = async (pathname: string): Promise<DeleteFileResponse> => {
+    return jsonFetch(
+      `${this.config.apiURI}/admin/storage/files?app_id=${this.config.appId}&filename=${encodeURIComponent(
+        pathname,
+      )}`,
+      {
+        method: 'DELETE',
+        headers: authorizedHeaders(this.config, this.impersonationOpts),
+      },
+    );
+  };
+
+  /**
+   * Deletes multiple files by their path names.
+   *
+   * @deprecated Use `db.transact` to delete files instead:
+   * @example
+   *   // Delete multiple files by path
+   *   const paths = ['images/1.png', 'images/2.png', 'images/3.png'];
+   *   await db.transact(paths.map(p => db.tx.$files[lookup('path', p)].delete()));
+   *
+   * @see https://instantdb.com/docs/storage
+   */
+  deleteMany = async (pathnames: string[]): Promise<DeleteManyFileResponse> => {
+    return jsonFetch(
+      `${this.config.apiURI}/admin/storage/files/delete?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: authorizedHeaders(this.config, this.impersonationOpts),
+        body: JSON.stringify({ filenames: pathnames }),
+      },
+    );
+  };
+
+  /**
+   * @deprecated. This method will be removed in the future. Use `uploadFile`
+   * instead
+   */
+  upload = async (
+    pathname: string,
+    file: Buffer,
+    metadata: FileOpts = {},
+  ): Promise<boolean> => {
+    const { data: presignedUrl } = await jsonFetch(
+      `${this.config.apiURI}/admin/storage/signed-upload-url?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: authorizedHeaders(this.config),
+        body: JSON.stringify({
+          app_id: this.config.appId,
+          filename: pathname,
+        }),
+      },
+    );
+    const headers = {};
+    const contentType = metadata.contentType;
+    if (contentType) {
+      headers['Content-Type'] = contentType;
+    }
+    const { ok } = await fetch(presignedUrl, {
+      method: 'PUT',
+      body: file as unknown as BodyInit,
+      headers,
+    });
+
+    return ok;
+  };
+
+  /**
+   * @deprecated. This method will be removed in the future. Use `query` instead
+   * @example
+   * const files = await db.query({ $files: {}})
+   */
+  list = async (): Promise<StorageFile[]> => {
+    const { data } = await jsonFetch(
+      `${this.config.apiURI}/admin/storage/files?app_id=${this.config.appId}`,
+      {
+        method: 'GET',
+        headers: authorizedHeaders(this.config),
+      },
+    );
+
+    return data;
+  };
+
+  /**
+   * @deprecated. getDownloadUrl will be removed in the future.
+   * Use `query` instead to query and fetch for valid urls
+   *
+   * db.useQuery({
+   *   $files: {
+   *     $: {
+   *       where: {
+   *         path: "moop.png"
+   *       }
+   *     }
+   *   }
+   * })
+   */
+  getDownloadUrl = async (pathname: string): Promise<string> => {
+    const { data } = await jsonFetch(
+      `${this.config.apiURI}/admin/storage/signed-download-url?app_id=${this.config.appId}&filename=${encodeURIComponent(pathname)}`,
+      {
+        method: 'GET',
+        headers: authorizedHeaders(this.config),
+      },
+    );
+
+    return data;
+  };
+}
+
+type CreateReadStreamOpts = {
+  clientId?: string | null | undefined;
+  streamId?: string | null | undefined;
+  byteOffset?: number | null | undefined;
+  ruleParams?: RuleParams | null | undefined;
+};
+
+type CreateWriteStreamOpts = {
+  clientId: string;
+  /**
+   * A function that takes a promise and ensures that the current program stays alive
+   * until the promise is resolved.
+   *
+   * Useful in serverless environments to ensure the writer fully flushes before the
+   * environment is shut down.
+   *
+   * @example
+   * import { after } from 'next/server'
+   * db.streams.createWriteStream({clientId, waitUntil: after})
+   */
+  waitUntil?: (promise: Promise<any>) => void | null | undefined;
+  ruleParams?: RuleParams | null | undefined;
+};
+
+/**
+ * Functions to manage streams.
+ */
+class Streams {
+  #ensureInstantStream: () => InstantStream;
+
+  constructor(ensureInstantStream: () => InstantStream) {
+    this.#ensureInstantStream = ensureInstantStream;
+  }
+
+  /**
+   * Creates a new ReadableStream for the given clientId.
+   *
+   * @example
+   *   const stream = db.streams.createReadStream({clientId: clientId})
+   *   for await (const chunk of stream) {
+   *     console.log(chunk);
+   *   }
+   */
+  createReadStream = (
+    opts: CreateReadStreamOpts,
+  ): InstantReadableStream<string> => {
+    return this.#ensureInstantStream().createReadStream(opts);
+  };
+
+  /**
+   * Creates a new WritableStream for the given clientId.
+   *
+   * @example
+   *   const writeStream = db.streams.createWriteStream({clientId: clientId})
+   *   const writer = writeStream.getWriter();
+   *   writer.write('Hello world');
+   *   writer.close();
+   */
+  createWriteStream = (
+    opts: CreateWriteStreamOpts,
+  ): InstantWritableStream<string> => {
+    return this.#ensureInstantStream().createWriteStream(opts);
+  };
+}
+
+type AdminQueryOpts = {
+  ruleParams?: RuleParams;
+  fetchOpts?: RequestInit;
+};
+
+function createLogger(
+  isEnabled: boolean,
+  baseLogger: Logger = console,
+): Logger {
+  return {
+    info: isEnabled ? (...args: any[]) => baseLogger.info(...args) : () => {},
+    debug: isEnabled ? (...args: any[]) => baseLogger.debug(...args) : () => {},
+    error: isEnabled ? (...args: any[]) => baseLogger.error(...args) : () => {},
+  };
+}
+
+/**
+ *
+ * The first step: init your application!
+ *
+ * Visit https://instantdb.com/dash to get your `appId` and `adminToken` :)
+ *
+ * @example
+ *  const db = init({ appId: "my-app-id", adminToken: "my-admin-token" })
+ */
+class InstantAdminDatabase<
+  Schema extends InstantSchemaDef<any, any, any>,
+  UseDates extends boolean = false,
+  Config extends InstantConfig<Schema, UseDates> = InstantConfig<
+    Schema,
+    UseDates
+  >,
+> {
+  config: InstantConfigFilled<Schema, UseDates>;
+  auth: Auth<Schema>;
+  storage: Storage;
+  streams: Streams;
+  rooms: Rooms<Schema>;
+  impersonationOpts?: ImpersonationOpts;
+  webhooks: Webhooks<Schema>;
+
+  #sseConnection: SSEConnection | null = null;
+  #sseBackoff = 0;
+  #instantStream: InstantStream | null = null;
+  #log: Logger;
+
+  public tx = txInit<NonNullable<Schema>>();
+
+  constructor(_config: Config) {
+    this.config = instantConfigWithDefaults(_config);
+    this.auth = new Auth<Schema>(this.config);
+    this.storage = new Storage(this.config, this.impersonationOpts);
+    this.streams = new Streams(this.#ensureInstantStream.bind(this));
+    this.rooms = new Rooms<Schema>(this.config);
+    this.webhooks = new Webhooks<Schema>(this.config, jsonFetch);
+    this.#log = createLogger(!!this.config.verbose, this.config.logger);
+  }
+
+  /**
+   * Sometimes you want to scope queries to a specific user.
+   *
+   * You can provide a user's auth token, email, or impersonate a guest.
+   *
+   * @see https://instantdb.com/docs/backend#impersonating-users
+   * @example
+   *  await db.asUser({email: "stopa@instantdb.com"}).query({ goals: {} })
+   */
+  asUser = (
+    opts: ImpersonationOpts,
+  ): InstantAdminDatabase<Schema, UseDates, Config> => {
+    const newClient = new InstantAdminDatabase<Schema, UseDates, Config>({
+      ...(this.config as Config),
+    });
+    newClient.impersonationOpts = opts;
+    newClient.storage = new Storage(this.config, opts);
+    return newClient;
+  };
+
+  /**
+   * Use this to query your data!
+   *
+   * @see https://instantdb.com/docs/instaql
+   *
+   * @example
+   *  // fetch all goals
+   *  await db.query({ goals: {} })
+   *
+   *  // goals where the title is "Get Fit"
+   *  await db.query({ goals: { $: { where: { title: "Get Fit" } } } })
+   *
+   *  // all goals, _alongside_ their todos
+   *  await db.query({ goals: { todos: {} } })
+   */
+  query = <Q extends ValidQuery<Q, Schema>>(
+    query: Q,
+    opts: AdminQueryOpts = {},
+  ): Promise<InstaQLResponse<Schema, Q, UseDates>> => {
+    if (query && opts && 'ruleParams' in opts) {
+      query = { $$ruleParams: opts['ruleParams'], ...query };
+    }
+
+    if (!this.config.disableValidation) {
+      validateQuery(query, this.config.schema);
+    }
+
+    const fetchOpts = opts.fetchOpts || {};
+    const fetchOptsHeaders = fetchOpts['headers'] || {};
+    return jsonFetch(
+      `${this.config.apiURI}/admin/query?app_id=${this.config.appId}`,
+      {
+        ...fetchOpts,
+        method: 'POST',
+        headers: {
+          ...fetchOptsHeaders,
+          ...authorizedHeaders(this.config, this.impersonationOpts),
+        },
+        body: JSON.stringify({
+          query: query,
+          'inference?': !!this.config.schema,
+        }),
+      },
+    );
+  };
+
+  /**
+   * Use this to to get a live view of your data!
+   *
+   * @see https://www.instantdb.com/docs/backend
+   *
+   * @example
+   *  // create a subscription to a query
+   *  const query = { goals: { $: { where: { title: "Get Fit" } } } }
+   *  const sub = db.subscribeQuery(query);
+   *
+   *  // iterate through the results with an async iterator
+   *  for await (const payload of sub) {
+   *    if (payload.error) {
+   *      console.log(payload.error);
+   *      // Stop the subscription
+   *      sub.close();
+   *    } else {
+   *      console.log(payload.data);
+   *    }
+   *  }
+   *
+   *  // Stop the subscription
+   *  sub.close();
+   *
+   *  // Create a subscription with a callback
+   *  const sub = db.subscribeQuery(query, (payload) => {
+   *    if (payload.error) {
+   *      console.log(payload.error);
+   *      // Stop the subscription
+   *      sub.close();
+   *    } else {
+   *      console.log(payload.data);
+   *    }
+   *  });
+   */
+  subscribeQuery<Q extends ValidQuery<Q, Schema>>(
+    query: Q,
+    cb?: SubscribeQueryCallback<Schema, Q, UseDates>,
+    opts: AdminQueryOpts = {},
+  ): SubscribeQueryResponse<Schema, Q, UseDates> {
+    if (query && opts && 'ruleParams' in opts) {
+      query = { $$ruleParams: opts['ruleParams'], ...query };
+    }
+
+    if (!this.config.disableValidation) {
+      validateQuery(query, this.config.schema);
+    }
+
+    const fetchOpts = opts.fetchOpts || {};
+    const fetchOptsHeaders = fetchOpts['headers'] || {};
+
+    const headers: HeadersInit = {
+      ...fetchOptsHeaders,
+      ...authorizedHeaders(this.config, this.impersonationOpts),
+    };
+
+    const inference = !!this.config.schema;
+
+    return subscribe(query, cb, {
+      headers,
+      inference,
+      apiURI: this.config.apiURI,
+    });
+  }
+
+  /**
+   * Use this to write data! You can create, update, delete, and link objects
+   *
+   * @see https://instantdb.com/docs/instaml
+   *
+   * @example
+   *   // Create a new object in the `goals` namespace
+   *   const goalId = id();
+   *   db.transact(db.tx.goals[goalId].update({title: "Get fit"}))
+   *
+   *   // Update the title
+   *   db.transact(db.tx.goals[goalId].update({title: "Get super fit"}))
+   *
+   *   // Delete it
+   *   db.transact(db.tx.goals[goalId].delete())
+   *
+   *   // Or create an association:
+   *   todoId = id();
+   *   db.transact([
+   *    db.tx.todos[todoId].update({ title: 'Go on a run' }),
+   *    db.tx.goals[goalId].link({todos: todoId}),
+   *  ])
+   */
+  transact = (
+    inputChunks: TransactionChunk<any, any> | TransactionChunk<any, any>[],
+  ) => {
+    if (!this.config.disableValidation) {
+      validateTransactions(inputChunks, this.config.schema);
+    }
+    return jsonFetch(
+      `${this.config.apiURI}/admin/transact?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: authorizedHeaders(this.config, this.impersonationOpts),
+        body: JSON.stringify({
+          steps: steps(inputChunks),
+          'throw-on-missing-attrs?': !!this.config.schema,
+        }),
+      },
+    );
+  };
+
+  /**
+   * Like `query`, but returns debugging information
+   * for permissions checks along with the result.
+   * Useful for inspecting the values returned by the permissions checks.
+   * Note, this will return debug information for *all* entities
+   * that match the query's `where` clauses.
+   *
+   * Requires a user/guest context to be set with `asUser`,
+   * since permissions checks are user-specific.
+   *
+   * Accepts an optional configuration object with a `rules` key.
+   * The provided rules will override the rules in the database for the query.
+   *
+   * @see https://instantdb.com/docs/instaql
+   *
+   * @example
+   *  await db.asUser({ guest: true }).debugQuery(
+   *    { goals: {} },
+   *    { rules: { goals: { allow: { read: "auth.id != null" } } }
+   *  )
+   */
+  debugQuery = async <Q extends ValidQuery<Q, Schema>>(
+    query: Q,
+    opts?: {
+      rules?: any;
+      ruleParams?: { [key: string]: any };
+      ip?: string | null | undefined;
+      origin?: string | null | undefined;
+      cardinalityInference?: boolean;
+    },
+  ): Promise<{
+    result: InstaQLResponse<Schema, Q, UseDates>;
+    checkResults: DebugCheckResult[];
+  }> => {
+    if (query && opts && 'ruleParams' in opts) {
+      query = { $$ruleParams: opts['ruleParams'], ...query };
+    }
+
+    const body: any = {
+      query,
+      'rules-override': opts?.rules,
+      'inference?': opts?.cardinalityInference ?? !!this.config.schema,
+    };
+    if (opts?.ip) {
+      body['ip-override'] = opts.ip;
+    }
+    if (opts?.origin) {
+      body['origin-override'] = opts.origin;
+    }
+
+    const response = await jsonFetch(
+      `${this.config.apiURI}/admin/query_perms_check?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: authorizedHeaders(this.config, this.impersonationOpts),
+        body: JSON.stringify(body),
+      },
+    );
+
+    return {
+      result: response.result,
+      checkResults: response['check-results'],
+    };
+  };
+
+  /**
+   * Like `transact`, but does not write to the database.
+   * Returns debugging information for permissions checks.
+   * Useful for inspecting the values returned by the permissions checks.
+   *
+   * Requires a user/guest context to be set with `asUser`,
+   * since permissions checks are user-specific.
+   *
+   * Accepts an optional configuration object with a `rules` key.
+   * The provided rules will override the rules in the database for the duration of the transaction.
+   *
+   * @example
+   *   const goalId = id();
+   *   db.asUser({ guest: true }).debugTransact(
+   *      [db.tx.goals[goalId].update({title: "Get fit"})],
+   *      { rules: { goals: { allow: { update: "auth.id != null" } } }
+   *   )
+   */
+  debugTransact = (
+    inputChunks: TransactionChunk<any, any> | TransactionChunk<any, any>[],
+    opts?: {
+      rules?: any;
+      ip?: string | null | undefined;
+      origin?: string | null | undefined;
+    },
+  ): Promise<DebugTransactResult> => {
+    const body: any = {
+      steps: steps(inputChunks),
+      'rules-override': opts?.rules,
+      // @ts-expect-error because we're using a private API (for now)
+      'dangerously-commit-tx': opts?.__dangerouslyCommit,
+    };
+
+    if (opts?.ip) {
+      body['ip-override'] = opts.ip;
+    }
+    if (opts?.origin) {
+      body['origin-override'] = opts.origin;
+    }
+
+    return jsonFetch(
+      `${this.config.apiURI}/admin/transact_perms_check?app_id=${this.config.appId}`,
+      {
+        method: 'POST',
+        headers: authorizedHeaders(this.config, this.impersonationOpts),
+        body: JSON.stringify(body),
+      },
+    );
+  };
+
+  #setupSSEConnection() {
+    if (this.#sseConnection) {
+      this.#sseConnection.close();
+    }
+    const headers: HeadersInit = {
+      ...authorizedHeaders(this.config, this.impersonationOpts),
+    };
+
+    const inference = !!this.config.schema;
+
+    const ES = makeEventSourceWrapper({ headers, inference });
+    const conn = new SSEConnection(
+      ES,
+      `${this.config.apiURI}/admin/sse?app_id=${this.config.appId}`,
+      `${this.config.apiURI}/admin/sse/push?app_id=${this.config.appId}`,
+    );
+    conn.onopen = this.#onopen;
+    conn.onmessage = this.#onmessage;
+    conn.onclose = this.#onclose;
+    conn.onerror = this.#onerror;
+    this.#sseConnection = conn;
+    return conn;
+  }
+
+  #ensureSSEConnection() {
+    return this.#sseConnection || this.#setupSSEConnection();
+  }
+
+  #trySend(eventId, msg) {
+    const sseConnection = this.#ensureSSEConnection();
+    this.#log.info('[send]', eventId, msg, {
+      isOpen: sseConnection.isOpen(),
+    });
+    if (sseConnection.isOpen()) {
+      sseConnection.send({ 'client-event-id': eventId, ...msg });
+    }
+  }
+
+  #setupInstantStream() {
+    this.#ensureSSEConnection();
+    const instantStream = new InstantStream({
+      WStream: this.config.WritableStream || WritableStream,
+      RStream: this.config.ReadableStream || ReadableStream,
+      trySend: (eventId, msg) => {
+        this.#trySend(eventId, msg);
+      },
+      log: this.#log,
+    });
+
+    this.#instantStream = instantStream;
+    return instantStream;
+  }
+
+  #ensureInstantStream() {
+    return this.#instantStream || this.#setupInstantStream();
+  }
+
+  #onopen = (e) => {
+    if (e.target !== this.#sseConnection) {
+      this.#log.info(
+        '[socket][open]',
+        e.target.id,
+        'skip; this is no longer the current transport',
+      );
+      return;
+    }
+    this.#log.info('[socket][open]', e.target.id);
+    this.#sseBackoff = 0;
+    this.#instantStream?.onConnectionStatusChange('authenticated');
+  };
+
+  #onclose = (e) => {
+    if (e.target !== this.#sseConnection) {
+      this.#log.info(
+        '[socket][close]',
+        e.target.id,
+        'skip; this is no longer the current transport',
+      );
+      return;
+    }
+    this.#log.info('[socket][close]', e.target.id);
+    this.#instantStream?.onConnectionStatusChange('closed');
+    if (this.#sseConnection) {
+      this.#sseConnection = null;
+      if (!this.#connectionIsIdle()) {
+        // We didn't remove the sse connection, and we have streams we care about, so let's try again
+        setTimeout(() => this.#ensureSSEConnection(), this.#sseBackoff);
+        this.#sseBackoff = Math.min(15000, Math.max(this.#sseBackoff, 500) * 2);
+      }
+    }
+  };
+
+  #onerror = (e) => {
+    if (e.target !== this.#sseConnection) {
+      this.#log.info(
+        '[socket][error]',
+        e.target.id,
+        'skip; this is no longer the current transport',
+      );
+      return;
+    }
+    this.#log.info('[socket][error]', e.target.id);
+
+    this.#instantStream?.onConnectionStatusChange('closed');
+  };
+
+  #connectionIsIdle() {
+    return !this.#instantStream || !this.#instantStream.hasActiveStreams();
+  }
+
+  #maybeShutdownConnection() {
+    if (this.#sseConnection && this.#connectionIsIdle()) {
+      const conn = this.#sseConnection;
+      this.#log.info('cleaning up unused socket', conn.id);
+      this.#sseConnection = null;
+      conn.close();
+    }
+  }
+
+  #onmessage = (e) => {
+    if (e.target !== this.#sseConnection) {
+      this.#log.info(
+        '[socket][message]',
+        e.target.id,
+        'skip; this is no longer the current transport',
+      );
+      return;
+    }
+
+    const msg = e.message;
+    this.#log.info('[receive]', msg);
+    switch (msg.op) {
+      case 'start-stream-ok': {
+        this.#instantStream?.onStartStreamOk(msg);
+        break;
+      }
+      case 'stream-flushed': {
+        this.#instantStream?.onStreamFlushed(msg);
+        break;
+      }
+      case 'append-failed': {
+        this.#instantStream?.onAppendFailed(msg);
+        break;
+      }
+      case 'stream-append': {
+        this.#instantStream?.onStreamAppend(msg);
+        break;
+      }
+
+      case 'error': {
+        switch (msg['original-event']?.op) {
+          case 'start-stream':
+          case 'append-stream':
+          case 'subscribe-stream':
+          case 'unsubscribe-stream': {
+            this.#instantStream?.onRecieveError(msg);
+            break;
+          }
+        }
+        break;
+      }
+    }
+
+    // Closes the connection if we don't have any items pending
+    this.#maybeShutdownConnection();
+  };
+}
+
+export {
+  init,
+  init_experimental,
+  id,
+  tx,
+  lookup,
+  i,
+  createInstantRouteHandler,
+  type InstantRouteHandlerPayloadByType,
+  type InstantRouteHandlerType,
+  type InstantRouteHandlerBody,
+  Webhooks,
+  WebhooksManager,
+  type WebhookAction,
+  type WebhookStatus,
+  type WebhookEventStatus,
+  type WebhookInfo,
+  type WebhookAttempt,
+  type WebhookEventInfo,
+  type WebhookEventsPage,
+  type WebhookBody,
+  type WebhookEntity,
+  type WebhookPayload,
+  type WebhookPayloadRecord,
+  type WebhookPayloadRecordFor,
+  type WebhookHandlerFn,
+  type WebhookHandlers,
+  type WebhookHelpers,
+  type CreateWebhookParams,
+  type UpdateWebhookParams,
+
+  // error
+  InstantAPIError,
+
+  // warnings
+  setInstantWarningsEnabled,
+
+  // types
+  type Config,
+  type ImpersonationOpts,
+  type TransactionChunk,
+  type DebugCheckResult,
+  type InstantAdminDatabase,
+
+  // core types
+  type User,
+  type InstaQLParams,
+  type ValidQuery,
+  type Query,
+  InstantError,
+
+  // query types
+  type QueryResponse,
+  type InstaQLResponse,
+  type InstantQuery,
+  type InstantUnknownSchemaDef,
+  type InstantQueryResult,
+  type InstantSchema,
+  type InstantSchemaDatabase,
+  type IInstantDatabase,
+  type InstantObject,
+  type InstantEntity,
+  type BackwardsCompatibleSchema,
+  type InstaQLFields,
+  type SubscribeQueryCallback,
+  type SubscribeQueryResponse,
+  type SubscribeQueryPayload,
+  type SubscriptionReadyState,
+
+  // schema types
+  type AttrsDefs,
+  type CardinalityKind,
+  type DataAttrDef,
+  type EntitiesDef,
+  type EntitiesWithLinks,
+  type EntityDef,
+  type InstantGraph,
+  type LinkAttrDef,
+  type LinkDef,
+  type LinksDef,
+  type ResolveAttrs,
+  type RoomsOf,
+  type PresenceOf,
+  type RoomsDef,
+  type RoomHandle,
+  type ValueTypes,
+  type InstantSchemaDef,
+  type InstantUnknownSchema,
+  type InstaQLEntity,
+  type InstaQLResult,
+  type InstaQLEntitySubquery,
+  type InstantRules,
+  type CreateParams,
+  type UpdateParams,
+  type LinkParams,
+
+  // storage types
+  type FileOpts,
+  type UploadFileResponse,
+  type DeleteFileResponse,
+  type DeleteManyFileResponse,
+
+  // stream types
+  type CreateReadStreamOpts,
+  type CreateWriteStreamOpts,
+  type InstantWritableStream,
+
+  // error types
+  type InstantIssue,
+
+  // logger
+  type Logger,
+};

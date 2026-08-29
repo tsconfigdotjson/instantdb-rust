@@ -1,0 +1,270 @@
+{:paths ["src" "resources" "data" "target/classes"]
+ :deps {cheshire/cheshire {:mvn/version "6.0.0"}
+        clj-http/clj-http {:mvn/version "3.12.3"}
+
+        com.github.seancorfield/next.jdbc {:mvn/version "1.3.981"}
+
+        compojure/compojure {:mvn/version "1.6.2" :exclusions [instaparse/instaparse]}
+        instaparse/instaparse {:mvn/version "1.5.0"}
+        luminus/ring-undertow-adapter {:mvn/version "1.4.4"}
+        io.undertow/undertow-core {:mvn/version "2.3.23.Final"}
+        metosin/ring-http-response {:mvn/version "0.9.2"}
+        org.clojure/clojure {:mvn/version "1.12.0"}
+        org.clojure/core.async {:mvn/version "1.6.673"}
+        org.clojure/tools.logging {:mvn/version "1.3.0"}
+        org.clojure/tools.cli {:mvn/version "1.1.230"}
+        com.github.ben-manes.caffeine/caffeine {:mvn/version "3.2.2"}
+        org.postgresql/postgresql {:mvn/version "42.7.3"}
+        ring-cors/ring-cors {:mvn/version "0.1.13"}
+        ring/ring {:mvn/version "1.13.0"}
+        ring/ring-codec {:mvn/version "1.3.0"}
+        ring/ring-json {:mvn/version "0.5.0"}
+        com.zaxxer/HikariCP {:mvn/version "6.2.1"}
+        ch.qos.logback/logback-classic {:mvn/version "1.5.6"}
+        org.slf4j/slf4j-api {:mvn/version "2.0.13"}
+        org.slf4j/jul-to-slf4j {:mvn/version "2.0.18"}
+        cider/cider-nrepl {:mvn/version "0.45.0"}
+
+        software.amazon.awssdk/ec2 {:mvn/version "2.46.2"}
+        software.amazon.awssdk/rds {:mvn/version "2.46.2"}
+        software.amazon.awssdk/secretsmanager {:mvn/version "2.46.2"}
+        software.amazon.awssdk/s3 {:mvn/version "2.46.2"}
+        software.amazon.awssdk/s3-transfer-manager {:mvn/version "2.46.2"}
+        software.amazon.awssdk/netty-nio-client {:mvn/version "2.46.2"}
+        software.amazon.awssdk/bedrockruntime {:mvn/version "2.46.2"}
+        software.amazon.awssdk/cloudwatch {:mvn/version "2.46.2"}
+        software.amazon.awssdk/sqs {:mvn/version "2.46.2"}
+        software.amazon.awssdk/sns {:mvn/version "2.46.2"}
+        software.amazon.awssdk.crt/aws-crt {:mvn/version "0.46.1"}
+        juji/editscript {:mvn/version "0.6.4"}
+        io.github.tonsky/clojure-plus {:mvn/version "1.6.3"}
+
+        org.bouncycastle/bcprov-jdk15on {:mvn/version "1.70"}
+
+        ;; https://github.com/incanter/incanter/pull/429
+        ;; https://github.com/incanter/incanter/issues/430
+        ;; https://github.com/mikera/vectorz-clj/pull/75
+        io.github.tonsky/incanter-charts {:mvn/version "1.9.5"}
+        io.github.tonsky/vectorz-clj {:mvn/version "0.48.1"}
+        net.mikera/vectorz {:mvn/version "0.67.0"}
+        net.mikera/core.matrix {:mvn/version "0.63.0"}
+
+        com.taoensso/nippy {:mvn/version "3.5.0"}
+
+        nrepl/nrepl {:mvn/version "0.9.0"}
+        jarohen/chime {:mvn/version "0.3.3"}
+        com.github.seancorfield/honeysql {:mvn/version "2.7.1295"}
+        org.clojure/spec.alpha {:mvn/version "0.3.218"}
+        circleci/circleci.test {:mvn/version "0.5.0"}
+        org.clojure/test.check {:mvn/version "1.1.1"}
+        com.github.vertical-blank/sql-formatter {:mvn/version "2.0.3"}
+        com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.7.0"}
+        org.clj-commons/claypoole {:mvn/version "1.2.2"}
+
+        ;; opentelemetry
+        io.opentelemetry/opentelemetry-api {:mvn/version "1.61.0"}
+        io.opentelemetry/opentelemetry-sdk {:mvn/version "1.61.0"}
+        io.opentelemetry/opentelemetry-exporter-otlp {:mvn/version "1.61.0"}
+        io.grpc/grpc-netty-shaded {:mvn/version "1.79.0"}
+        io.grpc/grpc-stub {:mvn/version "1.79.0"}
+        io.grpc/grpc-core {:mvn/version "1.79.0"}
+        io.grpc/grpc-services {:mvn/version "1.79.0"}
+        com.github.steffan-westcott/clj-otel-api {:mvn/version "0.2.4"}
+
+        dev.cel/cel {:mvn/version "0.11.1"}
+        com.google.protobuf/protobuf-java-util {:mvn/version "4.33.5"}
+        com.fasterxml.jackson.core/jackson-core {:mvn/version "2.18.3"}
+        com.google.crypto.tink/tink {:mvn/version "1.21.0"}
+        com.google.crypto.tink/tink-awskms {:mvn/version "2.0.0"}
+        ;; Version required by aws kms library pulled in by tink
+        com.fasterxml.jackson.core/jackson-databind {:mvn/version "2.18.3"}
+
+        lambdaisland/uri {:mvn/version "1.19.155"}
+        lambdaisland/deep-diff2 {:mvn/version "2.12.219"
+                                 :exclusions [lambdaisland/clj-diff]}
+        ;; https://github.com/lambdaisland/clj-diff/pull/3
+        io.github.tonsky/clj-diff {:mvn/version "1.4.79"}
+
+        com.auth0/java-jwt {:mvn/version "4.4.0"}
+        com.auth0/jwks-rsa {:mvn/version "0.22.1"}
+        com.nimbusds/nimbus-jose-jwt {:mvn/version "10.9"}
+        com.stripe/stripe-java {:mvn/version "29.5.0"}
+        inflections/inflections {:mvn/version "0.14.1" :exclusions [noencore/noencore]}
+        noencore/noencore {:mvn/version "0.3.8"}
+        org.apache.tika/tika-core {:mvn/version "3.2.1"}
+
+        datascript/datascript {:git/url "https://github.com/tonsky/datascript.git"
+                               :sha "d270292ddaee0a9052e73502247798baae31a77f"
+                               ;; Need https://github.com/tonsky/datascript/issues/470
+                               ;; :mvn/version "1.6.5"
+                               }
+        hiccup/hiccup {:mvn/version "2.0.0-RC3"}
+
+        djblue/portal {:mvn/version "0.58.5"}
+        dev.weavejester/medley {:mvn/version "1.8.1"}
+        com.hazelcast/hazelcast {:mvn/version "5.5.0"}
+
+        com.bucket4j/bucket4j_jdk17-core {:mvn/version "8.17.0"}
+        com.bucket4j/bucket4j_jdk17-hazelcast {:mvn/version "8.17.0"}
+
+        net.openhft/zero-allocation-hashing {:mvn/version "0.27ea1"}
+        com.github.luben/zstd-jni {:mvn/version "1.5.7-4"}
+        me.lemire.integercompression/JavaFastPFOR {:mvn/version "0.3.9"}
+
+        org.clojure/java.jmx {:mvn/version "1.1.0"}
+
+        com.squareup.okhttp3/okhttp-jvm {:mvn/version "5.3.2"}
+        com.squareup.okhttp3/okhttp-dnsoverhttps {:mvn/version "5.3.2"}
+        com.github.seancfoley/ipaddress {:mvn/version "5.6.2"}
+
+        ;; Server-side analytics
+        com.posthog/posthog-server {:mvn/version "2.1.0"}}
+ :aliases {:dev {:extra-paths ["dev" "test" "dev-resources"]
+                 :extra-deps {refactor-nrepl/refactor-nrepl {:mvn/version "3.10.0"}
+                              criterium/criterium           {:mvn/version "0.4.6"}
+                              spec-provider/spec-provider   {:mvn/version "0.4.14"}
+                              io.github.tonsky/clj-reload   {:mvn/version "0.9.8"}
+                              ;; https://github.com/kkinnear/zprint/pull/351
+                              io.github.tonsky/zprint       {:mvn/version "1.2.10"}
+                              com.squareup.okhttp3/mockwebserver3 {:mvn/version "5.3.2"}
+                              virgil/virgil {:mvn/version "0.5.1"}
+                              ;; asm deps add support for Java 26 (can remove once virgil updates)
+                              org.ow2.asm/asm {:mvn/version "9.9.1"}
+                              org.ow2.asm/asm-tree {:mvn/version "9.9.1"}}
+                 :jvm-opts ["-XX:+UseZGC"
+                            "-enableassertions"
+                            "-Djdk.tracePinnedThreads=full"
+
+                            ;; force locale
+                            "-Duser.language=en"
+                            "-Duser.country=US"
+                            "-Duser.timezone=UTC"
+                            "-Dfile.encoding=UTF-8"
+
+                            ;; clj-async-profiler
+                            "-Djdk.attach.allowAttachSelf" ;; allow to attach
+                            "-XX:+UnlockDiagnosticVMOptions" ;; better profile accuracy
+                            "-XX:+DebugNonSafepoints" ;; better profile accuracy
+                            "-XX:+EnableDynamicAgentLoading"
+
+                            ;; print stack traces instead of "Full report at ..."
+                            "-Dclojure.main.report=stderr"
+
+                            ;; throw on invalid go block usage in development
+                            "-Dclojure.core.async.go-checking=true"
+
+                            ;; hazelcast
+                            "--add-modules" "java.se"
+                            "--add-exports" "java.base/jdk.internal.ref=ALL-UNNAMED"
+                            "--add-opens" "java.base/java.lang=ALL-UNNAMED"
+                            "--add-opens" "java.base/sun.nio.ch=ALL-UNNAMED"
+                            "--add-opens" "java.management/sun.management=ALL-UNNAMED"
+                            "--add-opens" "jdk.management/com.sun.management.internal=ALL-UNNAMED"
+
+                            ;; headless charts
+                            "-Djava.awt.headless=true"]}
+           :build {:extra-deps {io.github.clojure/tools.build {:git/tag "v0.10.3" :git/sha "15ead66"}}
+                   :ns-default build}
+           :test {:extra-paths ["test" "dev-resources"]
+                  :extra-deps {io.github.tonsky/clj-reload {:mvn/version "0.9.4"}
+                               zprint/zprint               {:mvn/version "1.2.9"}
+                               com.squareup.okhttp3/mockwebserver3 {:mvn/version "5.3.2"}}
+                  :main-opts ["-m" "instant.test-core"]
+                  :jvm-opts ["-Dinstant.env=test"
+                             "-XX:+UseZGC"
+                             "-enableassertions"
+                             "-Djdk.tracePinnedThreads=full"
+                             "-Duser.timezone=UTC"
+                             ;; print stack traces instead of "Full report at ..."
+                             "-Dclojure.main.report=stderr"
+                             ;; hazelcast
+                             "--add-modules" "java.se"
+                             "--add-exports" "java.base/jdk.internal.ref=ALL-UNNAMED"
+                             "--add-opens" "java.base/java.lang=ALL-UNNAMED"
+                             "--add-opens" "java.base/sun.nio.ch=ALL-UNNAMED"
+                             "--add-opens" "java.management/sun.management=ALL-UNNAMED"
+                             "--add-opens" "jdk.management/com.sun.management.internal=ALL-UNNAMED"
+
+                             ;; clj-async-profiler
+                             "-XX:+UnlockDiagnosticVMOptions"
+                             "-XX:+DebugNonSafepoints"
+                             "-Djdk.attach.allowAttachSelf"
+
+                             ;; throw on invalid go block usage in tests
+                             "-Dclojure.core.async.go-checking=true"
+                             ;; headless charts
+                             "-Djava.awt.headless=true"]}
+           :retest {:extra-paths ["test" "dev-resources"]
+                    :main-opts ["-m" "circleci.test.retest"]
+                    :jvm-opts [;; clj-async-profiler
+                               "-XX:+UnlockDiagnosticVMOptions"
+                               "-XX:+DebugNonSafepoints"
+                               "-Djdk.attach.allowAttachSelf"]}
+           :repl-connect {:main-opts ["-m" "nrepl.cmdline" "--connect" "--host" "localhost" "--port" "6005"]}
+           :encrypt-secret {:extra-deps {org.clojure/tools.cli {:mvn/version "1.1.230"}}
+                            :exec-fn tasks/encrypt-config-secret}
+           :generate-cloudfront-key {:extra-deps {org.clojure/tools.cli {:mvn/version "1.1.230"}}
+                                     :exec-fn tasks/generate-cloudfront-key}
+           :oss-bootstrap {:extra-deps {org.clojure/tools.cli {:mvn/version "1.1.230"}}
+                           :exec-fn tasks/bootstrap-for-oss
+                           :jvm-opts ["-Dclojure.main.report=stderr"]}
+           :lint {:extra-deps {clj-kondo/clj-kondo {:mvn/version "2025.04.07"}}
+                  :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"]}
+
+           :memory-meter {:extra-deps {com.clojure-goes-fast/clj-memory-meter {:mvn/version "0.4.0"}}
+                          :jvm-opts ["--add-opens=java.base/java.io=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.lang=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.lang.annotation=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.lang.invoke=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.lang.module=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.lang.ref=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.math=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.net=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.net.spi=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.nio=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.nio.channels=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.nio.channels.spi=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.nio.charset=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.nio.charset.spi=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.nio.file=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.nio.file.attribute=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.nio.file.spi=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.security=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.security.cert=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.security.interfaces=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.security.spec=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.text=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.text.spi=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.time=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.time.chrono=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.time.format=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.time.temporal=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.time.zone=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.util=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.util.concurrent=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.util.function=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.util.jar=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.util.regex=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.util.spi=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.util.stream=ALL-UNNAMED"
+                                     "--add-opens=java.base/java.util.zip=ALL-UNNAMED"
+                                     "--add-opens=java.base/javax.crypto=ALL-UNNAMED"
+                                     "--add-opens=java.base/javax.crypto.interfaces=ALL-UNNAMED"
+                                     "--add-opens=java.base/javax.crypto.spec=ALL-UNNAMED"
+                                     "--add-opens=java.base/javax.net=ALL-UNNAMED"
+                                     "--add-opens=java.base/javax.net.ssl=ALL-UNNAMED"
+                                     "--add-opens=java.base/javax.security.auth=ALL-UNNAMED"
+                                     "--add-opens=java.base/javax.security.auth.callback=ALL-UNNAMED"
+                                     "--add-opens=java.base/javax.security.auth.login=ALL-UNNAMED"
+                                     "--add-opens=java.base/javax.security.auth.spi=ALL-UNNAMED"
+                                     "--add-opens=java.base/javax.security.auth.x500=ALL-UNNAMED"
+                                     "--add-opens=java.base/javax.security.cert=ALL-UNNAMED"
+                                     "--add-opens=java.desktop/sun.java2d.marlin=ALL-UNNAMED"
+                                     "--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED"
+                                     "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+                                     "--add-opens=jdk.management/com.sun.management.internal=ALL-UNNAMED"
+                                     "--add-opens=java.base/jdk.internal.module=ALL-UNNAMED"]}}
+ :main-opts ["-m" "instant.core"]}

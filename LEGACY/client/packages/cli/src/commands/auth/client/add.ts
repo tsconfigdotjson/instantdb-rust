@@ -1,0 +1,744 @@
+import { Effect, Match, Option, Schema } from 'effect';
+import type { authClientAddDef, OptsFromCommand } from '../../../index.ts';
+import { BadArgsError } from '../../../errors.ts';
+import { GlobalOpts } from '../../../context/globalOpts.ts';
+import { Args } from '../../../lib/args.ts';
+import { runUIEffect, validateRequired } from '../../../lib/ui.ts';
+import {
+  addOAuthClient,
+  findName,
+  getClientNameAndProvider,
+  getOrCreateProvider,
+  GoogleAppTypeSchema,
+  OAuthClient,
+} from '../../../lib/oauth.ts';
+import {
+  GOOGLE_AUTHORIZATION_ENDPOINT,
+  GOOGLE_DISCOVERY_ENDPOINT,
+  GOOGLE_TOKEN_ENDPOINT,
+  APPLE_AUTHORIZATION_ENDPOINT,
+  APPLE_DISCOVERY_ENDPOINT,
+  APPLE_TOKEN_ENDPOINT,
+  clerkDomainFromPublishableKey,
+  LINKEDIN_AUTHORIZATION_ENDPOINT,
+  LINKEDIN_DISCOVERY_ENDPOINT,
+  LINKEDIN_TOKEN_ENDPOINT,
+} from '@instantdb/platform';
+import { getOAuthCallbackUrl } from '../../../lib/config.ts';
+import { UI } from '../../../ui/index.ts';
+import chalk from 'chalk';
+import boxen from 'boxen';
+import { link } from '../../../logging.ts';
+import {
+  appleKeyIdPrompt,
+  applePrivateKeyFilePrompt,
+  appleServicesIdPrompt,
+  appleTeamIdPrompt,
+  clerkPublishableKeyPrompt,
+  clientIdPrompt,
+  clientSecretPrompt,
+  firebaseDiscoveryEndpoint,
+  firebaseProjectIdPrompt,
+  readPrivateKeyFile,
+  redirectSetupMessages,
+  redirectUriPrompt,
+  validateFirebaseProjectId,
+} from './shared.ts';
+
+export const ClientTypeSchema = Schema.Literal(
+  'google',
+  'github',
+  'apple',
+  'linkedin',
+  'clerk',
+  'firebase',
+);
+
+const googleConsoleUrl =
+  'https://console.developers.google.com/apis/credentials';
+const githubDeveloperUrl = 'https://github.com/settings/developers';
+const linkedinDeveloperUrl = 'https://www.linkedin.com/developers/apps';
+const optionalRedirectPrompt = (oauthCallbackURL: string) =>
+  redirectUriPrompt({
+    heading: 'Custom redirect URI (optional):',
+    oauthCallbackURL,
+  });
+
+const selectGoogleAppType = (value: unknown) =>
+  Effect.gen(function* () {
+    const { yes } = yield* GlobalOpts;
+
+    return yield* Option.fromNullable(value).pipe(
+      Effect.catchTag('NoSuchElementException', () => {
+        if (yes) {
+          return BadArgsError.make({
+            message: `Missing required value for --app-type. Expected one of: ${GoogleAppTypeSchema.literals.join(', ')}`,
+          });
+        }
+
+        return runUIEffect(
+          new UI.Select({
+            options: [
+              {
+                label:
+                  'Web' + chalk.dim(' (Redirect Flows or Expo Auth Session)'),
+                value: 'web',
+              },
+              { label: 'iOS', value: 'ios' },
+              { label: 'Android', value: 'android' },
+              { label: 'Google Button for Web', value: 'button-for-web' },
+            ],
+            promptText: 'Select a Google app type:',
+            modifyOutput: UI.modifiers.piped([
+              UI.modifiers.topPadding,
+              UI.modifiers.dimOnComplete,
+            ]),
+            defaultValue: 'web',
+          }),
+        ).pipe(
+          Effect.catchTag('UIError', (e) =>
+            BadArgsError.make({ message: `UI error: ${e.message}` }),
+          ),
+        );
+      }),
+      Effect.andThen((raw) => Schema.decodeUnknown(GoogleAppTypeSchema)(raw)),
+      Effect.catchTag('ParseError', () =>
+        BadArgsError.make({
+          message:
+            'Invalid app-type, must be one of: web, ios, android, button-for-web',
+        }),
+      ),
+    );
+  });
+
+const selectGoogleCredentialMode = Effect.fn(function* () {
+  return yield* runUIEffect(
+    new UI.Select({
+      options: [
+        {
+          label:
+            'Use dev credentials' +
+            chalk.dim(' (works on localhost and Expo, no Google setup)'),
+          value: 'dev' as const,
+        },
+        {
+          label:
+            'Use my own credentials' +
+            chalk.dim(' (client ID and secret from Google Console)'),
+          value: 'custom' as const,
+        },
+      ],
+      promptText: 'Select Google credential mode:',
+      modifyOutput: UI.modifiers.piped([
+        UI.modifiers.topPadding,
+        UI.modifiers.dimOnComplete,
+      ]),
+      defaultValue: 'dev' as const,
+    }),
+  ).pipe(
+    Effect.catchTag('UIError', (e) =>
+      BadArgsError.make({ message: `UI error: ${e.message}` }),
+    ),
+  );
+});
+
+const resolveGoogleCredentialMode = Effect.fn(function* ({
+  appType,
+  opts,
+}: {
+  appType: typeof GoogleAppTypeSchema.Type;
+  opts: Record<string, unknown>;
+}): Effect.fn.Return<'custom' | 'dev', BadArgsError, GlobalOpts> {
+  const { yes } = yield* GlobalOpts;
+  const devCredentialsFlag = Args.isTrue(opts, 'dev-credentials');
+  const hasProvidedSomeCustomCredentials = Args.hasAny(opts, [
+    'client-id',
+    'client-secret',
+    'custom-redirect-uri',
+  ]);
+
+  if (devCredentialsFlag && appType !== 'web') {
+    return yield* BadArgsError.make({
+      message:
+        '--dev-credentials is only supported for --app-type web. Native Google clients need credentials from Google.',
+    });
+  }
+
+  if (devCredentialsFlag && hasProvidedSomeCustomCredentials) {
+    return yield* BadArgsError.make({
+      message:
+        '--dev-credentials cannot be combined with --client-id, --client-secret, or --custom-redirect-uri.',
+    });
+  }
+
+  if (appType !== 'web') {
+    return 'custom';
+  }
+
+  if (hasProvidedSomeCustomCredentials) {
+    return 'custom';
+  }
+
+  if (devCredentialsFlag) {
+    return 'dev';
+  }
+
+  if (yes) {
+    return 'dev';
+  }
+
+  return yield* selectGoogleCredentialMode();
+});
+
+const printGoogleDevCredentialsClient = Effect.fn(function* ({
+  appType,
+  client,
+}: {
+  appType: typeof GoogleAppTypeSchema.Type;
+  client: typeof OAuthClient.Type;
+}) {
+  yield* Effect.log(
+    boxen(
+      [
+        `Google OAuth client created: ${client.client_name}`,
+        `App type: ${appType}`,
+        `Credentials: Instant dev credentials`,
+        `ID: ${client.id}`,
+        '',
+        'No Google Console setup required.',
+        'Works on localhost and Expo during development.',
+        '',
+        chalk.bold('Ready for production? Run:'),
+        `  instant-cli auth client update --name ${client.client_name} --client-id <id> --client-secret <secret>`,
+      ].join('\n'),
+      { dimBorder: true, padding: { right: 1, left: 1 } },
+    ),
+  );
+});
+
+const printGoogleCustomCredentialsClient = Effect.fn(function* ({
+  appType,
+  client,
+  clientId,
+  customRedirectUri,
+  redirectUri,
+  oauthCallbackURL,
+}: {
+  appType: typeof GoogleAppTypeSchema.Type;
+  client: typeof OAuthClient.Type;
+  clientId: string | undefined;
+  customRedirectUri: string | undefined;
+  redirectUri: string | undefined;
+  oauthCallbackURL: string;
+}) {
+  const redirectMessages: string[] = [];
+  if (appType === 'web' && redirectUri) {
+    redirectMessages.push(
+      ...redirectSetupMessages({
+        prompt: 'Add this redirect URI in Google Console',
+        redirectUri,
+        oauthCallbackURL,
+        showCustomRedirectInstructions: Boolean(customRedirectUri),
+      }),
+    );
+  }
+
+  yield* Effect.log(
+    boxen(
+      [
+        `Google OAuth client created: ${client.client_name}`,
+        `App type: ${appType}`,
+        `ID: ${client.id}`,
+        `Google Client ID: ${client.client_id ?? clientId}`,
+        ...redirectMessages,
+      ].join('\n'),
+      { dimBorder: true, padding: { right: 1, left: 1 } },
+    ),
+  );
+});
+
+const handleGoogleClient = Effect.fn(function* (
+  opts: Record<string, unknown>,
+  oauthCallbackURL: string,
+) {
+  // This one requires special logic for getting client name
+  // because the suggested name includes the app type
+  const appType = yield* selectGoogleAppType(opts['app-type']);
+  const credentialMode = yield* resolveGoogleCredentialMode({
+    appType,
+    opts,
+  });
+  const useSharedCredentials = credentialMode === 'dev';
+
+  const { auth, provider } = yield* getOrCreateProvider('google');
+  const usedClientNames = new Set(
+    (auth.oauth_clients ?? []).map((client) => client.client_name),
+  );
+  const suggestedClientName = findName(`google-${appType}`, usedClientNames);
+
+  const clientName = yield* Args.text(opts, 'name').pipe(
+    Args.prompt({
+      prompt: 'Client Name:',
+      defaultValue: suggestedClientName,
+      placeholder: suggestedClientName,
+      validate: validateRequired,
+      modifyOutput: UI.modifiers.piped([
+        UI.modifiers.topPadding,
+        UI.modifiers.dimOnComplete,
+      ]),
+    }),
+    Args.required(),
+  );
+
+  if (usedClientNames.has(clientName)) {
+    return yield* BadArgsError.make({
+      message: `The unique name '${clientName}' is already in use.`,
+    });
+  }
+
+  const clientId = yield* Args.text(opts, 'client-id').pipe(
+    Args.availableWhen(!useSharedCredentials, {
+      message:
+        '--client-id is not compatible with --dev-credentials. Drop one or the other.',
+    }),
+    Args.prompt(clientIdPrompt({ providerUrl: googleConsoleUrl })),
+    Args.required(),
+  );
+
+  const usesCustomWebCredentials = !useSharedCredentials && appType === 'web';
+  const clientSecret = yield* Args.text(opts, 'client-secret').pipe(
+    Args.availableWhen(usesCustomWebCredentials, {
+      message: useSharedCredentials
+        ? '--client-secret is not compatible with --dev-credentials. Drop one or the other.'
+        : undefined,
+    }),
+    Args.prompt(clientSecretPrompt({ providerUrl: googleConsoleUrl })),
+    Args.required(),
+  );
+
+  const customRedirectUri = yield* Args.text(opts, 'custom-redirect-uri').pipe(
+    Args.availableWhen(usesCustomWebCredentials, {
+      message: useSharedCredentials
+        ? '--custom-redirect-uri is not compatible with --dev-credentials.'
+        : 'Provided custom redirect URI when not using web app type.',
+    }),
+    Args.prompt(optionalRedirectPrompt(oauthCallbackURL)),
+    Args.optional(),
+  );
+
+  const redirectUri = useSharedCredentials
+    ? undefined
+    : customRedirectUri || oauthCallbackURL;
+
+  const response = yield* addOAuthClient({
+    providerId: provider.id,
+    clientName,
+    clientId: useSharedCredentials ? undefined : clientId,
+    clientSecret: useSharedCredentials ? undefined : clientSecret,
+    authorizationEndpoint: GOOGLE_AUTHORIZATION_ENDPOINT,
+    tokenEndpoint: GOOGLE_TOKEN_ENDPOINT,
+    discoveryEndpoint: GOOGLE_DISCOVERY_ENDPOINT,
+    redirectTo: redirectUri,
+    meta: {
+      appType,
+      skipNonceChecks: true,
+    },
+    useSharedCredentials,
+  });
+
+  if (useSharedCredentials) {
+    yield* printGoogleDevCredentialsClient({
+      appType,
+      client: response.client,
+    });
+    return;
+  }
+
+  yield* printGoogleCustomCredentialsClient({
+    appType,
+    client: response.client,
+    clientId,
+    customRedirectUri,
+    redirectUri,
+    oauthCallbackURL,
+  });
+});
+
+const handleGithubClient = Effect.fn(function* (
+  opts: Record<string, unknown>,
+  oauthCallbackURL: string,
+) {
+  const { clientName, provider } = yield* getClientNameAndProvider(
+    'github',
+    opts,
+  );
+
+  const clientId = yield* Args.text(opts, 'client-id').pipe(
+    Args.prompt(clientIdPrompt({ providerUrl: githubDeveloperUrl })),
+    Args.required(),
+  );
+
+  const clientSecret = yield* Args.text(opts, 'client-secret').pipe(
+    Args.prompt(clientSecretPrompt({ providerUrl: githubDeveloperUrl })),
+    Args.required(),
+  );
+
+  const customRedirectUri = yield* Args.text(opts, 'custom-redirect-uri').pipe(
+    Args.prompt(optionalRedirectPrompt(oauthCallbackURL)),
+    Args.optional(),
+  );
+
+  const redirectUri = customRedirectUri || oauthCallbackURL;
+
+  // The backend infers GitHub's authorization/token endpoints from
+  // meta.providerName === 'github', so we don't pass them here.
+  const response = yield* addOAuthClient({
+    providerId: provider.id,
+    clientName,
+    clientId,
+    clientSecret,
+    redirectTo: redirectUri,
+    meta: { providerName: 'github' },
+  });
+
+  const redirectMessages = redirectSetupMessages({
+    prompt: 'Add this callback URL in your GitHub OAuth App settings',
+    redirectUri,
+    oauthCallbackURL,
+    showCustomRedirectInstructions: Boolean(customRedirectUri),
+  });
+
+  yield* Effect.log(
+    boxen(
+      [
+        `GitHub OAuth client created: ${response.client.client_name}`,
+        `ID: ${response.client.id}`,
+        `GitHub Client ID: ${response.client.client_id ?? clientId}`,
+        ...redirectMessages,
+      ].join('\n'),
+      { dimBorder: true, padding: { right: 1, left: 1 } },
+    ),
+  );
+});
+
+const handleLinkedInClient = Effect.fn(function* (
+  opts: Record<string, unknown>,
+  oauthCallbackURL: string,
+) {
+  const { clientName, provider } = yield* getClientNameAndProvider(
+    'linkedin',
+    opts,
+  );
+
+  const clientId = yield* Args.text(opts, 'client-id').pipe(
+    Args.prompt(clientIdPrompt({ providerUrl: linkedinDeveloperUrl })),
+    Args.required(),
+  );
+
+  const clientSecret = yield* Args.text(opts, 'client-secret').pipe(
+    Args.prompt(clientSecretPrompt({ providerUrl: linkedinDeveloperUrl })),
+    Args.required(),
+  );
+
+  const customRedirectUri = yield* Args.text(opts, 'custom-redirect-uri').pipe(
+    Args.prompt(optionalRedirectPrompt(oauthCallbackURL)),
+    Args.optional(),
+  );
+
+  const redirectUri = customRedirectUri || oauthCallbackURL;
+
+  const response = yield* addOAuthClient({
+    providerId: provider.id,
+    clientName,
+    clientId,
+    clientSecret,
+    authorizationEndpoint: LINKEDIN_AUTHORIZATION_ENDPOINT,
+    tokenEndpoint: LINKEDIN_TOKEN_ENDPOINT,
+    discoveryEndpoint: LINKEDIN_DISCOVERY_ENDPOINT,
+    redirectTo: redirectUri,
+  });
+
+  const redirectMessages = redirectSetupMessages({
+    prompt: 'Add this redirect URI in your LinkedIn app settings',
+    redirectUri,
+    oauthCallbackURL,
+    showCustomRedirectInstructions: Boolean(customRedirectUri),
+  });
+
+  yield* Effect.log(
+    boxen(
+      [
+        `LinkedIn OAuth client created: ${response.client.client_name}`,
+        `ID: ${response.client.id}`,
+        `LinkedIn Client ID: ${response.client.client_id ?? clientId}`,
+        ...redirectMessages,
+      ].join('\n'),
+      { dimBorder: true, padding: { right: 1, left: 1 } },
+    ),
+  );
+});
+
+const handleAppleClient = Effect.fn(function* (
+  opts: Record<string, unknown>,
+  oauthCallbackURL: string,
+) {
+  const { clientName, provider } = yield* getClientNameAndProvider(
+    'apple',
+    opts,
+  );
+
+  const servicesId = yield* Args.text(opts, 'services-id').pipe(
+    Args.prompt(appleServicesIdPrompt({})),
+    Args.required(),
+  );
+
+  // If any web-flow flag is provided, enable web flow; otherwise ask
+  // (non-interactively with --yes we default to native-only).
+  const anyWebFlagProvided = Args.hasAny(opts, [
+    'team-id',
+    'key-id',
+    'private-key-file',
+    'custom-redirect-uri',
+  ]);
+
+  const configureWeb = anyWebFlagProvided
+    ? true
+    : yield* Args.bool(opts, 'configure-web').pipe(
+        Args.confirm({
+          promptText:
+            'Configure web redirect flow? ' +
+            chalk.dim(
+              '(requires Team ID, Key ID, and a .p8 private key from Apple)',
+            ),
+          defaultValue: false,
+        }),
+        Args.required(),
+      );
+
+  const skipWeb = !configureWeb;
+  const webSkipMessage =
+    'requires configuring the web redirect flow (also provide --team-id, --key-id, and --private-key-file).';
+
+  const teamId = yield* Args.text(opts, 'team-id').pipe(
+    Args.availableWhen(!skipWeb, { message: `--team-id ${webSkipMessage}` }),
+    Args.prompt(appleTeamIdPrompt({})),
+    Args.required(),
+  );
+
+  const keyId = yield* Args.text(opts, 'key-id').pipe(
+    Args.availableWhen(!skipWeb, { message: `--key-id ${webSkipMessage}` }),
+    Args.prompt(appleKeyIdPrompt({})),
+    Args.required(),
+  );
+
+  const privateKeyPath = yield* Args.text(opts, 'private-key-file').pipe(
+    Args.availableWhen(!skipWeb, {
+      message: `--private-key-file ${webSkipMessage}`,
+    }),
+    Args.prompt(applePrivateKeyFilePrompt({})),
+    Args.required(),
+  );
+
+  const privateKey = privateKeyPath
+    ? yield* readPrivateKeyFile(privateKeyPath)
+    : undefined;
+
+  const customRedirectUri = yield* Args.text(opts, 'custom-redirect-uri').pipe(
+    Args.availableWhen(!skipWeb, {
+      message: `--custom-redirect-uri ${webSkipMessage}`,
+    }),
+    Args.prompt(optionalRedirectPrompt(oauthCallbackURL)),
+    Args.optional(),
+  );
+
+  const redirectUri = privateKey
+    ? customRedirectUri || oauthCallbackURL
+    : undefined;
+
+  const meta: { teamId?: string; keyId?: string } = {};
+  if (teamId !== undefined) meta.teamId = teamId;
+  if (keyId !== undefined) meta.keyId = keyId;
+
+  const response = yield* addOAuthClient({
+    providerId: provider.id,
+    clientName,
+    clientId: servicesId,
+    clientSecret: privateKey,
+    authorizationEndpoint: APPLE_AUTHORIZATION_ENDPOINT,
+    tokenEndpoint: APPLE_TOKEN_ENDPOINT,
+    discoveryEndpoint: APPLE_DISCOVERY_ENDPOINT,
+    redirectTo: redirectUri,
+    ...(Object.keys(meta).length > 0 ? { meta } : {}),
+  });
+
+  const summaryLines: string[] = [
+    `Apple OAuth client created: ${response.client.client_name}`,
+    `ID: ${response.client.id}`,
+    `Services ID: ${response.client.client_id ?? servicesId}`,
+  ];
+
+  if (privateKey && redirectUri) {
+    summaryLines.push(`Team ID: ${teamId}`);
+    summaryLines.push(`Key ID: ${keyId}`);
+    summaryLines.push(
+      ...redirectSetupMessages({
+        prompt: `Add this return URL under your Services ID on ${link('https://developer.apple.com', 'developer.apple.com')}`,
+        redirectUri,
+        oauthCallbackURL,
+        showCustomRedirectInstructions: Boolean(customRedirectUri),
+      }),
+    );
+  }
+  yield* Effect.log(
+    boxen(summaryLines.join('\n'), {
+      dimBorder: true,
+      padding: { right: 1, left: 1 },
+    }),
+  );
+});
+
+const handleClerkClient = Effect.fn(function* (opts: Record<string, unknown>) {
+  const { clientName, provider } = yield* getClientNameAndProvider(
+    'clerk',
+    opts,
+  );
+
+  const publishableKey = yield* Args.text(opts, 'publishable-key').pipe(
+    Args.prompt(clerkPublishableKeyPrompt({})),
+    Args.required(),
+  );
+
+  const domain = clerkDomainFromPublishableKey(publishableKey);
+  if (!domain) {
+    return yield* BadArgsError.make({
+      message: 'Invalid publishable key. Could not extract domain.',
+    });
+  }
+
+  const response = yield* addOAuthClient({
+    providerId: provider.id,
+    clientName,
+    discoveryEndpoint: `https://${domain}/.well-known/openid-configuration`,
+    meta: { clerkPublishableKey: publishableKey },
+  });
+
+  const clerkDomain = response.client.discovery_endpoint?.replace(
+    '/.well-known/openid-configuration',
+    '',
+  );
+
+  yield* Effect.log(
+    boxen(
+      [
+        `Clerk OAuth client created: ${response.client.client_name}`,
+        `ID: ${response.client.id}`,
+        `Clerk Publishable Key: ${response.client.meta?.clerkPublishableKey}`,
+        `Clerk Domain: ${clerkDomain}`,
+      ].join('\n'),
+      { dimBorder: true, padding: { right: 1, left: 1 } },
+    ),
+  );
+
+  yield* Effect.log(
+    '\nNavigate to your Clerk dashboard. On the Sessions page, click the Edit button in the Customize session token section.\nEnsure your Claims field has the email claim:\n' +
+      boxen(
+        `{
+  "email": "{{user.primary_email_address}}",
+  "email_verified": "{{user.email_verified}}"
+}`,
+        { borderStyle: 'none' },
+      ),
+  );
+});
+
+const handleFirebaseClient = Effect.fn(function* (
+  opts: OptsFromCommand<typeof authClientAddDef> & Record<string, unknown>,
+) {
+  const { clientName, provider } = yield* getClientNameAndProvider(
+    'firebase',
+    opts,
+  );
+
+  const projectId = yield* Args.text(opts, 'project-id').pipe(
+    Args.prompt(firebaseProjectIdPrompt({})),
+    Args.validate(validateFirebaseProjectId),
+    Args.required(),
+  );
+  const response = yield* addOAuthClient({
+    providerId: provider.id,
+    clientName,
+    discoveryEndpoint: firebaseDiscoveryEndpoint(projectId),
+  });
+
+  yield* Effect.log(
+    boxen(
+      [
+        `Firebase OAuth client created: ${response.client.client_name}`,
+        `ID: ${response.client.id}`,
+        `Firebase Project ID: ${projectId}`,
+      ].join('\n'),
+      { dimBorder: true, padding: { right: 1, left: 1 } },
+    ),
+  );
+});
+
+export const authClientAddCmd = Effect.fn(
+  function* (
+    opts: OptsFromCommand<typeof authClientAddDef> & Record<string, unknown>,
+  ) {
+    const { yes } = yield* GlobalOpts;
+    if (!opts.type && yes) {
+      return yield* BadArgsError.make({
+        message: `Missing required value for --type. Expected one of: ${ClientTypeSchema.literals.join(', ')}`,
+      });
+    }
+    const clientType = yield* Option.fromNullable(opts.type).pipe(
+      Effect.catchTag('NoSuchElementException', () =>
+        runUIEffect(
+          new UI.Select({
+            options: [
+              { label: 'Google', value: 'google' },
+              { label: 'GitHub', value: 'github' },
+              { label: 'Apple', value: 'apple' },
+              { label: 'LinkedIn', value: 'linkedin' },
+              { label: 'Clerk', value: 'clerk' },
+              { label: 'Firebase', value: 'firebase' },
+            ],
+            promptText: 'Select a client type:',
+            modifyOutput: UI.modifiers.piped([UI.modifiers.dimOnComplete]),
+          }),
+        ),
+      ),
+      Effect.andThen((s) => Schema.decodeUnknown(ClientTypeSchema)(s)),
+      Effect.catchTag('ParseError', () =>
+        BadArgsError.make({
+          message: `Invalid client type, must be one of: ${ClientTypeSchema.literals.join(', ')}`,
+        }),
+      ),
+    );
+    const oauthCallbackURL = yield* getOAuthCallbackUrl;
+
+    yield* Match.value(clientType).pipe(
+      Match.withReturnType<Effect.Effect<void, any, any>>(),
+      Match.when('google', () => handleGoogleClient(opts, oauthCallbackURL)),
+      Match.when('github', () => handleGithubClient(opts, oauthCallbackURL)),
+      Match.when('apple', () => handleAppleClient(opts, oauthCallbackURL)),
+      Match.when('linkedin', () =>
+        handleLinkedInClient(opts, oauthCallbackURL),
+      ),
+      Match.when('clerk', () => handleClerkClient(opts)),
+      Match.when('firebase', () => handleFirebaseClient(opts)),
+      Match.exhaustive,
+    );
+  },
+  Effect.catchTag('BadArgsError', (e) =>
+    Effect.gen(function* () {
+      yield* Effect.logError(e.message);
+      yield* Effect.log(
+        chalk.dim(
+          'hint: run `instant-cli auth client add --help` for the list of available arguments',
+        ),
+      );
+    }),
+  ),
+);

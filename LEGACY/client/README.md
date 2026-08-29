@@ -1,0 +1,153 @@
+<p align="center">
+  <a href="#">
+    <img alt="Shows the Instant logo" src="https://instantdb.com/img/icon/android-chrome-512x512.png" width="10%">
+  </a>
+  <h1 align="center">instant-client</h1>
+</p>
+
+This houses Instant's javascript monorepo! Here's the lay of the land:
+
+1. [`www/`](./www/)
+   1. This is a nextjs app. It’s the frontend for [instantdb.com](https://instantdb.com), including the dashboard and docs.
+2. [`packages/`](./packages/)
+   1. These are where our client libraries live:
+      1. [`@instantdb/core`](./packages/core)
+      2. [`@instantdb/react`](./packages/react/)
+      3. [`@instantdb/react-native`](./packages/react-native)
+      4. [`@instantdb/admin`](./packages/admin)
+      5. [`instant-cli`.](./packages/cli/)
+      6. [`@instantdb/platform`](./packages/platform)
+      7. [`@instantdb/mcp`](./packages/mcp)
+3. [`sandbox/`](./sandbox/)
+   1. We built a few example apps, to make it easy to develop against the local version of `packages`.
+
+# Development
+
+To kick everything off:
+
+```bash
+cd client
+corepack enable # enables pnpm
+pnpm i
+pnpm run build-packages
+make dev
+```
+
+With that, all frontend code should be up and running!
+
+## Running more packages in dev mode
+
+When you `make dev`, we start up the most common packages you'll want to hack on:
+
+- The client libraries: `@instantdb/core`, `@instantdb/react`, `@instantdb/react-native`, `@instantdb/admin`
+- A few services that use them: `www`, `sandbox/react-nextjs`, `sandbox/admin-sdk-express`
+
+What should you do if you want to work on other packages that we haven't included? For example, if you wanted to make a change to expo?
+
+You can either add `--filter` to make dev:
+
+```bash
+# Run dev for a sandbox app
+make dev -- --filter create-instant-app
+```
+
+Or cd into the package and run a separate command there:
+
+```bash
+cd packages/create-instant-app && pnpm run dev
+```
+
+## Dashboard & Docs
+
+Visit [localhost:3000](http://localhost:3000), and you'll see Instant's homepage. You can make changes to the marketing pages, dashboard, or docs here.
+
+If you press `cmd + shift + 9`, you'll also see a devtool window pop up. This can be useful if you want to enable feature flags.
+
+### Connect to a local backend
+
+Right now all backend requests will go to api.instantdb.com. If you want to develop against your local backend, load [localhost:3000](http://localhost:3000), and set the `devBackend` flag:
+
+```javascript
+localStorage.setItem('devBackend', true);
+```
+
+Now all requests will go to your local backend at [localhost:8888](http://localhost:8888). If you haven't set up a local backend, follow the [server README](../server/README.md)
+
+### Show client logs
+
+The instant client can show development logs. You can turn this on by writing:
+
+```javascript
+localStorage.setItem('__instantLogging', true);
+```
+
+### Running a local app
+
+You can create local apps by following these steps
+
+1. On localhost:3000, click "Sign up" in the upper right corner.
+2. Enter your email address (or a fake one; it won't send a real email).
+3. Click "Send Code".
+4. Go back to the terminal window running the backend server. Look for a log entry showing an email. It will not have been sent, but you can read the HTML code of the email to find a 6-digit number.
+5. Use this number to complete the login on the website.
+6. You should now be in the dashboard with a newly created local app id.
+
+You can then connect to this app in a new project with the following snippet
+
+```javascript
+const APP_ID = '<your app id from your own server>';
+const db = init({
+  appId: APP_ID,
+  apiURI: 'http://localhost:8888',
+  websocketURI: 'ws://localhost:8888/runtime/session',
+});
+```
+
+## Packages and sandbox
+
+All client SDKs live in `packages/`.
+
+To develop against them, we've created a few `sandbox` examples. These examples let you locally test changes to the client SDK. We recommend you create an app in your dev environment and use it in each directories `.env` file
+
+Based on what you change, you'll play with different examples:
+
+1. [`@instantdb/core`](./packages/core) ➡ [`sandbox/vanilla-js-vite/`](./sandbox/vanilla-js-vite/)
+2. [`@instantdb/react`](./packages/react/) ➡ [`sandbox/react-nextjs/`](./sandbox/react-nextjs/)
+3. [`@instantdb/react-native`](./packages/react-native) ➡[`sandbox/react-native-expo/`](./sandbox/react-native-expo/)
+4. [`@instantdb/admin`](./packages/admin) ➡ [`sandbox/admin-sdk-express`](./sandbox/admin-sdk-express/)
+
+Check out the sandbox READMEs to see how to run them.
+
+### Publishing
+
+We publish our packages through GitHub actions with [https://docs.npmjs.com/trusted-publishers](https://docs.npmjs.com/trusted-publishers).
+
+To publish a new package:
+
+1. Create the package on npm
+2. Add `instantdb/instant` as a trusted publisher with js.yml as the workflow file from the package's settings [https://docs.npmjs.com/trusted-publishers#step-1-add-a-trusted-publisher-on-npmjscom](https://docs.npmjs.com/trusted-publishers#step-1-add-a-trusted-publisher-on-npmjscom)
+3. Make sure you have all of the fields needed for provenance in your package.json (your best bet is to copy https://github.com/instantdb/instant/blob/main/client/packages/core/package.json)
+4. Update `PACKAGE_PATHS` in `script/publish_pacakges.clj`
+
+## Internal Apps
+
+We also have a few internal pages and apps we use for things like metrics and
+feedback. For simple pages like '/overview' we just use a Next.js page. For more
+complex pages or apps we separate logic across
+
+- `www/lib` for app configuration
+- `www/components` for React components
+- `www/pages` for Next.js pages
+
+To illustrate a concrete example, providing feedback for the docs is powered by its own Instant
+app! We also have an internal dashboard to view feedback. Some notes on how this
+is structured:
+
+- The feedback app configuration is in `www/lib/intern/docs-feedback/`
+- The public feedback component is in `www/components/docs/`
+- The internal feedback dashboard page is in `www/pages/intern/docs-feedback.tsx`
+- The internal feedback dashboard components are in `www/components/intern/docs-feedback/`
+
+# Questions?
+
+If you have any questions, feel free to drop us a line on our [Discord](https://discord.com/invite/VU53p7uQcE)!

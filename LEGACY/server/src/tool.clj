@@ -1,0 +1,565 @@
+(ns tool
+  "Handy functions to use when you're in the REPL.
+
+   This is required in the `core` namespace, so you can use it anywhere.
+
+   The most popular:
+     (tool/def-locals)
+     (tool/copy)
+     (tool/hsql-pretty ...) and more!"
+  (:require
+   [cheshire.core :as cheshire]
+   [clojure.string :as str]
+   [honey.sql :as hsql]
+   [lambdaisland.uri :as uri]
+   [portal.api :as p]
+   [clj-async-profiler.core :as prof])
+  (:import
+   (com.github.vertical_blank.sqlformatter SqlFormatter)
+   (com.zaxxer.hikari HikariDataSource)
+   (java.net InetAddress)
+   (java.time Instant)
+   (java.util UUID)
+   (org.apache.commons.codec.binary Hex)
+   (org.postgresql.replication LogSequenceNumber)))
+
+(defmacro def-locals*
+  [prefix]
+  (let [env# &env]
+    `(do
+       ~@(->> env#
+              keys
+              (map (fn [k]
+                     (list 'def (symbol (str prefix (name k))) k)))))))
+
+(defmacro def-locals
+  "Defines all locals from wherever this is called, prefixed by a `-`.
+
+   (defn f [a] (let [b 2]
+      (def-locals)
+      (+ a b)))
+  (f 1)
+  -a ;; => 1
+  -b ;; => 2"
+  []
+  `(def-locals* "-"))
+
+(defmacro def-locals!
+  "Defines all locals from wherever this is called
+
+   (defn f [a] (let [b 2]
+      (def-locals)
+      (+ a b)))
+  (f 1)
+  a ;; => 1
+  b ;; => 2
+
+  Note: be careful when using this, as it can lead you to hard to catch bugs.
+  For example:
+
+  If you call def-locals and then update the function to remove the parameter,
+  you might not realize what you've done until you restart the server
+  "
+  []
+  `(def-locals* ""))
+
+#_{:clj-kondo/ignore [:unresolved-symbol]}
+(comment
+  (defn f [a]
+    (let [b 2]
+      (def-locals)
+      (+ a b)))
+  (f 1)
+
+  -a
+  -b
+  (defn f! [a]
+    (let [b 2]
+      (def-locals!)
+      (+ a b)))
+  (f! 1)
+  a
+  b)
+
+(defn sql-pretty [sql-str]
+  (-> (SqlFormatter/of "PostgreSql")
+      (.format sql-str)))
+
+(defn hsql-pretty [x]
+  (-> x
+      hsql/format
+      first
+      sql-pretty
+      println))
+
+(comment
+  (hsql-pretty
+   {:with [[:foo {:select :* :from :foo}]
+           [:bar {:select :* :from :bar}]]
+    :select :* :from :bar}))
+
+;; Copied from sql.clj
+(defn ->pg-text-array
+  "Formats as text[] in pg, i.e. {item-1, item-2, item3}"
+  [col]
+  (format
+   "{%s}"
+   (str/join
+    ","
+    (map (fn [s] (format "\"%s\""
+                         ;; Escape quotes (but don't double esc)
+                         (str/replace s #"(?<!\\)\"" "\\\"")))
+         col))))
+
+(defn ->pg-text-2d-array
+  [col]
+  (format
+   "{%s}"
+   (str/join
+    ","
+    (map (fn [c] (->pg-text-array c))
+         col))))
+
+;; Copied from sql.clj
+(defn ->pg-uuid-array
+  "Formats as uuid[] in pg, i.e. {item-1, item-2, item3}"
+  [uuids]
+  (let [s (StringBuilder. "{")]
+    (doseq [^UUID uuid uuids]
+      (when (not= 1 (.length s))
+        (.append s \,))
+      (.append s (.toString uuid)))
+    (.append s "}")
+    (.toString s)))
+
+(defn ->pg-stringable-array
+  "Formats stringable list, i.e. {item-1, item-2, item-3}. Works for
+  things you can call toString on that return the representation
+  postgres expects.  Doesn't work on things that might contain a
+  comma."
+  [items]
+  (let [s (StringBuilder. "{")]
+    (doseq [item items]
+      (when (not= 1 (.length s))
+        (.append s \,))
+      (.append s (if (nil? item)
+                   "null"
+                   (.toString ^Object item))))
+    (.append s "}")
+    (.toString s)))
+
+;; ISN is a Clojure deftype in instant.isn; we can't :import it here because
+;; tool.clj loads before instant.isn. Check by class name instead.
+(defn isn?
+  [v]
+  (and (some? v)
+       (= "instant.isn.ISN" (.getName ^Class (class v)))))
+
+(defn webhook-attempt?
+  [v]
+  (and (some? v)
+       (= "instant.webhook_sender.WebhookAttempt" (.getName ^Class (class v)))))
+
+;; Delegate to the reflection-free version in instant.jdbc.sql. tool.clj can't
+;; :import ISN (loaded before instant.isn) and can't :require instant.jdbc.sql
+;; eagerly for the same reason, so resolve at first call.
+(def ^:private sql-isn->composite-str
+  (delay (requiring-resolve 'instant.jdbc.sql/isn->composite-str)))
+
+(def ^:private sql-webhook-attempt->composite-str
+  (delay (requiring-resolve 'instant.jdbc.sql/webhook-attempt->composite-str)))
+
+(defn isn->composite-str
+  "Serializes an ISN as the Postgres composite literal (slot_num,lsn)."
+  ^String [v]
+  (@sql-isn->composite-str v))
+
+(defn webhook-attempt->composite-str
+  "Serializes a WebhookAttempt as the Postgres composite literal."
+  ^String [v]
+  (@sql-webhook-attempt->composite-str v))
+
+(defn ->pg-isn-array
+  "Array-literal form: {\"(s,l)\",\"(s,l)\"}. Composites must be double-quoted
+   inside an array literal because they contain commas."
+  [isns]
+  (let [s (StringBuilder. "{")]
+    (doseq [isn isns]
+      (when (not= 1 (.length s))
+        (.append s \,))
+      (.append s \")
+      (.append s (isn->composite-str isn))
+      (.append s \"))
+    (.append s "}")
+    (.toString s)))
+
+(defn ->pg-webhook-attempt-array
+  "Array-literal form for webhook_attempt[]. Composites are double-quoted
+   inside the array literal, and any embedded \" or \\ in the composite
+   literal must be escaped again for the array nesting."
+  [attempts]
+  (let [s (StringBuilder. "{")]
+    (doseq [a attempts]
+      (when (not= 1 (.length s))
+        (.append s \,))
+      (.append s \")
+      (.append s (-> (webhook-attempt->composite-str a)
+                     (str/replace "\\" "\\\\")
+                     (str/replace "\"" "\\\"")))
+      (.append s \"))
+    (.append s "}")
+    (.toString s)))
+
+(defn ->pg-json-array [items]
+  (let [s (StringBuilder. "ARRAY[")]
+    (doseq [item items]
+      (when (not= 6 (.length s))
+        (.append s \,))
+      (.append s \')
+      (.append s (str/replace (cheshire/generate-string item) #"(?<!\\)'" "\\'"))
+      (.append s \'))
+    (.append s "]::jsonb[]")))
+
+(defn ->pg-json-2d-array [items]
+  (let [s (StringBuilder. "ARRAY[")]
+    (doseq [item items]
+      (when (not= 6 (.length s))
+        (.append s \,))
+      (.append s (->pg-json-array item)))
+    (.append s "]::jsonb[][]")))
+
+(defn unsafe-sql-format-query
+  "Use with caution: this inlines parameters in the query, so it could
+   be used with sql injection.
+   Useful for running queries in psql"
+  [[q & params]]
+  (let [idx (atom 0)]
+    (-> q
+        (clojure.string/replace #"\?"
+                                (fn [_] (let [i @idx
+                                              v (nth params i)]
+                                          (swap! idx inc)
+                                          (str (cond
+                                                 (int? v) (format "%s" v)
+                                                 (string? v) (format "'%s'" (-> ^String v
+                                                                                (.replace "'" "''")))
+
+                                                 (= "text[]" (-> v meta :pgtype))
+                                                 (format "'%s'" (->pg-text-array v))
+
+                                                 (= "text[][]" (-> v meta :pgtype))
+                                                 (format "'%s'" (->pg-text-2d-array v))
+
+                                                 (= "jsonb[]" (-> v meta :pgtype))
+                                                 (->pg-json-array v)
+
+                                                 (= "jsonb[][]" (-> v meta :pgtype))
+                                                 (->pg-json-2d-array v)
+
+                                                 (or (= "uuid[]" (-> v meta :pgtype))
+                                                     (= "boolean[]" (-> v meta :pgtype))
+                                                     (= "float8[]" (-> v meta :pgtype))
+                                                     (= "timestamptz[]" (-> v meta :pgtype))
+                                                     (= "integer[]" (-> v meta :pgtype))
+                                                     (= "int[]" (-> v meta :pgtype))
+                                                     (= "bigint[]" (-> v meta :pgtype))
+                                                     (= "history_storage[]" (-> v meta :pgtype))
+                                                     (= "webhook_event_status[]" (-> v meta :pgtype))
+                                                     (and (set? v)
+                                                          (or (every? uuid? v)
+                                                              (every? boolean? v)
+                                                              (every? number? v)
+                                                              (every? (fn [x] (instance? Instant x)) v))))
+                                                 (format "'%s'%s"
+                                                         (->pg-stringable-array v)
+                                                         (if-let [pgtype (-> v meta :pgtype)]
+                                                           (str "::" pgtype)
+                                                           ""))
+
+                                                 (= "bigint[][]" (-> v meta :pgtype))
+                                                 (format "'%s'::bigint[][]"
+                                                         (->pg-stringable-array
+                                                          (map (fn [a]
+                                                                 (->pg-stringable-array a))
+                                                               v)))
+
+                                                 (or (= "bytea[]" (-> v meta :pgtype))
+                                                     (and (coll? v)
+                                                          (every? (fn [x]
+                                                                    (or (bytes? x)
+                                                                        (nil? x)))
+                                                                  v)))
+                                                 (format "'%s'::bytea[]"
+                                                         (->pg-stringable-array
+                                                          (map (fn [x]
+                                                                 (when x
+                                                                   (str "\\x" (String. (Hex/encodeHex ^bytes x)))))
+                                                               v)))
+
+                                                 (= "bytea[][]" (-> v meta :pgtype))
+                                                 (format "'%s'::bytea[]"
+                                                         (->pg-stringable-array
+                                                          (map (fn [v]
+                                                                 (->pg-stringable-array
+                                                                  (map (fn [x]
+                                                                         (when x
+                                                                           (str "\\x" (String. (Hex/encodeHex ^bytes x)))))
+                                                                       v)))
+                                                               v)))
+
+                                                 (instance? LogSequenceNumber v)
+                                                 (format "'%s'::pg_lsn" (LogSequenceNumber/.asString v))
+
+                                                 (isn? v)
+                                                 (format "'%s'::isn" (isn->composite-str v))
+
+                                                 (= "isn[]" (-> v meta :pgtype))
+                                                 (format "'%s'::isn[]" (->pg-isn-array v))
+
+                                                 (webhook-attempt? v)
+                                                 (format "'%s'::webhook_attempt"
+                                                         (.replace (webhook-attempt->composite-str v) "'" "''"))
+
+                                                 (= "webhook_attempt[]" (-> v meta :pgtype))
+                                                 (format "'%s'::webhook_attempt[]"
+                                                         (.replace (->pg-webhook-attempt-array v) "'" "''"))
+
+                                                 ;; Fallback to JSON
+                                                 (set? v)
+                                                 (->pg-json-array v)
+
+                                                 :else (format "'%s'" v))
+                                               (if (uuid? v)
+                                                 "::uuid"
+                                                 "")))))
+        ^String sql-pretty
+        ;; Fix a bug with the pretty printer where the || operator gets a space
+        (.replace "| |" "||"))))
+
+(defn unsafe-hsql-format
+  "Use with caution: this inlines parameters in the query, so it could
+   be used with sql injection.
+   Useful for running queries in psql"
+  [x]
+  (unsafe-sql-format-query (hsql/format x)))
+
+(defn req->curl [{:keys [method path params headers]}]
+  (let [param-str (str/join "&" (map #(str (name (key %)) "=" (val %)) params))
+        header-str (str/join " " (map #(str "-H \"" (name (key %)) ": " (val %) "\"") headers))]
+    (str "curl -X " (str/upper-case (name method))
+         " http://localhost:8888" path " "
+         header-str
+         " -d \"" param-str "\"")))
+
+(defn copy
+  "Stringifies the argument and copies it to the clipboard"
+  [x]
+  (let [pb (ProcessBuilder. ["pbcopy"])
+        p (.start pb)
+        os (.getOutputStream p)]
+    (.write os (.getBytes (str x)))
+    (.close os)
+    (.waitFor p)
+    x))
+
+(defn copy-quiet
+  "Stringifies the argument and copies it to the clipboard"
+  [x]
+  (copy x)
+  nil)
+
+(def ^:dynamic *time-tracker* nil)
+
+(defmacro track-time [label & body]
+  `(let [start# (. System (nanoTime))
+         ret# ~@body
+         ms# (/ (double (- (. System (nanoTime)) start#)) 1000000.0)]
+     (when *time-tracker*
+       (swap! *time-tracker* (fn [tt#]
+                               (let [time# (+ (get-in tt# [~label :time] 0)
+                                              ms#)
+                                     counts# (+ (get-in tt# [~label :counts] 0)
+                                                1)
+                                     avg# (/ time# counts#)]
+                                 (-> tt#
+                                     (assoc-in [~label :time] time#)
+                                     (assoc-in [~label :counts] counts#)
+                                     (assoc-in [~label :avg] avg#))))))
+     ret#))
+
+(def ^:dynamic *time-indent*
+  "")
+
+(def time-enabled?
+  true)
+
+(defmacro time* [msg & body]
+  (if time-enabled?
+    `(let [msg# ~msg
+           t#   (System/nanoTime)
+           res# (binding [*time-indent* (str "┌╴" *time-indent*)]
+                  ~@body)
+           dt#  (-> (System/nanoTime) (- t#) (/ 1000000.0))]
+       (println (format "%s[ %8.3f ms ] %s" *time-indent* dt# msg#))
+       res#)
+    (cons 'do body)))
+
+(defn copy-unsafe-sql-format-query
+  "Formats the [sql, ...params] query as sql and copies it to the clipboard,
+   returning the query as something that portal will display nicely."
+  [query]
+  (with-meta [(copy (unsafe-sql-format-query query))]
+    {:portal.viewer/default :tool/sql-query}))
+
+;; Adds a :tool/sql-query viewer
+(def portal-sql-query-viewer "
+  (require '[portal.ui.api :as p])
+  (require '[portal.ui.inspector :as ins])
+  (require '[portal.ui.viewer.text :as text])
+  (require '[portal.ui.commands :as cmd])
+
+
+  (p/register-viewer!
+   {:name :tool/sql-query
+    :predicate (fn [x] (and (vector? x) (string? (first x))))
+    :component (fn [query]
+                 [:<>
+                  [text/inspect-text (first query)]])})")
+
+(defonce taplist (atom (with-meta (list)
+                         {:portal.viewer/default :portal.viewer/inspector})))
+
+(def taplist-limit 1000)
+(defn add-to-taplist
+  ([v]
+   (add-to-taplist taplist v))
+  ([l v]
+   (swap! l (fn [x]
+              (take taplist-limit (conj x v))))))
+
+(defn start-portal!
+  "Lets you inspect data using Portal.
+
+   (start-portal!)
+   ;; all tap> calls will be sent to portal
+   (tap> @instant.reactive.store/store)
+
+   For a guide, see:
+   https://www.youtube.com/watch?v=Tj-iyDo3bq0"
+  ([]
+   (start-portal! taplist))
+  ([v]
+   (let [s (p/open {:value v})]
+     (when (identical? v taplist)
+       (remove-tap #'add-to-taplist)
+       (add-tap #'add-to-taplist)
+       (def portal s))
+     (p/register! #'copy-unsafe-sql-format-query)
+     (p/eval-str s portal-sql-query-viewer)
+     s)))
+
+(comment
+  (start-portal!)
+  (tap> {:hello [1 2 3]}))
+
+(defmacro inspect
+  "prints the expression '<name> is <value>', and returns the value"
+  [value]
+  `(do
+     (let [name# (quote ~value)
+           result# ~value]
+       (println "INSPECT" (pr-str name#) "is" (pr-str result#))
+       result#)))
+
+(defmacro profile [options? & body]
+  `(prof/profile ~options? ~@body))
+
+(defn prof-serve-ui
+  ([] (prof/serve-ui 8080))
+  ([port] (prof/serve-ui port)))
+
+(defmacro bench [& body]
+  `(do
+     (require 'criterium.core)
+     (criterium.core/quick-bench ~@body)
+     (flush)))
+
+(defmacro with-prod-conn
+  "Usage: (with-prod-conn [my-conn]
+            (sql/select my-conn [\"select 1\"]))"
+  [[conn-name] & body]
+  `(let [cluster-id# (-> (clojure.java.io/resource "config/prod.edn")
+                         slurp
+                         clojure.edn/read-string
+                         :database-cluster-id)
+         rds-cluster-id->db-config# (requiring-resolve 'instant.aurora-config/rds-cluster-id->db-config)
+         start-pool# (requiring-resolve 'instant.jdbc.aurora/start-pool)
+         application-name# (uri/query-encode (.getHostName (InetAddress/getLocalHost)))]
+     (with-open [~conn-name ^HikariDataSource (start-pool# 1 (rds-cluster-id->db-config# cluster-id# application-name#))]
+       ~@body)))
+
+(defn recompile-java
+  "Recompiles java files in src/java.
+   Can only be used in development.
+   May still require a restart to get rid of any instances using the old
+   definitions."
+  []
+  (require 'virgil)
+  (let [compile-java (resolve 'virgil/compile-java)]
+    (compile-java ["src"] :options ["-Xlint:all"])))
+
+(defn memory-size
+  "Measures the size of objects with https://github.com/clojure-goes-fast/clj-memory-meter
+   Can only be used in development with the memory-meter profile enabled:
+     `make memory-meter-dev` # starts the dev server and loads the memory meter library
+
+  Takes an optional options map:
+  {
+    :bytes true // defaults to false, will return bytes as a long instead of humanized
+    :shallow true // defaults to false
+    :debug true // defaults to false, will print memory usage of each level
+  }"
+  ([obj]
+   (memory-size obj {}))
+  ([obj opts]
+   (require 'clj-memory-meter.core)
+   (let [measure (resolve 'clj-memory-meter.core/measure)]
+     (measure obj opts))))
+
+(defn time+* [^long duration-in-ms f]
+  (let [^com.sun.management.ThreadMXBean bean (java.lang.management.ManagementFactory/getThreadMXBean)
+        bytes-before (.getCurrentThreadAllocatedBytes bean)
+        duration (* duration-in-ms 1000000)
+        start (System/nanoTime)
+        first-res (f)
+        delta (- (System/nanoTime) start)
+        deadline (+ start duration)
+        tight-iters (max (quot (quot duration (max 1 delta)) 10) 1)]
+    (loop [i 1]
+      (let [now (System/nanoTime)]
+        (if (< now deadline)
+          (do (dotimes [_ tight-iters] (f))
+              (recur (+ i tight-iters)))
+          (let [i' (double i)
+                bytes-after (.getCurrentThreadAllocatedBytes bean)
+                t (/ (- now start) i')]
+            (println
+             (format "Time per call: %s   Alloc per call: %,.0fb   Iterations: %d"
+                     (cond (< t 1e3) (format "%.0f ns" t)
+                           (< t 1e6) (format "%.2f us" (/ t 1e3))
+                           (< t 1e9) (format "%.2f ms" (/ t 1e6))
+                           :else (format "%.2f s" (/ t 1e9)))
+                     (/ (- bytes-after bytes-before) i')
+                     i))
+            first-res))))))
+
+(defmacro time+
+  "Like `time`, but runs the supplied body for 2000 ms and prints the average
+   time for a single iteration. Custom total time in milliseconds can be provided
+   as the first argument. Returns the returned value of the FIRST iteration.
+   From https://clojure-goes-fast.com/kb/benchmarking/time-plus/"
+  [?duration-in-ms & body]
+  (let [[duration body] (if (integer? ?duration-in-ms)
+                          [?duration-in-ms body]
+                          [2000 (cons ?duration-in-ms body)])]
+    `(~time+* ~duration (fn [] ~@body))))

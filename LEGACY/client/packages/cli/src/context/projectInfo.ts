@@ -1,0 +1,218 @@
+import { Context, Data, Effect, Layer } from 'effect';
+import { detect } from 'package-manager-detector/detect';
+import { readPackage } from 'pkg-types';
+import type { PackageJson } from 'pkg-types';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
+import { UI } from '../ui/index.ts';
+import { findProjectDir } from '../util/projectDir.ts';
+import { runUIEffect } from '../lib/ui.ts';
+import chalk from 'chalk';
+import { GlobalOpts } from './globalOpts.ts';
+import { BadArgsError } from '../errors.ts';
+
+export class ProjectInfo extends Context.Tag(
+  'instant-cli/new/context/projectInfo',
+)<
+  ProjectInfo,
+  {
+    pkgDir: string;
+    projectType: 'node' | 'deno' | 'python';
+    instantModuleName: string;
+  }
+>() {}
+
+const execAsync = promisify(exec);
+
+export const PACKAGE_ALIAS_AND_FULL_NAMES = {
+  react: '@instantdb/react',
+  'react-native': '@instantdb/react-native',
+  core: '@instantdb/core',
+  admin: '@instantdb/admin',
+  solid: '@instantdb/solidjs',
+  svelte: '@instantdb/svelte',
+  vue: '@instantdb/vue',
+};
+
+export class ProjectInfoError extends Data.TaggedError('ProjectInfoError')<{
+  message: string;
+  cause?: unknown;
+}> {}
+
+const getProjectInfo = (
+  coerce: boolean = true,
+  packageName?: keyof typeof PACKAGE_ALIAS_AND_FULL_NAMES,
+) =>
+  Effect.gen(function* () {
+    const projectDir = yield* Effect.tryPromise({
+      try: () => findProjectDir(),
+      catch: (e) =>
+        new ProjectInfoError({ message: "Couldn't get project dir" }),
+    });
+
+    if (!projectDir) {
+      return yield* new ProjectInfoError({
+        message:
+          "Couldn't find a project directory. Is there a package.json, deno.json, or pyproject.toml file?",
+      });
+    }
+
+    if (projectDir.type === 'deno' || projectDir.type === 'python') {
+      return {
+        pkgDir: projectDir.dir,
+        projectType: projectDir.type,
+        instantModuleName: '@instantdb/core',
+      };
+    }
+
+    const pkgJson = yield* Effect.tryPromise({
+      try: () => readPackage(),
+      catch: () =>
+        new ProjectInfoError({
+          message:
+            "We couldn't find an Instant SDK. Install one, or run `init`",
+        }),
+    });
+
+    yield* Effect.log('Checking for an Instant SDK...');
+    let moduleName = getInstantModuleName(pkgJson);
+    if (!moduleName && !coerce) {
+      return yield* new ProjectInfoError({
+        message: "We couldn't find an Instant SDK. Install one, or run `init`",
+      });
+    }
+
+    if (!moduleName && coerce) {
+      yield* Effect.log(
+        "Couldn't find an Instant SDK in your package.json, let's install one!",
+      );
+    } else {
+      yield* Effect.log(
+        `Found ${chalk.green(moduleName)} in your package.json.\n`,
+      );
+    }
+
+    // TODO: Clean up with option
+    const packageManager = yield* Effect.tryPromise(() => detect()).pipe(
+      Effect.flatMap(Effect.fromNullable),
+      Effect.catchTag('NoSuchElementException', () =>
+        Effect.succeed({
+          name: 'npm',
+          agent: 'npm',
+        }),
+      ),
+      Effect.option,
+    );
+
+    const { yes } = yield* GlobalOpts;
+    if (!moduleName && coerce) {
+      // install the packages
+      if (packageName) {
+        moduleName = PACKAGE_ALIAS_AND_FULL_NAMES[packageName];
+      } else {
+        if (yes) {
+          return yield* BadArgsError.make({
+            message:
+              '--yes was provided without a package specification and no Instant SDK was found',
+          });
+        }
+        moduleName = yield* runUIEffect(
+          new UI.Select({
+            promptText: 'Which package would you like to use?',
+            options: [
+              { label: '@instantdb/react', value: '@instantdb/react' },
+              {
+                label: '@instantdb/react-native',
+                value: '@instantdb/react-native',
+              },
+              { label: '@instantdb/core', value: '@instantdb/core' },
+              { label: '@instantdb/admin', value: '@instantdb/admin' },
+              { label: '@instantdb/solidjs', value: '@instantdb/solidjs' },
+              { label: '@instantdb/svelte', value: '@instantdb/svelte' },
+              { label: '@instantdb/vue', value: '@instantdb/vue' },
+            ],
+          }),
+        ).pipe(
+          Effect.flatMap(Effect.fromNullable),
+          Effect.mapError(
+            () =>
+              new ProjectInfoError({
+                message: 'Failed to select package',
+              }),
+          ),
+        );
+      }
+      const packagesToInstall = [moduleName];
+      if (moduleName === '@instantdb/react-native') {
+        packagesToInstall.push(
+          'react-native-get-random-values',
+          '@react-native-async-storage/async-storage',
+        );
+      }
+
+      const pkgManager = yield* packageManager.pipe(
+        Effect.mapError(
+          (e) =>
+            new ProjectInfoError({
+              message: 'Failed to detect package manager',
+              cause: e,
+            }),
+        ),
+      );
+
+      const installCommand = getInstallCommand(
+        pkgManager.agent,
+        packagesToInstall.join(' '),
+      );
+      yield* Effect.log(installCommand);
+      yield* runUIEffect(
+        new UI.Spinner({
+          promise: execAsync(installCommand, {
+            cwd: projectDir.dir,
+          }),
+          errorText: 'Failed to install packages',
+          workingText: `Installing ${packagesToInstall.join(', ')} using ${pkgManager.agent}...`,
+          doneText: `Installed ${packagesToInstall.join(', ')} using ${pkgManager.agent}.`,
+        }),
+      );
+      return {
+        pkgDir: projectDir.dir,
+        projectType: projectDir.type,
+        instantModuleName: moduleName,
+      };
+    } else {
+      return {
+        pkgDir: projectDir.dir,
+        projectType: projectDir.type,
+        instantModuleName: moduleName!,
+      };
+    }
+  });
+
+export const ProjectInfoLive = (
+  coerce: boolean = true,
+  packageName?: keyof typeof PACKAGE_ALIAS_AND_FULL_NAMES,
+) => Layer.effect(ProjectInfo, getProjectInfo(coerce, packageName));
+
+function getInstantModuleName(pkgJson: PackageJson) {
+  const deps = pkgJson.dependencies || {};
+  const devDeps = pkgJson.devDependencies || {};
+  const instantModuleName = [
+    '@instantdb/react',
+    '@instantdb/react-native',
+    '@instantdb/core',
+    '@instantdb/admin',
+    '@instantdb/solidjs',
+    '@instantdb/svelte',
+    '@instantdb/vue',
+  ].find((name) => deps[name] || devDeps[name]);
+  return instantModuleName;
+}
+
+function getInstallCommand(packageManager: string, moduleName: string) {
+  if (packageManager === 'npm') {
+    return `npm install ${moduleName}`;
+  } else {
+    return `${packageManager} add ${moduleName}`;
+  }
+}

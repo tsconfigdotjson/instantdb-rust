@@ -1,0 +1,293 @@
+(ns instant.util.crypt
+  (:require [instant.util.json :refer [<-json]]
+            [instant.util.memoize :refer [safe-memoize]]
+            [instant.util.uuid :as uuid-util])
+  (:import
+   (java.security KeyPair KeyFactory KeyPairGenerator MessageDigest PrivateKey)
+   (java.security.spec PKCS8EncodedKeySpec)
+   (java.util Base64 UUID)
+   (javax.crypto Mac)
+   (javax.crypto.spec SecretKeySpec)
+   (com.google.crypto.tink Aead JsonKeysetReader TinkJsonProtoKeysetFormat
+                           CleartextKeysetHandle HybridEncrypt HybridDecrypt
+                           KeysetHandle
+                           ;; Only used for bootstrapping for OSS
+                           InsecureSecretKeyAccess
+                           RegistryConfiguration
+                           PublicKeySign
+                           PublicKeyVerify)
+   (com.google.crypto.tink.aead AeadConfig
+                                PredefinedAeadParameters)
+   (com.google.crypto.tink.proto Ed25519PublicKey)
+   (com.google.crypto.tink.signature SignatureConfig
+                                     PredefinedSignatureParameters)
+   (com.google.crypto.tink.hybrid HybridConfig)
+   (com.google.crypto.tink.integration.awskms AwsKmsClient)
+   (com.google.crypto.tink.subtle Random)
+   (org.apache.commons.codec.binary Hex)))
+
+(defn uuid->sha256
+  "Returns the sha256 of a java.util.UUID as a byte array"
+  ^bytes [^UUID uuid]
+  (.digest (MessageDigest/getInstance "SHA-256") (uuid-util/->bytes uuid)))
+
+(defn str->sha256
+  "Returns the sha256 of a string as a byte array"
+  ^bytes [^String s]
+  (.digest (MessageDigest/getInstance "SHA-256") (.getBytes s)))
+
+(defn bytes->sha256
+  "Returns the sha256 of a byte array as a byte array"
+  ^bytes [^bytes b]
+  (.digest (MessageDigest/getInstance "SHA-256") b))
+
+(defn str->md5
+  "Returns the md5 of a string as a byte array"
+  ^bytes [^String s]
+  (.digest (MessageDigest/getInstance "MD5") (.getBytes s)))
+
+(defn bytes->md5
+  "Returns the md5 of a string as a byte array"
+  ^bytes [^bytes ba]
+  (.digest (MessageDigest/getInstance "MD5") ba))
+
+(defn str->utf-8-bytes
+  "Converts a string to a byte array using UTF-8 encoding"
+  ^bytes [^String s]
+  (.getBytes s "UTF-8"))
+
+;; The md5 of json null in postgres
+;; select md5('null') or (-> "null" str->md5 bytes->hex-string)
+(def json-null-md5 "37a6259cc0c1dae299a7866489dff0bd")
+
+(defn constant-bytes=
+  "Constant time comparison to prevent timing attacks"
+  [bytes-a bytes-b]
+  (MessageDigest/isEqual bytes-a bytes-b))
+
+(defn constant-uuid=
+  "Constant time comparison to prevent timing attacks"
+  [uuid-a uuid-b]
+  (MessageDigest/isEqual (uuid-util/->bytes uuid-a) (uuid-util/->bytes uuid-b)))
+
+(defn constant-string=
+  "Constant time comparison to prevent timing attacks"
+  [^String str-a ^String str-b]
+  (MessageDigest/isEqual (.getBytes str-a) (.getBytes str-b)))
+
+(defn bytes->hex-string [^bytes b]
+  (String. (Hex/encodeHex b)))
+
+(defn hex-string->bytes ^bytes [^String s]
+  (Hex/decodeHex s))
+
+(defn bytes->b64-string [^bytes b]
+  (-> (Base64/getEncoder)
+      (.encode b)
+      (String. "UTF-8")))
+
+(defn random-bytes [^Long size]
+  (Random/randBytes size))
+
+(defn random-hex [^Long size]
+  (bytes->hex-string (Random/randBytes size)))
+
+(defn hmac-256 [^bytes secret-key ^bytes b]
+  (let [mac (Mac/getInstance "HmacSHA256")]
+    (.init mac (SecretKeySpec. secret-key "HmacSHA256"))
+    (.doFinal mac b)))
+
+(defonce default-aead (atom nil))
+
+(defn assert-default-aead []
+  (if-let [aead @default-aead]
+    aead
+    (throw (Exception. "default-aead is nil"))))
+
+(defn aead-encrypt
+  "Encrypts plaintext with associated data:
+   https://developers.google.com/tink/encrypt-data#aead"
+  ([input]
+   (aead-encrypt (assert-default-aead) input))
+  ([^Aead aead {:keys [^bytes plaintext ^bytes associated-data] :as _input}]
+   (.encrypt aead plaintext associated-data)))
+
+(defn aead-decrypt
+  "Decrypts ciphertext encrypted with aead-encrypt"
+  (^bytes [input]
+   (aead-decrypt (assert-default-aead) input))
+  (^bytes [^Aead aead {:keys [^bytes ciphertext ^bytes associated-data] :as _input}]
+   (.decrypt aead ciphertext associated-data)))
+
+(defn aead-encrypt-hex
+  "Encrypts `plaintext` (a string) with `associated-data` (bytes) via
+   `aead-encrypt`, returning the ciphertext as a hex string."
+  ^String [^String plaintext ^bytes associated-data]
+  (bytes->hex-string
+   (aead-encrypt {:plaintext (str->utf-8-bytes plaintext)
+                  :associated-data associated-data})))
+
+(defn hybrid-encrypt
+  "Encrypts plaintext with associated data:
+   https://developers.google.com/tink/exchange-data#hybrid_encryption"
+  [^HybridEncrypt hybrid {:keys [^bytes plaintext ^bytes associated-data] :as _input}]
+  (.encrypt hybrid plaintext associated-data))
+
+(defn hybrid-decrypt
+  "Decrypts ciphertext encrypted with hybrid-encrypt:
+  https://developers.google.com/tink/exchange-data#hybrid_encryption"
+  [^HybridDecrypt hybrid
+   {:keys [^bytes ciphertext ^bytes associated-data] :as _input}]
+  (.decrypt hybrid ciphertext associated-data))
+
+;; A type for encapsulating sensitive information. When printed,
+;; it displays "<secret>" instead of the actual value.
+(defonce _define-secret
+  (deftype Secret [value]
+    Object
+    (toString [_this] "<secret>")))
+
+(defn secret-value [^Secret secret]
+  (.value secret))
+
+(defn obfuscate
+  "Helper function so you don't have to import the Secret type to
+  wrap a value with Secret"
+  [v]
+  (Secret. v))
+
+(defn decode-keyset-handle ^KeysetHandle [config]
+  (if-not (:encrypted? config)
+    (-> config
+        :json
+        (JsonKeysetReader/withString)
+        (CleartextKeysetHandle/read))
+    (let [client (AwsKmsClient.)
+          key-url (:kms-key-url config)
+          aead (.getAead client key-url)]
+      (TinkJsonProtoKeysetFormat/parseEncryptedKeyset (:json config)
+                                                      aead
+                                                      (byte-array 0)))))
+
+(defn get-aead-primitive [aead-config]
+  (-> (decode-keyset-handle aead-config)
+      (.getPrimitive Aead)))
+
+(defn get-hybrid-decrypt-primitive [hybrid-config]
+  (let [client (AwsKmsClient.)
+        key-url (:kms-key-url hybrid-config)
+        aead (.getAead client key-url)]
+    (-> (TinkJsonProtoKeysetFormat/parseEncryptedKeyset (:json hybrid-config)
+                                                        aead
+                                                        (byte-array 0))
+        (.getPrimitive HybridDecrypt))))
+
+(defn get-hybrid-encrypt-primitive [hybrid-config]
+  (-> (:public-key-json hybrid-config)
+      (JsonKeysetReader/withString)
+      (CleartextKeysetHandle/read)
+      (.getPrimitive HybridEncrypt)))
+
+(defn register-aead []
+  (AeadConfig/register))
+
+(defn init-aead [aead-config]
+  (register-aead)
+  (let [primitive (get-aead-primitive aead-config)]
+    (reset! default-aead primitive)))
+
+(defn register-hybrid []
+  (HybridConfig/register))
+
+(defn init-hybrid []
+  (register-hybrid))
+
+(defn register-signature []
+  (SignatureConfig/register))
+
+(defn init [aead-config]
+  (init-aead aead-config)
+  (init-hybrid)
+  (register-signature))
+
+(defn ed25519-public-jwks*
+  "Given a public Ed25519 KeysetHandle, returns a JWK Set map (RFC 7517 /
+   RFC 8037) suitable for serving from a .well-known endpoint. If you have a
+   private handle, call (.getPublicKeysetHandle handle) first."
+  [^KeysetHandle pub-handle]
+  (let [pub-json (TinkJsonProtoKeysetFormat/serializeKeysetWithoutSecret
+                  pub-handle)
+        keyset (<-json pub-json)
+        b64-decoder (Base64/getDecoder)
+        b64url-encoder (.withoutPadding (Base64/getUrlEncoder))]
+    {:keys
+     (vec
+      (for [{:strs [keyId status keyData]} (get keyset "key")
+            :when (= status "ENABLED")
+            :let [proto-bytes (.decode b64-decoder ^String (get keyData "value"))
+                  proto (Ed25519PublicKey/parseFrom proto-bytes)
+                  x (.encodeToString b64url-encoder
+                                     (.toByteArray (.getKeyValue proto)))]]
+        {:kty "OKP"
+         :crv "Ed25519"
+         :alg "EdDSA"
+         :use "sig"
+         :kid (str keyId)
+         :x x}))}))
+
+(def ed25519-public-jwks (safe-memoize ed25519-public-jwks*))
+
+(defn get-sign-primitive* [^KeysetHandle k]
+  (.getPrimitive k
+                 (RegistryConfiguration/get)
+                 PublicKeySign))
+
+(def get-sign-primitive (safe-memoize get-sign-primitive*))
+
+(defn get-verify-primitive* [^KeysetHandle k]
+  (.getPrimitive k
+                 (RegistryConfiguration/get)
+                 PublicKeyVerify))
+
+(def get-verify-primitive (safe-memoize get-verify-primitive*))
+
+(defn signature-sign [^KeysetHandle k ^bytes ba]
+  (let [^PublicKeySign primitive (get-sign-primitive k)
+        ^bytes sig (.sign primitive ba)]
+    {:kid (-> k
+              (.getKeysetInfo)
+              (.getPrimaryKeyId)
+              str)
+     :signature (bytes->hex-string sig)}))
+
+;; Utilities for bootstrap
+
+(defn generate-unencrypted-aead-keyset []
+  (-> (KeysetHandle/generateNew PredefinedAeadParameters/AES128_GCM)
+      (TinkJsonProtoKeysetFormat/serializeKeyset (InsecureSecretKeyAccess/get))))
+
+(defn generate-cloudfront-key
+  "Generates an RSA signing key for signing CloudFront urls.
+   We want the same signature for the same data, so we use an RSA key."
+  ^KeyPair []
+  (let [kpg (KeyPairGenerator/getInstance "RSA")]
+    (.initialize kpg 2048)
+    (.generateKeyPair kpg)))
+
+(defn print-rsa-public-key [^KeyPair keypair]
+  (let [public-key-bytes (.getEncoded (.getPublic keypair))
+        encoder (Base64/getMimeEncoder 64 (.getBytes "\n"))]
+    (str "-----BEGIN PUBLIC KEY-----\n"
+         (.encodeToString encoder public-key-bytes)
+         "\n-----END PUBLIC KEY-----")))
+
+(defn cloudfront-key-from-bytes ^PrivateKey [^bytes ba]
+  (let [spec (PKCS8EncodedKeySpec. ba)
+        kf (KeyFactory/getInstance "RSA")]
+    (.generatePrivate kf spec)))
+
+(defn generate-webhook-signing-key
+  "Generates a ED25519 key for signing webhook payloads."
+  ^String []
+  (-> (KeysetHandle/generateNew PredefinedSignatureParameters/ED25519WithRawOutput)
+      (TinkJsonProtoKeysetFormat/serializeKeyset (InsecureSecretKeyAccess/get))))

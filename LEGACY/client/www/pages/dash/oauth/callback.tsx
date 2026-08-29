@@ -1,0 +1,178 @@
+import { NextRouter, useRouter } from 'next/router';
+import Head from 'next/head';
+import { useEffect, useState } from 'react';
+import { Button, Content, ScreenHeading } from '@/components/ui';
+import { exchangeOAuthCodeForToken } from '@/lib/auth';
+import { messageFromInstantError } from '@/lib/errors';
+import config, { cliOauthParamName } from '@/lib/config';
+import { InstantIssue } from '@/lib/types';
+import { usePostHog } from 'posthog-js/react';
+import { Toaster } from '@instantdb/components';
+import { useDarkMode } from '@/components/dash/DarkModeToggle';
+
+type CallbackState =
+  | { type: 'router-loading' }
+  | { type: 'exchange-code'; code: string; ticket?: string }
+  | { type: 'login' }
+  | { type: 'error'; error: string };
+
+function LoadingScreen() {
+  return (
+    <div className="flex h-full w-full items-center justify-center">
+      <div className="flex w-full max-w-sm flex-col gap-4 p-4">
+        <span className="animate-slow-pulse text-center">Loading...</span>
+      </div>
+    </div>
+  );
+}
+const ErrorBubble: React.FC<{ error: string }> = ({ error }) => (
+  <div className="rounded-sm bg-red-100 px-3 py-1.5 text-sm text-red-600">
+    {error}
+  </div>
+);
+
+function ErrorScreen({ error }: { error: string }) {
+  return (
+    <div className="flex h-full w-full items-center justify-center">
+      <div className="flex w-full max-w-sm flex-col gap-4 p-4">
+        <p className="text-center text-2xl font-bold text-gray-600">
+          There was an error
+        </p>
+        <ErrorBubble error={error} />
+        <Button type="link" href="/dash">
+          Back to the dash
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function LoginScreen() {
+  return (
+    <div className="flex h-full w-full items-center justify-center">
+      <div className="flex w-full max-w-sm flex-col gap-4 p-4">
+        <ScreenHeading className="text-center">Log in</ScreenHeading>
+        <Content className="text-center">
+          <a href={`${config.apiURI}/dash/oauth/start`}>Log in with Google</a>
+        </Content>
+      </div>
+    </div>
+  );
+}
+
+function stateFromRouter(router: NextRouter): CallbackState {
+  if (!router.isReady) {
+    return { type: 'router-loading' };
+  }
+  if (typeof router.query.code === 'string') {
+    return {
+      type: 'exchange-code',
+      code: router.query.code,
+      ticket: router.query.ticket as string | undefined,
+    };
+  }
+  if (typeof router.query.error === 'string') {
+    return { type: 'error', error: router.query.error };
+  }
+  return { type: 'login' };
+}
+
+const CallbackScreen = ({ state }: { state: CallbackState }) => {
+  if (
+    state.type === 'router-loading' ||
+    state.type === 'exchange-code' ||
+    state.type === 'login'
+  ) {
+    return <LoadingScreen />;
+  }
+  if (state.type === 'error') {
+    return <ErrorScreen error={state.error} />;
+  }
+  return <LoginScreen />;
+};
+
+export default function OAuthCallback() {
+  const router = useRouter();
+  const posthog = usePostHog();
+
+  const { darkMode } = useDarkMode();
+
+  const [state, setState] = useState<CallbackState>(stateFromRouter(router));
+
+  useEffect(() => {
+    if (router.isReady && state.type === 'router-loading') {
+      setState(stateFromRouter(router));
+    }
+  }, [router.isReady, state.type]);
+
+  useEffect(() => {
+    switch (state.type) {
+      case 'exchange-code': {
+        const { code: _, ...queryWithoutCode } = router.query;
+        router.replace({
+          pathname: router.pathname,
+          query: queryWithoutCode,
+        });
+
+        exchangeOAuthCodeForToken({
+          code: state.code,
+        })
+          .then(async (res) => {
+            posthog.identify(res.user.email, {
+              user_id: res.user.id,
+              signed_up_at: res.user.created_at,
+            });
+            posthog.capture('auth_complete', {
+              auth_method: 'google',
+            });
+
+            const ticket = state.ticket;
+            const path = res.redirect_path || '/dash';
+
+            if (!ticket) {
+              router.push(path);
+              return;
+            }
+
+            const url = new URL(path, window.location.origin);
+            url.searchParams.set(cliOauthParamName, ticket);
+            const finalPath = url.href.replace(window.location.origin, '');
+            router.push(finalPath);
+          })
+          .catch((res) => {
+            const error = messageFromInstantError(res as InstantIssue);
+
+            setState({
+              type: 'error',
+              error: error || 'Error logging in.',
+            });
+          });
+        break;
+      }
+      case 'error': {
+        if (router.query.error) {
+          const { error: _, ...queryWithoutCode } = router.query;
+          router.replace({
+            pathname: router.pathname,
+            query: queryWithoutCode,
+          });
+        }
+        break;
+      }
+      case 'login': {
+        router.replace('/dash');
+        break;
+      }
+    }
+  }, [state]);
+
+  return (
+    <div className="flex h-screen w-full flex-col overflow-hidden md:flex-row">
+      <Head>
+        <title>Instant - Log in with Google</title>
+      </Head>
+      <CallbackScreen state={state} />
+      <Toaster theme={darkMode ? 'dark' : 'light'} position="top-right" />
+    </div>
+  );
+}

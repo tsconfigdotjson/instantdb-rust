@@ -1,0 +1,120 @@
+@import 'tailwindcss';
+
+@plugin '@tailwindcss/forms';
+
+@layer base {
+  @font-face {
+    font-family: 'Berk Mono';
+    font-weight: normal;
+    font-style: normal;
+    font-stretch: normal;
+    src: url('https://stopaio.s3.amazonaws.com/public/BerkeleyMono-Regular.woff2')
+      format('woff2');
+    font-display: swap;
+  }
+
+  @font-face {
+    font-family: 'Berk Mono';
+    font-weight: normal;
+    font-style: italic;
+    font-stretch: normal;
+    src: url('https://stopaio.s3.amazonaws.com/public/BerkeleyMono-Italic.woff2')
+      format('woff2');
+    font-display: swap;
+  }
+
+  @font-face {
+    font-family: 'Berk Mono';
+    font-weight: bold;
+    font-style: normal;
+    font-stretch: normal;
+    src: url('https://stopaio.s3.amazonaws.com/public/BerkeleyMono-Bold.woff2')
+      format('woff2');
+    font-display: swap;
+  }
+
+  @font-face {
+    font-family: 'Berk Mono';
+    font-weight: normal;
+    font-style: italic;
+    font-stretch: normal;
+    src: url('https://stopaio.s3.amazonaws.com/public/BerkeleyMono-BoldItalic.woff2')
+      format('woff2');
+    font-display: swap;
+  }
+
+  @font-face {
+    font-family: 'Switzer';
+    font-weight: normal;
+    font-style: normal;
+    font-stretch: normal;
+    src: url('/fonts/Switzer-Variable.woff2') format('woff2');
+    font-display: swap;
+  }
+}
+
+@theme {
+  --default-font-family: 'Switzer', var(--font-switzer), 'Georgia';
+  --default-mono-font-family: 'Berk Mono', var(--font-berk-mono), 'monospace';
+  --font-mono: 'Berk Mono';
+}
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: oklch(92.8% 0.006 264.531);
+  }
+}
+
+html {
+  --default-mono-font-family: 'Berk Mono', var(--font-berk-mono), 'monospace';
+}
+
+/* Mirrored in www/styles/globals.css for the dashboard's non-shadow-DOM mount. */
+@keyframes filter-shadow-r-fade {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes filter-shadow-l-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@utility filter-shadow-r {
+  opacity: 1;
+
+  @supports (animation-timeline: scroll()) {
+    @media (prefers-reduced-motion: no-preference) {
+      opacity: 0;
+      animation: filter-shadow-r-fade linear backwards;
+      animation-timeline: --filter-scroll;
+      animation-range: calc(100% - 16px) 100%;
+    }
+  }
+}
+
+@utility filter-shadow-l {
+  opacity: 0;
+
+  @supports (animation-timeline: scroll()) {
+    @media (prefers-reduced-motion: no-preference) {
+      animation: filter-shadow-l-fade linear forwards;
+      animation-timeline: --filter-scroll;
+      animation-range: 0% 16px;
+    }
+  }
+}

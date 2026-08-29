@@ -1,0 +1,211 @@
+import * as NodeContext from '@effect/platform-node/NodeContext';
+import * as NodeHttpClient from '@effect/platform-node/NodeHttpClient';
+import { Cause, Effect, Layer, ManagedRuntime } from 'effect';
+import { UnknownException } from 'effect/Cause';
+import { inspect } from 'node:util';
+import chalk from 'chalk';
+import { AuthTokenLive } from './context/authToken.ts';
+import { CurrentAppLive } from './context/currentApp.ts';
+import { GlobalOptsLive } from './context/globalOpts.ts';
+import { PlatformApi, PlatformApiError } from './context/platformApi.ts';
+import {
+  PACKAGE_ALIAS_AND_FULL_NAMES,
+  ProjectInfoLive,
+} from './context/projectInfo.ts';
+import {
+  InstantHttpAuthedLive,
+  InstantHttpError,
+  InstantHttpLive,
+} from './lib/http.ts';
+import { SimpleLogLayer } from './logging.ts';
+import { RequestError } from '@effect/platform/HttpClientError';
+
+const runtime = ManagedRuntime.make(SimpleLogLayer);
+
+// Best-effort stringification for unknown error causes. Tries JSON first
+// (compact, readable) and falls back to util.inspect for circular refs or
+// values JSON can't serialize (functions, BigInt, etc.).
+function serializeCause(cause: unknown): string {
+  try {
+    const json = JSON.stringify(cause);
+    if (json !== undefined) return json;
+  } catch {
+    // fall through
+  }
+  return inspect(cause, { depth: 2, breakLength: Infinity });
+}
+
+export const runCommandEffect = <A, E, R extends never>(
+  effect: Effect.Effect<A, E, R>,
+): Promise<A> => runtime.runPromise(effect.pipe(printRedErrors) as any);
+
+export const printRedErrors = Effect.catchAllCause((cause) =>
+  Effect.gen(function* () {
+    const failure = Cause.failureOption(cause);
+
+    // This should never happen because the catchAllCause should only fire when there IS a failure
+    if (failure._tag !== 'Some') {
+      return;
+    }
+
+    // Unwrap Effect.tryPromise's UnknownException so instanceof checks below
+    // match regardless of whether the error was Effect.fail'd or thrown from a Promise.
+    const theError =
+      failure.value instanceof UnknownException
+        ? failure.value.error
+        : failure.value;
+
+    // Simplify "can't connect to url errors" instead of printing
+    // crazy stack trace
+    if (theError instanceof RequestError) {
+      yield* Effect.logError(theError.toString());
+      return process.exit(1);
+    }
+
+    // Surface server-side validation messages instead of dumping a stack with
+    // the useful detail buried in [cause].
+    if (theError instanceof PlatformApiError) {
+      const cause = theError.cause;
+      const causeMessage =
+        cause instanceof Error
+          ? cause.message
+          : cause != null
+            ? serializeCause(cause)
+            : '';
+      yield* Effect.logError(
+        causeMessage
+          ? `${theError.message}: ${causeMessage}`
+          : theError.message,
+      );
+      return process.exit(1);
+    }
+
+    // Special error handling for specific error types
+    if (theError instanceof InstantHttpError) {
+      if (theError?.message) {
+        yield* Effect.logError(
+          'Error making request to Instant API: ' + theError.message,
+        );
+      }
+      if (Array.isArray(theError?.hint?.errors)) {
+        for (const err of theError.hint.errors) {
+          if (err) {
+            if (typeof err === 'string') {
+              yield* Effect.logError(err);
+            } else {
+              yield* Effect.logError(
+                `${err.in ? err.in.join('->') + ': ' : ''}${err.message}`,
+              );
+            }
+          }
+        }
+      }
+      return process.exit(1);
+    }
+
+    // Print just the message if the error has a message attribute and no cause
+    if (
+      typeof theError === 'object' &&
+      theError !== null &&
+      'message' in theError &&
+      typeof theError.message === 'string' &&
+      !('cause' in theError)
+    ) {
+      return yield* Effect.logError(theError.message).pipe(
+        Effect.tap(() => {
+          process.exit(1);
+        }),
+      );
+    }
+
+    return yield* Effect.logError(
+      Cause.pretty(cause, { renderErrorCause: true }),
+    ).pipe(
+      Effect.tap(() => {
+        process.exit(1);
+      }),
+    );
+  }),
+);
+
+/**
+ * Note:
+ Avoid Duplicate Layer Creation
+
+ Layers are memoized using reference equality. Therefore, if you have a layer that is created by calling a function like f(), you should only call that f once and re-use the resulting layer so that you are always using the same instance.
+ */
+
+// TODO: make coerce param work for auth too
+
+// Base layers
+const AuthTokenLayer = ({
+  allowAdminToken = true,
+  coerce = false,
+}: {
+  allowAdminToken: boolean;
+  coerce: boolean;
+}) =>
+  Layer.provide(AuthTokenLive({ allowAdminToken, coerce }), NodeContext.layer);
+
+const InstantHttpLayer = Layer.provide(InstantHttpLive, NodeHttpClient.layer);
+
+// Unauthenticated layer with InstantHttp + PlatformApi + GlobalOpts + NodeContext
+export const BaseLayerLive = Layer.provideMerge(
+  Layer.mergeAll(InstantHttpLayer, PlatformApi.Default, GlobalOptsLive),
+  NodeContext.layer,
+);
+
+// Authenticated layer extends BaseLayerLive with InstantHttpAuthed
+export const AuthLayerLive = ({
+  allowAdminToken = true,
+  coerce = false,
+}: {
+  allowAdminToken: boolean;
+  coerce: boolean;
+}) =>
+  Layer.provideMerge(
+    Layer.provideMerge(
+      InstantHttpAuthedLive,
+      Layer.merge(
+        AuthTokenLayer({ allowAdminToken, coerce }),
+        InstantHttpLayer,
+      ),
+    ),
+    BaseLayerLive,
+  );
+
+export const WithAppLayer = (args: {
+  appId?: string;
+  title?: string;
+  coerce: boolean;
+  coerceAuth?: boolean;
+  coerceLibraryInstall?: boolean;
+  packageName?: keyof typeof PACKAGE_ALIAS_AND_FULL_NAMES;
+  allowAdminToken?: boolean;
+  applyEnv?: boolean;
+  temp?: boolean;
+}) =>
+  Layer.mergeAll(
+    CurrentAppLive({
+      coerce: args.coerce,
+      appId: args.appId,
+      title: args.title,
+      applyEnv: args.applyEnv,
+      temp: args.temp,
+    }),
+  ).pipe(
+    Layer.provideMerge(
+      AuthLayerLive({
+        allowAdminToken:
+          args.allowAdminToken !== undefined ? args.allowAdminToken : true,
+        coerce: args.coerceAuth ?? false,
+      }),
+    ),
+    Layer.provideMerge(
+      ProjectInfoLive(
+        args.coerceLibraryInstall ?? args.coerce,
+        args.packageName,
+      ),
+    ),
+    Layer.provideMerge(BaseLayerLive),
+  );

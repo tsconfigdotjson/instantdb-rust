@@ -1,0 +1,327 @@
+import { SectionHeading, Button, Content } from '@/components/ui';
+import { friendlyErrorMessage, useAuthedFetch } from '@/lib/auth';
+import { messageFromInstantError } from '@/lib/errors';
+import config, { isSelfHosted, stripeKey } from '@/lib/config';
+import { TokenContext } from '@/lib/contexts';
+import { jsonFetch } from '@/lib/fetch';
+import { AppsSubscriptionResponse, InstantIssue } from '@/lib/types';
+import { loadStripe } from '@stripe/stripe-js';
+import { useContext, useRef, useState } from 'react';
+import { Loading, ErrorMessage } from '@/components/dash/shared';
+import { errorToast } from '@/lib/toast';
+import confetti from 'canvas-confetti';
+import { useOrgPaid } from '@/lib/hooks/useOrgPaid';
+import { useFetchedDash } from '@/components/dash/MainDashLayout';
+import Link from 'next/link';
+
+export const GB_1 = 1024 * 1024 * 1024;
+export const GB_10 = 10 * GB_1;
+export const GB_250 = 250 * GB_1;
+
+function stripeErrorMessage() {
+  return isSelfHosted
+    ? 'Failed to connect w/ Stripe! Try again or contact your deployment administrator if this persists.'
+    : 'Failed to connect w/ Stripe! Try again or ping us on Discord if this persists.';
+}
+
+export function roundToDecimal(num: number, decimalPlaces: number) {
+  const factor = Math.pow(10, decimalPlaces);
+  return Math.round(num * factor) / factor;
+}
+
+export function friendlyUsage(usage: number) {
+  if (usage < GB_1) {
+    const mb = roundToDecimal(usage / (1024 * 1024), 2);
+    if (mb === 0) {
+      const kb = roundToDecimal(usage / 1024, 2);
+      if (kb !== 0) {
+        return `${kb} KB`;
+      }
+    }
+    return `${mb} MB`;
+  }
+  return `${roundToDecimal(usage / (1024 * 1024 * 1024), 2)} GB`;
+}
+
+async function createCheckoutSession(appId: string, token: string) {
+  const sessionPromise = jsonFetch(
+    `${config.apiURI}/dash/apps/${appId}/checkout_session`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+    },
+  );
+  Promise.all([loadStripe(stripeKey), sessionPromise])
+    .then(([stripe, session]) => {
+      if (!stripe || !session) {
+        throw new Error('Failed to create checkout session');
+      }
+      stripe.redirectToCheckout({ sessionId: session.id });
+    })
+    .catch((err) => {
+      const message =
+        messageFromInstantError(err as InstantIssue) || stripeErrorMessage();
+      const friendlyMessage = friendlyErrorMessage('dash-billing', message);
+      errorToast(friendlyMessage);
+      console.error(err);
+    });
+}
+
+async function createPortalSession(appId: string, token: string) {
+  const sessionPromise = jsonFetch(
+    `${config.apiURI}/dash/apps/${appId}/portal_session`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+    },
+  );
+  Promise.all([loadStripe(stripeKey), sessionPromise])
+    .then(([stripe, session]) => {
+      if (!stripe || !session) {
+        throw new Error('Failed to create portal session');
+      }
+      window.open(session.url, '_blank');
+    })
+    .catch((err) => {
+      const message =
+        messageFromInstantError(err as InstantIssue) || stripeErrorMessage();
+      const friendlyMessage = friendlyErrorMessage('dash-billing', message);
+      errorToast(friendlyMessage);
+      console.error(err);
+    });
+}
+
+export function ProgressBar({ width }: { width: number }) {
+  return (
+    <div className="relative h-1.5 overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-700">
+      <div
+        style={{ width: `${width}%` }}
+        className="absolute top-0 left-0 h-full bg-indigo-500"
+      />
+    </div>
+  );
+}
+
+export default function Billing({ appId }: { appId: string }) {
+  const token = useContext(TokenContext);
+  const confettiRef = useRef<HTMLDivElement>(null);
+  const [isActivating, setIsActivating] = useState(false);
+
+  const onUpgrade = async (
+    e: React.MouseEvent<HTMLButtonElement, MouseEvent>,
+  ) => {
+    e.preventDefault();
+    createCheckoutSession(appId, token);
+  };
+
+  const onManage = async (
+    e: React.MouseEvent<HTMLButtonElement, MouseEvent>,
+  ) => {
+    e.preventDefault();
+    createPortalSession(appId, token);
+  };
+
+  const orgIsPaid = useOrgPaid();
+  const fetchedDash = useFetchedDash();
+  const billingClosed = fetchedDash.data.sunset?.['billing-closed'] ?? false;
+  const paidFeaturesFree =
+    fetchedDash.data.sunset?.['paid-features-free'] ?? false;
+
+  const authResponse = useAuthedFetch<AppsSubscriptionResponse>(
+    `${config.apiURI}/dash/apps/${appId}/billing`,
+  );
+
+  const onActivateSelfHostedSub = async () => {
+    setIsActivating(true);
+    try {
+      await jsonFetch(
+        `${config.apiURI}/dash/apps/${appId}/self_hosted_subscription`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+        },
+      );
+      await Promise.all([
+        authResponse.mutate(undefined, { revalidate: true }),
+        fetchedDash.refetch(),
+      ]);
+    } catch (err) {
+      const message =
+        messageFromInstantError(err as InstantIssue) ||
+        'Failed to activate the included Pro plan.';
+      errorToast(friendlyErrorMessage('dash-billing', message));
+    } finally {
+      setIsActivating(false);
+    }
+  };
+
+  if (authResponse.isLoading) {
+    return <Loading />;
+  }
+
+  if (orgIsPaid) {
+    return (
+      <div className="">
+        <div className="parent rounded-sm p-3">
+          <div className="p-2">This app is part of a paid organization.</div>
+          <Link href={'/dash/org?tab=billing'}>
+            <Button>Manage Organization Billing</Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  const data = authResponse.data;
+
+  if (!data) {
+    return (
+      <div className="mx-auto flex max-w-xl flex-col gap-4 p-2">
+        <ErrorMessage>
+          <div className="flex gap-2">
+            There was an error loading the data.{' '}
+            <Button
+              variant="subtle"
+              size="mini"
+              onClick={() =>
+                authResponse.mutate(undefined, { revalidate: true })
+              }
+            >
+              Refresh.
+            </Button>
+          </div>
+        </ErrorMessage>
+      </div>
+    );
+  }
+
+  const subscriptionName = data['subscription-name'];
+  const isFreeTier = subscriptionName === 'Free';
+  const isSelfHostedSubscription =
+    data['subscription-source'] === 'self-hosted';
+  const canActivateSelfHostedPlan =
+    isFreeTier && data['self-hosted-plan-enabled'];
+  const totalAppBytes = data['total-app-bytes'] || 0;
+  const totalStorageBytes = data['total-storage-bytes'] || 0;
+  const totalUsageBytes = totalAppBytes + totalStorageBytes;
+  const progressDen = isFreeTier ? GB_1 : GB_10;
+  const progress = Math.round((totalUsageBytes / progressDen) * 100);
+
+  return (
+    <div className="flex max-w-md flex-col gap-4 p-4">
+      <SectionHeading>Billing</SectionHeading>
+      <div className="flex items-center gap-2">
+        <h1 className="font-bold">Current plan</h1>
+        {isFreeTier ? (
+          <div className="rounded-sm border px-2 py-1 font-bold dark:border-neutral-600">
+            {subscriptionName}
+          </div>
+        ) : (
+          <div style={{ animation: 'wiggle 5s infinite' }}>
+            <div
+              ref={confettiRef}
+              className="translate-y-0 cursor-pointer rounded-sm border border-purple-400 bg-purple-100 px-2 py-1 font-mono font-bold text-purple-800 transition-all select-none hover:-translate-y-1 active:scale-90 dark:border-purple-400/50 dark:bg-purple-800/40 dark:text-purple-100"
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+
+                const originX = (rect.x + 0.5 * rect.width) / window.innerWidth;
+                const originY =
+                  (rect.y + 0.5 * rect.height) / window.innerHeight;
+
+                confetti({
+                  angle: randomInRange(55, 125),
+                  spread: randomInRange(50, 70),
+                  particleCount: randomInRange(50, 100),
+                  origin: { x: originX, y: originY },
+                });
+              }}
+            >
+              {subscriptionName} <span>🎉</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="gap flex flex-col rounded-sm border bg-white px-2 pt-1 pb-3 dark:border-neutral-700 dark:bg-neutral-800">
+        <h2 className="flex justify-between gap-2 p-2">
+          <span className="font-bold">Usage</span>{' '}
+          <span className="font-mono text-sm">
+            {friendlyUsage(totalUsageBytes)}
+            {paidFeaturesFree ? '' : ` / ${friendlyUsage(progressDen)}`}
+          </span>
+        </h2>
+        {paidFeaturesFree ? null : <ProgressBar width={progress} />}
+        <div className="flex justify-start gap-4 pt-3 pl-2 text-sm">
+          <span className="font-mono text-sm text-gray-500 dark:text-neutral-400">
+            DB ({friendlyUsage(totalAppBytes)})
+          </span>
+
+          <span className="font-mono text-sm text-gray-500 dark:text-neutral-400">
+            Storage ({friendlyUsage(totalStorageBytes)})
+          </span>
+        </div>
+      </div>
+      {isSelfHostedSubscription ? (
+        <Content className="rounded-sm border border-purple-400 bg-purple-100 px-2 py-2 text-sm text-purple-800 dark:border-purple-500/50 dark:bg-purple-500/20 dark:text-white">
+          <span className="font-bold">Self-hosted Pro mode</span>
+          <br />
+          The Pro plan is included with this self-hosted instance.
+        </Content>
+      ) : canActivateSelfHostedPlan ? (
+        <div className="flex flex-col space-y-4">
+          <Button
+            variant="primary"
+            loading={isActivating}
+            onClick={onActivateSelfHostedSub}
+          >
+            Activate Pro for free
+          </Button>
+          <Content className="rounded-sm border border-purple-400 bg-purple-100 px-2 py-2 text-sm text-purple-800 dark:border-purple-500/50 dark:bg-purple-500/20 dark:text-white">
+            The Pro plan is included with this self-hosted instance.
+          </Content>
+        </div>
+      ) : billingClosed ? (
+        <div className="flex flex-col space-y-4">
+          <Content className="rounded-sm border border-purple-400 bg-purple-100 px-2 py-1 text-sm text-purple-800 italic dark:border-purple-500/50 dark:bg-purple-500/20 dark:text-white">
+            Instant is winding down. Paid features like teams are now included
+            on every plan for free, plan limits are removed, and we no longer
+            sell subscriptions. Existing subscriptions end at the close of their
+            billing period.
+          </Content>
+          {isFreeTier ? null : (
+            <Button variant="primary" onClick={onManage}>
+              Manage subscription
+            </Button>
+          )}
+        </div>
+      ) : isFreeTier ? (
+        <div className="flex flex-col space-y-4">
+          <Button variant="primary" onClick={onUpgrade}>
+            Upgrade to Pro
+          </Button>
+          <Content className="rounded-sm border border-purple-400 bg-purple-100 px-2 py-1 text-sm text-purple-800 italic dark:border-purple-500/50 dark:bg-purple-500/20 dark:text-white">
+            Pro offers 10GB of storage, backups, multiple team members for apps,
+            and priority support.
+          </Content>
+        </div>
+      ) : (
+        <Button variant="primary" onClick={onManage}>
+          Manage Pro subscription
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function randomInRange(min: number, max: number) {
+  return Math.random() * (max - min) + min;
+}

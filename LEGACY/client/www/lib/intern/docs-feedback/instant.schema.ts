@@ -1,0 +1,140 @@
+// Docs: https://www.instantdb.com/docs/modeling-data
+
+import { i } from '@instantdb/react';
+import { UIMessagePart } from 'ai';
+
+const _schema = i.schema({
+  entities: {
+    $files: i.entity({
+      path: i.string().unique().indexed(),
+      url: i.string(),
+    }),
+    $streams: i.entity({
+      abortReason: i.string().optional(),
+      clientId: i.string().unique().indexed(),
+      done: i.boolean().optional(),
+      size: i.number().optional(),
+      localId: i.string().optional(),
+    }),
+    $users: i.entity({
+      email: i.string().unique().indexed().optional(),
+    }),
+    ratings: i.entity({
+      extraComment: i.string().optional(),
+      key: i.string().unique(),
+      localId: i.string(),
+      pageId: i.string().indexed(),
+      wasHelpful: i.boolean(),
+      createdAt: i.date().indexed().optional(),
+      isArchived: i.boolean().indexed().optional(),
+    }),
+    chats: i.entity({
+      createdAt: i.date().indexed(),
+      localId: i.string(),
+      createdByUserId: i.string(),
+    }),
+    messages: i.entity({
+      index: i.number().indexed(),
+      role: i.string(),
+      metadata: i.any().optional(),
+      parts: i.json<Array<UIMessagePart<any, any>>>(),
+      createdAt: i.date().indexed(),
+    }),
+    llmUsage: i.entity({
+      userId: i.string(),
+      userEmail: i.string().indexed().optional(),
+      usedAt: i.date().indexed(),
+      tokens: i.number().indexed(),
+    }),
+    ghStarTotals: i.entity({
+      repoId: i.number().unique(),
+      repoFullName: i.string().indexed(),
+      stargazersCount: i.number(),
+    }),
+    ghStarGazers: i.entity({
+      repoId: i.number(),
+      repoFullName: i.string().indexed(),
+      starredAt: i.date(),
+      senderLogin: i.string(),
+      senderId: i.number(),
+      senderType: i.string(),
+    }),
+  },
+  links: {
+    chatMessages: {
+      forward: {
+        on: 'chats',
+        has: 'many',
+        label: 'messages',
+        required: false,
+      },
+      reverse: {
+        on: 'messages',
+        has: 'one',
+        label: 'chat',
+        required: true,
+      },
+    },
+    $streams$files: {
+      forward: {
+        on: '$streams',
+        has: 'many',
+        label: '$files',
+      },
+      reverse: {
+        on: '$files',
+        has: 'one',
+        label: '$stream',
+        onDelete: 'cascade',
+      },
+    },
+    message$stream: {
+      forward: {
+        on: 'messages',
+        has: 'one',
+        label: '$stream',
+        onDelete: 'cascade',
+      },
+      reverse: {
+        on: '$streams',
+        has: 'one',
+        label: 'message',
+      },
+    },
+    chat$stream: {
+      forward: {
+        on: 'chats',
+        has: 'one',
+        label: '$stream',
+        onDelete: 'cascade',
+      },
+      reverse: {
+        on: '$streams',
+        has: 'one',
+        label: 'chat',
+      },
+    },
+  },
+  rooms: {
+    homepageStorageDemo: {
+      presence: i.entity({}),
+      topics: {
+        hearts: i.entity({}),
+      },
+    },
+    homepagePresenceDemo: {
+      presence: i.entity({}),
+      topics: {
+        emoji: i.entity({ emoji: i.string() }),
+      },
+    },
+  },
+});
+
+// This helps TypeScript display nicer intellisense
+type _AppSchema = typeof _schema;
+interface AppSchema extends _AppSchema {}
+const schema: AppSchema = _schema;
+
+export type { AppSchema };
+export default schema;

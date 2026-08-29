@@ -1,0 +1,497 @@
+(ns instant.config
+  (:require [clojure.string :as string]
+            [clojure.tools.logging :as log]
+            [instant.config-edn :as config-edn]
+            [instant.util.crypt :as crypt-util]
+            [instant.util.aws :as aws-util]
+            [instant.util.email :as email]
+            [instant.aurora-config :as aurora-config]
+            [lambdaisland.uri :as uri]
+            [lambdaisland.uri.normalize :as normalize])
+  (:import
+   (com.google.crypto.tink KeysetHandle)
+   (java.net InetAddress)
+   (java.time ZoneId ZonedDateTime)
+   (javax.crypto.spec SecretKeySpec)))
+
+(defonce hostname
+  (delay
+    (try
+      (.getHostName (InetAddress/getLocalHost))
+      (catch Exception e
+        (log/error "Error getting hostname" e)
+        "unknown"))))
+
+(def ^:dynamic *env*
+  nil)
+
+(def staging-env (System/getenv "STAGING"))
+(def prod-env (System/getenv "PRODUCTION"))
+
+(defn get-env []
+  (cond
+    (some? *env*)                                 *env*
+    ;; n.b. make sure this the staging check is first so that we can
+    ;;      override it in the eb env vars
+    (= "true" staging-env)                        :staging
+    (= "true" prod-env)                           :prod
+    (= "test" (System/getProperty "instant.env")) :test
+    (= "true" (System/getenv "TEST"))             :test
+    :else                                         :dev))
+
+(defn prod? [] (= :prod (get-env)))
+
+(defn dev? [] (= :dev (get-env)))
+
+(defn test? [] (= :test (get-env)))
+
+(defn using-swarm? []
+  (some? (System/getenv "SWARM_SERVICE_NAME")))
+
+(defn aws-env? []
+  (contains? #{:prod :staging} (get-env)))
+
+(def use-logfmt? (aws-env?))
+
+(def instant-config-app-id
+  #uuid "24a4d71b-7bb2-4630-9aee-01146af26239")
+
+(defn superuser-email
+  "The self-hosted deployment operator's email (INSTANT_SUPERUSER_EMAIL),
+   normalized. nil when unset (or blank), e.g. on the hosted deployment.
+   Throws when set to something that isn't a valid email."
+  []
+  (when-let [value (some-> (System/getenv "INSTANT_SUPERUSER_EMAIL")
+                           string/trim
+                           not-empty)]
+    (or (email/coerce value)
+        (throw (ex-info
+                "INSTANT_SUPERUSER_EMAIL must be a valid email address."
+                {:value value})))))
+
+(defonce instance-id
+  (delay
+    (when (aws-env?)
+      (aws-util/get-instance-id))))
+
+(defonce machine-id (random-uuid))
+
+(defonce process-id
+  (delay
+    (string/replace
+     (string/join "_"
+                  [(name (get-env))
+                   (or @instance-id
+                       (crypt-util/random-hex 8))
+                   (crypt-util/random-hex 8)])
+     #"-" "_")))
+
+(def config-map
+  (delay (do
+           ;; init-hybrid because we might need it to decrypt the config
+           (crypt-util/init-hybrid)
+           (crypt-util/register-signature)
+
+           (config-edn/decrypted-config crypt-util/obfuscate
+                                        crypt-util/get-hybrid-decrypt-primitive
+                                        crypt-util/hybrid-decrypt
+                                        (aws-env?)
+                                        (config-edn/read-config (get-env))))))
+
+(def rate-limit-hmac-secret
+  (delay (SecretKeySpec. (or (some-> @config-map
+                                     :rate-limit-hmac-key
+                                     crypt-util/secret-value
+                                     crypt-util/hex-string->bytes)
+                             (crypt-util/random-bytes 32))
+                         "HmacSHA256")))
+
+(defn s3-storage-access-key []
+  (some-> @config-map :s3-storage-access-key crypt-util/secret-value))
+
+(defn s3-storage-secret-key []
+  (some-> @config-map :s3-storage-secret-key crypt-util/secret-value))
+
+(defn s3-endpoint []
+  (or (System/getenv "S3_ENDPOINT")
+      (some-> @config-map :s3-endpoint)))
+
+(defn s3-public-endpoint []
+  (or (System/getenv "S3_PUBLIC_ENDPOINT")
+      (some-> @config-map :s3-public-endpoint)
+      (s3-endpoint)))
+
+(defn s3-region []
+  (or (System/getenv "AWS_REGION")
+      (some-> @config-map :s3-region)
+      "us-east-1"))
+
+(defn postmark-token []
+  (or (System/getenv "POSTMARK_TOKEN")
+      (some-> @config-map :postmark-token crypt-util/secret-value)))
+
+(defn sendgrid-token []
+  (or (some-> (System/getenv "SENDGRID_TOKEN") string/trim not-empty)
+      (some-> @config-map :sendgrid-token crypt-util/secret-value)))
+
+(defn postmark-account-token []
+  (or (System/getenv "POSTMARK_ACCOUNT_TOKEN")
+      (some-> @config-map :postmark-account-token crypt-util/secret-value)))
+
+(defn email-reply-to []
+  (or (System/getenv "INSTANT_EMAIL_REPLY_TO")
+      "hello@instantdb.com"))
+
+(defn dashboard-email-sender []
+  {:name (or (System/getenv "INSTANT_DASHBOARD_EMAIL_SENDER_NAME")
+             "Instant")
+   :email (or (System/getenv "INSTANT_DASHBOARD_EMAIL_SENDER_EMAIL")
+              "verify@dash-pm.instantdb.com")})
+
+(defn app-email-sender []
+  {:name (System/getenv "INSTANT_APP_EMAIL_SENDER_NAME")
+   :email (or (System/getenv "INSTANT_APP_EMAIL_SENDER_EMAIL")
+              "verify@auth-pm.instantdb.com")})
+
+(defn team-email-sender []
+  {:name (or (System/getenv "INSTANT_TEAM_EMAIL_SENDER_NAME")
+             "Instant")
+   :email (or (System/getenv "INSTANT_TEAM_EMAIL_SENDER_EMAIL")
+              "teams@pm.instantdb.com")})
+
+(defn email-provider
+  "Explicit email-provider override for self-hosted deployments
+   (INSTANT_EMAIL_PROVIDER = \"postmark\" | \"sendgrid\"). Wins over token
+   auto-detection when set. nil when unset."
+  []
+  (some-> (System/getenv "INSTANT_EMAIL_PROVIDER")
+          string/trim
+          string/lower-case
+          not-empty
+          keyword))
+
+(defn sendgrid-send-enabled? []
+  (not (string/blank? (sendgrid-token))))
+
+(defn postmark-send-enabled? []
+  (not (string/blank? (postmark-token))))
+
+(defn postmark-admin-enabled? []
+  (not (string/blank? (postmark-account-token))))
+
+(defn secret-discord-token []
+  (some-> @config-map :secret-discord-token crypt-util/secret-value))
+
+(defn discord-enabled? []
+  (not (string/blank? (secret-discord-token))))
+
+(def discord-signups-channel-id
+  "1235663275144908832")
+
+(def discord-teams-channel-id
+  "1196584090552512592")
+
+(def discord-debug-channel-id
+  "1235659966627582014")
+
+(def discord-errors-channel-id
+  "1235713531018612896")
+
+(def instant-on-instant-app-id
+  (when-let [app-id (System/getenv "INSTANT_ON_INSTANT_APP_ID")]
+    (parse-uuid app-id)))
+
+(def webhook-signing-key* (delay (-> @config-map
+                                     :webhook-keyset
+                                     crypt-util/decode-keyset-handle)))
+
+(defn webhook-signing-key ^KeysetHandle []
+  @webhook-signing-key*)
+
+(def webhook-public-key* (delay (-> (webhook-signing-key)
+                                    (.getPublicKeysetHandle))))
+
+(defn webhook-public-key ^KeysetHandle []
+  @webhook-public-key*)
+
+(defn db-url->config [url]
+  (cond (string/starts-with? url "jdbc")
+        {:jdbcUrl url}
+
+        (string/starts-with? url "postgresql")
+        (let [{:keys [user password host port path]} (uri/parse url)]
+          {:dbtype "postgres"
+           :dbname (if (string/starts-with? path "/")
+                     (subs path 1)
+                     path)
+           :user user
+           :password (normalize/percent-decode password)
+           :host host
+           :port (when port
+                   (Integer/parseInt port))})
+
+        :else
+        (throw (Exception. "Invalid database connection string. Expected either a JDBC url or a postgres url."))))
+
+(defn aurora-config-from-database-url []
+  (let [url (or (System/getenv "DATABASE_URL")
+                (some-> @config-map :database-url crypt-util/secret-value)
+                "jdbc:postgresql://localhost:5432/instant")]
+    (db-url->config url)))
+
+(defn aurora-config-from-cluster-id [application-name]
+  (when-let [cluster-id (or (System/getenv "DATABASE_CLUSTER_ID")
+                            (some-> @config-map :database-cluster-id))]
+    (aurora-config/rds-cluster-id->db-config cluster-id application-name)))
+
+(defn db-application-name []
+  (uri/query-encode (format "%s, %s"
+                            @hostname
+                            @process-id)))
+
+(defn get-aurora-config []
+  (let [application-name (db-application-name)
+        config (or (aurora-config-from-cluster-id application-name)
+                   (aurora-config-from-database-url))]
+    (assoc config
+           :ApplicationName application-name)))
+
+(defn next-aurora-config-from-cluster-id [application-name]
+  (when-let [cluster-id (or (System/getenv "NEXT_DATABASE_CLUSTER_ID")
+                            (some-> @config-map :next-database-cluster-id))]
+    (aurora-config/rds-cluster-id->db-config cluster-id application-name)))
+
+(defn next-aurora-config-from-database-url []
+  (when-let [url (or (System/getenv "NEXT_DATABASE_URL")
+                     (some-> @config-map :next-database-url crypt-util/secret-value))]
+    (db-url->config url)))
+
+(defn get-next-aurora-config []
+  (let [application-name (db-application-name)]
+    (when-let [config (or (next-aurora-config-from-cluster-id application-name)
+                          (next-aurora-config-from-database-url))]
+      (assoc config
+             :ApplicationName application-name))))
+
+(defn dashboard-origin
+  ([] (dashboard-origin {:env (get-env)}))
+  ([{:keys [env]}]
+   (or (System/getenv "INSTANT_DASHBOARD_URL")
+       (case env
+         :prod "https://www.instantdb.com"
+         :staging "https://staging.instantdb.com"
+         "http://localhost:3000"))))
+
+(def instance-events-sns-topic-arn
+  (or (System/getenv "INSTANCE_EVENTS_SNS_TOPIC_ARN")
+      "arn:aws:sns:us-east-1:597134865416:instance-events"))
+
+(def instance-events-sqs-queue-arn-prefix
+  (or (System/getenv "INSTANCE_EVENTS_SQS_TOPIC_ARN_PREFIX")
+      "arn:aws:sqs:us-east-1:597134865416:"))
+
+;; ---
+;; Stripe
+(defn stripe-secret []
+  ;; Add an override from the environment because we need
+  ;; it for the tests (populated at https://github.com/jsventures/instant/settings/secrets/actions)
+  (let [env-secret (System/getenv "STRIPE_API_KEY")]
+    (or (when-not (string/blank? env-secret) env-secret)
+        (some-> @config-map :stripe-secret crypt-util/secret-value))))
+
+(defn default-paid-app? []
+  (string/blank? (stripe-secret)))
+
+(defn stripe-webhook-secret []
+  (-> @config-map :stripe-webhook-secret crypt-util/secret-value))
+
+(defn stripe-return-url [type obj-id]
+  (case type
+    :app (str (dashboard-origin)
+              "/dash?t=billing&app="
+              obj-id)
+    :org (str (dashboard-origin)
+              "/dash/org?tab=billing&org="
+              obj-id)))
+
+(def test-pro-subscription "price_1P4ocVL5BwOwpxgU8Fe6oRWy")
+(def prod-pro-subscription "price_1P4nokL5BwOwpxgUpWoidzdL")
+(defn stripe-pro-subscription
+  ([] (stripe-pro-subscription {:env (get-env)}))
+  ([{:keys [env]}]
+   (case env
+     :prod prod-pro-subscription
+     test-pro-subscription)))
+
+(def test-startup-subscription "price_1RvkYbL5BwOwpxgUoDyhZtzN")
+(def prod-startup-subscription "price_1RvkPZL5BwOwpxgUSVW7f2dd")
+(defn stripe-startup-subscription
+  ([] (stripe-startup-subscription {:env (get-env)}))
+  ([{:keys [env]}]
+   (case env
+     :prod prod-startup-subscription
+     test-startup-subscription)))
+
+(defn get-honeycomb-api-key []
+  (some-> @config-map :honeycomb-api-key crypt-util/secret-value))
+
+(defn get-honeycomb-endpoint []
+  (or (System/getenv "HONEYCOMB_ENDPOINT")
+      "https://api.honeycomb.io:443"))
+
+;; ---
+;; PostHog
+(defn get-posthog-api-key []
+  (some-> @config-map :posthog-api-key crypt-util/secret-value))
+
+(defn posthog-enabled? []
+  (not (string/blank? (get-posthog-api-key))))
+
+(defn get-google-oauth-client
+  ([]
+   (get-google-oauth-client
+    (System/getenv "INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID")
+    (System/getenv "INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET")))
+  ([client-id client-secret]
+   (cond
+     (every? string/blank? [client-id client-secret])
+     (-> @config-map :google-oauth-client)
+
+     (some string/blank? [client-id client-secret])
+     (throw (ex-info (str "INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID and "
+                          "INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET must be set together")
+                     {}))
+
+     :else
+     {:client-id client-id
+      :client-secret (crypt-util/obfuscate client-secret)})))
+
+(defn shared-oauth-clients []
+  (-> @config-map :shared-oauth-clients))
+
+(def s3-bucket-name
+  (or (System/getenv "S3_BUCKET")
+      (case (get-env)
+        :prod "instant-storage"
+        :staging "instant-storage-staging"
+        "instantdb-test-bucket")))
+
+(def s3-wal-history-bucket-name
+  (when-not (= "pg" (System/getenv "WAL_HISTORY_STORAGE"))
+    (or (System/getenv "WAL_HISTORY_BUCKET_NAME")
+        (case (get-env)
+          :prod "instant-wal-logs-prod--use1-az4--x-s3"
+          :staging "instant-wal-logs-staging--use1-az4--x-s3"
+          :dev "instant-wal-logs-dev--use1-az4--x-s3"
+          nil))))
+
+(def s3-app-backups-bucket-name
+  (or (System/getenv "S3_APP_BACKUPS_BUCKET")
+      (case (get-env)
+        :prod "app-backups-prod-597134865416-us-east-1-an"
+        :staging "app-backups-staging-597134865416-us-east-1-an"
+        :dev "app-backups-dev-597134865416-us-east-1-an"
+        nil)))
+
+(def wal-history-prefix
+  (when (= :dev (get-env))
+    @hostname))
+
+(def cloudfront-s3-url
+  (case (get-env)
+    :prod {"instant-storage" "https://files.instantdb.com"
+           "app-backups-prod-597134865416-us-east-1-an" "https://backups.instantdb.com"}
+    :dev {"instantdb-test-bucket" "https://files-dev.instantdb.com"
+          "app-backups-dev-597134865416-us-east-1-an" "https://app-backups-dev.instantdb.com"}
+    :staging {"instant-storage-staging" "https://files-staging.instantdb.com"
+              "app-backups-staging-597134865416-us-east-1-an" "https://app-backups-staging.instantdb.com"}
+    {}))
+
+(def cloudfront-signing-key
+  (delay (when-let [{:keys [key-id private-key]} (-> @config-map
+                                                     :cloudfront-signing-key)]
+           {:key-id key-id
+            :private-key (-> private-key
+                             crypt-util/secret-value
+                             crypt-util/cloudfront-key-from-bytes)})))
+
+(defn get-connection-pool-size []
+  (or (some-> (System/getenv "CONNECTION_POOL_SIZE")
+              (parse-long))
+      (case (get-env)
+        (:prod :staging) 400
+        20)))
+
+(defn env-integer [var-name]
+  (when-let [envvar (System/getenv var-name)]
+    (Integer/parseInt envvar)))
+
+(defn get-server-port []
+  (or (env-integer "PORT")
+      (env-integer "BEANSTALK_PORT")
+      (if-not (= :test (get-env))
+        8888
+        8886)))
+
+(defn get-server-ssl-port []
+  (or (env-integer "SSL_PORT")
+      (if-not (= :test (get-env))
+        8889
+        8887)))
+
+(def server-origin
+  (or (System/getenv "INSTANT_BACKEND_URL")
+      (case (get-env)
+        :prod "https://api.instantdb.com"
+        :staging "https://api-staging.instantdb.com"
+        (str "http://localhost:" (get-server-port)))))
+
+(defn get-nrepl-port []
+  (or (env-integer "NREPL_PORT") 6005))
+
+(defn get-hz-port []
+  (if-let [env-port (env-integer "HZ_PORT")]
+    ;; In prod, HZ_PORT must be 5701-5708 (AWS default range)
+    (if (or (= :dev (get-env))
+            (<= 5701 env-port 5708))
+      env-port
+      (do
+        (log/error "Invalid HZ_PORT" env-port)
+        5701))
+    5701))
+
+(def grpc-port-offset 100)
+
+(defn get-grpc-server-port []
+  (+ (get-hz-port) grpc-port-offset))
+
+(defn get-nrepl-bind-address []
+  (or (System/getenv "NREPL_BIND_ADDRESS")
+      (case (get-env)
+        (:prod :staging) "0.0.0.0"
+        nil)))
+
+;; Should be increased by 1 every time we move the slot to a new
+;; machine. This gives us a way to have a consistent ordering of LSNs
+;; across database upgrades.
+(def invalidator-slot-num 2)
+
+;; Cuts off when the calendar turns to March in every time zone on Earth
+(def free-teams-cutoff (-> (ZonedDateTime/of 2026 3 1 0 0 0 0 (ZoneId/of "Etc/GMT+12"))
+                           (.toInstant)))
+
+(defn pg-lock-ns
+  "Creates a unique namespace for a pg advisory lock."
+  [k]
+  (int (case k
+         :webhook 1
+         :webhook-config 2)))
+
+(defn init []
+  ;; instantiate the config-map so we can fail early if it's not
+  ;; valid
+  (let [config @config-map]
+    (get-google-oauth-client)
+    config))
+
+(defonce fewer-vfutures? true)

@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "types": ["node"],
+    "target": "ES2020",
+    "module": "ESNext",
+
+    /* Bundler mode */
+    "moduleResolution": "node",
+    "noEmit": true,
+
+    /* Linting */
+    "strict": true
+  },
+  "include": ["src/db/instant.schema.ts", "src/db/instant.perms.ts"]
+}

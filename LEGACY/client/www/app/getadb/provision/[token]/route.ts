@@ -1,0 +1,56 @@
+import { randomUUID } from 'crypto';
+import { createGDBApp } from '../../createGDBApp';
+import generateMarkdown from '../../generateMarkdown';
+import { PLACEHOLDER_TOKEN } from '../../guideMarkdown';
+
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ token: string }> },
+) {
+  const { token: urlToken } = await params;
+
+  // Catch agents that fetched the URL verbatim without replacing the
+  // placeholder.
+  if (urlToken === PLACEHOLDER_TOKEN) {
+    return new Response(placeholderNotReplacedMarkdown(), {
+      status: 400,
+      headers: {
+        'Content-Type': 'text/markdown; charset=utf-8',
+        'Cache-Control': 'no-store',
+      },
+    });
+  }
+
+  const title =
+    new URL(request.url).searchParams.get('title')?.trim() || DEFAULT_APP_TITLE;
+  const app = await createGDBApp(title);
+
+  const markdown = await generateMarkdown(app);
+
+  return new Response(markdown, {
+    headers: {
+      'Cache-Control':
+        'private, no-store, no-cache, max-age=0, must-revalidate, proxy-revalidate',
+      Pragma: 'no-cache',
+      Expires: '0',
+      Vary: '*',
+      ETag: `"${randomUUID()}"`,
+      'Content-Disposition': 'inline; filename="AGENTS.md"',
+      'Content-Type': 'text/markdown; charset=utf-8',
+    },
+  });
+}
+
+const DEFAULT_APP_TITLE = 'Instant App';
+
+function placeholderNotReplacedMarkdown(): string {
+  return `You fetched the provision URL without replacing the placeholder.
+
+"${PLACEHOLDER_TOKEN}" is a placeholder. Generate a random UUID yourself
+and put it in the URL in place of the placeholder. Each fetch must use a
+different UUID so upstream caches never serve stale credentials.
+`;
+}

@@ -1,0 +1,31 @@
+#!/usr/bin/env sh
+set -e
+
+cd "$(dirname "$0")"
+
+SSH_HOST=root@ip
+DASHBOARD_URL="https://dashboard@example.com"
+SERVER_URL="https://backend.example.com"
+# S3_PUBLIC_ENDPOINT must be an origin without a path. Use a dedicated hostname or port.
+S3_PUBLIC_ENDPOINT="https://files.example.com"
+POSTGRES_PASSWORD=changeme
+MINIO_ROOT_PASSWORD=changeme
+INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID=
+INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET=
+INSTANT_SUPERUSER_EMAIL=${INSTANT_SUPERUSER_EMAIL:-}
+
+stack_config() {
+  env -i \
+    PATH="$PATH" \
+    DASHBOARD_URL="$DASHBOARD_URL" \
+    SERVER_URL="$SERVER_URL" \
+    S3_PUBLIC_ENDPOINT="$S3_PUBLIC_ENDPOINT" \
+    POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+    MINIO_ROOT_PASSWORD="$MINIO_ROOT_PASSWORD" \
+    INSTANT_SUPERUSER_EMAIL="$INSTANT_SUPERUSER_EMAIL" \
+    INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID="$INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID" \
+    INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET="$INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET" \
+    docker stack config --compose-file swarm.yml
+}
+
+stack_config | (ssh $SSH_HOST 'docker stack deploy -c - instant')

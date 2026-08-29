@@ -1,0 +1,541 @@
+(ns instant.core
+  (:gen-class)
+  (:require
+   [tool]
+   clojure.string
+   [clojure.java.io :as io]
+   [clojure.tools.logging :as log]
+   [compojure.core :refer [defroutes GET POST routes wrap-routes]]
+   [instant.admin.routes :as admin-routes]
+   [instant.admin.transact-queue :as admin-tx-queue]
+   [instant.app-proxy :as app-proxy]
+   [instant.auth.jwt :as jwt]
+   [instant.auth.oauth :as oauth]
+   [instant.config :as config]
+   [instant.dash.ephemeral-app :as ephemeral-app]
+   [instant.dash.routes :as dash-routes]
+   [instant.db.app-backup-jobs :as app-backup-jobs]
+   [instant.db.indexing-jobs :as indexing-jobs]
+   [instant.db.hint-testing :as hint-testing]
+   [instant.db.model.wal-log :as wal-log-model]
+   [instant.db.model.transaction :as tx-model]
+   [instant.demo-routes :as demo-routes]
+   [instant.storage.sweeper :as storage-sweeper]
+   [instant.flags :as flags]
+   [instant.flags-impl :as flags-impl]
+   [instant.gauges :as gauges]
+   [instant.grpc-server :as grpc-server]
+   [instant.health :as health]
+   [instant.honeycomb-api :as honeycomb-api]
+   [instant.jdbc.aurora :as aurora]
+   [instant.jdbc.wal :as wal]
+   [instant.lib.ring.undertow :as undertow-adapter]
+   [instant.loadbalancer :as loadbalancer-listener]
+   [instant.log-config :as log-config]
+   [instant.mma-example :as mma-example]
+   [instant.machine-summaries]
+   [instant.model.history :as history-model]
+   [instant.model.triples-size-updates :as triples-size-updates]
+   [instant.nippy]
+   [instant.nrepl :as nrepl]
+   [instant.oauth-apps.routes :as oauth-app-routes]
+   [instant.rate-limit :as rate-limit]
+   [instant.reactive.aggregator :as agg]
+   [instant.reactive.ephemeral :as eph]
+   [instant.reactive.invalidator :as inv]
+   [instant.reactive.session :as session]
+   [instant.reactive.store :as rs]
+   [instant.runtime.routes :as runtime-routes]
+   [instant.backup :as backup]
+   [instant.scripts.analytics :as analytics]
+   [instant.scripts.daily-metrics :as daily-metrics]
+   [instant.scripts.welcome-email :as welcome-email]
+   [instant.join-room-logger :as join-room-logger]
+   [instant.session-counter :as session-counter]
+   [instant.storage.routes :as storage-routes]
+   [instant.stripe :as stripe]
+   [instant.stripe-webhook :as stripe-webhook]
+   [instant.sunset :as sunset]
+   [instant.superadmin.routes :as superadmin-routes]
+   [instant.system-catalog-migration :refer [ensure-attrs-on-system-catalog-app]]
+   [instant.util.async :as ua]
+   [instant.util.crypt :as crypt-util]
+   [instant.util.delay :as delay]
+   [instant.util.http :as http-util]
+   [instant.util.lang :as lang]
+   [instant.util.posthog :as posthog]
+   [instant.util.tracer :as tracer]
+   [instant.hard-deletion-sweeper :as hard-deletion-sweeper]
+   [instant.custodian :as custodian]
+   [instant.webhook-routes :as webhook-routes]
+   [instant.webhook-processor :as webhook-processor]
+   [ring.middleware.cookies :refer [CookieDateTime]]
+   [ring.middleware.cors :refer [wrap-cors preflight?]]
+   [ring.middleware.json :refer [wrap-json-body wrap-json-response]]
+   [ring.middleware.keyword-params :refer [wrap-keyword-params]]
+   [ring.middleware.multipart-params :refer [wrap-multipart-params]]
+   [ring.middleware.params :refer [wrap-params]]
+   [ring.util.http-response :as response])
+  (:import
+   (clojure.lang IFn)
+   (io.undertow Undertow UndertowOptions Undertow$Builder Undertow$ListenerInfo)
+   (instant.lib.ring.undertow Server)
+   (java.text SimpleDateFormat)
+   (java.util Locale TimeZone)))
+
+;; --------
+;; Middleware
+
+(defn wrap-json-body-except [handler method-paths]
+  (fn [request]
+    (if (some (fn [[method pattern]]
+                (and (= method (:request-method request))
+                     (re-matches pattern (:uri request))))
+              method-paths)
+      (handler request)
+      ((wrap-json-body handler {:keywords? true}) request))))
+
+;; --------
+;; Wrappers
+
+(defn get-index [& _args]
+  "<code>Welcome to Instant's Backend!</code>")
+
+(defroutes home-routes
+  (GET "/" [] get-index))
+
+;; Makes java.util.Date play nicely with ring's cookie middleware
+(let [rfc822Formatter (SimpleDateFormat. "EEE, dd MMM yyyy HH:mm:ss Z" Locale/US)]
+  (.setTimeZone rfc822Formatter (TimeZone/getTimeZone "GMT"))
+  (extend java.util.Date
+    CookieDateTime
+    {:rfc822-format
+     (fn [date]
+       (.format rfc822Formatter date))}))
+
+(defroutes stripe-webhook-routes
+  (POST "/hooks/stripe" [] stripe-webhook/webhook))
+
+(defroutes generic-webhook-routes
+  (POST "/hooks/honeycomb/exceptions" [] honeycomb-api/webhook))
+
+(defn req-origin [req]
+  (get-in req [:headers "origin"]))
+
+(defn allow-cors-origin? [req]
+  (case (:uri req)
+    ("/platform/oauth/start"
+     "/platform/oauth/grant") false
+    "/platform/oauth/claim" (= (req-origin req)
+                               (config/dashboard-origin))
+
+    true))
+
+(defn wrap-options-cache-control [handler]
+  (fn [request]
+    (let [response (handler request)]
+      (if (or (not (preflight? request))
+              (not (allow-cors-origin? request))
+              (flags/toggled? :disable-preflight-caching))
+        response
+        ;; If we allowed the CORs origin, add cache control headers
+        (let [max-age (or (str (flags/flag :cors-max-age))
+                          "600")]
+          (update response :headers merge {"Vary" "origin, Access-Control-Request-Headers"
+                                           "Access-Control-Max-Age" max-age
+                                           "Cache-Control" (str "public, max-age=" max-age)}))))))
+
+(defn add-security-headers [resp]
+  (let [script-shas (some->> resp
+                             :inline-scripts
+                             (map (comp crypt-util/bytes->b64-string
+                                        crypt-util/str->sha256))
+                             (map (fn [s] (str "'sha256-" s "'"))))
+        default-headers { ;; Don't let anyone put us in an iframe
+                         "X-Frame-Options" "DENY"
+                         ;; Don't leak path info in referrer
+                         "Referrer-Policy" "strict-origin"
+                         ;; Only load scripts and assets from ourselves
+                         "Content-Security-Policy" (str "script-src 'self'"
+                                                        (when script-shas
+                                                          (str " "
+                                                               (clojure.string/join " " script-shas))))
+                         ;; Disallow features we don't use
+                         "Permissions-Policy" "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+                         ;; Only use the content-type we provide, don't let the
+                         ;; browser infer it
+                         "X-Content-Type-Options" "nosniff"}
+        headers (apply dissoc default-headers (flags/flag :filter-security-headers []))]
+    (update resp :headers merge headers)))
+
+(defn wrap-security-headers [handler]
+  (fn [request]
+    (let [response (handler request)]
+      (add-security-headers response))))
+
+(defn wrap-dev-server-info
+  "Adds the responding server's identity in development. This is useful when
+   running multiple local servers or verifying that a proxy reached its target."
+  [handler]
+  (if-not (config/dev?)
+    handler
+    (fn [request]
+      (update (handler request)
+              :headers merge
+              {"X-Instant-Server-Hostname" @config/hostname
+               "X-Instant-Server-Port" (str (config/get-server-port))
+               "Access-Control-Expose-Headers" "X-Instant-Server-Hostname, X-Instant-Server-Port"}))))
+
+(defn not-found [_req]
+  (response/not-found {:message "Oops! We couldn't match this route."}))
+
+(defn handler []
+  (routes (-> stripe-webhook-routes
+              (wrap-routes http-util/tracer-record-route)
+              (wrap-routes http-util/wrap-errors)
+              (wrap-routes wrap-json-response)
+              (wrap-routes http-util/tracer-wrap-span))
+          (-> (routes home-routes
+                      dash-routes/routes
+                      runtime-routes/routes
+                      admin-routes/routes
+                      superadmin-routes/routes
+                      storage-routes/routes
+                      generic-webhook-routes
+                      stripe-webhook-routes
+                      health/routes
+                      oauth-app-routes/routes
+                      demo-routes/routes
+                      mma-example/routes
+                      webhook-routes/routes)
+              (wrap-routes http-util/tracer-record-route)
+              http-util/tracer-record-attrs
+              app-proxy/wrap-proxied-app-guard
+              wrap-keyword-params
+              wrap-params
+              wrap-multipart-params
+              (wrap-json-body-except #{[:put #"/dash/apps/.*/storage/upload"]
+                                       [:put #"/storage/upload"]
+                                       [:put #"/admin/storage/upload"]
+                                       [:post #"/dash/restores/zip"]})
+
+              http-util/wrap-errors
+
+              wrap-json-response
+              (wrap-cors :access-control-allow-origin allow-cors-origin?
+                         :access-control-allow-methods [:get :put :post :delete])
+              wrap-options-cache-control
+              wrap-dev-server-info
+              wrap-security-headers
+              (http-util/tracer-wrap-span))
+          (wrap-json-response not-found)))
+
+(defonce ^Server server
+  nil)
+
+(defonce stop-gauge
+  nil)
+
+(defn listener-stats [^Server server]
+  (let [^Undertow$ListenerInfo listener (some-> server
+                                                (.getListenerInfo)
+                                                first)]
+
+    (when-let [stats (some-> listener
+                             (.getConnectorStatistics))]
+      [{:path "instant.server.active-connections"
+        :value (.getActiveConnections stats)}
+       {:path "instant.server.active-requests"
+        :value (.getActiveRequests stats)}
+       {:path "instant.server.max-active-connections"
+        :value (.getMaxActiveConnections stats)}
+       {:path "instant.server.max-active-requests"
+        :value (.getMaxActiveRequests stats)}
+       {:path "instant.server.request-count"
+        :value (.getRequestCount stats)}
+       {:path "instant.server.bytes-sent"
+        :value (.getBytesSent stats)}
+       {:path "instant.server.bytes-received"
+        :value (.getBytesReceived stats)}
+       {:path "instant.server.error-count"
+        :value (.getErrorCount stats)}])))
+
+(defn worker-stats [^Server server]
+  (let [^Undertow undertow (.-server ^Server server)
+        worker (.getWorker undertow)
+        mx (.getMXBean worker)]
+    [{:path "instant.server.current-worker-thread-count"
+      :value (.getWorkerPoolSize mx)}
+     {:path "instant.server.max-worker-thread-count"
+      :value (.getMaxWorkerPoolSize mx)}
+     {:path "instant.server.busy-worker-thread-count"
+      :value (.getBusyWorkerThreadCount mx)}
+     {:path "instant.server.worker-queue-size"
+      :value (.getWorkerQueueSize mx)}]))
+
+(defn server-stats [^Server server]
+  (concat (listener-stats server)
+          (worker-stats server)))
+
+(defn start []
+  (let [config (merge
+                {:host "0.0.0.0"
+                 :port (config/get-server-port)
+                 :max-entity-size -1
+                 :io-threads (* 2 (delay/cpu-count))
+                 ;; 8 per io-thread
+                 :worker-threads (* 16 (delay/cpu-count))
+                 :graceful-shutdown? true
+                 :handler-proxy app-proxy/handler-proxy
+                 :configurator (fn [^Undertow$Builder builder]
+                                 (.setServerOption builder UndertowOptions/ENABLE_STATISTICS true))}
+                (when (.exists (io/file "dev-resources/certs/dev.jks"))
+                  {:ssl-port (config/get-server-ssl-port)
+                   :keystore "dev-resources/certs/dev.jks"
+                   :key-password "changeit"}))
+        _ (tracer/record-info! {:name "server/start"
+                                :attributes (select-keys config [:port :ssl-port])})
+        s (undertow-adapter/run-undertow
+           (handler)
+           config)]
+
+    (lang/set-var! server s)
+    (lang/set-var! stop-gauge
+      (gauges/add-gauge-metrics-fn
+       (fn [_]
+         (server-stats s))))))
+
+(defn stop []
+  (when (and (bound? #'server)
+             server)
+    (Server/.shutdownGracefully server))
+
+  (let [drain-opts {:total-ms (if (config/dev?)
+                                1000
+                                (* 1000 60 4))
+                    :max-gap-ms (if (config/dev?)
+                                  100
+                                  1000)}
+        ;; Proxied WebSockets never enter the session store, so they need
+        ;; their own drain. Run it alongside the local one so both finish
+        ;; within the drain window.
+        proxied-drain (future (app-proxy/drain-proxied-connections! drain-opts))]
+    (rs/close-connections rs/store drain-opts)
+    @proxied-drain)
+  (when (and (bound? #'server)
+             server)
+    ;; Wait another 20 seconds for the server to shut down
+    (Server/.awaitShutdown server (* 1000 20)))
+  ;; Stop the server
+  (lang/clear-var! server Server/.stop)
+  (lang/clear-var! stop-gauge IFn/.invoke))
+
+(defn restart []
+  (stop)
+  (start))
+
+(defn shutdown-hook []
+  (tracer/record-info! {:name "shut-down.start"})
+  (tracer/with-span! {:name "shut-down"}
+    (tracer/with-span! {:name "stop-server"}
+      (stop))
+    @(ua/all-of
+      (future
+        (tracer/with-span! {:name "stop-aggregator"}
+          (agg/stop-global)))
+      (future
+        (tracer/with-span! {:name "stop-ephemeral"}
+          (eph/stop))
+        (tracer/with-span! {:name "stop-invalidator"}
+          (inv/stop-global))
+        (tracer/with-span! {:name "stop-grpc"}
+          (grpc-server/stop-global))
+        (tracer/with-span! {:name "stop-webhook-processor"}
+          (webhook-processor/stop-global)))
+      (future
+        (tracer/with-span! {:name "stop-indexing-jobs"}
+          (indexing-jobs/stop)))
+      (future
+        (tracer/with-span! {:name "stop-app-backup-jobs"}
+          (app-backup-jobs/stop)))
+      (future
+        (tracer/with-span! {:name "stop-join-room-logger"}
+          (join-room-logger/stop)))
+      (future
+        (tracer/with-span! {:name "stop-hard-deletion-sweeper"}
+          (hard-deletion-sweeper/stop)))
+      (future
+        (tracer/with-span! {:name "stop-custodian"}
+          (custodian/stop)))
+      (future
+        (when (posthog/enabled?)
+          (tracer/with-span! {:name "stop-posthog"}
+            (posthog/flush!)
+            (posthog/shutdown!))))
+      (future
+        (tracer/with-span! {:name "stop-rate-limit-sweeper"}
+          (rate-limit/stop)))
+      (future
+        (tracer/with-span! {:name "stop-wal-log-truncator"}
+          (wal-log-model/stop)))
+      (future
+        (tracer/with-span! {:name "stop-history-truncator"}
+          (history-model/stop)))
+      (future
+        (tracer/with-span! {:name "stop-loadbalancer-listener"}
+          (loadbalancer-listener/stop)))
+      (future
+        (tracer/with-span! {:name "stop-app-proxy"}
+          (app-proxy/stop)))
+      (future
+        (tracer/with-span! {:name "stop-triples-size-updates"}
+          (triples-size-updates/stop-global)))
+      (future
+        (tracer/with-span! {:name "stop-backup"}
+          (backup/stop)))))
+  (tracer/shutdown))
+
+(defn add-shutdown-hook []
+  (.addShutdownHook
+   (Runtime/getRuntime)
+   (Thread.
+    (fn []
+      (@(resolve 'instant.core/shutdown-hook))))))
+
+(defmacro with-log-init [operation & body]
+  `(do
+     (tracer/record-info! {:name (format "init.start.%s" (name ~operation))})
+     (tracer/with-span! {:name (format "init.finish.%s" (name ~operation))}
+       ;; Don't let ourselves be the parent of any child spans
+       (tracer/with-new-trace-root
+         ~@body))))
+
+(defn -main [& _args]
+  (try
+    (binding [*print-namespace-maps* false]
+      (log-config/init)
+      (log/info "Initializing...")
+      (let [{:keys [aead-keyset]} (config/init)]
+        (crypt-util/init aead-keyset))
+
+      (tracer/init)
+
+      (when (config/posthog-enabled?)
+        (with-log-init :posthog
+          (posthog/init! {:api-key (config/get-posthog-api-key)})))
+
+      (with-log-init :uncaught-exception-handler
+        (Thread/setDefaultUncaughtExceptionHandler
+         (ua/logging-uncaught-exception-handler)))
+
+      (with-log-init :shutdown-hook
+        (add-shutdown-hook))
+
+      (with-log-init :gauges
+        (gauges/start))
+      (with-log-init :nrepl
+        (nrepl/start))
+      (with-log-init :oauth
+        (oauth/start))
+      (with-log-init :jwt
+        (jwt/start))
+      (with-log-init :aurora
+        (aurora/start))
+      (with-log-init :tx-model
+        (tx-model/init (aurora/conn-pool :read)))
+      (with-log-init :system-catalog
+        (ensure-attrs-on-system-catalog-app))
+      (with-log-init :reactive-store
+        (rs/start))
+      (with-log-init :grpc-server
+        (grpc-server/start-global))
+      (with-log-init :ephemeral
+        (eph/start))
+      (with-log-init :stripe
+        (stripe/init))
+      (with-log-init :session
+        (session/start rs/store))
+      (with-log-init :webhook-processor
+        (webhook-processor/start-global))
+      (with-log-init :invalidator
+        (inv/start-global))
+      (with-log-init :wal
+        (wal/start))
+
+      (with-log-init :flags
+        (flags-impl/init config/instant-config-app-id
+                         flags/queries
+                         flags/query-results))
+
+      (with-log-init :sunset
+        (sunset/start))
+
+      (with-log-init :app-proxy
+        (app-proxy/start))
+
+      (with-log-init :aggregator
+        (agg/start-global))
+      (with-log-init :ephemeral-app
+        (ephemeral-app/start))
+      (with-log-init :session-counter
+        (session-counter/start))
+      (with-log-init :join-room-logger
+        (join-room-logger/start))
+      (with-log-init :indexing-jobs
+        (indexing-jobs/start))
+      (with-log-init :app-backup-jobs
+        (app-backup-jobs/start))
+      (with-log-init :storage-sweeper
+        (storage-sweeper/start))
+      (with-log-init :hard-deletion-sweeper
+        (hard-deletion-sweeper/start))
+      (with-log-init :custodian
+        (custodian/start))
+      (with-log-init :rate-limit-sweeper
+        (rate-limit/start))
+      (with-log-init :wal-log-truncator
+        (wal-log-model/start))
+      (with-log-init :history-truncator
+        (history-model/start))
+      (when (= (config/get-env) :prod)
+        (with-log-init :analytics
+          (analytics/start)))
+      (when (= (config/get-env) :prod)
+        (with-log-init :daily-metrics
+          (daily-metrics/start)))
+      (when (= (config/get-env) :prod)
+        (with-log-init :welcome-email
+          (welcome-email/start)))
+      (when (and (= (config/get-env) :prod)
+                 (config/aws-env?))
+        (with-log-init :backup
+          (backup/start)))
+
+      (with-log-init :hint-testing
+        (hint-testing/start))
+      (with-log-init :admin-tx-queue
+        (admin-tx-queue/start))
+      (with-log-init :web-server
+        (start))
+      (try
+        (when @config/instance-id
+          (with-log-init :loadbalancer-listener
+            (loadbalancer-listener/start)))
+        (catch Throwable t
+          (tracer/record-exception-span! t {:name "load-balancer-listener-init-error"
+                                            :escaping? false})))
+      (with-log-init :triples-size-updates
+        (triples-size-updates/start-global))
+      (log/info "Finished initializing"))
+    (catch Throwable t
+      (log/error t "Error in startup")
+      (when (and (not= (System/getenv "EXIT_ON_ERROR") "false")
+                 (not= :dev (config/get-env)))
+        (log/info "Exiting")
+        (System/exit 1)))))
+
+(defn before-ns-unload []
+  (stop))
+
+(defn after-ns-reload []
+  (start))

@@ -1,0 +1,390 @@
+(ns instant.util.test
+  (:require
+   [clojure.core.async :as a]
+   [clojure.set :as set]
+   [clojure.string :as string]
+   [clojure+.walk :as walk]
+   [instant.config :as config]
+   [instant.db.attr-sketch :as cms]
+   [instant.db.datalog :as d]
+   [instant.db.instaql :as iq]
+   [instant.db.model.attr :as attr-model]
+   [instant.db.model.triple :as triple-model]
+   [instant.db.transaction :as tx]
+   [instant.jdbc.aurora :as aurora]
+   [instant.jdbc.wal :as wal]
+   [instant.model.rule :as rule-model]
+   [instant.reactive.aggregator :as aggregator]
+   [instant.reactive.invalidator :as inv]
+   [instant.storage.s3 :as s3]
+   [instant.system-catalog :refer [encode-string->long]]
+   [instant.util.coll :as coll]
+   [instant.util.exception :as ex]
+   [instant.util.instaql :refer [instaql-nodes->object-tree]]
+   [next.jdbc])
+  (:import
+   (java.io InputStream)
+   (java.time Duration Instant)
+   (java.util UUID)))
+
+(defmacro instant-ex-data [& body]
+  `(try
+     ~@body
+     (catch Exception e#
+       (let [instant-ex# (ex/find-instant-exception e#)]
+         (ex-data instant-ex#)))))
+
+(defn pretty-perm-q [{:keys [app-id current-user]} q]
+  (let [attrs (attr-model/get-by-app-id app-id)]
+    (walk/keywordize-keys
+     (instaql-nodes->object-tree
+      {:attrs attrs}
+      (iq/permissioned-query
+       {:db {:conn-pool (aurora/conn-pool :read)}
+        :app-id app-id
+        :attrs attrs
+        :datalog-query-fn d/query
+        :current-user current-user}
+       q)))))
+
+(defn wait-for
+  ([wait-fn wait-ms]
+   (wait-for wait-fn wait-ms 100))
+  ([wait-fn wait-ms ^Long sleep-ms]
+   (let [start (Instant/now)]
+     (loop [res (wait-fn)]
+       (when-not res
+         (if (< wait-ms (.toMillis (Duration/between start (Instant/now))))
+           (throw (Exception. "Timed out in wait-for"))
+           (do
+             (Thread/sleep sleep-ms)
+             (recur (wait-fn)))))))))
+
+(defn make-ctx [app-id {:keys [rw]
+                        :or {rw :read}}]
+  {:db               {:conn-pool (aurora/conn-pool rw)}
+   :app-id           app-id
+   :attrs            (attr-model/get-by-app-id app-id)
+   :datalog-query-fn d/query
+   :rules            (rule-model/get-by-app-id (aurora/conn-pool :read) {:app-id app-id})
+   :current-user     nil})
+
+(defn make-attrs
+  "Makes attrs from short description like:
+
+     [:A/id :unique? :index?]
+
+   Will become:
+
+     namespace   'A'
+     ident       'id'
+     type        blob
+     cardinality one
+     unique?     true
+     index?      true
+
+   Or a ref:
+
+     [[:B/c :C/bs] :many :unique? :on-delete-reverse]
+
+   Will become B → C ref
+
+     namespace         'B'
+     ident             'c'
+     reverse ns        'C'
+     reverse ident     'bs'
+     type              ref
+     cardinality       many
+     unique?           true
+     index?            false
+     on-delete-reverse :cascade
+
+   Or a checked-data-type via :string, :number, :date, :boolean:
+
+     [:A/createdAt :index? :date]  ;; index? + checked-data-type :date
+
+  Returns map attr->attr-id"
+  [app-id attrs]
+  (let [attrs (for [attr attrs
+                    :let [[id & rest] attr
+                          [fwd rvr]   (if (vector? id) id [id nil])]]
+                (reduce
+                 (fn [m k]
+                   (case k
+                     :many              (assoc m :cardinality :many)
+                     :unique?           (assoc m :unique? true)
+                     :index?            (assoc m :index? true)
+                     :required?         (assoc m :required? true)
+                     :on-delete         (assoc m :on-delete :cascade)
+                     :on-delete-reverse (assoc m :on-delete-reverse :cascade)
+                     (:string :number :date :boolean) (assoc m :checked-data-type k)))
+                 {:id               (random-uuid)
+                  :forward-identity [(random-uuid) (namespace fwd) (name fwd)]
+                  :reverse-identity (when rvr
+                                      [(random-uuid) (namespace rvr) (name rvr)])
+                  :value-type       (if rvr :ref :blob)
+                  :cardinality      :one
+                  :unique?          false
+                  :index?           false
+                  :required?        false}
+                 rest))]
+    (attr-model/insert-multi! (aurora/conn-pool :write) app-id attrs {})
+    (into {}
+          (for [attr (attr-model/get-by-app-id app-id)
+                :let [[_ ns n] (:forward-identity attr)]]
+            [(keyword ns n) (:id attr)]))))
+
+(defn resolve-attrs [attrs tx]
+  (for [step tx]
+    (cond-> step
+      (and (vector? (-> step (nth 1))) (contains? attrs (-> step (nth 1) first)))
+      (update-in [1 0] attrs)
+
+      (and (> (count step) 2)
+           (contains? attrs (-> step (nth 2))))
+      (update-in [2] attrs)
+
+      (and (> (count step) 3)
+           (vector? (-> step (nth 3)))
+           (contains? attrs (-> step (nth 3) first)))
+      (update-in [3 0] attrs))))
+
+(defn insert-entities
+  "Insert entities in more human-readable form (attrs by their ns/ident value,
+   not by attr-id). All entities must have :db/id presudo-attr:
+
+     (insert-entities app-id attr->id
+       [{:db/id       (suid \"a\")
+         :user/name   \"Leo Tolstoy\"
+        {:db/id       (suid \"b\")
+         :book/title  \"War and Peace\"
+         :book/author (suid \"a\")}])"
+  [app-id attr->id entities]
+  (tx/transact!
+   (aurora/conn-pool :write)
+   (attr-model/get-by-app-id app-id)
+   app-id
+   (for [entity entities
+         :let   [id (:db/id entity)]
+         [a v]  (dissoc entity :db/id)
+         :let   [attr (attr->id a)]
+         v      (if (sequential? v) v [v])]
+     [:add-triple id attr v])))
+
+(defn find-entities-by-ids
+  "Finds entities by ids. Converts attr-ids to attribute keywords, adds :db/id"
+  ([app-id ids]
+   (let [attrs (attr-model/get-by-app-id (aurora/conn-pool :read) app-id)
+         attr->id (into {} (map (fn [{id :id
+                                      [_ etype label] :forward-identity}]
+                                  [(keyword etype label) id]) attrs))]
+     (find-entities-by-ids app-id attr->id ids)))
+  ([app-id attr->id ids]
+   (let [id->attr     (set/map-invert attr->id)
+         id->entities (reduce
+                       (fn [m {:keys [triple]}]
+                         (let [[e aid v] triple
+                               a (id->attr aid)]
+                           (update m e assoc a v)))
+                       {}
+                       (triple-model/fetch
+                        (aurora/conn-pool :read)
+                        app-id
+                        [[:in :entity-id ids]]))]
+     (reduce-kv
+      (fn [acc id entity]
+        (conj acc (assoc entity :db/id id)))
+      #{} id->entities))))
+
+(defn find-entids-by-ids
+  "Finds entitiy ids by ids"
+  ([app-id ids]
+   (into #{} (map :db/id) (find-entities-by-ids app-id ids)))
+  ([app-id attr->id ids]
+   (into #{} (map :db/id) (find-entities-by-ids app-id attr->id ids))))
+
+(defn suid
+  "Short uuid, can just specify prefix, rest will be filled with 0s
+
+     (suid \"123\") ; => #uuid \"12300000-0000-0000-0000-000000000000\""
+  [s]
+  (parse-uuid
+    (str s (subs "00000000-0000-0000-0000-000000000000" (count s)))))
+
+(defn stuid
+  "Stable uuid, can just specify prefix, rest will be filled with 0s
+   Like suid, but accepts any string. Must be less than 24 characters.
+
+     (stuid \"hello\") ; => #uuid \"3916b77f-ffff-ffff-ffff-ffffffffffff\""
+  [s]
+  (UUID. (encode-string->long (subs s 0 (min 12 (count s))))
+         (encode-string->long (if (> (count s) 12)
+                                (subs s 12)
+                                ""))))
+
+(defn rand-string
+  ([]
+   (rand-string (+ 13 (rand-int 13))))
+  ([len]
+   (string/join
+    (repeatedly len #(rand-nth "qwertyuiopasdfghjklzxcvbnm")))))
+
+(defn rand-email []
+  (str (rand-string 13) "@" (rand-string 13) (rand-nth [".com" ".net" ".org" ".int" ".edu" ".gov" ".mil"])))
+
+(defmacro perm-err? [& body]
+  `(try
+     ~@body
+     false
+     (catch Exception e#
+       (let [instant-ex# (ex/find-instant-exception e#)]
+         (if (= ::ex/permission-denied (::ex/type (ex-data instant-ex#)))
+           instant-ex#
+           (throw e#))))))
+
+(defmacro perm-pass? [& body]
+  `(boolean (not (perm-err? ~@body))))
+
+(defmacro validation-err? [& body]
+  `(try
+     ~@body
+     false
+     (catch Exception e#
+       (let [instant-ex# (ex/find-instant-exception e#)]
+         (if (= ::ex/validation-failed (::ex/type (ex-data instant-ex#)))
+           instant-ex#
+           (throw e#))))))
+
+(defmacro timeout-err? [& body]
+  `(try
+     ~@body
+     false
+     (catch Exception e#
+       (let [instant-ex# (ex/find-instant-exception e#)]
+         (if (= ::ex/timeout (::ex/type (ex-data instant-ex#)))
+           instant-ex#
+           (throw e#))))))
+
+(defn in-memory-sketches-for-app [app-id]
+  (with-open [conn (next.jdbc/get-connection (config/get-aurora-config))]
+    (reduce (fn [acc sketch]
+              (assoc acc (select-keys sketch [:app-id :attr-id]) sketch))
+            {}
+            (aggregator/initial-sketch-seq conn
+                                           (format "copy (select app_id, attr_id, entity_id, value, checked_data_type, created_at, eav, ea from triples where app_id = '%s'::uuid order by app_id, attr_id) to stdout with (format binary)"
+                                                   app-id)))))
+
+(defn lookup-with-in-memory-sketches
+  ([original-lookup in-memory-sketches app-id keys]
+   (lookup-with-in-memory-sketches original-lookup
+                                   in-memory-sketches
+                                   app-id
+                                   (aurora/conn-pool :read)
+                                   keys))
+  ([original-lookup in-memory-sketches app-id conn keys]
+   (let [{ours true theirs false} (group-by (fn [k]
+                                              (= app-id (:app-id k)))
+                                            keys)
+         results
+         (reduce (fn [acc k]
+                   (assoc acc k (get in-memory-sketches k)))
+                 {}
+                 ours)]
+     (merge results (original-lookup conn theirs)))))
+
+(defmacro with-sketches
+  "Calculates the sketches for the app and returns them from calls to `attr-sketch/lookup`.
+   Used when we need to have the sketches for a test, but the aggregator isn't running or
+   we don't want to wait for the aggregator to catch up."
+  [app & body]
+  `(let [sketches# (in-memory-sketches-for-app (:id ~app))
+         original-lookup# (var-get #'cms/lookup)]
+     (with-redefs [cms/lookup (partial lookup-with-in-memory-sketches original-lookup# sketches# (:id ~app))]
+       ~@body)))
+
+(defn- collect-symbols [with-let? bindings]
+  (vec
+   (distinct
+    (for [[left right] (partition 2 bindings)
+          sym          (cond
+                         (= :let left)  (if with-let?
+                                          (->> right
+                                             (partition 2)
+                                             (map first)
+                                             (mapcat #(coll/collect symbol? %)))
+                                          [])
+                         (symbol? left) [left]
+                         :else          (coll/collect symbol? left))]
+      sym))))
+
+(defmacro test-matrix
+  "Similar to doseq, but records current testing context via `testing`,
+   and avoids “method body too large” produced by doseq"
+  [bindings & body]
+  (let [all-keys      (collect-symbols true bindings)
+        variable-keys (mapv keyword (collect-symbols false bindings))]
+    `(doseq [var# (for ~bindings (array-map ~@(mapcat #(vector (keyword %) %) all-keys)))
+             :let [{:keys ~all-keys} var#]]
+       (clojure.test/testing (str (select-keys var# ~variable-keys))
+         ~@body))))
+
+(defmacro with-s3-mock [{:keys [upload
+                                get-object-metadata
+                                location-id-url]
+                         :or {upload (fn [_bucket _props ^InputStream file]
+                                       (with-open [in file]
+                                         (slurp in)
+                                         nil))
+                              get-object-metadata (fn [_bucket _key]
+                                                    {})
+                              location-id-url (fn [_app-id _location-id]
+                                                nil)}}
+                        & body]
+  `(binding [s3/*s3-mock* {:upload ~upload
+                           :get-object-metadata ~get-object-metadata
+                           :location-id-url ~location-id-url}]
+     ~@body))
+
+(defmacro with-test-replication-slot
+  "Spins up a temporary wal2json replication slot and a wal worker that
+   continuously appends transformed `WalRecord`s (the same shape the
+   invalidator sees) to `records-sym`, an atom of a vector. Body code can
+   run SQL and use `wait-for` against the atom to await specific changes.
+
+   Cleans up the worker, channels, and slot in finally."
+  [[records-sym] & body]
+  `(let [slot-name# (str "test_"
+                         (subs (.replace ^String (str (random-uuid)) "-" "") 0 16))
+         wal-chan# (a/chan 1000 (inv/wal-record-xf))
+         close-signal# (a/chan)
+         worker-chan# (a/chan)
+         opts# (-> (wal/make-wal-opts {:wal-chan wal-chan#
+                                       :close-signal-chan close-signal#
+                                       :ex-handler (fn [e#] (throw e#))
+                                       :get-conn-config config/get-aurora-config
+                                       :slot-suffix nil
+                                       :slot-type :invalidator
+                                       :flush-lsn-chan nil
+                                       :lsn nil
+                                       :worker-chan worker-chan#
+                                       :slot-num config/invalidator-slot-num})
+                   (assoc :slot-name slot-name#
+                          :temporary? true))
+         worker# (future (wal/start-worker opts#))
+         ~records-sym (atom [])
+         pumper# (future
+                   (loop []
+                     (when-let [r# (a/<!! wal-chan#)]
+                       (swap! ~records-sym conj r#)
+                       (recur))))]
+     (try
+       (when (= ::timeout (deref (:started-promise opts#) 10000 ::timeout))
+         (throw (ex-info "wal worker did not start within 10s"
+                         {:worker-error (when (future-done? worker#)
+                                          (try @worker#
+                                               (catch Throwable t# t#)))})))
+       ~@body
+       (finally
+         (inv/stop opts#)
+         @worker#
+         @pumper#))))

@@ -1,0 +1,586 @@
+import React, { useEffect, useState } from 'react';
+
+import { useAuthToken } from '@/lib/auth';
+import { jsonFetch } from '@/lib/fetch';
+import config from '@/lib/config';
+import { useIsHydrated } from '@/lib/hooks/useIsHydrated';
+
+import { FullscreenLoading, LogoIcon } from '@/components/ui';
+import Head from 'next/head';
+import { format, parse } from 'date-fns';
+import useCurrentDate from '@/lib/hooks/useCurrentDate';
+import { ArrowPathIcon } from '@heroicons/react/16/solid';
+import { useRouter } from 'next/router';
+
+async function fetchDailyOverview(token: string) {
+  return jsonFetch(`${config.apiURI}/dash/overview/daily`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    },
+  });
+}
+
+type MachineId = string;
+type AppId = string;
+type AppSessions = {
+  'app-id': AppId;
+  'app-title': string;
+  'creator-email': string;
+  count: number;
+  origins: Record<string, number>;
+};
+type MachineSessions = Record<AppId, AppSessions>;
+type SessionReports = Record<MachineId, MachineSessions>;
+type ProxiedConnection = { count: number; target: string | null };
+type ProxiedConnections = Record<MachineId, Record<AppId, ProxiedConnection>>;
+type MinuteOverview = {
+  'session-reports': SessionReports;
+  'proxied-connections': ProxiedConnections | null;
+};
+
+async function fetchMinuteOverview(token: string): Promise<MinuteOverview> {
+  return jsonFetch(`${config.apiURI}/dash/overview/minute`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    },
+  });
+}
+
+function useDailyOverview(token: string, options?: { enabled?: boolean }) {
+  const enabled = options?.enabled ?? true;
+  const sentAt = useCurrentDate({ refreshSeconds: 60 * 5 });
+  const [state, setState] = useState<any>({
+    isLoading: true,
+    error: undefined,
+    data: undefined,
+  });
+  useEffect(() => {
+    if (!enabled) return;
+    let cancel = false;
+    async function exec() {
+      try {
+        const data = await fetchDailyOverview(token);
+        if (cancel) return;
+        setState({ data, error: undefined, isLoading: false });
+      } catch (error) {
+        if (cancel) return;
+        setState({ data: undefined, error, isLoading: false });
+      }
+    }
+    exec();
+    return () => {
+      cancel = true;
+    };
+  }, [token, sentAt, enabled]);
+
+  return { ...state, sentAt, isLoading: enabled ? state.isLoading : false };
+}
+
+function useMinuteOverview(
+  token: string,
+  options?: { enabled?: boolean },
+): {
+  isLoading: boolean;
+  isRefreshing: boolean;
+  error: Error | undefined;
+  data: MinuteOverview | undefined;
+  sentAt: Date;
+  lastUpdatedAt: Date | undefined;
+  refresh: () => void;
+} {
+  const enabled = options?.enabled ?? true;
+  const sentAt = useCurrentDate({ refreshSeconds: 30 });
+  const [manualRefresh, setManualRefresh] = useState(0);
+  const [state, setState] = useState<any>({
+    isLoading: true,
+    isRefreshing: false,
+    error: undefined,
+    data: undefined,
+    lastUpdatedAt: undefined,
+  });
+  useEffect(() => {
+    if (!enabled) return;
+    let cancel = false;
+    async function exec() {
+      setState((s: any) => ({ ...s, isRefreshing: true }));
+      try {
+        const data = await fetchMinuteOverview(token);
+        if (cancel) return;
+        setState({
+          data,
+          error: undefined,
+          isLoading: false,
+          isRefreshing: false,
+          lastUpdatedAt: new Date(),
+        });
+      } catch (error) {
+        if (cancel) return;
+        setState((s: any) => ({
+          ...s,
+          data: undefined,
+          error,
+          isLoading: false,
+          isRefreshing: false,
+        }));
+      }
+    }
+    exec();
+    return () => {
+      cancel = true;
+    };
+  }, [token, sentAt, manualRefresh, enabled]);
+
+  return {
+    ...state,
+    sentAt,
+    isLoading: enabled ? state.isLoading : false,
+    refresh: () => setManualRefresh((n) => n + 1),
+  };
+}
+
+function mergeOrigins(originsA: any, originsB: any) {
+  const ret = { ...originsA };
+  for (const origin in originsB) {
+    if (origin in ret) {
+      ret[origin] += originsB[origin];
+    } else {
+      ret[origin] = originsB[origin];
+    }
+  }
+  return ret;
+}
+
+function mergeSessions(sessA: any, sessB: any) {
+  const ret = { ...sessA };
+  ret.count += sessB.count;
+  ret.origins = mergeOrigins(sessA.origins, sessB.origins);
+
+  return ret;
+}
+
+function flattenedSessionReports(machineToReport: SessionReports) {
+  const res: any = {};
+  for (const memberId in machineToReport) {
+    const memberReports = machineToReport[memberId];
+    for (const sessionId in memberReports) {
+      const curr = memberReports[sessionId];
+      const prev = res[sessionId];
+      res[sessionId] = prev ? mergeSessions(prev, curr) : curr;
+    }
+  }
+  const items = Object.values(res);
+  return items;
+}
+
+type FlatProxiedConnection = {
+  'app-id': AppId;
+  target: string | null;
+  count: number;
+};
+
+function flattenedProxiedConnections(
+  machineToConnections: ProxiedConnections | null,
+): FlatProxiedConnection[] {
+  const res: Record<AppId, FlatProxiedConnection> = {};
+  for (const machineId in machineToConnections) {
+    const machineConnections = machineToConnections[machineId];
+    for (const appId in machineConnections) {
+      const curr = machineConnections[appId];
+      const prev = res[appId];
+      res[appId] = prev
+        ? { ...prev, count: prev.count + curr.count }
+        : { 'app-id': appId, target: curr.target, count: curr.count };
+    }
+  }
+  return Object.values(res).toSorted((a, b) => b.count - a.count);
+}
+
+function makeMachineSummary(
+  machineToReport: SessionReports,
+): Record<string, number> {
+  const res: any = {};
+  for (const [memberId, reports] of Object.entries(machineToReport)) {
+    let total = 0;
+    for (const [_appId, appReport] of Object.entries(reports)) {
+      total += appReport.count;
+    }
+    res[memberId] = total;
+  }
+  return res;
+}
+
+const OriginColumn = ({ origins }: { origins: any }) => {
+  if (!origins || Object.keys(origins).length === 0) return '-';
+
+  const originEntries = Object.entries(origins).toSorted(
+    (a: any, b: any) => b[1] - a[1],
+  );
+
+  const [mostFrequentOrigin, ...extraOrigins] = originEntries.map((x) => x[0]);
+
+  const extraCount = extraOrigins.length;
+
+  // Cap the tooltip list to a maximum of 5 origins
+  const maxDisplay = 5;
+  const displayedExtraOrigins = extraOrigins.slice(0, maxDisplay);
+  const extraOriginsTitle =
+    displayedExtraOrigins.join(', ') + (extraCount > maxDisplay ? ', ...' : '');
+
+  const isLocalhost = mostFrequentOrigin.includes('localhost');
+
+  return (
+    <span>
+      {isLocalhost ? (
+        mostFrequentOrigin
+      ) : (
+        <a href={mostFrequentOrigin} target="_blank" rel="noreferrer">
+          {mostFrequentOrigin}
+        </a>
+      )}
+      {extraCount > 0 && (
+        <span
+          className="text-sm text-gray-500"
+          title={extraOriginsTitle} // Tooltip shows extra origins on hover
+        >
+          {' '}
+          (+{extraCount} other{extraCount > 1 ? 's' : ''})
+        </span>
+      )}
+    </span>
+  );
+};
+
+// Component for Daily Stats Section
+const DailyStatsSection = ({ daily, solo }: { daily: any; solo?: boolean }) => {
+  const wrapperClass = solo
+    ? 'mx-auto w-full max-w-4xl space-y-2 p-2'
+    : 'flex-1 space-y-2 p-2';
+
+  if (daily.isLoading) {
+    return (
+      <div className={wrapperClass}>
+        <div className="flex h-64 items-center justify-center">
+          <div className="text-gray-500">Loading daily stats...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (daily.error) {
+    return (
+      <div className={wrapperClass}>
+        <div className="rounded-sm border border-red-200 bg-red-50 p-4">
+          <h3 className="mb-2 font-semibold text-red-600">Daily Stats Error</h3>
+          <pre className="text-sm text-red-500">
+            {JSON.stringify(daily.error.body || daily.error.message, null, 2)}
+          </pre>
+        </div>
+      </div>
+    );
+  }
+
+  if (!daily.data) {
+    return (
+      <div className={wrapperClass}>
+        <div className="rounded-sm border border-yellow-200 bg-yellow-50 p-4">
+          <p className="text-yellow-600">No daily data available</p>
+        </div>
+      </div>
+    );
+  }
+
+  const rollingStats = daily.data['data-points']['rolling-monthly-stats'];
+  const latestRolling = rollingStats[rollingStats.length - 1];
+  const charts = daily.data['charts'];
+  const subInfo = daily.data?.['subscription-info'];
+
+  return (
+    <div className={wrapperClass}>
+      <div>
+        <div className="inline-flex items-baseline space-x-4">
+          <h1 className="leading-none" style={{ fontSize: 120 }}>
+            {latestRolling['distinct_apps']}
+          </h1>
+          <div className="leading-none font-bold">Monthly Active Apps</div>
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <img src={charts['rolling-monthly-active-apps']} />
+          </div>
+          <div>
+            <img src={charts['month-to-date-active-apps']} />
+          </div>
+          <div>
+            <img src={charts['daily-signups']} />
+          </div>
+          <div>
+            <img src={charts['weekly-signups']} />
+          </div>
+        </div>
+      </div>
+      <div className="flex space-x-8 pb-4">
+        <div>
+          <h3 className="font-bold" style={{ fontSize: 30 }}>
+            {latestRolling['distinct_users']}
+          </h3>
+          <div>Monthly Active Devs</div>
+        </div>
+        <div>
+          <h3
+            className="flex items-baseline gap-2 font-bold"
+            style={{ fontSize: 30 }}
+          >
+            <span>{subInfo?.['num-subs']}</span>
+            <span className="text-lg font-normal text-gray-500">
+              (
+              {Object.entries(subInfo?.['sub-breakdown'] || {}).map(
+                ([name, count], idx, arr) => (
+                  <span key={name}>
+                    {count as number} {name.toLowerCase()}
+                    {idx < arr.length - 1 ? ', ' : ''}
+                  </span>
+                ),
+              )}
+              )
+            </span>
+          </h3>
+          <div>Subscriptions</div>
+        </div>
+
+        <div>
+          <h3 className="font-bold" style={{ fontSize: 30 }}>
+            ${Math.round(subInfo?.['total-monthly-revenue'] / 100)}
+          </h3>
+          <div>Monthly Revenue</div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const MinuteStatsSection = ({
+  minute,
+  solo,
+}: {
+  minute: any;
+  solo?: boolean;
+}) => {
+  const wrapperClass = solo
+    ? 'relative mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col space-y-2 p-4'
+    : 'relative flex min-h-0 w-1/2 flex-1 flex-col space-y-2 p-4';
+
+  if (minute.isLoading) {
+    return (
+      <div className={wrapperClass}>
+        <div className="flex h-64 items-center justify-center">
+          <div className="text-gray-500">Loading minute stats...</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (minute.error) {
+    return (
+      <div className={wrapperClass}>
+        <div className="rounded-sm border border-red-200 bg-red-50 p-4">
+          <h3 className="mb-2 font-semibold text-red-600">
+            Minute Stats Error
+          </h3>
+          <pre className="text-sm text-red-500">
+            {JSON.stringify(minute.error.body || minute.error.message, null, 2)}
+          </pre>
+        </div>
+      </div>
+    );
+  }
+
+  if (!minute.data) {
+    return (
+      <div className={wrapperClass}>
+        <div className="rounded-sm border border-yellow-200 bg-yellow-50 p-4">
+          <p className="text-yellow-600">No minute data available</p>
+        </div>
+      </div>
+    );
+  }
+
+  const sessions = flattenedSessionReports(
+    minute.data['session-reports'],
+  ).toSorted((a: any, b: any) => b.count - a.count);
+  const machineSummary = makeMachineSummary(minute.data['session-reports']);
+  const totalSessions = sessions.reduce(
+    (acc: number, x: any) => acc + x.count,
+    0,
+  );
+  const totalApps = Object.keys(sessions).length;
+
+  const proxiedConnections = flattenedProxiedConnections(
+    minute.data['proxied-connections'],
+  );
+  const totalProxied = proxiedConnections.reduce(
+    (acc: number, x) => acc + x.count,
+    0,
+  );
+
+  return (
+    <div className={wrapperClass}>
+      <button
+        type="button"
+        onClick={minute.refresh}
+        disabled={minute.isRefreshing}
+        title="Refresh minute stats"
+        className="absolute top-2 right-2 cursor-pointer rounded p-1 text-gray-500 hover:bg-gray-100 hover:text-gray-700 disabled:cursor-default disabled:opacity-50"
+      >
+        <ArrowPathIcon
+          className={`h-4 w-4 ${minute.isRefreshing ? 'animate-spin' : ''}`}
+        />
+      </button>
+      <div className="flex items-baseline justify-between">
+        <div className="inline-flex items-baseline space-x-4">
+          <h1 className="leading-none" style={{ fontSize: 120 }}>
+            {totalSessions}
+          </h1>
+
+          <div className="m-4 flex flex-col justify-between self-stretch">
+            <div>
+              {Object.entries(machineSummary).map(([machine, count]) => (
+                <div key={machine}>
+                  {machine}: {Intl.NumberFormat().format(count)}
+                </div>
+              ))}
+            </div>
+
+            <div className="leading-none font-bold">Active Connections</div>
+          </div>
+        </div>
+        <div className="inline-flex items-baseline space-x-4">
+          <h3 className="font-bold" style={{ fontSize: 30 }}>
+            {totalApps}
+          </h3>
+          <div>Active Apps</div>
+        </div>
+      </div>
+      {proxiedConnections.length > 0 && (
+        <div className="flex flex-col">
+          <div className="flex items-baseline space-x-2">
+            <h3 className="font-bold">Proxied Connections</h3>
+            <span className="text-gray-500">
+              {Intl.NumberFormat().format(totalProxied)} across{' '}
+              {proxiedConnections.length} app
+              {proxiedConnections.length > 1 ? 's' : ''}
+            </span>
+          </div>
+          <div className="mt-1 max-h-48 overflow-y-scroll border">
+            <table className="w-full">
+              <tbody>
+                {proxiedConnections.map((conn) => (
+                  <tr key={conn['app-id']}>
+                    <td className="px-4 py-2 text-right">
+                      {Intl.NumberFormat().format(conn.count)}
+                    </td>
+                    <td className="px-4 py-2">{conn['app-id']}</td>
+                    <td className="px-4 py-2">{conn.target || '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+      <div className="mt-4 overflow-y-scroll border">
+        <table className="w-full">
+          <tbody>
+            {sessions.map((session: any, i) => (
+              <tr key={session['app-title'] + i}>
+                <td className="px-4 py-2 text-right">
+                  {Intl.NumberFormat().format(session.count)}
+                </td>
+                <td className="px-4 py-2" title={session['app-id']}>
+                  {session['app-title']}
+                </td>
+                <td className="px-4 py-2">{session['creator-email'] || '-'}</td>
+                <td className="px-4 py-2">
+                  <OriginColumn origins={session['origins']} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+};
+
+export function Main() {
+  const token = useAuthToken();
+  const router = useRouter();
+  const onlyRaw = router.query.only;
+  const only = Array.isArray(onlyRaw) ? onlyRaw[0] : onlyRaw;
+  const showDaily = only !== 'minute';
+  const showMinute = only !== 'daily';
+
+  const daily = useDailyOverview(token!, {
+    enabled: router.isReady && showDaily,
+  });
+  const minute = useMinuteOverview(token!, {
+    enabled: router.isReady && showMinute,
+  });
+
+  if (!router.isReady) {
+    return <FullscreenLoading />;
+  }
+
+  if (showDaily && showMinute && daily.isLoading && minute.isLoading) {
+    return <FullscreenLoading />;
+  }
+
+  const dateAnalyzed = daily.data?.date
+    ? parse(daily.data.date, 'yyyy-MM-dd', new Date())
+    : new Date();
+
+  return (
+    <div className="flex h-full flex-col overflow-auto font-mono">
+      <div className="flex items-center space-x-4 border-b p-2">
+        <LogoIcon size="normal" />
+        <h3 className="flex items-center space-x-4 text-lg">
+          <span>
+            <span className="font-bold">instant</span> metrics
+          </span>
+          <span>/</span>
+          <span>{format(dateAnalyzed, 'MMMM d, yyyy')}</span>
+          {showMinute && (
+            <>
+              <span>/</span>
+              <span>
+                {format(minute.lastUpdatedAt ?? minute.sentAt, 'hh:mm:ssa')}
+              </span>
+            </>
+          )}
+        </h3>
+      </div>
+      <div className="flex min-h-0">
+        {showDaily && <DailyStatsSection daily={daily} solo={!showMinute} />}
+        {showMinute && <MinuteStatsSection minute={minute} solo={!showDaily} />}
+      </div>
+    </div>
+  );
+}
+
+export default function Page() {
+  const isHydrated = useIsHydrated();
+  return (
+    <div className="flex h-full w-full flex-col overflow-hidden md:flex-row">
+      <Head>
+        <title>Instant Overview</title>
+        <meta name="description" content="Welcome to Instant." />
+      </Head>
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {isHydrated ? <Main /> : null}
+      </div>
+    </div>
+  );
+}

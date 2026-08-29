@@ -1,0 +1,262 @@
+import { existsSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import chalk from 'chalk';
+
+type ConfigCandidate = {
+  files: string;
+  extensions?: string[];
+  transform: (code: string) => string;
+};
+
+/**
+ * Some framework packages can't be loaded in a Node.js CLI context:
+ * - @instantdb/react-native brings in react-native which isn't available
+ * - @instantdb/svelte re-exports .svelte files which can't be parsed
+ * - @instantdb/vue re-exports .vue files which can't be parsed
+ *
+ * Since schema files only need schema types (i, id, tx, etc.) which all
+ * come from @instantdb/core, we rewrite these imports to a safe export
+ * in the package that only re-exports from @instantdb/core.
+ */
+function transformImports(code: string): string {
+  return code
+    .replace(
+      /["']@instantdb\/react-native["']/g,
+      '"@instantdb/react-native/dist/cli"',
+    )
+    .replace(/["']@instantdb\/svelte["']/g, '"@instantdb/svelte/dist/cli"')
+    .replace(/["']@instantdb\/vue["']/g, '"@instantdb/vue/dist/cli"');
+}
+
+function findPathsRecursive(
+  baseDir: string,
+  maxDepth: number,
+  fileName: string,
+): string[] {
+  const paths: string[] = [];
+  const cwd = process.cwd();
+
+  const scanDir = (currentDir: string, currentDepth: number): void => {
+    if (currentDepth > maxDepth) return;
+
+    const fullPath = join(cwd, currentDir);
+    if (!existsSync(fullPath)) return;
+
+    paths.push(join(currentDir, fileName));
+
+    if (currentDepth < maxDepth) {
+      try {
+        const entries = readdirSync(fullPath, { withFileTypes: true });
+        for (const entry of entries) {
+          if (
+            entry.isDirectory() &&
+            !entry.name.startsWith('.') &&
+            entry.name !== 'node_modules'
+          ) {
+            scanDir(join(currentDir, entry.name), currentDepth + 1);
+          }
+        }
+      } catch (err) {
+        console.error(`Error scanning directory ${fullPath}: ${err}`);
+      }
+    }
+  };
+
+  scanDir(baseDir, 0);
+  return paths;
+}
+
+function getEnvSchemaPathWithLogging(): string | undefined {
+  const path = process.env.INSTANT_SCHEMA_FILE_PATH;
+  if (path) {
+    console.log(
+      `Using INSTANT_SCHEMA_FILE_PATH=${chalk.green(process.env.INSTANT_SCHEMA_FILE_PATH)}`,
+    );
+  }
+  return path;
+}
+
+function getEnvPermsPathWithLogging(): string | undefined {
+  const path = process.env.INSTANT_PERMS_FILE_PATH;
+  if (path) {
+    console.log(
+      `Using INSTANT_PERMS_FILE_PATH=${chalk.green(process.env.INSTANT_PERMS_FILE_PATH)}`,
+    );
+  }
+  return path;
+}
+
+function getEnvEmailPathWithLogging(): string | undefined {
+  const path = process.env.INSTANT_EMAIL_FILE_PATH;
+  if (path) {
+    console.log(
+      `Using INSTANT_EMAIL_FILE_PATH=${chalk.green(process.env.INSTANT_EMAIL_FILE_PATH)}`,
+    );
+  }
+  return path;
+}
+
+export function getSchemaReadCandidates(): ConfigCandidate[] {
+  const existing = getEnvSchemaPathWithLogging();
+
+  if (existing) {
+    return [{ files: existing, transform: transformImports }];
+  }
+  const extensions = ['ts', 'mts', 'cts', 'js', 'mjs', 'cjs'];
+  const candidates: ConfigCandidate[] = [];
+
+  candidates.push({
+    files: 'instant.schema',
+    extensions,
+    transform: transformImports,
+  });
+
+  // matches: src/any-folder/any-folder/instant.schema
+  //          src/any-folder/instant.schema
+  //          src/instant.schema
+  // 3 levels in case someone does src/lib/db/instant.schema
+  const srcPaths = findPathsRecursive('src', 3, 'instant.schema');
+  for (const srcPath of srcPaths) {
+    candidates.push({
+      files: srcPath,
+      extensions,
+      transform: transformImports,
+    });
+  }
+
+  // matches: lib/any-folder/instant.schema
+  //          lib/instant.schema
+  // 2 levels in case someone does lib/db/instant.schema
+  const libPaths = findPathsRecursive('lib', 2, 'instant.schema');
+  for (const libPath of libPaths) {
+    candidates.push({
+      files: libPath,
+      extensions,
+      transform: transformImports,
+    });
+  }
+
+  candidates.push({
+    files: 'app/instant.schema',
+    extensions,
+    transform: transformImports,
+  });
+
+  return candidates;
+}
+
+export function getPermsReadCandidates(): ConfigCandidate[] {
+  const existing = getEnvPermsPathWithLogging();
+  if (existing) {
+    return [{ files: existing, transform: transformImports }];
+  }
+  const extensions = ['ts', 'mts', 'cts', 'js', 'mjs', 'cjs'];
+
+  const candidates: ConfigCandidate[] = [];
+
+  candidates.push({
+    files: 'instant.perms',
+    extensions,
+    transform: transformImports,
+  });
+
+  const srcPaths = findPathsRecursive('src', 3, 'instant.perms');
+  for (const srcPath of srcPaths) {
+    candidates.push({
+      files: srcPath,
+      extensions,
+      transform: transformImports,
+    });
+  }
+
+  const libPaths = findPathsRecursive('lib', 2, 'instant.perms');
+  for (const libPath of libPaths) {
+    candidates.push({
+      files: libPath,
+      extensions,
+      transform: transformImports,
+    });
+  }
+
+  candidates.push({
+    files: 'app/instant.perms',
+    extensions,
+    transform: transformImports,
+  });
+
+  return candidates;
+}
+
+export function getEmailReadCandidates(emailPath?: string): ConfigCandidate[] {
+  const existing = emailPath ?? getEnvEmailPathWithLogging();
+  if (existing) {
+    return [{ files: existing, transform: transformImports }];
+  }
+  const extensions = ['ts', 'mts', 'cts', 'js', 'mjs', 'cjs'];
+
+  const candidates: ConfigCandidate[] = [];
+
+  candidates.push({
+    files: 'instant.email',
+    extensions,
+    transform: transformImports,
+  });
+
+  const srcPaths = findPathsRecursive('src', 3, 'instant.email');
+  for (const srcPath of srcPaths) {
+    candidates.push({
+      files: srcPath,
+      extensions,
+      transform: transformImports,
+    });
+  }
+
+  const libPaths = findPathsRecursive('lib', 2, 'instant.email');
+  for (const libPath of libPaths) {
+    candidates.push({
+      files: libPath,
+      extensions,
+      transform: transformImports,
+    });
+  }
+
+  candidates.push({
+    files: 'app/instant.email',
+    extensions,
+    transform: transformImports,
+  });
+
+  return candidates;
+}
+
+export function getSchemaPathToWrite(existingPath?: string): string {
+  if (existingPath) return existingPath;
+  if (process.env.INSTANT_SCHEMA_FILE_PATH) {
+    return process.env.INSTANT_SCHEMA_FILE_PATH;
+  }
+  if (existsSync(join(process.cwd(), 'src'))) {
+    return join('src', 'instant.schema.ts');
+  }
+
+  return 'instant.schema.ts';
+}
+
+export function getPermsPathToWrite(): string {
+  if (process.env.INSTANT_PERMS_FILE_PATH) {
+    return process.env.INSTANT_PERMS_FILE_PATH;
+  }
+  if (existsSync(join(process.cwd(), 'src'))) {
+    return join('src', 'instant.perms.ts');
+  }
+  return 'instant.perms.ts';
+}
+
+export function getEmailPathToWrite(): string {
+  if (process.env.INSTANT_EMAIL_FILE_PATH) {
+    return process.env.INSTANT_EMAIL_FILE_PATH;
+  }
+  if (existsSync(join(process.cwd(), 'src'))) {
+    return join('src', 'instant.email.ts');
+  }
+  return 'instant.email.ts';
+}
