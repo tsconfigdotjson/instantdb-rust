@@ -18,7 +18,7 @@ use crate::state::{AppState, Session};
 pub async fn stream(State(state): State<Arc<AppState>>) -> Response {
     let session_id = Uuid::new_v4();
     let sse_token = Uuid::new_v4();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
+    let (tx, rx) = mpsc::unbounded_channel::<Value>();
     let session = Arc::new(Session {
         id: session_id,
         tx,

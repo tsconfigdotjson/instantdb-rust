@@ -7,7 +7,6 @@ mod state;
 mod storage;
 mod ws;
 
-use std::sync::Arc;
 
 use axum::routing::{delete, get, post, put};
 use axum::Router;

@@ -10,7 +10,7 @@ use crate::attr::{Attr, AttrMap};
 use crate::error::{InstantError, Result};
 use crate::system_catalog;
 use crate::triple::{
-    self, backfill_indexed_nulls, backfill_nulls_for_new_attr, delete_entities, delete_triples,
+    backfill_indexed_nulls, backfill_nulls_for_new_attr, delete_entities, delete_triples,
     deep_merge_triples, expand_delete_cascade, insert_triples, parse_eid, resolve_etypes_for_delete,
     validate_required, value_lookup, CanonicalValue, EidRef, LookupResolver, ResolvedTriple,
 };

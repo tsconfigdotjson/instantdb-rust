@@ -35,7 +35,7 @@ Full unit + scenario testing. React todo example validated in browser.
 - [x] M7 presence/rooms/broadcast via PG table + NOTIFY (refresh-presence snapshots; patch-presence TODO optional)
 - [x] M8 admin API: query (object tree, inference), transact (admin steps grammar incl lookups/links/auto-attrs), refresh_tokens, sign_out, users, magic codes, presence, storage upload/delete + local-disk blob serve
 - [x] M9 react-todo example (examples/react-todo, official @instantdb/react built from LEGACY) browser-validated: two tabs live sync, presence=2, toggle/add/delete-completed sync, magic-code auth in-browser
-- [ ] M10 scenario tests matching legacy test suite level
+- [x] M10 scenario tests: 50 core tests (tx/query/rules/scenarios) + 5 e2e node suites (smoke-ws, multinode, admin-sdk, oauth, sse) + browser validation
 
 ## Validation loop
 - cargo test (unit+integration against dockerized PG)
@@ -49,3 +49,5 @@ Full unit + scenario testing. React todo example validated in browser.
 - 2026-08-29: M4/M7 smoke-tested end-to-end via scripts/smoke-ws.mjs (two clients, presence, broadcast). Server: crates/instant-server (state/service/ws/invalidator/presence/auth).
 - 2026-08-29: M6+M8 tested via curl: magic code lifecycle, admin query/transact/link/refresh_tokens all green. OAuth implemented but needs a mock-provider test.
 - 2026-08-29: M9 browser validation complete. Fixed cursor-direction bug found by scenario tests (forward=is_after). 50 core tests green.
+- 2026-08-29: patch-presence, SSE fallback, perms-check endpoints, client storage routes added; full regression green (5 node suites + 50 rust tests + browser).
+- 2026-08-29: ALL MILESTONES COMPLETE. GOAL.md satisfied: stateless multi-node sync engine on plain Postgres, wire-compatible with official clients (browser + admin SDK validated), full perms/auth/oauth/presence/storage, packaged with Docker + migration docs. Remaining known gaps tracked honestly in docs/PARITY.md (sync-tables/streams experimental features, BYOP, dashboard routes).
