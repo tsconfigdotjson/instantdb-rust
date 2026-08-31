@@ -3,6 +3,9 @@ name = "instant-server"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 instant-core = { path = "../instant-core" }
 tokio.workspace = true

@@ -21,7 +21,9 @@ fn verr(msg: &str) -> InstantError {
 
 /// Parse + validate a sync query: single namespace, no links, only $.order.
 fn parse_sync_query(attrs: &AttrMap, q: &Value) -> Result<String> {
-    let obj = q.as_object().ok_or_else(|| verr("Query must be an object."))?;
+    let obj = q
+        .as_object()
+        .ok_or_else(|| verr("Query must be an object."))?;
     let mut keys = obj.keys().filter(|k| *k != "$$ruleParams");
     let etype = keys.next().ok_or_else(|| verr("Query is empty."))?.clone();
     if keys.next().is_some() {
@@ -75,7 +77,10 @@ pub async fn handle_start_sync(
             .ok_or_else(|| InstantError::param_malformed("session not initialized"))?;
         (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
-    let q = msg.get("q").cloned().ok_or_else(|| InstantError::param_missing("missing q"))?;
+    let q = msg
+        .get("q")
+        .cloned()
+        .ok_or_else(|| InstantError::param_missing("missing q"))?;
     let attrs = service::load_attrs(state, app_id).await?;
     let etype = parse_sync_query(&attrs, &q)?;
 
@@ -106,7 +111,13 @@ pub async fn handle_start_sync(
     let tx_id = initial_load(state, session, app_id, &attrs, &etype, sub_id).await?;
     {
         let mut st = session.state.lock().await;
-        st.sync_subs.insert(sub_id, SyncSub { etype, last_tx: tx_id });
+        st.sync_subs.insert(
+            sub_id,
+            SyncSub {
+                etype,
+                last_tx: tx_id,
+            },
+        );
     }
     session.send(json!({
         "op": "sync-init-finish",
@@ -243,7 +254,13 @@ pub async fn handle_resync_table(
 
     {
         let mut st = session.state.lock().await;
-        st.sync_subs.insert(sub_id, SyncSub { etype: etype.clone(), last_tx: from_tx });
+        st.sync_subs.insert(
+            sub_id,
+            SyncSub {
+                etype: etype.clone(),
+                last_tx: from_tx,
+            },
+        );
     }
     // replay the backlog
     let latest = service::max_tx_id(state, app_id).await?;
@@ -285,12 +302,7 @@ pub async fn handle_remove_sync(
 
 /// Push sync-update-triples for all of a session's subs up to `latest`.
 /// Called from the invalidator on each tx notification.
-pub async fn push_updates(
-    state: &AppState,
-    session: &Arc<Session>,
-    app_id: Uuid,
-    latest: i64,
-) {
+pub async fn push_updates(state: &AppState, session: &Arc<Session>, app_id: Uuid, latest: i64) {
     let subs: Vec<(Uuid, SyncSub)> = {
         let st = session.state.lock().await;
         if st.app_id != Some(app_id) {
@@ -301,7 +313,9 @@ pub async fn push_updates(
     if subs.is_empty() {
         return;
     }
-    let Ok(attrs) = service::load_attrs(state, app_id).await else { return };
+    let Ok(attrs) = service::load_attrs(state, app_id).await else {
+        return;
+    };
     for (sub_id, sub) in subs {
         if sub.last_tx >= latest {
             continue;

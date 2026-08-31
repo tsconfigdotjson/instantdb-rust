@@ -54,9 +54,13 @@ async fn cardinality_one_upsert_replaces() {
     )
     .await
     .unwrap();
-    transact_json(&pool, app, json!([["add-triple", eid, ids.todos_title, "v2"]]))
-        .await
-        .unwrap();
+    transact_json(
+        &pool,
+        app,
+        json!([["add-triple", eid, ids.todos_title, "v2"]]),
+    )
+    .await
+    .unwrap();
 
     let titles: Vec<(String, Value)> = entity_triples(&pool, app, eid)
         .await
@@ -171,9 +175,7 @@ async fn lookup_refs_upsert_and_resolve() {
     transact_json(
         &pool,
         app,
-        json!([
-            ["add-triple", lookup, ids.owners_id, lookup],
-        ]),
+        json!([["add-triple", lookup, ids.owners_id, lookup],]),
     )
     .await
     .unwrap();
@@ -201,7 +203,12 @@ async fn lookup_refs_upsert_and_resolve() {
         app,
         json!([
             ["add-triple", todo, ids.todos_id, todo],
-            ["add-triple", todo, ids.todos_owner, [ids.owners_name, "bob"]]
+            [
+                "add-triple",
+                todo,
+                ids.todos_owner,
+                [ids.owners_name, "bob"]
+            ]
         ]),
     )
     .await
@@ -378,9 +385,13 @@ async fn indexed_attr_backfills_nulls() {
     // owners.name is indexed; creating an owner without a name should
     // backfill a null row so ave scans can find it.
     let owner = Uuid::new_v4();
-    transact_json(&pool, app, json!([["add-triple", owner, ids.owners_id, owner]]))
-        .await
-        .unwrap();
+    transact_json(
+        &pool,
+        app,
+        json!([["add-triple", owner, ids.owners_id, owner]]),
+    )
+    .await
+    .unwrap();
     let triples = entity_triples(&pool, app, owner).await;
     assert!(triples.contains(&("owners.name".to_string(), Value::Null)));
 }

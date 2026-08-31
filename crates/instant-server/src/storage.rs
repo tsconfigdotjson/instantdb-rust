@@ -102,14 +102,13 @@ pub async fn put_blob(
 pub async fn read_blob(state: &AppState, app_id: Uuid, location_id: &str) -> Option<Vec<u8>> {
     match backend() {
         Backend::Postgres => {
-            let row = sqlx::query(
-                "SELECT data FROM rust_blobs WHERE app_id = $1 AND location_id = $2",
-            )
-            .bind(app_id)
-            .bind(location_id)
-            .fetch_optional(&state.pool)
-            .await
-            .ok()??;
+            let row =
+                sqlx::query("SELECT data FROM rust_blobs WHERE app_id = $1 AND location_id = $2")
+                    .bind(app_id)
+                    .bind(location_id)
+                    .fetch_optional(&state.pool)
+                    .await
+                    .ok()??;
             Some(row.get::<Vec<u8>, _>("data"))
         }
         Backend::Disk => {
@@ -133,7 +132,10 @@ pub async fn blob_size(state: &AppState, app_id: Uuid, location_id: &str) -> i64
         .map(|r| r.get::<i32, _>("n") as i64)
         .unwrap_or(0),
         Backend::Disk => match blob_path(app_id, location_id) {
-            Ok(path) => tokio::fs::metadata(&path).await.map(|m| m.len() as i64).unwrap_or(0),
+            Ok(path) => tokio::fs::metadata(&path)
+                .await
+                .map(|m| m.len() as i64)
+                .unwrap_or(0),
             Err(_) => 0,
         },
     }
@@ -170,7 +172,11 @@ pub async fn append_blob(
                 ));
             }
             let skip = (current - offset) as usize;
-            let new_bytes = if skip < bytes.len() { &bytes[skip..] } else { &[] };
+            let new_bytes = if skip < bytes.len() {
+                &bytes[skip..]
+            } else {
+                &[]
+            };
             if !new_bytes.is_empty() {
                 sqlx::query(
                     "INSERT INTO rust_blobs (app_id, location_id, data) VALUES ($1, $2, $3)
@@ -194,7 +200,10 @@ pub async fn append_blob(
                     .await
                     .map_err(|e| InstantError::internal(format!("storage mkdir: {e}")))?;
             }
-            let current = tokio::fs::metadata(&path).await.map(|m| m.len() as i64).unwrap_or(0);
+            let current = tokio::fs::metadata(&path)
+                .await
+                .map(|m| m.len() as i64)
+                .unwrap_or(0);
             if offset > current {
                 return Err(InstantError::validation_failed(
                     "stream",
@@ -203,7 +212,11 @@ pub async fn append_blob(
                 ));
             }
             let skip = (current - offset) as usize;
-            let new_bytes = if skip < bytes.len() { &bytes[skip..] } else { &[] };
+            let new_bytes = if skip < bytes.len() {
+                &bytes[skip..]
+            } else {
+                &[]
+            };
             if !new_bytes.is_empty() {
                 use tokio::io::AsyncWriteExt;
                 let mut f = tokio::fs::OpenOptions::new()
@@ -297,5 +310,7 @@ async fn file_content_type(state: &AppState, app_id: Uuid, location_id: &str) ->
     .fetch_optional(&state.pool)
     .await
     .ok()??;
-    row.get::<serde_json::Value, _>("ct").as_str().map(|s| s.to_string())
+    row.get::<serde_json::Value, _>("ct")
+        .as_str()
+        .map(|s| s.to_string())
 }

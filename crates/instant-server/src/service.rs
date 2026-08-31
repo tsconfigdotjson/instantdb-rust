@@ -19,12 +19,14 @@ pub struct AppRow {
 }
 
 pub async fn get_app(state: &AppState, app_id: Uuid) -> Result<AppRow> {
-    let row = sqlx::query("SELECT id, title, status FROM apps WHERE id = $1 AND deletion_marked_at IS NULL")
-        .bind(app_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(InstantError::from)?
-        .ok_or_else(|| InstantError::record_not_found("app", "Could not find app."))?;
+    let row = sqlx::query(
+        "SELECT id, title, status FROM apps WHERE id = $1 AND deletion_marked_at IS NULL",
+    )
+    .bind(app_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(InstantError::from)?
+    .ok_or_else(|| InstantError::record_not_found("app", "Could not find app."))?;
     Ok(AppRow {
         id: row.get("id"),
         title: row.get("title"),
@@ -62,7 +64,11 @@ pub async fn run_query(
     q: &Value,
 ) -> Result<QueryResult> {
     let rule_params = q.get("$$ruleParams").cloned();
-    let ctx = QueryCtx { app_id, attrs, admin: perms.admin };
+    let ctx = QueryCtx {
+        app_id,
+        attrs,
+        admin: perms.admin,
+    };
     let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
     let mut result = instaql::query(&mut conn, &ctx, q).await?;
     if !perms.admin {
@@ -74,7 +80,9 @@ pub async fn run_query(
         let filter = instant_core::perms::PermsFilter {
             rules: &rules,
             auth: &auth,
-            rule_params: rule_params.or(perms.rule_params.clone()).unwrap_or(json!({})),
+            rule_params: rule_params
+                .or(perms.rule_params.clone())
+                .unwrap_or(json!({})),
         };
         filter.filter(&mut conn, app_id, attrs, &mut result).await?;
     }
@@ -184,7 +192,9 @@ pub async fn run_system_transact(
         app_id,
         &mut attrs,
         steps,
-        &TxOptions { allow_system_catalog_writes: true },
+        &TxOptions {
+            allow_system_catalog_writes: true,
+        },
     )
     .await?;
     dbtx.commit().await.map_err(InstantError::from)?;
@@ -323,12 +333,10 @@ pub async fn ensure_server_tables(pool: &sqlx::PgPool) -> Result<()> {
     .execute(pool)
     .await
     .map_err(InstantError::from)?;
-    sqlx::query(
-        "DROP TRIGGER IF EXISTS rust_capture_trigger ON triples",
-    )
-    .execute(pool)
-    .await
-    .map_err(InstantError::from)?;
+    sqlx::query("DROP TRIGGER IF EXISTS rust_capture_trigger ON triples")
+        .execute(pool)
+        .await
+        .map_err(InstantError::from)?;
     sqlx::query(
         "CREATE TRIGGER rust_capture_trigger
          AFTER INSERT OR UPDATE OR DELETE ON triples

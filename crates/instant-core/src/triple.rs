@@ -86,9 +86,18 @@ pub struct LookupResolver {
     pub created: HashSet<Uuid>,
 }
 
+impl Default for LookupResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LookupResolver {
     pub fn new() -> Self {
-        LookupResolver { resolved: HashMap::new(), created: HashSet::new() }
+        LookupResolver {
+            resolved: HashMap::new(),
+            created: HashSet::new(),
+        }
     }
 
     fn validate_lookup_attr(attrs: &AttrMap, attr_id: &Uuid) -> Result<Attr> {
@@ -102,7 +111,10 @@ impl LookupResolver {
         if !attr.is_unique {
             return Err(InstantError::validation_failed(
                 "lookup",
-                format!("{}.{} is not a unique attribute on {}", attr.etype, attr.label, attr.etype),
+                format!(
+                    "{}.{} is not a unique attribute on {}",
+                    attr.etype, attr.label, attr.etype
+                ),
                 json!([]),
             ));
         }
@@ -489,7 +501,11 @@ pub async fn deep_merge_triples(
         for p in patches {
             merged = deep_merge(&merged, p);
         }
-        let t = ResolvedTriple { entity_id: *eid, attr: attr.clone(), value: merged };
+        let t = ResolvedTriple {
+            entity_id: *eid,
+            attr: attr.clone(),
+            value: merged,
+        };
         let newly = insert_triples(conn, app_id, attrs, &[t]).await?;
         created.extend(newly);
     }
@@ -592,8 +608,7 @@ pub async fn delete_entities(
     entities: &[(Uuid, String)],
 ) -> Result<()> {
     for (eid, etype) in entities {
-        let etype_attr_ids: Vec<Uuid> =
-            attrs.attrs_of_etype(etype).map(|a| a.id).collect();
+        let etype_attr_ids: Vec<Uuid> = attrs.attrs_of_etype(etype).map(|a| a.id).collect();
         sqlx::query(
             "DELETE FROM triples
              WHERE app_id = $1 AND entity_id = $2 AND attr_id = ANY($3)",
@@ -639,13 +654,12 @@ pub async fn resolve_etypes_for_delete(
     attrs: &AttrMap,
     eid: Uuid,
 ) -> Result<Vec<String>> {
-    let rows = sqlx::query(
-        "SELECT DISTINCT attr_id FROM triples WHERE app_id = $1 AND entity_id = $2",
-    )
-    .bind(app_id)
-    .bind(eid)
-    .fetch_all(&mut *conn)
-    .await?;
+    let rows =
+        sqlx::query("SELECT DISTINCT attr_id FROM triples WHERE app_id = $1 AND entity_id = $2")
+            .bind(app_id)
+            .bind(eid)
+            .fetch_all(&mut *conn)
+            .await?;
     let mut etypes = HashSet::new();
     for row in rows {
         let attr_id: Uuid = row.get("attr_id");
@@ -701,7 +715,10 @@ pub async fn validate_required(
                 return Err(InstantError::new(
                     "validation-failed",
                     400,
-                    format!("Missing required attribute `{}/{}`: {}", etype, attr.label, eid),
+                    format!(
+                        "Missing required attribute `{}/{}`: {}",
+                        etype, attr.label, eid
+                    ),
                     Some(json!({"data-type": "triples", "records": [eid]})),
                 ));
             }

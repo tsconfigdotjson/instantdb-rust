@@ -27,13 +27,24 @@ async fn run_filtered(
     q: Value,
 ) -> instant_core::instaql::QueryResult {
     let attrs = attrs_of(pool, app).await;
-    let ctx = QueryCtx { app_id: app, attrs: &attrs, admin: true };
+    let ctx = QueryCtx {
+        app_id: app,
+        attrs: &attrs,
+        admin: true,
+    };
     let mut conn = pool.acquire().await.unwrap();
     let mut result = query(&mut conn, &ctx, &q).await.unwrap();
     let rules = Rules::load(&mut conn, app).await.unwrap();
     let rule_params = q.get("$$ruleParams").cloned().unwrap_or(json!({}));
-    let filter = PermsFilter { rules: &rules, auth, rule_params };
-    filter.filter(&mut conn, app, &attrs, &mut result).await.unwrap();
+    let filter = PermsFilter {
+        rules: &rules,
+        auth,
+        rule_params,
+    };
+    filter
+        .filter(&mut conn, app, &attrs, &mut result)
+        .await
+        .unwrap();
     result
 }
 
@@ -47,10 +58,9 @@ async fn transact_with_perms(
     let mut attrs = attrs_of(pool, app).await;
     let mut dbtx = pool.begin().await.unwrap();
     let rules = Rules::load(&mut dbtx, app).await?;
-    let report = perms::permissioned_transact(
-        &mut dbtx, app, &mut attrs, parsed, &rules, auth, &json!({}),
-    )
-    .await?;
+    let report =
+        perms::permissioned_transact(&mut dbtx, app, &mut attrs, parsed, &rules, auth, &json!({}))
+            .await?;
     dbtx.commit().await.unwrap();
     Ok(report)
 }
@@ -72,7 +82,9 @@ async fn mk_user(pool: &PgPool, app: Uuid, email: &str) -> Uuid {
         app,
         &mut attrs,
         parsed,
-        &TxOptions { allow_system_catalog_writes: true },
+        &TxOptions {
+            allow_system_catalog_writes: true,
+        },
     )
     .await
     .unwrap();
@@ -90,7 +102,10 @@ async fn default_rules_allow_user_namespaces() {
     transact_json(
         &pool,
         app,
-        json!([["add-triple", e, ids.todos_id, e], ["add-triple", e, ids.todos_title, "t"]]),
+        json!([
+            ["add-triple", e, ids.todos_id, e],
+            ["add-triple", e, ids.todos_title, "t"]
+        ]),
     )
     .await
     .unwrap();
@@ -186,8 +201,14 @@ async fn auth_binding_and_owner_rule() {
     .await
     .unwrap();
 
-    let alice_auth = AuthCtx { user_id: Some(alice), user_map: None };
-    let bob_auth = AuthCtx { user_id: Some(bob), user_map: None };
+    let alice_auth = AuthCtx {
+        user_id: Some(alice),
+        user_map: None,
+    };
+    let bob_auth = AuthCtx {
+        user_id: Some(bob),
+        user_map: None,
+    };
 
     let res = run_filtered(&pool, app, &alice_auth, json!({"todos": {}})).await;
     assert_eq!(res.forms[0].entities.len(), 1);
@@ -391,7 +412,10 @@ async fn users_default_rules() {
     let bob = mk_user(&pool, app, "bob2@example.com").await;
 
     // alice sees only herself
-    let alice_auth = AuthCtx { user_id: Some(alice), user_map: None };
+    let alice_auth = AuthCtx {
+        user_id: Some(alice),
+        user_map: None,
+    };
     let res = run_filtered(&pool, app, &alice_auth, json!({"$users": {}})).await;
     assert_eq!(res.forms[0].entities.len(), 1);
     assert_eq!(res.forms[0].entities[0].eid, alice);
@@ -401,7 +425,10 @@ async fn users_default_rules() {
     assert_eq!(res.forms[0].entities.len(), 0);
 
     // bob can't delete alice
-    let bob_auth = AuthCtx { user_id: Some(bob), user_map: None };
+    let bob_auth = AuthCtx {
+        user_id: Some(bob),
+        user_map: None,
+    };
     let err = transact_with_perms(
         &pool,
         app,
@@ -419,7 +446,12 @@ async fn default_namespace_rule_applies() {
     let app = mk_app(&pool).await;
     let (schema, ids) = todo_schema_steps();
     transact_json(&pool, app, schema).await.unwrap();
-    set_rules(&pool, app, json!({"$default": {"allow": {"view": "false"}}})).await;
+    set_rules(
+        &pool,
+        app,
+        json!({"$default": {"allow": {"view": "false"}}}),
+    )
+    .await;
     let e = Uuid::new_v4();
     transact_json(&pool, app, json!([["add-triple", e, ids.todos_id, e]]))
         .await

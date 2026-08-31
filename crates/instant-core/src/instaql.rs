@@ -200,10 +200,7 @@ impl QueryResult {
             }
         }
         let mut data = Map::new();
-        data.insert(
-            "datalog-result".into(),
-            json!({"join-rows": [triples]}),
-        );
+        data.insert("datalog-result".into(), json!({"join-rows": [triples]}));
         if !page_info.is_empty() {
             data.insert("page-info".into(), Value::Object(page_info));
         }
@@ -250,13 +247,22 @@ fn parse_form(k: &str, etype: &str, v: &Value, level: usize) -> Result<Form> {
         }
     }
     if opts.aggregate && !children.is_empty() {
-        return Err(verr("You can not combine aggregates with child queries at this time."));
+        return Err(verr(
+            "You can not combine aggregates with child queries at this time.",
+        ));
     }
-    Ok(Form { k: k.to_string(), etype: etype.to_string(), opts, children })
+    Ok(Form {
+        k: k.to_string(),
+        etype: etype.to_string(),
+        opts,
+        children,
+    })
 }
 
 fn parse_opts(v: &Value, level: usize) -> Result<Opts> {
-    let obj = v.as_object().ok_or_else(|| verr("`$` must be an object."))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| verr("`$` must be an object."))?;
     let mut opts = Opts::default();
     for (k, v) in obj {
         match k.as_str() {
@@ -316,8 +322,15 @@ fn parse_opts(v: &Value, level: usize) -> Result<Opts> {
             }
         }
     }
-    if [opts.limit, opts.first, opts.last].iter().filter(|x| x.is_some()).count() > 1 {
-        return Err(verr("Only one of `limit`, `first`, or `last` can be provided."));
+    if [opts.limit, opts.first, opts.last]
+        .iter()
+        .filter(|x| x.is_some())
+        .count()
+        > 1
+    {
+        return Err(verr(
+            "Only one of `limit`, `first`, or `last` can be provided.",
+        ));
     }
     if level > 0 && (opts.offset.is_some() || opts.before.is_some() || opts.after.is_some()) {
         return Err(verr(
@@ -344,16 +357,25 @@ fn parse_cursor(v: &Value) -> Result<Cursor> {
         .ok_or_else(|| verr("cursor attr must be a uuid."))?;
     let e = arr[0].as_str().and_then(|s| Uuid::parse_str(s).ok());
     let t = arr.get(3).and_then(|t| t.as_i64());
-    Ok(Cursor { e, a, v: arr[2].clone(), t })
+    Ok(Cursor {
+        e,
+        a,
+        v: arr[2].clone(),
+        t,
+    })
 }
 
 fn parse_where(v: &Value) -> Result<WhereCond> {
-    let obj = v.as_object().ok_or_else(|| verr("`where` must be an object."))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| verr("`where` must be an object."))?;
     let mut conds = vec![];
     for (k, val) in obj {
         match k.as_str() {
             "or" => {
-                let arr = val.as_array().ok_or_else(|| verr("`or` must be an array."))?;
+                let arr = val
+                    .as_array()
+                    .ok_or_else(|| verr("`or` must be an array."))?;
                 if arr.is_empty() {
                     return Err(verr("The `or` operation expects a non-empty list."));
                 }
@@ -362,7 +384,9 @@ fn parse_where(v: &Value) -> Result<WhereCond> {
                 ));
             }
             "and" => {
-                let arr = val.as_array().ok_or_else(|| verr("`and` must be an array."))?;
+                let arr = val
+                    .as_array()
+                    .ok_or_else(|| verr("`and` must be an array."))?;
                 if arr.is_empty() {
                     return Err(verr("The `and` operation expects a non-empty list."));
                 }
@@ -374,12 +398,19 @@ fn parse_where(v: &Value) -> Result<WhereCond> {
                 let segs: Vec<String> = path.split('.').map(|s| s.to_string()).collect();
                 let ops = parse_where_value(val)?;
                 for op in ops {
-                    conds.push(WhereCond::Cond { path: segs.clone(), op });
+                    conds.push(WhereCond::Cond {
+                        path: segs.clone(),
+                        op,
+                    });
                 }
             }
         }
     }
-    Ok(if conds.len() == 1 { conds.pop().unwrap() } else { WhereCond::And(conds) })
+    Ok(if conds.len() == 1 {
+        conds.pop().unwrap()
+    } else {
+        WhereCond::And(conds)
+    })
 }
 
 fn parse_where_value(v: &Value) -> Result<Vec<WhereOp>> {
@@ -395,23 +426,26 @@ fn parse_where_value(v: &Value) -> Result<Vec<WhereOp>> {
                     ),
                     "$not" | "$ne" => WhereOp::Not(val.clone()),
                     "$isNull" => WhereOp::IsNull(
-                        val.as_bool().ok_or_else(|| verr("`$isNull` expects a boolean."))?,
+                        val.as_bool()
+                            .ok_or_else(|| verr("`$isNull` expects a boolean."))?,
                     ),
                     "$gt" => WhereOp::Cmp(">", val.clone()),
                     "$gte" => WhereOp::Cmp(">=", val.clone()),
                     "$lt" => WhereOp::Cmp("<", val.clone()),
                     "$lte" => WhereOp::Cmp("<=", val.clone()),
                     "$like" => WhereOp::Like(
-                        val.as_str().ok_or_else(|| verr("`$like` expects a string."))?.to_string(),
+                        val.as_str()
+                            .ok_or_else(|| verr("`$like` expects a string."))?
+                            .to_string(),
                         false,
                     ),
                     "$ilike" => WhereOp::Like(
-                        val.as_str().ok_or_else(|| verr("`$ilike` expects a string."))?.to_string(),
+                        val.as_str()
+                            .ok_or_else(|| verr("`$ilike` expects a string."))?
+                            .to_string(),
                         true,
                     ),
-                    other => {
-                        return Err(verr(format!("Unsupported where operator `{other}`.")))
-                    }
+                    other => return Err(verr(format!("Unsupported where operator `{other}`."))),
                 };
                 ops.push(op);
             }
@@ -420,9 +454,7 @@ fn parse_where_value(v: &Value) -> Result<Vec<WhereOp>> {
             }
             Ok(ops)
         }
-        Value::String(_) | Value::Number(_) | Value::Bool(_) => {
-            Ok(vec![WhereOp::Eq(v.clone())])
-        }
+        Value::String(_) | Value::Number(_) | Value::Bool(_) => Ok(vec![WhereOp::Eq(v.clone())]),
         Value::Null => Ok(vec![WhereOp::IsNull(true)]),
         _ => Err(verr("Invalid where value.")),
     }
@@ -452,7 +484,10 @@ fn resolve_seg<'a>(
 ) -> std::result::Result<PathStep<'a>, MissingAttr> {
     if seg == "$entityIdStartsWith" {
         // handled by the caller; treat as forward id attr
-        return attrs.id_attr_of(etype).map(PathStep::Forward).ok_or(MissingAttr);
+        return attrs
+            .id_attr_of(etype)
+            .map(PathStep::Forward)
+            .ok_or(MissingAttr);
     }
     if let Some(a) = attrs.by_fwd_name(etype, seg) {
         return Ok(PathStep::Forward(a));
@@ -609,7 +644,10 @@ impl<'a> SqlCtx<'a> {
         // $entityIdStartsWith special label
         if path.len() == 1 && path[0] == "$entityIdStartsWith" {
             if let WhereOp::Eq(Value::String(prefix)) = op {
-                let clean: String = prefix.chars().filter(|c| c.is_ascii_hexdigit() || *c == '-').collect();
+                let clean: String = prefix
+                    .chars()
+                    .filter(|c| c.is_ascii_hexdigit() || *c == '-')
+                    .collect();
                 let lo = pad_uuid(&clean, '0');
                 let hi = pad_uuid(&clean, 'f');
                 match (lo, hi) {
@@ -675,8 +713,12 @@ impl<'a> SqlCtx<'a> {
             WhereOp::IsNull(b) => {
                 self.push_path(qb, etype, ent, path, &LeafEmit::IsNull(*b), depth)
             }
-            WhereOp::Eq(v) => self.push_path(qb, etype, ent, path, &LeafEmit::Eq(vec![v.clone()]), depth),
-            WhereOp::In(vs) => self.push_path(qb, etype, ent, path, &LeafEmit::Eq(vs.clone()), depth),
+            WhereOp::Eq(v) => {
+                self.push_path(qb, etype, ent, path, &LeafEmit::Eq(vec![v.clone()]), depth)
+            }
+            WhereOp::In(vs) => {
+                self.push_path(qb, etype, ent, path, &LeafEmit::Eq(vs.clone()), depth)
+            }
             WhereOp::Cmp(op, v) => {
                 self.push_path(qb, etype, ent, path, &LeafEmit::Cmp(op, v.clone()), depth)
             }
@@ -781,7 +823,11 @@ impl<'a> SqlCtx<'a> {
         emit: &LeafEmit,
         alias: &str,
     ) -> Result<()> {
-        let typed = if attr.is_indexed { attr.checked_data_type } else { None };
+        let typed = if attr.is_indexed {
+            attr.checked_data_type
+        } else {
+            None
+        };
         let base = |qb: &mut QueryBuilder<Postgres>, negate: bool| {
             if negate {
                 qb.push("NOT ");
@@ -813,9 +859,7 @@ impl<'a> SqlCtx<'a> {
                     }
                     first = false;
                     match typed {
-                        Some(t)
-                            if t != CheckedDataType::String && !v.is_null() =>
-                        {
+                        Some(t) if t != CheckedDataType::String && !v.is_null() => {
                             coerce_typed(attr, t, v, "$eq")?;
                             qb.push(format!("({}({}.value) = ", extract_fn(t), alias));
                             push_typed_value(qb, t, v);
@@ -1002,9 +1046,9 @@ impl<'a> SqlCtx<'a> {
                 qb.push(")");
                 Ok(())
             }
-            LeafEmit::Cmp(..) | LeafEmit::Like(..) => Err(verr(
-                "Comparison operators are not supported on links.",
-            )),
+            LeafEmit::Cmp(..) | LeafEmit::Like(..) => {
+                Err(verr("Comparison operators are not supported on links."))
+            }
         }
     }
 }
@@ -1039,11 +1083,7 @@ pub struct QueryCtx<'a> {
     pub admin: bool,
 }
 
-pub async fn query(
-    conn: &mut PgConnection,
-    ctx: &QueryCtx<'_>,
-    q: &Value,
-) -> Result<QueryResult> {
+pub async fn query(conn: &mut PgConnection, ctx: &QueryCtx<'_>, q: &Value) -> Result<QueryResult> {
     let forms = parse_query(q)?;
     let mut out = vec![];
     for form in &forms {
@@ -1058,15 +1098,16 @@ struct MatchedRow {
     order_t: i64,
 }
 
-async fn run_top_form(
-    conn: &mut PgConnection,
-    ctx: &QueryCtx<'_>,
-    form: &Form,
-) -> Result<FormOut> {
+async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) -> Result<FormOut> {
     if form.opts.aggregate && !ctx.admin {
-        return Err(verr("Aggregates are currently only available for admin queries."));
+        return Err(verr(
+            "Aggregates are currently only available for admin queries.",
+        ));
     }
-    let sql_ctx = SqlCtx { app_id: ctx.app_id, attrs: ctx.attrs };
+    let sql_ctx = SqlCtx {
+        app_id: ctx.app_id,
+        attrs: ctx.attrs,
+    };
     let id_attr = match ctx.attrs.id_attr_of(&form.etype) {
         Some(a) => a.clone(),
         None => {
@@ -1114,11 +1155,10 @@ async fn run_top_form(
 
     // ---- matching + ordering + pagination ----
     let paginated = form.opts.is_paginated();
-    let order = form
-        .opts
-        .order
-        .clone()
-        .unwrap_or(OrderSpec { key: "serverCreatedAt".to_string(), dir: Dir::Asc });
+    let order = form.opts.order.clone().unwrap_or(OrderSpec {
+        key: "serverCreatedAt".to_string(),
+        dir: Dir::Asc,
+    });
 
     // Resolve order attr
     let (order_attr, order_type): (Attr, Option<CheckedDataType>) =
@@ -1255,18 +1295,15 @@ async fn run_top_form(
     };
     for (cursor, is_after) in [(&form.opts.after, true), (&form.opts.before, false)] {
         let Some(cursor) = cursor else { continue };
-        let inclusive = if is_after { form.opts.after_inclusive } else { form.opts.before_inclusive };
+        let inclusive = if is_after {
+            form.opts.after_inclusive
+        } else {
+            form.opts.before_inclusive
+        };
         // after = rows later in display order; before = rows earlier
         let forward = is_after;
         push_cursor_filter(
-            &mut qb,
-            sort_col,
-            by_created,
-            order_type,
-            cursor,
-            order.dir,
-            forward,
-            inclusive,
+            &mut qb, sort_col, by_created, order_type, cursor, order.dir, forward, inclusive,
         )?;
     }
 
@@ -1333,21 +1370,48 @@ async fn run_top_form(
             // SQL was reversed: extra row lies before the displayed start
             has_prev = has_extra;
             has_next = cursor_row_exists(
-                conn, ctx, &sql_ctx, form, &id_attr, &order_attr, order_type, by_created, &order,
-                matched.last().unwrap(), true,
+                conn,
+                ctx,
+                &sql_ctx,
+                form,
+                &id_attr,
+                &order_attr,
+                order_type,
+                by_created,
+                &order,
+                matched.last().unwrap(),
+                true,
             )
             .await?;
         } else {
             has_next = has_extra
                 || cursor_row_exists(
-                    conn, ctx, &sql_ctx, form, &id_attr, &order_attr, order_type, by_created,
-                    &order, matched.last().unwrap(), true,
+                    conn,
+                    ctx,
+                    &sql_ctx,
+                    form,
+                    &id_attr,
+                    &order_attr,
+                    order_type,
+                    by_created,
+                    &order,
+                    matched.last().unwrap(),
+                    true,
                 )
                 .await?;
             has_prev = offset > 0
                 || cursor_row_exists(
-                    conn, ctx, &sql_ctx, form, &id_attr, &order_attr, order_type, by_created,
-                    &order, matched.first().unwrap(), false,
+                    conn,
+                    ctx,
+                    &sql_ctx,
+                    form,
+                    &id_attr,
+                    &order_attr,
+                    order_type,
+                    by_created,
+                    &order,
+                    matched.first().unwrap(),
+                    false,
                 )
                 .await?;
         }
@@ -1391,7 +1455,11 @@ fn push_cursor_filter(
         (Dir::Asc, true) | (Dir::Desc, false) => ">",
         _ => "<",
     };
-    let e_cmp = if inclusive { format!("{cmp}=") } else { cmp.to_string() };
+    let e_cmp = if inclusive {
+        format!("{cmp}=")
+    } else {
+        cmp.to_string()
+    };
     let v_is_null = cursor.v.is_null();
     qb.push(" AND (");
     if v_is_null && !by_created {
@@ -1490,7 +1558,9 @@ async fn cursor_row_exists(
             CheckedDataType::Date => "triples_extract_date_value(ord.value)",
         }
     };
-    push_cursor_filter(&mut qb, sort_col, by_created, order_type, &cursor, order.dir, forward, false)?;
+    push_cursor_filter(
+        &mut qb, sort_col, by_created, order_type, &cursor, order.dir, forward, false,
+    )?;
     qb.push(" LIMIT 1");
     let row = qb.build().fetch_optional(&mut *conn).await?;
     Ok(row.is_some())
@@ -1568,18 +1638,25 @@ fn attach_children<'a>(
     ctx: &'a QueryCtx<'_>,
     parent_form: &'a Form,
     child_form: &'a Form,
-    parents: &'a mut Vec<EntityNode>,
+    parents: &'a mut [EntityNode],
 ) -> futures::future::BoxFuture<'a, Result<()>> {
     Box::pin(async move {
         let parent_ids: Vec<Uuid> = parents.iter().map(|p| p.eid).collect();
         // Resolve link
-        let fwd = ctx.attrs.by_fwd_name(&parent_form.etype, &child_form.k).cloned();
+        let fwd = ctx
+            .attrs
+            .by_fwd_name(&parent_form.etype, &child_form.k)
+            .cloned();
         let (link_attr, forward, child_etype) = match fwd {
             Some(a) if a.value_type == ValueType::Ref => {
                 let child_etype = a.reverse_etype.clone().unwrap_or_default();
                 (Some(a), true, child_etype)
             }
-            _ => match ctx.attrs.by_rev_name(&parent_form.etype, &child_form.k).cloned() {
+            _ => match ctx
+                .attrs
+                .by_rev_name(&parent_form.etype, &child_form.k)
+                .cloned()
+            {
                 Some(a) => {
                     let child_etype = a.etype.clone();
                     (Some(a), false, child_etype)
@@ -1634,18 +1711,16 @@ fn attach_children<'a>(
                 t: row.get::<Option<i64>, _>("created_at").unwrap_or(0),
             };
             let (parent, child) = if forward {
-                let child = t
-                    .v
-                    .as_str()
-                    .and_then(|s| Uuid::parse_str(s).ok())
-                    .unwrap_or_default();
+                let child =
+                    t.v.as_str()
+                        .and_then(|s| Uuid::parse_str(s).ok())
+                        .unwrap_or_default();
                 (t.e, child)
             } else {
-                let parent = t
-                    .v
-                    .as_str()
-                    .and_then(|s| Uuid::parse_str(s).ok())
-                    .unwrap_or_default();
+                let parent =
+                    t.v.as_str()
+                        .and_then(|s| Uuid::parse_str(s).ok())
+                        .unwrap_or_default();
                 (parent, t.e)
             };
             all_children.insert(child);
@@ -1654,7 +1729,10 @@ fn attach_children<'a>(
 
         // Apply the child's where filter over candidate children
         let kept: HashSet<Uuid> = if let Some(w) = &child_form.opts.where_conds {
-            let sql_ctx = SqlCtx { app_id: ctx.app_id, attrs: ctx.attrs };
+            let sql_ctx = SqlCtx {
+                app_id: ctx.app_id,
+                attrs: ctx.attrs,
+            };
             let candidates: Vec<Uuid> = all_children.iter().cloned().collect();
             if candidates.is_empty() {
                 HashSet::new()

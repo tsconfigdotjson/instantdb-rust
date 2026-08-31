@@ -85,9 +85,11 @@ pub async fn authed(
     };
     if let Some(email) = as_email {
         check_admin(bearer).await?;
-        let user = auth::user_by_email(state, app_id, email).await?.ok_or_else(|| {
-            InstantError::record_not_found("app-user", "Record not found: app-user")
-        })?;
+        let user = auth::user_by_email(state, app_id, email)
+            .await?
+            .ok_or_else(|| {
+                InstantError::record_not_found("app-user", "Record not found: app-user")
+            })?;
         return Ok(AdminCtx {
             app_id,
             perms: PermsCtx {
@@ -101,13 +103,23 @@ pub async fn authed(
     if as_guest {
         return Ok(AdminCtx {
             app_id,
-            perms: PermsCtx { admin: false, user_id: None, user_map: None, rule_params: None },
+            perms: PermsCtx {
+                admin: false,
+                user_id: None,
+                user_map: None,
+                rule_params: None,
+            },
         });
     }
     check_admin(bearer).await?;
     Ok(AdminCtx {
         app_id,
-        perms: PermsCtx { admin: true, user_id: None, user_map: None, rule_params: None },
+        perms: PermsCtx {
+            admin: true,
+            user_id: None,
+            user_map: None,
+            rule_params: None,
+        },
     })
 }
 
@@ -117,12 +129,7 @@ pub async fn authed(
 fn entity_created_at(node: &EntityNode, attrs: &AttrMap) -> i64 {
     node.triples
         .iter()
-        .find(|t| {
-            attrs
-                .get(&t.a)
-                .map(|a| a.label == "id")
-                .unwrap_or(false)
-        })
+        .find(|t| attrs.get(&t.a).map(|a| a.label == "id").unwrap_or(false))
         .map(|t| t.t)
         .unwrap_or(0)
 }
@@ -139,7 +146,9 @@ fn node_to_object(
     m.insert("id".into(), json!(node.eid));
     let mut location_id: Option<String> = None;
     for t in &node.triples {
-        let Some(attr) = attrs.get(&t.a) else { continue };
+        let Some(attr) = attrs.get(&t.a) else {
+            continue;
+        };
         if attr.value_type != ValueType::Blob {
             continue;
         }
@@ -249,7 +258,7 @@ fn sort_entities(
             entities.sort_by(|(_, at), (_, bt)| bt.cmp(at));
         }
         _ => {
-            entities.sort_by(|(_, at), (_, bt)| at.cmp(bt));
+            entities.sort_by_key(|(_, at)| *at);
         }
     }
 }
@@ -330,20 +339,19 @@ async fn query_impl(
         .get("query")
         .filter(|q| q.is_object())
         .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"query\"]"))?;
-    let inference = body.get("inference?").and_then(|v| v.as_bool()).unwrap_or(false);
+    let inference = body
+        .get("inference?")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let attrs = service::load_attrs(state, ctx.app_id).await?;
     let result = service::run_query(state, ctx.app_id, &attrs, &ctx.perms, q).await?;
-    Ok(object_tree(state, ctx.app_id, &result, &attrs, q, inference))
+    Ok(object_tree(
+        state, ctx.app_id, &result, &attrs, q, inference,
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // /admin/transact — admin steps grammar translation
-
-fn parse_admin_eid(v: &Value) -> Result<Value> {
-    // returns a client-format eid: uuid string or [attr-id?, ...] lookup —
-    // resolution of attr NAMES to ids happens in translate_steps (needs attrs)
-    Ok(v.clone())
-}
 
 fn eid_to_lookup(
     attrs: &AttrMap,
@@ -362,8 +370,7 @@ fn eid_to_lookup(
                 let mut parts = rest.splitn(2, "__");
                 let attr_name = parts.next().unwrap_or_default();
                 let raw = parts.next().unwrap_or_default();
-                let value: Value = serde_json::from_str(raw)
-                    .map_err(|_| invalid_eid(s))?;
+                let value: Value = serde_json::from_str(raw).map_err(|_| invalid_eid(s))?;
                 let attr_id =
                     resolve_lookup_attr(attrs, etype, attr_name, new_attrs, throw_missing)?;
                 return Ok(json!([attr_id, value]));
@@ -415,9 +422,15 @@ fn resolve_lookup_attr(
     // check pending new attrs
     for na in new_attrs.iter() {
         if let Some(obj) = na.get(1) {
-            if obj.get("forward-identity").and_then(|f| f.get(1)).and_then(|v| v.as_str())
+            if obj
+                .get("forward-identity")
+                .and_then(|f| f.get(1))
+                .and_then(|v| v.as_str())
                 == Some(etype)
-                && obj.get("forward-identity").and_then(|f| f.get(2)).and_then(|v| v.as_str())
+                && obj
+                    .get("forward-identity")
+                    .and_then(|f| f.get(2))
+                    .and_then(|v| v.as_str())
                     == Some(attr_name)
             {
                 return Ok(obj
@@ -547,9 +560,9 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
     let mut new_attrs: Vec<Value> = vec![];
     let mut out: Vec<Value> = vec![];
     for step in arr {
-        let sarr = step
-            .as_array()
-            .ok_or_else(|| InstantError::validation_failed("steps", "step must be an array", json!([])))?;
+        let sarr = step.as_array().ok_or_else(|| {
+            InstantError::validation_failed("steps", "step must be an array", json!([]))
+        })?;
         let action = sarr.first().and_then(|v| v.as_str()).unwrap_or_default();
         match action {
             "create" | "update" | "merge" => {
@@ -571,10 +584,12 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                 let opts = sarr.get(4).and_then(|v| v.as_object());
                 let mode: Option<&str> = match action {
                     "create" => Some("create"),
-                    "update" => match opts.and_then(|o| o.get("upsert")).and_then(|v| v.as_bool()) {
-                        Some(false) => Some("update"),
-                        _ => None,
-                    },
+                    "update" => {
+                        match opts.and_then(|o| o.get("upsert")).and_then(|v| v.as_bool()) {
+                            Some(false) => Some("update"),
+                            _ => None,
+                        }
+                    }
                     _ => None,
                 };
                 // id triple first
@@ -593,7 +608,11 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     }
                     let attr_id =
                         resolve_obj_attr(attrs, etype, label, &mut new_attrs, throw_missing)?;
-                    let op = if action == "merge" { "deep-merge-triple" } else { "add-triple" };
+                    let op = if action == "merge" {
+                        "deep-merge-triple"
+                    } else {
+                        "add-triple"
+                    };
                     push_step(op, attr_id, value.clone());
                 }
             }
@@ -613,7 +632,11 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     .and_then(|v| v.as_object())
                     .cloned()
                     .unwrap_or_default();
-                let op = if action == "link" { "add-triple" } else { "retract-triple" };
+                let op = if action == "link" {
+                    "add-triple"
+                } else {
+                    "retract-triple"
+                };
                 for (label, value) in &obj {
                     let (attr_id, forward) =
                         resolve_link_attr(attrs, etype, label, &mut new_attrs, throw_missing)?;
@@ -801,13 +824,18 @@ async fn sign_out_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed(state, headers, params).await?;
-    if let Some(id) = body.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok())
+    if let Some(id) = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
     {
         auth::sign_out(state, ctx.app_id, Some(id), None).await?;
     } else if let Some(email) = body.get("email").and_then(|v| v.as_str()) {
-        let user = auth::user_by_email(state, ctx.app_id, email).await?.ok_or_else(|| {
-            InstantError::record_not_found("app-user", "Record not found: app-user")
-        })?;
+        let user = auth::user_by_email(state, ctx.app_id, email)
+            .await?
+            .ok_or_else(|| {
+                InstantError::record_not_found("app-user", "Record not found: app-user")
+            })?;
         auth::sign_out(state, ctx.app_id, Some(user.id), None).await?;
     } else if let Some(token) = body.get("refresh_token").and_then(|v| v.as_str()) {
         auth::sign_out(state, ctx.app_id, None, Some(token)).await?;
@@ -970,14 +998,34 @@ async fn storage_upload_impl(
         json!(["add-triple", lookup, sc::attr_id("$files", "id"), lookup]),
         json!(["add-triple", lookup, sc::attr_id("$files", "path"), path]),
         json!(["add-triple", lookup, sc::attr_id("$files", "size"), size]),
-        json!(["add-triple", lookup, sc::attr_id("$files", "location-id"), location_id]),
-        json!(["add-triple", lookup, sc::attr_id("$files", "key-version"), 1]),
+        json!([
+            "add-triple",
+            lookup,
+            sc::attr_id("$files", "location-id"),
+            location_id
+        ]),
+        json!([
+            "add-triple",
+            lookup,
+            sc::attr_id("$files", "key-version"),
+            1
+        ]),
     ];
     if let Some(ct) = &content_type {
-        steps.push(json!(["add-triple", lookup, sc::attr_id("$files", "content-type"), ct]));
+        steps.push(json!([
+            "add-triple",
+            lookup,
+            sc::attr_id("$files", "content-type"),
+            ct
+        ]));
     }
     if let Some(cd) = &content_disposition {
-        steps.push(json!(["add-triple", lookup, sc::attr_id("$files", "content-disposition"), cd]));
+        steps.push(json!([
+            "add-triple",
+            lookup,
+            sc::attr_id("$files", "content-disposition"),
+            cd
+        ]));
     }
     service::run_system_transact(state, ctx.app_id, &Value::Array(steps)).await?;
 
@@ -1096,13 +1144,30 @@ async fn magic_code_impl(
     let code: String = {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        (0..6).map(|_| char::from(b'0' + rng.gen_range(0..9))).collect()
+        (0..6)
+            .map(|_| char::from(b'0' + rng.gen_range(0..9)))
+            .collect()
     };
     let entity = Uuid::new_v4();
     let steps = json!([
-        ["add-triple", entity, sc::attr_id("$magicCodes", "id"), entity],
-        ["add-triple", entity, sc::attr_id("$magicCodes", "codeHash"), auth::hash_string(&code)],
-        ["add-triple", entity, sc::attr_id("$magicCodes", "email"), email]
+        [
+            "add-triple",
+            entity,
+            sc::attr_id("$magicCodes", "id"),
+            entity
+        ],
+        [
+            "add-triple",
+            entity,
+            sc::attr_id("$magicCodes", "codeHash"),
+            auth::hash_string(&code)
+        ],
+        [
+            "add-triple",
+            entity,
+            sc::attr_id("$magicCodes", "email"),
+            email
+        ]
     ]);
     service::run_system_transact(state, ctx.app_id, &steps).await?;
     Ok(json!({"code": code}))
@@ -1192,7 +1257,12 @@ async fn client_storage_ctx(
     };
     Ok((
         app_id,
-        PermsCtx { admin: false, user_id, user_map: None, rule_params: None },
+        PermsCtx {
+            admin: false,
+            user_id,
+            user_map: None,
+            rule_params: None,
+        },
     ))
 }
 
@@ -1207,7 +1277,10 @@ async fn check_files_perm(
     let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
     let rules = instant_core::perms::Rules::load(&mut conn, app_id).await?;
     let program = rules.program("$files", action);
-    let auth_ctx = instant_core::perms::AuthCtx { user_id: perms.user_id, user_map: None };
+    let auth_ctx = instant_core::perms::AuthCtx {
+        user_id: perms.user_id,
+        user_map: None,
+    };
     let auth_val = if let Some(uid) = auth_ctx.user_id {
         let attrs = service::load_attrs(state, app_id).await?;
         instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$users", uid)
@@ -1270,14 +1343,34 @@ async fn client_storage_upload_impl(
         json!(["add-triple", lookup, sc::attr_id("$files", "id"), lookup]),
         json!(["add-triple", lookup, sc::attr_id("$files", "path"), path]),
         json!(["add-triple", lookup, sc::attr_id("$files", "size"), size]),
-        json!(["add-triple", lookup, sc::attr_id("$files", "location-id"), location_id]),
-        json!(["add-triple", lookup, sc::attr_id("$files", "key-version"), 1]),
+        json!([
+            "add-triple",
+            lookup,
+            sc::attr_id("$files", "location-id"),
+            location_id
+        ]),
+        json!([
+            "add-triple",
+            lookup,
+            sc::attr_id("$files", "key-version"),
+            1
+        ]),
     ];
     if let Some(ct) = &content_type {
-        steps.push(json!(["add-triple", lookup, sc::attr_id("$files", "content-type"), ct]));
+        steps.push(json!([
+            "add-triple",
+            lookup,
+            sc::attr_id("$files", "content-type"),
+            ct
+        ]));
     }
     if let Some(cd) = &content_disposition {
-        steps.push(json!(["add-triple", lookup, sc::attr_id("$files", "content-disposition"), cd]));
+        steps.push(json!([
+            "add-triple",
+            lookup,
+            sc::attr_id("$files", "content-disposition"),
+            cd
+        ]));
     }
     service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
     use sqlx::Row;
@@ -1418,11 +1511,19 @@ async fn query_perms_check_impl(
         .get("query")
         .filter(|q| q.is_object())
         .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"query\"]"))?;
-    let inference = body.get("inference?").and_then(|v| v.as_bool()).unwrap_or(false);
+    let inference = body
+        .get("inference?")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let attrs = service::load_attrs(state, ctx.app_id).await?;
 
     // run unfiltered, then evaluate view per top-level entity for check-results
-    let admin_perms = PermsCtx { admin: true, user_id: None, user_map: None, rule_params: None };
+    let admin_perms = PermsCtx {
+        admin: true,
+        user_id: None,
+        user_map: None,
+        rule_params: None,
+    };
     let unfiltered = service::run_query(state, ctx.app_id, &attrs, &admin_perms, q).await?;
 
     let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
@@ -1430,7 +1531,10 @@ async fn query_perms_check_impl(
         Some(code) if code.is_object() => instant_core::perms::Rules { code: code.clone() },
         _ => instant_core::perms::Rules::load(&mut conn, ctx.app_id).await?,
     };
-    let auth_ctx = instant_core::perms::AuthCtx { user_id: ctx.perms.user_id, user_map: None };
+    let auth_ctx = instant_core::perms::AuthCtx {
+        user_id: ctx.perms.user_id,
+        user_map: None,
+    };
     let mut check_results = vec![];
     for form in &unfiltered.forms {
         let program = rules.program(&form.etype, "view");
@@ -1532,7 +1636,10 @@ async fn transact_perms_check_impl(
         Some(code) if code.is_object() => instant_core::perms::Rules { code: code.clone() },
         _ => instant_core::perms::Rules::load(&mut dbtx, ctx.app_id).await?,
     };
-    let auth_ctx = instant_core::perms::AuthCtx { user_id: ctx.perms.user_id, user_map: None };
+    let auth_ctx = instant_core::perms::AuthCtx {
+        user_id: ctx.perms.user_id,
+        user_map: None,
+    };
     let (report, checks) = instant_core::perms::permissioned_transact_checked(
         &mut dbtx,
         ctx.app_id,
@@ -1544,9 +1651,11 @@ async fn transact_perms_check_impl(
         false,
     )
     .await?;
-    let all_ok = checks
-        .iter()
-        .all(|c| c.get("check-pass?").and_then(|v| v.as_bool()).unwrap_or(false));
+    let all_ok = checks.iter().all(|c| {
+        c.get("check-pass?")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    });
     let committed = commit && all_ok;
     if committed {
         dbtx.commit().await.map_err(InstantError::from)?;

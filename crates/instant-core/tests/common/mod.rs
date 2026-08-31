@@ -1,3 +1,6 @@
+// Shared across the integration-test binaries; each binary uses a subset.
+#![allow(dead_code)]
+
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -43,22 +46,25 @@ pub async fn mk_app(pool: &PgPool) -> Uuid {
 pub async fn transact_json(pool: &PgPool, app_id: Uuid, steps: Value) -> Result<TxReport> {
     let parsed = tx::parse_tx_steps(&steps)?;
     let mut attrs = instant_core::attr::get_by_app_id(pool, app_id).await?;
-    let mut dbtx = pool.begin().await.map_err(instant_core::error::InstantError::from)?;
+    let mut dbtx = pool
+        .begin()
+        .await
+        .map_err(instant_core::error::InstantError::from)?;
     let report = tx::transact(&mut dbtx, app_id, &mut attrs, parsed, &TxOptions::default()).await?;
-    dbtx.commit().await.map_err(instant_core::error::InstantError::from)?;
+    dbtx.commit()
+        .await
+        .map_err(instant_core::error::InstantError::from)?;
     Ok(report)
 }
 
 pub async fn attrs_of(pool: &PgPool, app_id: Uuid) -> AttrMap {
-    instant_core::attr::get_by_app_id(pool, app_id).await.unwrap()
+    instant_core::attr::get_by_app_id(pool, app_id)
+        .await
+        .unwrap()
 }
 
 /// All triples of an entity as (attr_label, value) pairs, for assertions.
-pub async fn entity_triples(
-    pool: &PgPool,
-    app_id: Uuid,
-    eid: Uuid,
-) -> Vec<(String, Value)> {
+pub async fn entity_triples(pool: &PgPool, app_id: Uuid, eid: Uuid) -> Vec<(String, Value)> {
     let attrs = attrs_of(pool, app_id).await;
     let rows: Vec<(Uuid, Value)> = sqlx::query_as(
         "SELECT attr_id, value FROM triples WHERE app_id = $1 AND entity_id = $2 ORDER BY attr_id",

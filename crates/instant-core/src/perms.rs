@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::attr::{AttrMap, Cardinality, ValueType};
 use crate::error::{InstantError, Result};
 use crate::instaql::QueryResult;
-use crate::tx::{self, TxOptions, TxReport, TxStep};
 use crate::triple::EidRef;
+use crate::tx::{self, TxOptions, TxReport, TxStep};
 
 #[derive(Debug, Clone, Default)]
 pub struct Rules {
@@ -25,7 +25,9 @@ impl Rules {
             .fetch_optional(&mut *conn)
             .await?;
         Ok(Rules {
-            code: row.map(|r| r.get::<Value, _>("code")).unwrap_or(Value::Null),
+            code: row
+                .map(|r| r.get::<Value, _>("code"))
+                .unwrap_or(Value::Null),
         })
     }
 
@@ -89,7 +91,10 @@ impl Rules {
                     Value::Bool(b) => b.to_string(),
                     _ => continue,
                 };
-                return Some(Program { expr, binds: self.binds_of(etype) });
+                return Some(Program {
+                    expr,
+                    binds: self.binds_of(etype),
+                });
             }
         }
         None
@@ -103,7 +108,10 @@ impl Rules {
             Value::Bool(b) => b.to_string(),
             _ => return None,
         };
-        Some(Program { expr, binds: self.binds_of(etype) })
+        Some(Program {
+            expr,
+            binds: self.binds_of(etype),
+        })
     }
 
     /// Does this etype have any field rules at all? (fast path)
@@ -127,12 +135,21 @@ impl Rules {
                 "view" | "update" => "auth.id == data.id",
                 _ => "false",
             };
-            return Program { expr: expr.to_string(), binds: vec![] };
+            return Program {
+                expr: expr.to_string(),
+                binds: vec![],
+            };
         }
         if etype.starts_with('$') {
-            return Program { expr: "false".to_string(), binds: vec![] };
+            return Program {
+                expr: "false".to_string(),
+                binds: vec![],
+            };
         }
-        Program { expr: "true".to_string(), binds: vec![] }
+        Program {
+            expr: "true".to_string(),
+            binds: vec![],
+        }
     }
 }
 
@@ -252,7 +269,9 @@ async fn resolve_ref_path(
                     .fetch_all(&mut *conn)
                     .await?;
                     (
-                        rows.iter().filter_map(|r| r.get::<Option<Uuid>, _>("t")).collect(),
+                        rows.iter()
+                            .filter_map(|r| r.get::<Option<Uuid>, _>("t"))
+                            .collect(),
                         a.reverse_etype.clone().unwrap_or_default(),
                     )
                 }
@@ -282,7 +301,10 @@ async fn resolve_ref_path(
             },
         };
         if is_last {
-            return Ok(json!(next.iter().map(|u| u.to_string()).collect::<Vec<_>>()));
+            return Ok(json!(next
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()));
         }
         current = next;
         current_etype = next_etype;
@@ -311,9 +333,14 @@ fn json_to_cel(v: &Value) -> cel::Value {
         Value::Object(o) => {
             let mut m: HashMap<cel::objects::Key, cel::Value> = HashMap::new();
             for (k, v) in o {
-                m.insert(cel::objects::Key::String(std::sync::Arc::new(k.clone())), json_to_cel(v));
+                m.insert(
+                    cel::objects::Key::String(std::sync::Arc::new(k.clone())),
+                    json_to_cel(v),
+                );
             }
-            cel::Value::Map(cel::objects::Map { map: std::sync::Arc::new(m) })
+            cel::Value::Map(cel::objects::Map {
+                map: std::sync::Arc::new(m),
+            })
         }
     }
 }
@@ -537,10 +564,7 @@ impl<'a> PermsFilter<'a> {
             let mut kept = vec![];
             let entities = std::mem::take(&mut form.entities);
             for mut node in entities {
-                if self
-                    .check_view_node(conn, app_id, attrs, &mut node)
-                    .await?
-                {
+                if self.check_view_node(conn, app_id, attrs, &mut node).await? {
                     kept.push(node);
                 }
             }
@@ -571,8 +595,16 @@ impl<'a> PermsFilter<'a> {
                 }
                 let sources: Vec<&str> = program.all_sources();
                 let data_paths = extract_ref_paths(&sources, "data");
-                attach_refs(conn, app_id, attrs, &node.etype, node.eid, &data_paths, &mut data)
-                    .await?;
+                attach_refs(
+                    conn,
+                    app_id,
+                    attrs,
+                    &node.etype,
+                    node.eid,
+                    &data_paths,
+                    &mut data,
+                )
+                .await?;
                 let auth_val =
                     build_auth_value(conn, app_id, attrs, self.auth, &[&program]).await?;
                 eval_program(
@@ -605,10 +637,9 @@ impl<'a> PermsFilter<'a> {
                         Some(label) => match self.rules.field_program(&node.etype, label) {
                             None => true,
                             Some(program) => {
-                                let auth_val = build_auth_value(
-                                    conn, app_id, attrs, self.auth, &[&program],
-                                )
-                                .await?;
+                                let auth_val =
+                                    build_auth_value(conn, app_id, attrs, self.auth, &[&program])
+                                        .await?;
                                 eval_program(
                                     &program,
                                     &data_val,
@@ -654,10 +685,24 @@ impl<'a> PermsFilter<'a> {
 // Permissioned transact
 
 enum Check {
-    Create { etype: String, eid: Uuid },
-    Update { etype: String, eid: Uuid, old: Map<String, Value> },
-    Delete { etype: String, eid: Uuid, old: Map<String, Value> },
-    ViewLinked { etype: String, eid: Uuid },
+    Create {
+        etype: String,
+        eid: Uuid,
+    },
+    Update {
+        etype: String,
+        eid: Uuid,
+        old: Map<String, Value>,
+    },
+    Delete {
+        etype: String,
+        eid: Uuid,
+        old: Map<String, Value>,
+    },
+    ViewLinked {
+        etype: String,
+        eid: Uuid,
+    },
     /// explicit [etype allow link/unlink <label>] rule on one link side
     LinkRule {
         action: &'static str, // "link" | "unlink"
@@ -682,7 +727,14 @@ pub async fn permissioned_transact(
     global_rule_params: &Value,
 ) -> Result<TxReport> {
     let (report, _checks) = permissioned_transact_checked(
-        conn, app_id, attrs, steps, rules, auth, global_rule_params, true,
+        conn,
+        app_id,
+        attrs,
+        steps,
+        rules,
+        auth,
+        global_rule_params,
+        true,
     )
     .await?;
     Ok(report)
@@ -740,15 +792,31 @@ pub async fn permissioned_transact_checked(
 
     for step in &steps {
         match step {
-            TxStep::AddTriple { eid, attr_id, value, .. }
-            | TxStep::DeepMergeTriple { eid, attr_id, value, .. }
-            | TxStep::RetractTriple { eid, attr_id, value } => {
-                let Some(attr) = attrs.get(attr_id).cloned() else { continue };
+            TxStep::AddTriple {
+                eid,
+                attr_id,
+                value,
+                ..
+            }
+            | TxStep::DeepMergeTriple {
+                eid,
+                attr_id,
+                value,
+                ..
+            }
+            | TxStep::RetractTriple {
+                eid,
+                attr_id,
+                value,
+            } => {
+                let Some(attr) = attrs.get(attr_id).cloned() else {
+                    continue;
+                };
                 if let Some(e) = peek_eid(conn, app_id, attrs, eid).await? {
                     let key = (e, attr.etype.clone());
-                    if !old_maps.contains_key(&key) {
+                    if let std::collections::hash_map::Entry::Vacant(slot) = old_maps.entry(key) {
                         let m = fetch_entity_map(conn, app_id, attrs, &attr.etype, e).await?;
-                        old_maps.insert(key, m);
+                        slot.insert(m);
                     }
                 }
                 if attr.value_type == ValueType::Ref {
@@ -833,9 +901,9 @@ pub async fn permissioned_transact_checked(
         crate::triple::expand_delete_cascade(&mut *conn, app_id, attrs, &delete_seeds).await?;
     for (e, et) in &delete_set {
         let key = (*e, et.clone());
-        if !old_maps.contains_key(&key) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = old_maps.entry(key) {
             let m = fetch_entity_map(conn, app_id, attrs, et, *e).await?;
-            old_maps.insert(key, m);
+            slot.insert(m);
         }
     }
 
@@ -846,7 +914,10 @@ pub async fn permissioned_transact_checked(
     let mut checks: Vec<Check> = vec![];
     let created: HashSet<(Uuid, String)> = report.created.iter().cloned().collect();
     for (e, et) in &report.created {
-        checks.push(Check::Create { etype: et.clone(), eid: *e });
+        checks.push(Check::Create {
+            etype: et.clone(),
+            eid: *e,
+        });
     }
     let deleted: HashSet<(Uuid, String)> = report.deleted.iter().cloned().collect();
     for (e, et) in &report.deleted {
@@ -855,7 +926,11 @@ pub async fn permissioned_transact_checked(
             .cloned()
             .flatten()
             .unwrap_or_else(|| base_entity_map(attrs, et, *e));
-        checks.push(Check::Delete { etype: et.clone(), eid: *e, old });
+        checks.push(Check::Delete {
+            etype: et.clone(),
+            eid: *e,
+            old,
+        });
     }
     let mut update_seen = HashSet::new();
     for (e, et) in &report.touched {
@@ -871,7 +946,11 @@ pub async fn permissioned_transact_checked(
             .cloned()
             .flatten()
             .unwrap_or_else(|| base_entity_map(attrs, et, *e));
-        checks.push(Check::Update { etype: et.clone(), eid: *e, old });
+        checks.push(Check::Update {
+            etype: et.clone(),
+            eid: *e,
+            old,
+        });
     }
     checks.extend(link_checks);
     let mut linked_seen = HashSet::new();
@@ -905,16 +984,28 @@ pub async fn permissioned_transact_checked(
                     Some(Value::Object(new)),
                 )
             }
-            Check::Delete { etype, eid, old } => {
-                ("delete", etype.clone(), *eid, Value::Object(old.clone()), None)
-            }
+            Check::Delete { etype, eid, old } => (
+                "delete",
+                etype.clone(),
+                *eid,
+                Value::Object(old.clone()),
+                None,
+            ),
             Check::ViewLinked { etype, eid } => {
                 let m = fetch_entity_map(conn, app_id, attrs, etype, *eid)
                     .await?
                     .unwrap_or_else(|| base_entity_map(attrs, etype, *eid));
                 ("view", etype.clone(), *eid, Value::Object(m), None)
             }
-            Check::LinkRule { action, etype, eid, old, linked_etype, linked_eid, program } => {
+            Check::LinkRule {
+                action,
+                etype,
+                eid,
+                old,
+                linked_etype,
+                linked_eid,
+                program,
+            } => {
                 // legacy: check runs only when the entity existed pre-tx
                 let Some(old) = old else { continue };
                 let new = fetch_entity_map(conn, app_id, attrs, etype, *eid)
@@ -935,8 +1026,7 @@ pub async fn permissioned_transact_checked(
                     Value::Object(m) => m.clone(),
                     _ => Map::new(),
                 };
-                if let Some(Value::Object(step_rp)) =
-                    report.rule_params.get(&(*eid, etype.clone()))
+                if let Some(Value::Object(step_rp)) = report.rule_params.get(&(*eid, etype.clone()))
                 {
                     for (k, v) in step_rp {
                         rp.insert(k.clone(), v.clone());

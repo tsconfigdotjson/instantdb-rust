@@ -13,8 +13,18 @@ pub struct InstantError {
 }
 
 impl InstantError {
-    pub fn new(error_type: &str, status: u16, message: impl Into<String>, hint: Option<Value>) -> Self {
-        Self { error_type: error_type.to_string(), message: message.into(), hint, status }
+    pub fn new(
+        error_type: &str,
+        status: u16,
+        message: impl Into<String>,
+        hint: Option<Value>,
+    ) -> Self {
+        Self {
+            error_type: error_type.to_string(),
+            message: message.into(),
+            hint,
+            status,
+        }
     }
 
     pub fn validation_failed(input_type: &str, message: impl Into<String>, errors: Value) -> Self {
@@ -28,10 +38,20 @@ impl InstantError {
     }
 
     pub fn record_not_found(record_type: &str, message: impl Into<String>) -> Self {
-        Self::new("record-not-found", 400, message, Some(json!({"record-type": record_type})))
+        Self::new(
+            "record-not-found",
+            400,
+            message,
+            Some(json!({"record-type": record_type})),
+        )
     }
 
-    pub fn record_not_unique(etype: &str, label: &str, attr_id: Option<&str>, value: Option<&Value>) -> Self {
+    pub fn record_not_unique(
+        etype: &str,
+        label: &str,
+        attr_id: Option<&str>,
+        value: Option<&Value>,
+    ) -> Self {
         Self::new(
             "record-not-unique",
             400,
@@ -50,7 +70,12 @@ impl InstantError {
     }
 
     pub fn permission_denied(input: Value, message: impl Into<String>) -> Self {
-        Self::new("permission-denied", 400, message, Some(json!({"input": input, "expected": "perms-pass?"})))
+        Self::new(
+            "permission-denied",
+            400,
+            message,
+            Some(json!({"input": input, "expected": "perms-pass?"})),
+        )
     }
 
     pub fn param_missing(message: impl Into<String>) -> Self {

@@ -1,5 +1,7 @@
 # Instant Sync Engine — Rust
 
+[![CI](https://github.com/GratefulWorkspace/instantdb-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/GratefulWorkspace/instantdb-rust/actions/workflows/ci.yml)
+
 A from-scratch, wire-compatible reimplementation of the
 [InstantDB](https://instantdb.com) sync engine in Rust. It plugs into a
 **standard Postgres database**, runs **stateless**, and **scales horizontally**

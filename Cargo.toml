@@ -7,6 +7,11 @@ edition = "2021"
 version = "0.1.0"
 license = "MIT"
 
+[workspace.lints.clippy]
+# InstantError is intentionally a plain enum mirroring the legacy wire errors;
+# boxing it everywhere isn't worth the churn.
+result_large_err = "allow"
+
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }

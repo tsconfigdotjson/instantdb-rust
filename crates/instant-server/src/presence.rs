@@ -71,15 +71,13 @@ pub async fn leave_room(
     room_id: &str,
     session_id: Uuid,
 ) -> Result<()> {
-    sqlx::query(
-        "DELETE FROM rust_presence WHERE app_id = $1 AND room_id = $2 AND session_id = $3",
-    )
-    .bind(app_id)
-    .bind(room_id)
-    .bind(session_id)
-    .execute(&state.pool)
-    .await
-    .map_err(InstantError::from)?;
+    sqlx::query("DELETE FROM rust_presence WHERE app_id = $1 AND room_id = $2 AND session_id = $3")
+        .bind(app_id)
+        .bind(room_id)
+        .bind(session_id)
+        .execute(&state.pool)
+        .await
+        .map_err(InstantError::from)?;
     if let Some(mut set) = state.room_sessions.get_mut(&(app_id, room_id.to_string())) {
         set.remove(&session_id);
     }
@@ -89,13 +87,12 @@ pub async fn leave_room(
 
 /// Remove a session from every room it joined (on disconnect).
 pub async fn leave_all(state: &AppState, session_id: Uuid) {
-    let rows = sqlx::query(
-        "DELETE FROM rust_presence WHERE session_id = $1 RETURNING app_id, room_id",
-    )
-    .bind(session_id)
-    .fetch_all(&state.pool)
-    .await
-    .unwrap_or_default();
+    let rows =
+        sqlx::query("DELETE FROM rust_presence WHERE session_id = $1 RETURNING app_id, room_id")
+            .bind(session_id)
+            .fetch_all(&state.pool)
+            .await
+            .unwrap_or_default();
     for row in rows {
         let app_id: Uuid = row.get("app_id");
         let room_id: String = row.get("room_id");
@@ -234,16 +231,14 @@ pub async fn heartbeat_loop(state: std::sync::Arc<AppState>) {
         )
         .execute(&state.pool)
         .await;
-        let _ = sqlx::query(
-            "DELETE FROM rust_spill WHERE created_at < now() - interval '5 minutes'",
-        )
-        .execute(&state.pool)
-        .await;
-        let _ = sqlx::query(
-            "DELETE FROM rust_tx_changes WHERE logged_at < now() - interval '1 hour'",
-        )
-        .execute(&state.pool)
-        .await;
+        let _ =
+            sqlx::query("DELETE FROM rust_spill WHERE created_at < now() - interval '5 minutes'")
+                .execute(&state.pool)
+                .await;
+        let _ =
+            sqlx::query("DELETE FROM rust_tx_changes WHERE logged_at < now() - interval '1 hour'")
+                .execute(&state.pool)
+                .await;
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     }
 }
