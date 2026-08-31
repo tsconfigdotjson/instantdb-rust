@@ -80,7 +80,13 @@ struct RenderedEmail {
 /// Kick off delivery of a magic-code email. Never blocks the caller on the
 /// network and never fails the request: template lookup + send run in a
 /// spawned task and errors are only logged.
-pub fn deliver_magic_code(state: &Arc<AppState>, app_id: Uuid, app_title: &str, email: &str, code: &str) {
+pub fn deliver_magic_code(
+    state: &Arc<AppState>,
+    app_id: Uuid,
+    app_title: &str,
+    email: &str,
+    code: &str,
+) {
     // Log-only mode keeps the exact legacy-stub behavior, synchronously.
     if matches!(state.email.provider, EmailProvider::Log) {
         tracing::info!("magic code for {email} (app {app_id}): {code}");
@@ -197,10 +203,12 @@ async fn render_magic_code_email(
 }
 
 async fn magic_code_expiry_minutes(state: &AppState, app_id: Uuid) -> Result<i64, sqlx::Error> {
-    let row = sqlx::query("SELECT coalesce(magic_code_expiry_minutes, 1440) AS m FROM apps WHERE id = $1")
-        .bind(app_id)
-        .fetch_optional(&state.pool)
-        .await?;
+    let row = sqlx::query(
+        "SELECT coalesce(magic_code_expiry_minutes, 1440) AS m FROM apps WHERE id = $1",
+    )
+    .bind(app_id)
+    .fetch_optional(&state.pool)
+    .await?;
     Ok(row.map(|r| r.get::<i32, _>("m") as i64).unwrap_or(1440))
 }
 
