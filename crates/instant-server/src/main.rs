@@ -1,4 +1,5 @@
 mod auth;
+mod email;
 mod invalidator;
 mod presence;
 mod routes;

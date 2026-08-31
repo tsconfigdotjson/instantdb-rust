@@ -106,6 +106,7 @@ pub fn new_trace_id() -> String {
 
 pub struct AppState {
     pub cfg: Config,
+    pub email: crate::email::EmailConfig,
     pub pool: PgPool,
     pub node_id: Uuid,
     pub sessions: DashMap<Uuid, Arc<Session>>,
@@ -125,6 +126,7 @@ impl AppState {
     pub fn new(cfg: Config, pool: PgPool) -> Arc<Self> {
         Arc::new(AppState {
             cfg,
+            email: crate::email::EmailConfig::from_env(),
             pool,
             node_id: Uuid::new_v4(),
             sessions: DashMap::new(),

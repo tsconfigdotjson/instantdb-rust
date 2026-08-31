@@ -124,9 +124,9 @@ pub async fn send_magic_code(
     json_or_err(send_magic_code_impl(&state, &body).await)
 }
 
-async fn send_magic_code_impl(state: &AppState, body: &Value) -> Result<Value> {
+async fn send_magic_code_impl(state: &Arc<AppState>, body: &Value) -> Result<Value> {
     let app_id = get_app_id(body, "app-id")?;
-    service::get_app(state, app_id).await?;
+    let app = service::get_app(state, app_id).await?;
     let email = coerce_email(get_str(body, "email")?)?;
     // 6-digit numeric code (legacy quirk: digits 0-8)
     let code: String = {
@@ -158,9 +158,9 @@ async fn send_magic_code_impl(state: &AppState, body: &Value) -> Result<Value> {
         ]
     ]);
     service::run_system_transact(state, app_id, &steps).await?;
-    // Email delivery is stubbed: log the code so local flows can complete.
-    tracing::info!("magic code for {email} (app {app_id}): {code}");
-    println!("MAGIC CODE for {email}: {code}");
+    // Fire-and-forget delivery (log-only by default); the response never
+    // depends on whether the email actually goes out.
+    crate::email::deliver_magic_code(state, app_id, &app.title, &email, &code);
     Ok(json!({"sent": true}))
 }
 
