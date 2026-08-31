@@ -643,11 +643,13 @@ Model `app_user_magic_code.clj`; attrs `system_catalog.clj:186-197`
   `{expiration}`; custom sender only if verified) or the default:
   subject `"<code> is your verification code for <title>"`. Sent via
   Postmark with fallback to the default sender.
-  **For the Rust reimplementation: stub the email path and log the code**
-  — nothing in the HTTP response depends on delivery (the response is
-  always `{"sent": true}`; a send failure surfaces as 400
-  `email-send-failed` / 500 only when Postmark hard-fails and it's not a
-  test user).
+  **Rust implementation** (`crates/instant-server/src/email.rs`): a
+  delivery-provider seam selected by `EMAIL_PROVIDER` — `log` (default)
+  prints the code to the server log; `cloudflare` sends via the Cloudflare
+  Email Service REST API (see README env vars). Templates/senders are
+  honored as in legacy, with one retry falling back to the default sender.
+  Unlike legacy, delivery is fully fire-and-forget: the response is always
+  `{"sent": true}` and send failures are only logged.
 
 ## 5. `$users` integration (system catalog)
 

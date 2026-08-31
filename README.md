@@ -85,6 +85,10 @@ works exactly as with the hosted service. A complete example lives in
 | `SERVER_SECRET` | `dev-secret` | signs storage URLs — set in production |
 | `STORAGE_BACKEND` | `postgres` | blob store: `postgres` (multi-node correct) or `disk` |
 | `STORAGE_DIR` | `./storage-data` | blob directory for the `disk` backend |
+| `EMAIL_PROVIDER` | `log` | magic-code email delivery: `log` (print code to server log) or `cloudflare` ([Email Service](https://developers.cloudflare.com/email-service/) REST API) |
+| `CLOUDFLARE_ACCOUNT_ID` | — | required for `EMAIL_PROVIDER=cloudflare` |
+| `CLOUDFLARE_API_TOKEN` | — | API token with Email Sending permission |
+| `INSTANT_APP_EMAIL_SENDER_EMAIL` | `verify@auth-pm.instantdb.com` | default From address — set to a sender on your verified Cloudflare domain |
 
 ### Horizontal scaling
 
