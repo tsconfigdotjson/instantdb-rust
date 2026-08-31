@@ -80,7 +80,22 @@ pub async fn handle_start_sync(
     let q = msg
         .get("q")
         .cloned()
-        .ok_or_else(|| InstantError::param_missing("missing q"))?;
+        .filter(|q| !q.is_null())
+        .ok_or_else(|| {
+            InstantError::validation_failed(
+                "start-sync",
+                "Query can not be null.",
+                json!([{"message": "Query can not be null."}]),
+            )
+        })?;
+    if !admin {
+        // legacy gates sync tables to admin sessions (session.clj:281-284)
+        return Err(InstantError::validation_failed(
+            "start-sync",
+            "start-sync is currently supported for admins only.",
+            json!([{"message": "start-sync is currently supported for admins only."}]),
+        ));
+    }
     let attrs = service::load_attrs(state, app_id).await?;
     let etype = parse_sync_query(&attrs, &q)?;
 
@@ -292,11 +307,7 @@ pub async fn handle_remove_sync(
             .execute(&state.pool)
             .await;
     }
-    session.send(json!({
-        "op": "remove-sync-ok",
-        "subscription-id": sub_id,
-        "client-event-id": msg.get("client-event-id"),
-    }));
+    // legacy sends no reply to remove-sync (session.clj handle-remove-sync!)
     Ok(())
 }
 

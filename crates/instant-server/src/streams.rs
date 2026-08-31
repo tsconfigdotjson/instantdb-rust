@@ -124,14 +124,26 @@ pub async fn handle_start_stream(
     let existing = stream_by_client_id(state, app_id, client_id).await?;
     let (stream_id, offset) = match existing {
         Some(sid) => {
-            // resume: reconnect token must match
+            // resume: reconnect token must match (legacy session.clj:776-786)
             let stored = stream_field(state, app_id, sid, "hashedReconnectToken").await;
             let supplied_hash = reconnect_token.map(crate::auth::hash_string);
             if stored.as_ref().and_then(|v| v.as_str()) != supplied_hash.as_deref() {
+                let m = "A stream with that clientId already exists. Reconnect token is invalid.";
                 return Err(InstantError::validation_failed(
-                    "stream",
-                    "A stream with this client-id already exists.",
-                    json!([]),
+                    "start-stream",
+                    m,
+                    json!([{"message": m}]),
+                ));
+            }
+            if stream_field(state, app_id, sid, "done")
+                .await
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                return Err(InstantError::validation_failed(
+                    "start-stream",
+                    "Stream is closed.",
+                    json!([{"message": "Stream is closed."}]),
                 ));
             }
             let size = stream_field(state, app_id, sid, "size")
@@ -179,6 +191,7 @@ pub async fn handle_start_stream(
     session.send(json!({
         "op": "start-stream-ok",
         "client-event-id": msg.get("client-event-id"),
+        "client-id": client_id,
         "stream-id": stream_id,
         "offset": offset,
     }));
@@ -260,25 +273,27 @@ pub async fn handle_append_stream(
     }
     service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
 
+    // legacy stream-flushed carries no client-event-id (session.clj:855-858)
     session.send(json!({
         "op": "stream-flushed",
-        "client-event-id": msg.get("client-event-id"),
         "stream-id": stream_id,
         "offset": new_size,
         "done": done,
     }));
 
     // fan out to subscribers (all nodes)
+    let client_id = stream_field(state, app_id, stream_id, "clientId").await;
     service::notify_json(
         state,
         "instant_stream",
         json!({
             "app_id": app_id,
             "stream_id": stream_id,
+            "client_id": client_id,
             "offset": new_size - new_bytes.len() as i64,
             "content": String::from_utf8_lossy(new_bytes),
             "done": done,
-            "error": abort_reason,
+            "abort_reason": abort_reason,
         }),
     )
     .await;
@@ -295,21 +310,41 @@ pub async fn handle_subscribe_stream(
         st.app_id
             .ok_or_else(|| InstantError::param_malformed("session not initialized"))?
     };
+    // legacy validates params before perms (session.clj:889-896 missing ids,
+    // :928-931 missing stream)
+    let missing_stream = || {
+        InstantError::validation_failed(
+            "subscribe-stream",
+            "Stream is missing.",
+            json!([{"message": "Stream is missing."}]),
+        )
+    };
+    if msg.get("stream-id").and_then(|v| v.as_str()).is_none()
+        && msg.get("client-id").and_then(|v| v.as_str()).is_none()
+    {
+        let m = "Must provide either a stream-id or a client-id";
+        return Err(InstantError::validation_failed(
+            "subscribe-stream",
+            m,
+            json!([{"message": m}]),
+        ));
+    }
     check_stream_perm(state, app_id, session, "view", msg.get("rule-params")).await?;
     let stream_id = match msg.get("stream-id").and_then(|v| v.as_str()) {
         Some(s) => {
             Uuid::parse_str(s).map_err(|_| InstantError::param_malformed("malformed stream-id"))?
         }
         None => {
-            let client_id = msg
-                .get("client-id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| InstantError::param_missing("missing stream-id or client-id"))?;
+            let client_id = msg.get("client-id").and_then(|v| v.as_str()).unwrap();
             stream_by_client_id(state, app_id, client_id)
                 .await?
-                .ok_or_else(|| InstantError::record_not_found("stream", "Unknown stream."))?
+                .ok_or_else(missing_stream)?
         }
     };
+    // the id form must also resolve to a real stream (legacy get-stream check)
+    if stream_field(state, app_id, stream_id, "id").await.is_none() {
+        return Err(missing_stream());
+    }
     let subscribe_event_id = msg
         .get("client-event-id")
         .and_then(|v| v.as_str())
@@ -325,29 +360,34 @@ pub async fn handle_subscribe_stream(
         .await
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let error = stream_field(state, app_id, stream_id, "abortReason")
+    let abort_reason = stream_field(state, app_id, stream_id, "abortReason")
         .await
         .filter(|v| v.is_string());
+    let client_id = stream_field(state, app_id, stream_id, "clientId").await;
     let catchup = if (offset as usize) < stored.len() {
         String::from_utf8_lossy(&stored[offset as usize..]).to_string()
     } else {
         String::new()
     };
+    // legacy catch-up shape (session.clj:918-927): aborts surface as
+    // done + abort-reason, not as error/retry (the client only reads
+    // error/retry for transport failures, Stream.ts:1064-1076). The
+    // abort-reason key is present only when the stream was aborted.
     let mut reply = json!({
         "op": "stream-append",
         "client-event-id": subscribe_event_id,
         "stream-id": stream_id,
+        "client-id": client_id,
         "offset": offset.min(stored.len() as i64),
         "content": catchup,
         "done": done,
     });
-    if let Some(e) = &error {
-        reply["error"] = e.clone();
-        reply["retry"] = json!(false);
+    if let Some(reason) = &abort_reason {
+        reply["abort-reason"] = reason.clone();
     }
     session.send(reply);
 
-    if !done && error.is_none() {
+    if !done {
         state
             .stream_subs
             .entry((app_id, stream_id))
@@ -405,13 +445,13 @@ pub async fn deliver_append(state: &Arc<AppState>, payload: &Value) {
                 "op": "stream-append",
                 "client-event-id": event_id,
                 "stream-id": stream_id,
+                "client-id": payload.get("client_id").cloned().unwrap_or(Value::Null),
                 "offset": payload.get("offset").cloned().unwrap_or(json!(0)),
                 "content": payload.get("content").cloned().unwrap_or(json!("")),
                 "done": done,
             });
-            if let Some(e) = payload.get("error").filter(|e| e.is_string()) {
-                msg["error"] = e.clone();
-                msg["retry"] = json!(false);
+            if let Some(reason) = payload.get("abort_reason").filter(|r| r.is_string()) {
+                msg["abort-reason"] = reason.clone();
             }
             session.send(msg);
         }

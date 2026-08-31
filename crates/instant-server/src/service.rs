@@ -47,6 +47,22 @@ pub async fn max_tx_id(state: &AppState, app_id: Uuid) -> Result<i64> {
     Ok(row.get("n"))
 }
 
+/// Current ISN in the legacy wire format `"{slotNumHex}/{pgLSN}"` (see
+/// LEGACY server instant/isn.clj — slot-num is a failover counter, always 0
+/// here; the LSN part is the Postgres WAL position). Clients never read it,
+/// but legacy attaches it to transact-ok / add-query-ok / refresh-ok, and the
+/// monotonicity invariant (refresh isn >= transact isn) holds because the WAL
+/// LSN only grows.
+pub async fn current_isn(state: &AppState) -> Value {
+    match sqlx::query("SELECT '0/' || pg_current_wal_lsn()::text AS isn")
+        .fetch_one(&state.pool)
+        .await
+    {
+        Ok(row) => Value::String(row.get("isn")),
+        Err(_) => Value::Null,
+    }
+}
+
 /// Auth context for permission checks.
 #[derive(Debug, Clone, Default)]
 pub struct PermsCtx {

@@ -1,0 +1,75 @@
+# Boots the LEGACY Instant server (official self-hosting images) beside a
+# local checkout of the rust server for differential wire-protocol testing.
+# Ports: legacy postgres 8890, legacy server 8891 (rust server runs on the
+# host at 8888 against its own postgres).
+name: instant-differential
+
+services:
+  legacy-postgres:
+    image: ghcr.io/instantdb/postgresql:postgresql-17-pg-hint-plan
+    ports:
+      - "8890:5432"
+    environment:
+      POSTGRES_PASSWORD: instant
+      POSTGRES_USER: instant
+      POSTGRES_DB: instant
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U instant"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+      - "-c"
+      - "shared_preload_libraries=pg_hint_plan"
+
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --address ":9000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  createbuckets:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin;
+      /usr/bin/mc mb --ignore-existing local/instant-bucket;
+      exit"
+
+  legacy-server:
+    depends_on:
+      legacy-postgres:
+        condition: service_healthy
+      createbuckets:
+        condition: service_completed_successfully
+    image: "ghcr.io/instantdb/server:latest"
+    ports:
+      - "8891:8888"
+    environment:
+      WAL_HISTORY_STORAGE: pg
+      DATABASE_URL: "postgresql://instant:instant@legacy-postgres:5432/instant?sslmode=disable"
+      CONNECTION_POOL_SIZE: 20
+      INSTANT_BACKEND_URL: http://localhost:8891
+      INSTANT_DASHBOARD_URL: http://localhost:3000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:9000
+      S3_BUCKET: instant-bucket

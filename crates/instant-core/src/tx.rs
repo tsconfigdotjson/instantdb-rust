@@ -88,19 +88,58 @@ fn parse_attr_uuid(v: Option<&Value>) -> Result<Uuid> {
         })
 }
 
+/// Legacy coerce-value-uuids (permissioned_transaction.clj:111-122): the
+/// value of a ref attr must be a lookup ref or a uuid; anything else fails
+/// with a `Validation failed for eid` error before any deeper processing.
+fn check_ref_value(attrs: &AttrMap, attr_id: &Uuid, value: &Value) -> Result<()> {
+    let Some(attr) = attrs.get(attr_id) else {
+        return Ok(());
+    };
+    if attr.value_type != crate::attr::ValueType::Ref {
+        return Ok(());
+    }
+    let ok = match value {
+        Value::Array(_) => true, // lookup ref
+        Value::String(s) => Uuid::parse_str(s).is_ok(),
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(InstantError::validation_failed(
+            "eid",
+            "Expected link value to be a uuid.",
+            json!([{"message": "Expected link value to be a uuid."}]),
+        ))
+    }
+}
+
+/// Step-shape (spec-level) failure. Legacy's message for these is the bare
+/// "Validation failed for tx-steps" — spec explain data lives in the hint
+/// (util/exception.clj throw-validation-err! with coercion errors).
+fn coerce_err(detail: impl Into<String>) -> InstantError {
+    InstantError::new(
+        "validation-failed",
+        400,
+        "Validation failed for tx-steps",
+        Some(json!({"data-type": "tx-steps", "errors": [{"message": detail.into()}]})),
+    )
+}
+
 /// Parse the wire `tx-steps` array.
 pub fn parse_tx_steps(steps: &Value) -> Result<Vec<TxStep>> {
-    let arr = steps.as_array().ok_or_else(|| {
-        InstantError::validation_failed("tx-steps", "tx-steps must be an array", json!([]))
-    })?;
+    let arr = steps
+        .as_array()
+        .ok_or_else(|| coerce_err("tx-steps must be an array"))?;
     let mut out = vec![];
     for step in arr {
-        let step_arr = step.as_array().ok_or_else(|| {
-            InstantError::validation_failed("tx-steps", "each tx-step must be an array", json!([]))
-        })?;
-        let op = step_arr.first().and_then(|v| v.as_str()).ok_or_else(|| {
-            InstantError::validation_failed("tx-steps", "tx-step missing op", json!([]))
-        })?;
+        let step_arr = step
+            .as_array()
+            .ok_or_else(|| coerce_err("each tx-step must be an array"))?;
+        let op = step_arr
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| coerce_err("tx-step missing op"))?;
         let parsed = match op {
             "add-attr" => {
                 TxStep::AddAttr(Attr::from_wire(step_arr.get(1).unwrap_or(&Value::Null))?)
@@ -150,13 +189,7 @@ pub fn parse_tx_steps(steps: &Value) -> Result<Vec<TxStep>> {
                     .map(|s| s.to_string()),
                 params: step_arr.get(3).cloned().unwrap_or(Value::Null),
             },
-            other => {
-                return Err(InstantError::validation_failed(
-                    "tx-steps",
-                    format!("unknown tx-step op {other:?}"),
-                    json!([]),
-                ))
-            }
+            other => return Err(coerce_err(format!("unknown tx-step op {other:?}"))),
         };
         out.push(parsed);
     }
@@ -358,6 +391,7 @@ pub async fn transact(
                     else {
                         unreachable!()
                     };
+                    check_ref_value(attrs, &attr_id, &value)?;
                     items.push((eid, attr_id, value, mode));
                 }
                 let resolved = resolve_add_batch(
@@ -395,6 +429,7 @@ pub async fn transact(
                     let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
                         InstantError::record_not_found("attr", format!("attr {attr_id} not found"))
                     })?;
+                    check_ref_value(attrs, &attr_id, &value)?;
                     let eid = resolve_eid(
                         &mut *conn,
                         app_id,
@@ -447,6 +482,7 @@ pub async fn transact(
                     let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
                         InstantError::record_not_found("attr", format!("attr {attr_id} not found"))
                     })?;
+                    check_ref_value(attrs, &attr_id, &value)?;
                     let eid = match eid {
                         EidRef::Id(id) => Some(id),
                         EidRef::Lookup(a, v) => {
@@ -608,17 +644,23 @@ async fn validate_mode(
     .await?
     .is_some()
         && !created_etypes.contains_key(&eid);
+    // legacy reports these under the singular `tx-step` input type
+    // (LEGACY transaction.clj:346-358)
     match mode {
-        WriteMode::Create if existed_before_tx => Err(InstantError::validation_failed(
-            "tx-steps",
-            format!("Creating entities that exist: {eid}"),
-            json!([]),
-        )),
-        WriteMode::Update if !existed_before_tx && !created_etypes.contains_key(&eid) => {
+        WriteMode::Create if existed_before_tx => {
+            let m = format!("Creating entities that exist: {eid}");
             Err(InstantError::validation_failed(
-                "tx-steps",
-                format!("Updating entities that don't exist: {eid}"),
-                json!([]),
+                "tx-step",
+                m.clone(),
+                json!([{"message": m}]),
+            ))
+        }
+        WriteMode::Update if !existed_before_tx && !created_etypes.contains_key(&eid) => {
+            let m = format!("Updating entities that don't exist: {eid}");
+            Err(InstantError::validation_failed(
+                "tx-step",
+                m.clone(),
+                json!([{"message": m}]),
             ))
         }
         _ => Ok(()),

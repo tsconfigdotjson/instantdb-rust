@@ -80,21 +80,29 @@ await w.waitFor((m) => m.op === "stream-flushed" && m.offset === 17);
 const live = await r.waitFor((m) => m.op === "stream-append" && m.content === "! more");
 assert(live.offset === 11, "live append carries its offset");
 
+// writer resume: same client-id + token resumes at the flushed offset
+w.send({ op: "start-stream", "client-id": clientId, "reconnect-token": reconnectToken });
+const resume = await w.waitFor((m) => m.op === "start-stream-ok" && m.offset === 17);
+assert(resume["stream-id"] === streamId, "resume returns the same stream");
+assert(resume["client-id"] === clientId, "start-stream-ok echoes client-id");
+
+// wrong reconnect token is rejected
+w.send({ op: "start-stream", "client-id": clientId, "reconnect-token": uuid() });
+const err = await w.waitFor((m) => m.op === "error" && m["original-event"]?.op === "start-stream");
+assert(err.type === "validation-failed", "bad reconnect token rejected");
+
 // done closes the stream for readers
 w.send({ op: "append-stream", "stream-id": streamId, chunks: [], offset: 17, done: true });
 await w.waitFor((m) => m.op === "stream-flushed" && m.done === true);
 await r.waitFor((m) => m.op === "stream-append" && m.done === true);
 console.log("ok: done propagated");
 
-// writer resume: same client-id + token resumes at the flushed offset
+// resuming a closed stream is rejected (legacy "Stream is closed.")
 w.send({ op: "start-stream", "client-id": clientId, "reconnect-token": reconnectToken });
-const resume = await w.waitFor((m) => m.op === "start-stream-ok" && m.offset === 17);
-assert(resume["stream-id"] === streamId, "resume returns the same stream");
-
-// wrong reconnect token is rejected
-w.send({ op: "start-stream", "client-id": clientId, "reconnect-token": uuid() });
-const err = await w.waitFor((m) => m.op === "error" && m["original-event"]?.op === "start-stream");
-assert(err.type === "validation-failed", "bad reconnect token rejected");
+const closedErr = await w.waitFor(
+  (m) => m.op === "error" && m["original-event"]?.op === "start-stream" && m.message.includes("closed"),
+);
+assert(closedErr.type === "validation-failed", "closed stream resume rejected");
 
 // late subscriber catches up fully on a finished stream
 const r2 = connect("R2");

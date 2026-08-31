@@ -24,6 +24,7 @@ pub async fn stream(State(state): State<Arc<AppState>>) -> Response {
         tx,
         state: Default::default(),
         refresh_lock: Default::default(),
+        batch_messages: Default::default(),
     });
     {
         let mut st = session.state.lock().await;

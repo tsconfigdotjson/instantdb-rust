@@ -322,14 +322,14 @@ impl AttrMap {
     /// Wire array of attrs, with server-only system attrs hidden
     /// (see attr.clj remove-hidden).
     pub fn to_wire_visible(&self) -> Value {
-        let mut out = vec![];
-        for attr in self.by_id.values() {
-            if attr.is_system && !system_catalog::is_client_visible(&attr.etype, &attr.label) {
-                continue;
-            }
-            out.push(attr.to_wire());
-        }
-        Value::Array(out)
+        // Legacy sends every attr definition, system catalog included
+        // ($oauthCodes, $magicCodes, ... — verified against the legacy server
+        // by scripts/differential/replay.mjs); clients key attrs by id and
+        // ignore unreferenced ones. Deterministic order keeps attrs-changed
+        // hashing and conformance diffing reliable.
+        let mut attrs: Vec<&Attr> = self.by_id.values().collect();
+        attrs.sort_by_key(|a| a.id);
+        Value::Array(attrs.into_iter().map(|a| a.to_wire()).collect())
     }
 }
 
