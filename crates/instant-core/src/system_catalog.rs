@@ -383,6 +383,13 @@ pub async fn ensure_system_catalog(pool: &sqlx::PgPool) -> Result<()> {
         .begin()
         .await
         .map_err(crate::error::InstantError::from)?;
+    // Serialize concurrent bootstrappers (parallel tests, racing nodes): the
+    // ON CONFLICT skips below only work against committed rows. Key must
+    // differ from the server's boot lock (772677321) — that one is held on a
+    // separate connection and would self-deadlock here.
+    sqlx::query("SELECT pg_advisory_xact_lock(772677322)")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(
         r#"
         INSERT INTO instant_users (id, email)
