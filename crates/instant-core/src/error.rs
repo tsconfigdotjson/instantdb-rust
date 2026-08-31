@@ -86,6 +86,19 @@ impl InstantError {
         Self::new("param-malformed", 400, message, None)
     }
 
+    /// Errors legacy surfaces as Postgres RAISEs (util/exception.clj:770-775):
+    /// type `sql-raise`, status 400, message "Raised Exception: ...", hint
+    /// carrying the raised text as `constraint`.
+    pub fn sql_raise(server_message: impl Into<String>) -> Self {
+        let m = server_message.into();
+        Self::new(
+            "sql-raise",
+            400,
+            format!("Raised Exception: {m}"),
+            Some(json!({"table": null, "condition": "raise-exception", "constraint": m})),
+        )
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new("internal-error", 500, message, None)
     }

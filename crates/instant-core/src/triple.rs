@@ -101,23 +101,14 @@ impl LookupResolver {
     }
 
     fn validate_lookup_attr(attrs: &AttrMap, attr_id: &Uuid) -> Result<Attr> {
-        let attr = attrs.get(attr_id).ok_or_else(|| {
-            InstantError::validation_failed(
-                "lookup",
-                format!("could not find attr for lookup {attr_id}"),
-                json!([]),
-            )
+        // legacy resolves lookup attrs via a unique-only join and RAISEs when
+        // the attr is missing or not unique (triple.clj hsql-attr-id-or-raise;
+        // verified live by scripts/differential/replay.mjs step 16)
+        let attr = attrs.get(attr_id).filter(|a| a.is_unique).ok_or_else(|| {
+            InstantError::sql_raise(format!(
+                "We could not find an attribute with id = '{attr_id}'"
+            ))
         })?;
-        if !attr.is_unique {
-            return Err(InstantError::validation_failed(
-                "lookup",
-                format!(
-                    "{}.{} is not a unique attribute on {}",
-                    attr.etype, attr.label, attr.etype
-                ),
-                json!([]),
-            ));
-        }
         Ok(attr.clone())
     }
 
@@ -470,10 +461,9 @@ pub async fn deep_merge_triples(
     let mut created = HashSet::new();
     for (eid, attr, patches) in merges {
         if attr.value_type == ValueType::Ref {
-            return Err(InstantError::validation_failed(
-                "tx-steps",
+            // legacy RAISEs from SQL here (triple.clj:356)
+            return Err(InstantError::sql_raise(
                 "merge operation is not supported for links",
-                json!([]),
             ));
         }
         let existing = sqlx::query(

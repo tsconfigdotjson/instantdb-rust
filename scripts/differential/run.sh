@@ -41,9 +41,11 @@ echo "== differential replay =="
 node replay.mjs "$APP_ID" "$APP_ID" "$TOKEN"
 
 echo "== fuzz layer =="
-FUZZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
-FUZZ_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
-./provision.sh "$FUZZ_APP" "$FUZZ_TOKEN"
-node fuzz.mjs "$FUZZ_APP" "$FUZZ_APP" "$FUZZ_TOKEN" "${FUZZ_SEED:-42}" "${FUZZ_ROUNDS:-40}"
+for SEED in ${FUZZ_SEEDS:-42 99}; do
+  FUZZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+  FUZZ_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+  ./provision.sh "$FUZZ_APP" "$FUZZ_TOKEN"
+  node fuzz.mjs "$FUZZ_APP" "$FUZZ_APP" "$FUZZ_TOKEN" "$SEED" "${FUZZ_ROUNDS:-60}"
+done
 
 echo "DIFFERENTIAL HARNESS PASSED"

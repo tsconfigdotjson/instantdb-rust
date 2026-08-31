@@ -55,6 +55,12 @@ function buildScenario() {
     ownerRef: mk(), ownersId: mk(), ownersName: mk(),
     e1: mk(), e2: mk(), e3: mk(), owner1: mk(), extraAttr: mk(),
     mergeAttr: mk(), lookupTitleEid: mk(),
+    // typed-query namespace (step 14)
+    typedId: mk(), typedScore: mk(), typedName: mk(), typedWhen: mk(), typedFlag: mk(),
+    t1: mk(), t2: mk(), t3: mk(), t4: mk(), t5: mk(),
+    // authed perms namespace (step 15)
+    secretsId: mk(), secretsOwner: mk(), secretsTitle: mk(),
+    s1: mk(), s2: mk(), s3: mk(), s4: mk(),
   };
   const attr = (id, etype, label, { unique = false, fwd, rev } = {}) => [
     "add-attr",
@@ -288,6 +294,220 @@ function buildScenario() {
         );
         msg(env.conns.A, { op: "append-stream", "stream-id": streamId, chunks: [], offset: 11, done: true });
         await env.conns.A.waitFor((m) => m.op === "stream-flushed" && m.done === true, 20000);
+      },
+    },
+    {
+      name: "14-typed-query-breadth",
+      run: async (env) => {
+        // typed + indexed attrs: number / string / date, plus an untyped flag
+        const typedAttr = (id, label, cdt) => [
+          "add-attr",
+          {
+            id,
+            "forward-identity": [id, "typed", label],
+            "value-type": "blob",
+            cardinality: "one",
+            "unique?": label === "id",
+            "index?": true,
+            ...(cdt ? { "checked-data-type": cdt } : {}),
+            isUnsynced: true,
+          },
+        ];
+        const row = (e, score, name, when, flag) => [
+          ["add-triple", e, ids.typedId, e],
+          ...(score === undefined ? [] : [["add-triple", e, ids.typedScore, score]]),
+          ...(name === undefined ? [] : [["add-triple", e, ids.typedName, name]]),
+          ...(when === undefined ? [] : [["add-triple", e, ids.typedWhen, when]]),
+          ...(flag === undefined ? [] : [["add-triple", e, ids.typedFlag, flag]]),
+        ];
+        msg(env.conns.A, {
+          op: "transact",
+          "tx-steps": [
+            typedAttr(ids.typedId, "id"),
+            typedAttr(ids.typedScore, "score", "number"),
+            typedAttr(ids.typedName, "name", "string"),
+            typedAttr(ids.typedWhen, "when", "date"),
+            typedAttr(ids.typedFlag, "flag"),
+            ...row(ids.t1, 1, "alice", "2024-01-01T00:00:00Z", true),
+            ...row(ids.t2, 2.5, "bob", "2024-02-01T00:00:00Z", false),
+            ...row(ids.t3, 3, "carol", "2024-03-01T00:00:00Z", null),
+            ...row(ids.t4, -1, "malice", undefined, undefined),
+            ...row(ids.t5, undefined, undefined, "2024-04-01T00:00:00Z", true),
+          ],
+        });
+        await env.conns.A.waitFor(
+          (m) => m.op === "transact-ok" && env.conns.A.frames.filter((f) => f.op === "transact-ok").length >= 6,
+        );
+        const queries = [
+          { typed: { $: { where: { score: { $gt: 2 } } } } },
+          { typed: { $: { where: { score: { $lte: 1 } } } } },
+          { typed: { $: { where: { name: { $like: "%li%" } } } } },
+          { typed: { $: { where: { name: { $ilike: "%A%" } } } } },
+          { typed: { $: { where: { name: { $in: ["alice", "carol", "nobody"] } } } } },
+          { typed: { $: { where: { name: { $not: "bob" } } } } },
+          { typed: { $: { where: { score: { $isNull: true } } } } },
+          { typed: { $: { where: { or: [{ score: { $gt: 2.6 } }, { name: "alice" }] } } } },
+          { typed: { $: { where: { and: [{ score: { $gt: 0 } }, { when: { $lt: "2024-02-15T00:00:00Z" } }] } } } },
+          { typed: { $: { where: { flag: true } } } },
+          { typed: { $: { order: { score: "desc" }, limit: 2 } } },
+          { typed: { $: { order: { name: "asc" }, limit: 2, offset: 1 } } },
+          { typed: { $: { order: { when: "asc" }, last: 2 } } },
+          { typed: { $: { fields: ["name", "score"] } } },
+          { todos: { $: { where: { "owner.name": "alice" } } } }, // dot-path (link severed in 07 -> empty)
+        ];
+        for (const q of queries) {
+          msg(env.conns.A, { op: "add-query", q });
+          await env.conns.A.waitFor(
+            (m) => m.op === "add-query-ok" && JSON.stringify(m.q) === JSON.stringify(q),
+          );
+          msg(env.conns.A, { op: "remove-query", q });
+          await env.conns.A.waitFor(
+            (m) => m.op === "remove-query-ok" && JSON.stringify(m.q) === JSON.stringify(q),
+          );
+        }
+        // typed-order cursor page: capture per-server for step 16's mismatch case
+        const qOrd = { typed: { $: { order: { score: "asc" }, limit: 2 } } };
+        msg(env.conns.A, { op: "add-query", q: qOrd });
+        const page = await env.conns.A.waitFor(
+          (m) => m.op === "add-query-ok" && JSON.stringify(m.q) === JSON.stringify(qOrd),
+        );
+        env.scratch = env.scratch ?? {};
+        env.scratch.scoreCursor = page.result?.[0]?.data?.["page-info"]?.typed?.["end-cursor"];
+        // and a serverCreatedAt cursor for the mismatch case
+        const qCreated = { typed: { $: { order: { serverCreatedAt: "asc" }, limit: 2 } } };
+        msg(env.conns.A, { op: "add-query", q: qCreated });
+        const page2 = await env.conns.A.waitFor(
+          (m) => m.op === "add-query-ok" && JSON.stringify(m.q) === JSON.stringify(qCreated),
+        );
+        env.scratch.createdCursor = page2.result?.[0]?.data?.["page-info"]?.typed?.["end-cursor"];
+        // typed-order after-cursor round trip
+        const qAfter = { typed: { $: { order: { score: "asc" }, limit: 2, after: env.scratch.scoreCursor } } };
+        msg(env.conns.A, { op: "add-query", q: qAfter });
+        await env.conns.A.waitFor((m) => m.op === "add-query-ok" && m.q?.typed?.$?.after);
+      },
+    },
+    {
+      name: "15-authed-perms",
+      run: async (env) => {
+        // mint a real refresh token via the admin API (both servers implement
+        // POST /admin/refresh_tokens with app-id + bearer admin token)
+        const resp = await fetch(`${env.url}/admin/refresh_tokens`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "app-id": env.appId,
+            authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({ email: "authuser@example.com" }),
+        });
+        const tokenBody = await resp.json();
+        const refreshToken = tokenBody?.user?.refresh_token;
+        if (!refreshToken) throw new Error(`no refresh token from ${env.serverName}: ${JSON.stringify(tokenBody).slice(0, 300)}`);
+
+        // rules: owner-only view via bind, owner-only create, no updates
+        psql(
+          env.db,
+          `UPDATE rules SET code = code || '{"secrets": {"bind": ["isOwner", "auth.email != null && data.owner == auth.email"], "allow": {"view": "isOwner", "create": "isOwner", "update": "false"}}}'::jsonb WHERE app_id = '${env.appId}'`,
+        );
+
+        // seed as admin: one owned secret, one foreign secret
+        const secretsAttr = (id, label) => [
+          "add-attr",
+          {
+            id,
+            "forward-identity": [id, "secrets", label],
+            "value-type": "blob",
+            cardinality: "one",
+            "unique?": label === "id",
+            "index?": label === "id",
+            isUnsynced: true,
+          },
+        ];
+        msg(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [
+            secretsAttr(ids.secretsId, "id"),
+            secretsAttr(ids.secretsOwner, "owner"),
+            secretsAttr(ids.secretsTitle, "title"),
+            ["add-triple", ids.s1, ids.secretsId, ids.s1],
+            ["add-triple", ids.s1, ids.secretsOwner, "authuser@example.com"],
+            ["add-triple", ids.s1, ids.secretsTitle, "mine"],
+            ["add-triple", ids.s2, ids.secretsId, ids.s2],
+            ["add-triple", ids.s2, ids.secretsOwner, "other@example.com"],
+            ["add-triple", ids.s2, ids.secretsTitle, "theirs"],
+          ],
+        });
+        await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok");
+
+        // authed session: happy-path init with the refresh token
+        env.conns.AUTH = connect(env.url, env.appId, `${env.serverName}:AUTH`);
+        await env.conns.AUTH.open;
+        msg(env.conns.AUTH, {
+          op: "init",
+          "app-id": env.appId,
+          "refresh-token": refreshToken,
+          versions: { "@instantdb/core": "v0.21.0" },
+        });
+        await env.conns.AUTH.waitFor((m) => m.op === "init-ok");
+
+        // view rule filters to owned entities only
+        msg(env.conns.AUTH, { op: "add-query", q: { secrets: {} } });
+        await env.conns.AUTH.waitFor((m) => m.op === "add-query-ok");
+        // $users default rules: authed user sees only self
+        msg(env.conns.AUTH, { op: "add-query", q: { $users: {} } });
+        await env.conns.AUTH.waitFor((m) => m.op === "add-query-ok" && m.q?.$users);
+
+        // create own secret allowed; foreign create + any update denied
+        msg(env.conns.AUTH, {
+          op: "transact",
+          "tx-steps": [
+            ["add-triple", ids.s3, ids.secretsId, ids.s3],
+            ["add-triple", ids.s3, ids.secretsOwner, "authuser@example.com"],
+            ["add-triple", ids.s3, ids.secretsTitle, "also mine"],
+          ],
+        });
+        await env.conns.AUTH.waitFor((m) => m.op === "transact-ok");
+        const expectErr = async (m) => {
+          const ceid = msg(env.conns.AUTH, m);
+          await env.conns.AUTH.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        await expectErr({
+          op: "transact",
+          "tx-steps": [
+            ["add-triple", ids.s4, ids.secretsId, ids.s4],
+            ["add-triple", ids.s4, ids.secretsOwner, "other@example.com"],
+          ],
+        });
+        await expectErr({
+          op: "transact",
+          "tx-steps": [["add-triple", ids.s1, ids.secretsTitle, "renamed"]],
+        });
+      },
+    },
+    {
+      name: "16-error-breadth",
+      run: async (env) => {
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { order: { nope: "asc" } } } } });
+        await expectErr(env.conns.A, {
+          op: "add-query",
+          q: { typed: { $: { order: { score: "asc" }, limit: 2, after: env.scratch.createdCursor } } },
+        });
+        await expectErr(env.conns.ADMIN, {
+          op: "add-query",
+          q: { todos: { $: { aggregate: "count" }, owner: {} } },
+        });
+        await expectErr(env.conns.A, {
+          op: "transact",
+          "tx-steps": [["deep-merge-triple", ids.e1, ids.ownerRef, { x: 1 }]],
+        });
+        await expectErr(env.conns.A, {
+          op: "transact",
+          "tx-steps": [["add-triple", [ids.todosTitle, "one"], ids.todosDone, true]],
+        });
       },
     },
   ];

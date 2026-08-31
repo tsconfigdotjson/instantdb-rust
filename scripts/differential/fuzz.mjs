@@ -46,6 +46,9 @@ function buildScript() {
   const attrs = {
     id: mk(),
     labels: Object.fromEntries(["p1", "p2", "p3", "num"].map((l) => [l, mk()])),
+    // typed + indexed attrs: exercised by comparison/like/order query ops
+    typedNum: mk(),
+    typedStr: mk(),
   };
   const entities = Array.from({ length: 8 }, () => mk());
   const attrSteps = [
@@ -54,25 +57,37 @@ function buildScript() {
       "add-attr",
       { id, "forward-identity": [id, NS, l], "value-type": "blob", cardinality: "one", "unique?": false, "index?": false, isUnsynced: true },
     ]),
+    ["add-attr", { id: attrs.typedNum, "forward-identity": [attrs.typedNum, NS, "tnum"], "value-type": "blob", cardinality: "one", "unique?": false, "index?": true, "checked-data-type": "number", isUnsynced: true }],
+    ["add-attr", { id: attrs.typedStr, "forward-identity": [attrs.typedStr, NS, "tstr"], "value-type": "blob", cardinality: "one", "unique?": false, "index?": true, "checked-data-type": "string", isUnsynced: true }],
   ];
   const script = [{ kind: "tx", steps: attrSteps }];
   const values = ["a", "b", "c", 1, 2, 3.5, true, false, null, { k: 1 }, [1, 2]];
+  const nums = [0, 1, 2.5, 7, -3, 100];
+  const strs = ["alpha", "beta", "gamma", "alphabet", "Zed"];
   for (let i = 0; i < rounds; i++) {
     const r = rand();
-    if (r < 0.7) {
+    if (r < 0.65) {
       // random transaction: 1-4 steps
       const n = 1 + Math.floor(rand() * 4);
       const steps = [];
       for (let j = 0; j < n; j++) {
         const e = pick(entities);
         const kind = rand();
-        if (kind < 0.55) {
+        if (kind < 0.4) {
           steps.push(["add-triple", e, attrs.id, e]);
           steps.push(["add-triple", e, pick(Object.values(attrs.labels)), pick(values)]);
-        } else if (kind < 0.75) {
+        } else if (kind < 0.6) {
+          steps.push(["add-triple", e, attrs.id, e]);
+          steps.push(["add-triple", e, attrs.typedNum, pick(nums)]);
+          steps.push(["add-triple", e, attrs.typedStr, pick(strs)]);
+        } else if (kind < 0.72) {
           steps.push(["add-triple", e, attrs.id, e]);
           steps.push(["deep-merge-triple", e, attrs.labels.p3, { [`k${Math.floor(rand() * 3)}`]: pick(values) }]);
-        } else if (kind < 0.9) {
+        } else if (kind < 0.8) {
+          // checked-type violation: both servers must reject alike
+          steps.push(["add-triple", e, attrs.id, e]);
+          steps.push(["add-triple", e, attrs.typedNum, pick(["oops", true])]);
+        } else if (kind < 0.92) {
           steps.push(["retract-triple", e, pick(Object.values(attrs.labels)), pick(values)]);
         } else {
           steps.push(["delete-entity", e, NS]);
@@ -80,12 +95,27 @@ function buildScript() {
       }
       script.push({ kind: "tx", steps });
     } else {
-      // random query
+      // random query over untyped equality, typed comparisons, like, isNull,
+      // boolean combinators, ordering by typed attrs, offset
       const opts = {};
       const q = rand();
-      if (q < 0.3) opts.where = { [pick(["p1", "p2"])]: pick(["a", "b", "c"]) };
-      if (rand() < 0.3) opts.limit = 1 + Math.floor(rand() * 5);
-      if (opts.limit && rand() < 0.5) opts.order = { serverCreatedAt: pick(["asc", "desc"]) };
+      if (q < 0.2) opts.where = { [pick(["p1", "p2"])]: pick(["a", "b", "c"]) };
+      else if (q < 0.35) opts.where = { tnum: { [pick(["$gt", "$gte", "$lt", "$lte"])]: pick(nums) } };
+      else if (q < 0.45) opts.where = { tstr: { [pick(["$like", "$ilike"])]: pick(["%a%", "alph%", "%ed", "%ET%"]) } };
+      else if (q < 0.52) opts.where = { tnum: { $isNull: pick([true, false]) } };
+      else if (q < 0.62) {
+        opts.where = {
+          [pick(["or", "and"])]: [
+            { tnum: { $gt: pick(nums) } },
+            { tstr: pick(strs) },
+          ],
+        };
+      }
+      if (rand() < 0.35) opts.limit = 1 + Math.floor(rand() * 5);
+      if (opts.limit && rand() < 0.7) {
+        opts.order = { [pick(["serverCreatedAt", "tnum", "tstr"])]: pick(["asc", "desc"]) };
+      }
+      if (opts.limit && rand() < 0.3) opts.offset = Math.floor(rand() * 3);
       const form = Object.keys(opts).length ? { $: opts } : {};
       script.push({ kind: "query", q: { [NS]: form } });
     }

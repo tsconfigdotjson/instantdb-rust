@@ -1171,8 +1171,9 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
             .by_fwd_name(&form.etype, &order.key)
             .cloned()
             .ok_or_else(|| {
+                // legacy message (LEGACY instaql.clj:945-949)
                 verr(format!(
-                    "There is no `{}` attribute on `{}` to order by.",
+                    "There is no `{}` attribute for {}.",
                     order.key, form.etype
                 ))
             })?;
@@ -1215,13 +1216,31 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
         (a, Some(t))
     };
 
-    // Validate cursors reference the order attr
-    for cursor in [&form.opts.before, &form.opts.after].into_iter().flatten() {
+    // Validate cursors reference the order attr — legacy message format
+    // (LEGACY instaql.clj:911-922, 979-997): an attr's order label is its
+    // fwd label except `id`, which reads as `serverCreatedAt`.
+    let order_label = |attr: &Attr| -> String {
+        if attr.label == "id" {
+            "serverCreatedAt".to_string()
+        } else {
+            attr.label.clone()
+        }
+    };
+    for (cursor, which) in [(&form.opts.before, "before"), (&form.opts.after, "after")] {
+        let Some(cursor) = cursor else { continue };
         if cursor.a != order_attr.id {
-            return Err(verr(format!(
-                "Invalid before/after cursor. The query orders by `{}`, but the query that returned the cursor used a different order.",
-                order.key
-            )));
+            let tail = match ctx.attrs.get(&cursor.a) {
+                Some(ca) => format!(
+                    "The query orders by `{}`, but the query that returned the cursor orders by `{}`.",
+                    order_label(&order_attr),
+                    order_label(ca)
+                ),
+                None => format!(
+                    "The query orders by `{}`, but the query that returned the cursor orders by a missing attribute.",
+                    order_label(&order_attr)
+                ),
+            };
+            return Err(verr(format!("Invalid {which} cursor. {tail}")));
         }
     }
 

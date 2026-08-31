@@ -19,9 +19,13 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   server (host :8891) from `ghcr.io/instantdb`.
 - `provision.sh` — creates the same app id + admin token in both servers'
   databases (both run the same legacy schema).
-- `replay.mjs` — 13-step scenario across init, schemaless transacts, queries
-  (nested/paginated/cursor round-trip/aggregate), the error matrix, rooms and
-  presence, sync tables, and streams. Frames are folded into the
+- `replay.mjs` — 16-step scenario across init, schemaless transacts, queries
+  (nested/paginated/cursor round-trip/aggregate), typed-attr query breadth
+  ($gt/$lt/$like/$ilike/$in/$not/$isNull/or/and, typed ordering, offset,
+  last, fields projection, dot-paths), authed sessions + permissions (real
+  refresh-token init, bind rules, view-rule filtering, $users defaults,
+  allowed/denied writes), the error matrix, rooms and presence, sync tables,
+  and streams. Frames are folded into the
   **client-visible projection** (exactly what `Reactor.js`/`SyncTable.ts`/
   `Stream.ts` read, with volatile server-chosen values normalized) and must
   match byte-for-byte. Key sets per op are compared raw. Remaining diffs must

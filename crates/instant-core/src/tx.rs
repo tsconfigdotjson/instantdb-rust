@@ -88,6 +88,32 @@ fn parse_attr_uuid(v: Option<&Value>) -> Result<Uuid> {
         })
 }
 
+/// Legacy coerce-value-uuids (permissioned_transaction.clj:111-122): the
+/// value of a ref attr must be a lookup ref or a uuid; anything else fails
+/// with a `Validation failed for eid` error before any deeper processing.
+fn check_ref_value(attrs: &AttrMap, attr_id: &Uuid, value: &Value) -> Result<()> {
+    let Some(attr) = attrs.get(attr_id) else {
+        return Ok(());
+    };
+    if attr.value_type != crate::attr::ValueType::Ref {
+        return Ok(());
+    }
+    let ok = match value {
+        Value::Array(_) => true, // lookup ref
+        Value::String(s) => Uuid::parse_str(s).is_ok(),
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(InstantError::validation_failed(
+            "eid",
+            "Expected link value to be a uuid.",
+            json!([{"message": "Expected link value to be a uuid."}]),
+        ))
+    }
+}
+
 /// Step-shape (spec-level) failure. Legacy's message for these is the bare
 /// "Validation failed for tx-steps" — spec explain data lives in the hint
 /// (util/exception.clj throw-validation-err! with coercion errors).
@@ -365,6 +391,7 @@ pub async fn transact(
                     else {
                         unreachable!()
                     };
+                    check_ref_value(attrs, &attr_id, &value)?;
                     items.push((eid, attr_id, value, mode));
                 }
                 let resolved = resolve_add_batch(
@@ -402,6 +429,7 @@ pub async fn transact(
                     let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
                         InstantError::record_not_found("attr", format!("attr {attr_id} not found"))
                     })?;
+                    check_ref_value(attrs, &attr_id, &value)?;
                     let eid = resolve_eid(
                         &mut *conn,
                         app_id,
@@ -454,6 +482,7 @@ pub async fn transact(
                     let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
                         InstantError::record_not_found("attr", format!("attr {attr_id} not found"))
                     })?;
+                    check_ref_value(attrs, &attr_id, &value)?;
                     let eid = match eid {
                         EidRef::Id(id) => Some(id),
                         EidRef::Lookup(a, v) => {
