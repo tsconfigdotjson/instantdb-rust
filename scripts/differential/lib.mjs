@@ -197,6 +197,7 @@ export async function foldFrames(frames, state) {
   for (const m of frames) {
     switch (m.op) {
       case "refresh-presence": {
+        if (state.leftRooms?.has(m["room-id"])) break; // straggler after leave
         // client keeps only entry.data per session (Reactor.js:2699-2710)
         state.rooms[m["room-id"]] = Object.fromEntries(
           Object.entries(m.data).map(([sid, v]) => [sid, v.data]),
@@ -204,6 +205,7 @@ export async function foldFrames(frames, state) {
         break;
       }
       case "patch-presence": {
+        if (state.leftRooms?.has(m["room-id"])) break; // straggler after leave
         // Reactor.js:2672-2697
         const room = (state.rooms[m["room-id"]] ??= {});
         for (const [path, op, val] of m.edits) {
@@ -211,6 +213,17 @@ export async function foldFrames(frames, state) {
           else if (path.length === 1) room[path[0]] = val.data;
           else if (path.length === 2 && path[1] === "data") room[path[0]] = val;
         }
+        break;
+      }
+      case "leave-room-ok": {
+        // the client drops a room's presence state on leave (Reactor.js:894-898
+        // marks the room disconnected); anything a server pushes for that room
+        // around the leave is not client-visible, and delivery timing of a
+        // final straggler frame legitimately differs between servers
+        delete state.rooms[m["room-id"]];
+        state.leftRooms = state.leftRooms ?? new Set();
+        state.leftRooms.add(m["room-id"]);
+        direct.push(normalize(m));
         break;
       }
       case "refresh-ok": {
