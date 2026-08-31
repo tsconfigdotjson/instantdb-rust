@@ -36,12 +36,6 @@ pub struct AppUser {
     pub email: Option<String>,
 }
 
-impl AppUser {
-    pub fn to_json(&self) -> Value {
-        json!({"id": self.id, "email": self.email})
-    }
-}
-
 /// Look up the user for a refresh token (token = plaintext uuid).
 pub async fn user_by_refresh_token(
     state: &AppState,
@@ -97,7 +91,10 @@ pub async fn user_by_email(state: &AppState, app_id: Uuid, email: &str) -> Resul
     .fetch_optional(&state.pool)
     .await
     .map_err(InstantError::from)?;
-    Ok(row.map(|r| AppUser { id: r.get("entity_id"), email: Some(email.to_string()) }))
+    Ok(row.map(|r| AppUser {
+        id: r.get("entity_id"),
+        email: Some(email.to_string()),
+    }))
 }
 
 pub async fn user_by_id(state: &AppState, app_id: Uuid, id: Uuid) -> Result<Option<AppUser>> {
@@ -117,39 +114,35 @@ pub async fn user_by_id(state: &AppState, app_id: Uuid, id: Uuid) -> Result<Opti
     .map_err(InstantError::from)?;
     Ok(row.map(|r| {
         let email: Option<Value> = r.try_get("email").ok();
-        AppUser { id, email: email.and_then(|v| v.as_str().map(|s| s.to_string())) }
-    }))
-}
-
-/// Create a user (if needed) and mint a refresh token. Returns (user, token).
-pub async fn create_user_and_token(
-    state: &AppState,
-    app_id: Uuid,
-    email: &str,
-) -> Result<(AppUser, Uuid)> {
-    let user = match user_by_email(state, app_id, email).await? {
-        Some(u) => u,
-        None => {
-            let uid = Uuid::new_v4();
-            let steps = json!([
-                ["add-triple", uid, sc::attr_id("$users", "id"), uid],
-                ["add-triple", uid, sc::attr_id("$users", "email"), email]
-            ]);
-            crate::service::run_system_transact(state, app_id, &steps).await?;
-            AppUser { id: uid, email: Some(email.to_string()) }
+        AppUser {
+            id,
+            email: email.and_then(|v| v.as_str().map(|s| s.to_string())),
         }
-    };
-    let token = mint_refresh_token(state, app_id, user.id).await?;
-    Ok((user, token))
+    }))
 }
 
 pub async fn mint_refresh_token(state: &AppState, app_id: Uuid, user_id: Uuid) -> Result<Uuid> {
     let token = Uuid::new_v4();
     let entity = Uuid::new_v4();
     let steps = json!([
-        ["add-triple", entity, sc::attr_id("$userRefreshTokens", "id"), entity],
-        ["add-triple", entity, sc::attr_id("$userRefreshTokens", "hashedToken"), hash_token(token)],
-        ["add-triple", entity, sc::attr_id("$userRefreshTokens", "$user"), user_id]
+        [
+            "add-triple",
+            entity,
+            sc::attr_id("$userRefreshTokens", "id"),
+            entity
+        ],
+        [
+            "add-triple",
+            entity,
+            sc::attr_id("$userRefreshTokens", "hashedToken"),
+            hash_token(token)
+        ],
+        [
+            "add-triple",
+            entity,
+            sc::attr_id("$userRefreshTokens", "$user"),
+            user_id
+        ]
     ]);
     crate::service::run_system_transact(state, app_id, &steps).await?;
     Ok(token)
@@ -203,7 +196,9 @@ pub async fn sign_out(
 
 /// Verify an admin token for an app.
 pub async fn check_admin_token(state: &AppState, app_id: Uuid, token: &str) -> Result<bool> {
-    let Ok(token) = Uuid::parse_str(token) else { return Ok(false) };
+    let Ok(token) = Uuid::parse_str(token) else {
+        return Ok(false);
+    };
     let row = sqlx::query("SELECT 1 AS x FROM app_admin_tokens WHERE app_id = $1 AND token = $2")
         .bind(app_id)
         .bind(token)

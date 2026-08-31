@@ -19,7 +19,10 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let port = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8888);
+        let port = std::env::var("PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(8888);
         Config {
             database_url: std::env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://instant:instant@localhost:5432/instant".into()),
@@ -118,7 +121,10 @@ impl AppState {
     }
 
     pub fn register_app_session(&self, app_id: Uuid, session_id: Uuid) {
-        self.app_sessions.entry(app_id).or_default().insert(session_id);
+        self.app_sessions
+            .entry(app_id)
+            .or_default()
+            .insert(session_id);
     }
 
     pub fn drop_session(&self, session_id: Uuid) {

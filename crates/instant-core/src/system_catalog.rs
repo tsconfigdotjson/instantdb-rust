@@ -20,7 +20,8 @@ fn encode_string_to_u64(input: &str) -> u64 {
     for c in input.chars() {
         let idx = NAME_CHARS
             .find(c)
-            .unwrap_or_else(|| panic!("unsupported char {c:?} in {input:?}")) as u64;
+            .unwrap_or_else(|| panic!("unsupported char {c:?} in {input:?}"))
+            as u64;
         bits = (bits << 5) | idx;
         nbits += 5;
     }
@@ -191,30 +192,59 @@ fn defs() -> Vec<Def> {
         Def::new("$users", "email").uniq().idx().checked(String),
         Def::new("$users", "type").checked(String),
         Def::new("$users", "imageURL").checked(String),
-        Def::new("$users", "linkedPrimaryUser").rev("$users", "linkedGuestUsers").reference().cascade(),
+        Def::new("$users", "linkedPrimaryUser")
+            .rev("$users", "linkedGuestUsers")
+            .reference()
+            .cascade(),
         // $magicCodes
         Def::new("$magicCodes", "id").uniq().idx(),
         Def::new("$magicCodes", "codeHash").idx().checked(String),
         Def::new("$magicCodes", "email").idx().checked(String),
         // $userRefreshTokens
         Def::new("$userRefreshTokens", "id").uniq().idx(),
-        Def::new("$userRefreshTokens", "hashedToken").uniq().idx().checked(String),
-        Def::new("$userRefreshTokens", "$user").rev("$users", "$userRefreshTokens").idx().reference().cascade(),
+        Def::new("$userRefreshTokens", "hashedToken")
+            .uniq()
+            .idx()
+            .checked(String),
+        Def::new("$userRefreshTokens", "$user")
+            .rev("$users", "$userRefreshTokens")
+            .idx()
+            .reference()
+            .cascade(),
         // $oauthProviders
         Def::new("$oauthProviders", "id").uniq().idx(),
-        Def::new("$oauthProviders", "name").uniq().idx().checked(String),
+        Def::new("$oauthProviders", "name")
+            .uniq()
+            .idx()
+            .checked(String),
         // $oauthUserLinks
         Def::new("$oauthUserLinks", "id").uniq().idx(),
         Def::new("$oauthUserLinks", "sub").idx().checked(String),
-        Def::new("$oauthUserLinks", "$user").rev("$users", "$oauthUserLinks").idx().reference().cascade(),
+        Def::new("$oauthUserLinks", "$user")
+            .rev("$users", "$oauthUserLinks")
+            .idx()
+            .reference()
+            .cascade(),
         // NB: declared without :value-type :ref upstream, so it stays a blob attr
         // that happens to have a reverse identity.
-        Def::new("$oauthUserLinks", "$oauthProvider").rev("$oauthProviders", "$oauthUserLinks").idx().cascade(),
-        Def::new("$oauthUserLinks", "sub+$oauthProvider").uniq().idx().checked(String),
+        Def::new("$oauthUserLinks", "$oauthProvider")
+            .rev("$oauthProviders", "$oauthUserLinks")
+            .idx()
+            .cascade(),
+        Def::new("$oauthUserLinks", "sub+$oauthProvider")
+            .uniq()
+            .idx()
+            .checked(String),
         // $oauthClients
         Def::new("$oauthClients", "id").uniq().idx(),
-        Def::new("$oauthClients", "$oauthProvider").rev("$oauthProviders", "$oauthClients").reference().cascade(),
-        Def::new("$oauthClients", "name").uniq().idx().checked(String),
+        Def::new("$oauthClients", "$oauthProvider")
+            .rev("$oauthProviders", "$oauthClients")
+            .reference()
+            .cascade(),
+        Def::new("$oauthClients", "name")
+            .uniq()
+            .idx()
+            .checked(String),
         Def::new("$oauthClients", "clientId").idx(),
         Def::new("$oauthClients", "encryptedClientSecret").checked(String),
         Def::new("$oauthClients", "discoveryEndpoint").checked(String),
@@ -223,34 +253,65 @@ fn defs() -> Vec<Def> {
         Def::new("$oauthClients", "useSharedCredentials").checked(Boolean),
         // $oauthCodes
         Def::new("$oauthCodes", "id").uniq().idx(),
-        Def::new("$oauthCodes", "codeHash").uniq().idx().checked(String),
+        Def::new("$oauthCodes", "codeHash")
+            .uniq()
+            .idx()
+            .checked(String),
         Def::new("$oauthCodes", "codeChallengeMethod").checked(String),
         Def::new("$oauthCodes", "codeChallenge").checked(String),
         Def::new("$oauthCodes", "userInfo"),
-        Def::new("$oauthCodes", "$oauthClient").rev("$oauthClients", "$oauthCodes").reference().cascade(),
+        Def::new("$oauthCodes", "$oauthClient")
+            .rev("$oauthClients", "$oauthCodes")
+            .reference()
+            .cascade(),
         // $oauthRedirects
         Def::new("$oauthRedirects", "id").uniq().idx(),
-        Def::new("$oauthRedirects", "stateHash").uniq().idx().checked(String),
+        Def::new("$oauthRedirects", "stateHash")
+            .uniq()
+            .idx()
+            .checked(String),
         Def::new("$oauthRedirects", "cookieHash").checked(String),
         Def::new("$oauthRedirects", "redirectUrl").checked(String),
         Def::new("$oauthRedirects", "redirectTo").checked(String),
-        Def::new("$oauthRedirects", "$oauthClient").rev("$oauthClients", "$oauthRedirects").reference().cascade(),
+        Def::new("$oauthRedirects", "$oauthClient")
+            .rev("$oauthClients", "$oauthRedirects")
+            .reference()
+            .cascade(),
         Def::new("$oauthRedirects", "codeChallengeMethod").checked(String),
         Def::new("$oauthRedirects", "codeChallenge").checked(String),
         // $files
         Def::new("$files", "id").uniq().idx(),
-        Def::new("$files", "path").uniq().idx().checked(String).req(),
+        Def::new("$files", "path")
+            .uniq()
+            .idx()
+            .checked(String)
+            .req(),
         Def::new("$files", "size").idx().checked(Number).req(),
         Def::new("$files", "content-type").idx().checked(String),
-        Def::new("$files", "content-disposition").idx().checked(String),
-        Def::new("$files", "location-id").uniq().idx().checked(String).req(),
+        Def::new("$files", "content-disposition")
+            .idx()
+            .checked(String),
+        Def::new("$files", "location-id")
+            .uniq()
+            .idx()
+            .checked(String)
+            .req(),
         Def::new("$files", "key-version").checked(Number),
         Def::new("$files", "url").checked(String),
         // $streams
         Def::new("$streams", "id").uniq().idx(),
-        Def::new("$streams", "clientId").uniq().idx().checked(String).req(),
+        Def::new("$streams", "clientId")
+            .uniq()
+            .idx()
+            .checked(String)
+            .req(),
         Def::new("$streams", "machineId").checked(String),
-        Def::new("$streams", "$files").rev("$files", "$stream").reference().card_many().uniq().cascade_reverse(),
+        Def::new("$streams", "$files")
+            .rev("$files", "$stream")
+            .reference()
+            .card_many()
+            .uniq()
+            .cascade_reverse(),
         Def::new("$streams", "done").checked(Boolean),
         Def::new("$streams", "size").checked(Number),
         Def::new("$streams", "hashedReconnectToken").checked(String),
@@ -264,8 +325,16 @@ pub fn all_attrs() -> Vec<Attr> {
         .into_iter()
         .map(|d| Attr {
             id: attr_id(d.etype, d.label),
-            value_type: if d.is_ref { ValueType::Ref } else { ValueType::Blob },
-            cardinality: if d.many { Cardinality::Many } else { Cardinality::One },
+            value_type: if d.is_ref {
+                ValueType::Ref
+            } else {
+                ValueType::Blob
+            },
+            cardinality: if d.many {
+                Cardinality::Many
+            } else {
+                Cardinality::One
+            },
             forward_ident: ident_id(d.etype, d.label),
             etype: d.etype.to_string(),
             label: d.label.to_string(),
@@ -310,7 +379,10 @@ pub fn is_editable_triple_ident(etype: &str, label: &str) -> bool {
 
 /// Ensure the system catalog app + attrs exist. Run at server boot.
 pub async fn ensure_system_catalog(pool: &sqlx::PgPool) -> Result<()> {
-    let mut tx = pool.begin().await.map_err(crate::error::InstantError::from)?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(crate::error::InstantError::from)?;
     sqlx::query(
         r#"
         INSERT INTO instant_users (id, email)
@@ -335,7 +407,9 @@ pub async fn ensure_system_catalog(pool: &sqlx::PgPool) -> Result<()> {
     for attr in all_attrs() {
         crate::attr::insert(&mut *tx, SYSTEM_CATALOG_APP_ID, &attr).await?;
     }
-    tx.commit().await.map_err(crate::error::InstantError::from)?;
+    tx.commit()
+        .await
+        .map_err(crate::error::InstantError::from)?;
     Ok(())
 }
 

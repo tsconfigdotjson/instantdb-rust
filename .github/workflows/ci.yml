@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: cargo test + e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: instant
+          POSTGRES_PASSWORD: instant
+          POSTGRES_DB: instant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U instant"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://instant:instant@localhost:5432/instant
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.2.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: LEGACY/client/pnpm-lock.yaml
+
+      - name: Apply migrations
+        run: ./scripts/apply-migrations.sh
+
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+      - name: Build admin SDK (e2e dependency)
+        working-directory: LEGACY/client
+        run: |
+          pnpm install --frozen-lockfile --filter "@instantdb/admin..."
+          pnpm --filter "@instantdb/admin..." run build
+
+      - name: Boot two server nodes
+        run: |
+          cargo build -p instant-server
+          PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/server1.log 2>&1 &
+          PORT=8889 BASE_URL=http://localhost:8889 ./target/debug/instant-server > /tmp/server2.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8888/health >/dev/null && curl -sf http://localhost:8889/health >/dev/null; then
+              echo "both nodes healthy"; exit 0
+            fi
+            sleep 1
+          done
+          echo "servers failed to boot"; cat /tmp/server1.log /tmp/server2.log; exit 1
+
+      - name: Provision test app + mock OAuth client
+        run: |
+          ./scripts/create-app.sh "ci app" | tee /tmp/app.txt
+          APP_ID=$(grep '^app_id=' /tmp/app.txt | cut -d= -f2)
+          ./scripts/create-oauth-client.sh "$APP_ID" mock mock-provider \
+            mock-client-id mock-secret \
+            "http://localhost:9377/.well-known/openid-configuration" > /dev/null
+          echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
+          echo "ADMIN_TOKEN=$(grep '^admin_token=' /tmp/app.txt | cut -d= -f2)" >> "$GITHUB_ENV"
+
+      - name: "e2e: ws smoke"
+        run: node scripts/smoke-ws.mjs "$APP_ID"
+      - name: "e2e: sse transport"
+        run: node scripts/sse-test.mjs "$APP_ID"
+      - name: "e2e: sync tables"
+        run: node scripts/synctable-test.mjs "$APP_ID"
+      - name: "e2e: streams"
+        run: node scripts/streams-test.mjs "$APP_ID"
+      - name: "e2e: oauth (mock OIDC)"
+        run: node scripts/oauth-test.mjs "$APP_ID"
+      - name: "e2e: admin SDK"
+        run: node scripts/admin-sdk-test.mjs "$APP_ID" "$ADMIN_TOKEN"
+      - name: "e2e: multinode ws"
+        run: node scripts/multinode-ws.mjs "$APP_ID"
+      - name: "e2e: multinode storage"
+        run: node scripts/multinode-storage-test.mjs "$APP_ID" "$ADMIN_TOKEN"
+
+      - name: Server logs
+        if: failure()
+        run: |
+          echo "=== node 1 (:8888) ==="; cat /tmp/server1.log || true
+          echo "=== node 2 (:8889) ==="; cat /tmp/server2.log || true
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

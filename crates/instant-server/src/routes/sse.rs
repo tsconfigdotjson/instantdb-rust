@@ -38,7 +38,11 @@ pub async fn stream(State(state): State<Arc<AppState>>) -> Response {
         "sse-token": sse_token,
     }));
 
-    let guard = RxGuard { rx: Some(rx), state: state.clone(), session_id };
+    let guard = RxGuard {
+        rx: Some(rx),
+        state: state.clone(),
+        session_id,
+    };
     let event_stream = futures::stream::unfold(guard, move |mut guard| async move {
         match guard.rx().recv().await {
             Some(msg) => {

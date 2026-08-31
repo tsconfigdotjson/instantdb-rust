@@ -25,10 +25,18 @@ async fn zeneca(pool: &PgPool) -> Zeneca {
     let app = mk_app(pool).await;
     let mut attrs = HashMap::new();
     for name in [
-        "users.id", "users.handle", "users.fullName", "users.createdAt",
-        "bookshelves.id", "bookshelves.name", "bookshelves.order",
-        "books.id", "books.title", "books.pageCount",
-        "users.bookshelves", "bookshelves.books",
+        "users.id",
+        "users.handle",
+        "users.fullName",
+        "users.createdAt",
+        "bookshelves.id",
+        "bookshelves.name",
+        "bookshelves.order",
+        "books.id",
+        "books.title",
+        "books.pageCount",
+        "users.bookshelves",
+        "bookshelves.books",
     ] {
         attrs.insert(
             match name {
@@ -130,7 +138,13 @@ async fn zeneca(pool: &PgPool) -> Zeneca {
     // stopa: shelf "Currently Reading" [musashi, antifragile]; shelf "Done" [atomic]
     // alex: shelf "Nonfiction" [sapiens]
     for (key, owner, name, order, book_keys) in [
-        ("s1", "stopa", "Currently Reading", 0, vec!["musashi", "antifragile"]),
+        (
+            "s1",
+            "stopa",
+            "Currently Reading",
+            0,
+            vec!["musashi", "antifragile"],
+        ),
         ("s2", "stopa", "Done", 1, vec!["atomic"]),
         ("s3", "alex", "Nonfiction", 0, vec!["sapiens"]),
     ] {
@@ -147,12 +161,22 @@ async fn zeneca(pool: &PgPool) -> Zeneca {
         }
         transact_json(pool, app, Value::Array(steps)).await.unwrap();
     }
-    Zeneca { app, attrs, users, books, shelves }
+    Zeneca {
+        app,
+        attrs,
+        users,
+        books,
+        shelves,
+    }
 }
 
 async fn q(pool: &PgPool, app: Uuid, q_json: Value) -> instant_core::instaql::QueryResult {
     let attrs = attrs_of(pool, app).await;
-    let ctx = QueryCtx { app_id: app, attrs: &attrs, admin: true };
+    let ctx = QueryCtx {
+        app_id: app,
+        attrs: &attrs,
+        admin: true,
+    };
     let mut conn = pool.acquire().await.unwrap();
     query(&mut conn, &ctx, &q_json).await.unwrap()
 }
@@ -280,7 +304,12 @@ async fn is_null_through_link_path() {
         z.app,
         json!([
             ["add-triple", empty_shelf, a("bookshelves.id"), empty_shelf],
-            ["add-triple", z.users["joe"], a("users.bookshelves"), empty_shelf]
+            [
+                "add-triple",
+                z.users["joe"],
+                a("users.bookshelves"),
+                empty_shelf
+            ]
         ]),
     )
     .await
@@ -374,7 +403,12 @@ async fn date_comparisons() {
 async fn same_eid_in_two_namespaces_stays_separate() {
     let pool = pool().await;
     let app = mk_app(&pool).await;
-    let (a1, a2, b1, b2) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (a1, a2, b1, b2) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
     let shared = Uuid::new_v4();
     transact_json(
         &pool,
@@ -421,14 +455,13 @@ async fn update_attr_toggles_unique_and_rewrites_flags() {
     .await
     .unwrap();
     // existing rows now have av flag
-    let (av_count,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM triples WHERE app_id = $1 AND attr_id = $2 AND av",
-    )
-    .bind(z.app)
-    .bind(name_attr)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let (av_count,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM triples WHERE app_id = $1 AND attr_id = $2 AND av")
+            .bind(z.app)
+            .bind(name_attr)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert!(av_count >= 3);
     // duplicate name now errors
     let e = Uuid::new_v4();
@@ -479,8 +512,12 @@ async fn retract_link_via_lookup_value() {
     transact_json(
         &pool,
         z.app,
-        json!([["retract-triple", z.shelves["s1"], a("bookshelves.books"),
-                [a("books.title"), "Musashi"]]]),
+        json!([[
+            "retract-triple",
+            z.shelves["s1"],
+            a("bookshelves.books"),
+            [a("books.title"), "Musashi"]
+        ]]),
     )
     .await
     .unwrap();

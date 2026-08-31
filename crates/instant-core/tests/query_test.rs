@@ -9,6 +9,7 @@ use uuid::Uuid;
 struct Fixture {
     app: Uuid,
     users_handle: Uuid,
+    #[allow(dead_code)]
     posts_id: Uuid,
     users: std::collections::HashMap<&'static str, Uuid>,
     posts: std::collections::HashMap<&'static str, Uuid>,
@@ -32,18 +33,19 @@ async fn fixture(pool: &PgPool) -> Fixture {
     let tags_name = Uuid::new_v4();
     let posts_tags = Uuid::new_v4();
 
-    let mk_blob = |id: Uuid, etype: &str, label: &str, unique: bool, index: bool, cdt: Option<&str>| {
-        let mut attr = json!({
-            "id": id,
-            "forward-identity": [Uuid::new_v4(), etype, label],
-            "value-type": "blob", "cardinality": "one",
-            "unique?": unique, "index?": index
-        });
-        if let Some(c) = cdt {
-            attr["checked-data-type"] = json!(c);
-        }
-        json!(["add-attr", attr])
-    };
+    let mk_blob =
+        |id: Uuid, etype: &str, label: &str, unique: bool, index: bool, cdt: Option<&str>| {
+            let mut attr = json!({
+                "id": id,
+                "forward-identity": [Uuid::new_v4(), etype, label],
+                "value-type": "blob", "cardinality": "one",
+                "unique?": unique, "index?": index
+            });
+            if let Some(c) = cdt {
+                attr["checked-data-type"] = json!(c);
+            }
+            json!(["add-attr", attr])
+        };
 
     let steps = json!([
         mk_blob(users_id, "users", "id", true, false, None),
@@ -80,11 +82,14 @@ async fn fixture(pool: &PgPool) -> Fixture {
     ];
     for (handle, age, active, joined, nickname) in data {
         let eid = Uuid::new_v4();
-        users.insert(match handle {
-            "alice" => "alice",
-            "bob" => "bob",
-            _ => "carol",
-        }, eid);
+        users.insert(
+            match handle {
+                "alice" => "alice",
+                "bob" => "bob",
+                _ => "carol",
+            },
+            eid,
+        );
         let mut steps = vec![
             json!(["add-triple", eid, users_id, eid]),
             json!(["add-triple", eid, users_handle, handle]),
@@ -97,18 +102,17 @@ async fn fixture(pool: &PgPool) -> Fixture {
         }
         transact_json(pool, app, Value::Array(steps)).await.unwrap();
     }
-    let post_data: Vec<(&str, &str)> = vec![
-        ("p1", "alice"),
-        ("p2", "alice"),
-        ("p3", "bob"),
-    ];
+    let post_data: Vec<(&str, &str)> = vec![("p1", "alice"), ("p2", "alice"), ("p3", "bob")];
     for (title, author) in post_data {
         let eid = Uuid::new_v4();
-        posts.insert(match title {
-            "p1" => "p1",
-            "p2" => "p2",
-            _ => "p3",
-        }, eid);
+        posts.insert(
+            match title {
+                "p1" => "p1",
+                "p2" => "p2",
+                _ => "p3",
+            },
+            eid,
+        );
         transact_json(
             pool,
             app,
@@ -121,19 +125,33 @@ async fn fixture(pool: &PgPool) -> Fixture {
         .await
         .unwrap();
     }
-    Fixture { app, users_handle, posts_id, users, posts }
+    Fixture {
+        app,
+        users_handle,
+        posts_id,
+        users,
+        posts,
+    }
 }
 
 async fn run_query(pool: &PgPool, app: Uuid, q: Value) -> instant_core::instaql::QueryResult {
     let attrs = attrs_of(pool, app).await;
-    let ctx = QueryCtx { app_id: app, attrs: &attrs, admin: true };
+    let ctx = QueryCtx {
+        app_id: app,
+        attrs: &attrs,
+        admin: true,
+    };
     let mut conn = pool.acquire().await.unwrap();
     query(&mut conn, &ctx, &q).await.unwrap()
 }
 
 async fn run_query_err(pool: &PgPool, app: Uuid, q: Value) -> instant_core::error::InstantError {
     let attrs = attrs_of(pool, app).await;
-    let ctx = QueryCtx { app_id: app, attrs: &attrs, admin: false };
+    let ctx = QueryCtx {
+        app_id: app,
+        attrs: &attrs,
+        admin: false,
+    };
     let mut conn = pool.acquire().await.unwrap();
     query(&mut conn, &ctx, &q).await.unwrap_err()
 }
@@ -161,7 +179,12 @@ fn entity_maps(
 
 fn handles(maps: &[serde_json::Map<String, Value>]) -> Vec<String> {
     maps.iter()
-        .map(|m| m.get("handle").and_then(|v| v.as_str()).unwrap_or("?").to_string())
+        .map(|m| {
+            m.get("handle")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?")
+                .to_string()
+        })
         .collect()
 }
 
@@ -176,7 +199,12 @@ async fn flat_where() {
     assert_eq!(res.forms[0].entities.len(), 3);
 
     // where by attr
-    let res = run_query(&pool, fx.app, json!({"users": {"$": {"where": {"handle": "alice"}}}})).await;
+    let res = run_query(
+        &pool,
+        fx.app,
+        json!({"users": {"$": {"where": {"handle": "alice"}}}}),
+    )
+    .await;
     let maps = entity_maps(&res, &attrs, "users");
     assert_eq!(handles(&maps), vec!["alice"]);
 
@@ -409,7 +437,12 @@ async fn where_or_and() {
     assert_eq!(res.forms[0].entities.len(), 2);
 
     // empty or -> validation error
-    let err = run_query_err(&pool, fx.app, json!({"users": {"$": {"where": {"or": []}}}})).await;
+    let err = run_query_err(
+        &pool,
+        fx.app,
+        json!({"users": {"$": {"where": {"or": []}}}}),
+    )
+    .await;
     assert_eq!(err.error_type, "validation-failed");
 }
 
@@ -421,7 +454,11 @@ async fn child_forms_nesting() {
     let res = run_query(&pool, fx.app, json!({"users": {"posts": {}}})).await;
     let form = &res.forms[0];
     assert_eq!(form.entities.len(), 3);
-    let alice = form.entities.iter().find(|e| e.eid == fx.users["alice"]).unwrap();
+    let alice = form
+        .entities
+        .iter()
+        .find(|e| e.eid == fx.users["alice"])
+        .unwrap();
     let posts = &alice.children[0];
     assert_eq!(posts.k, "posts");
     assert_eq!(posts.entities.len(), 2);
@@ -430,7 +467,11 @@ async fn child_forms_nesting() {
     for t in &posts.link_triples {
         assert_eq!(t.v, json!(fx.users["alice"]));
     }
-    let carol = form.entities.iter().find(|e| e.eid == fx.users["carol"]).unwrap();
+    let carol = form
+        .entities
+        .iter()
+        .find(|e| e.eid == fx.users["carol"])
+        .unwrap();
     assert_eq!(carol.children[0].entities.len(), 0);
 
     // child where filters children only
@@ -442,7 +483,11 @@ async fn child_forms_nesting() {
     .await;
     let form = &res.forms[0];
     assert_eq!(form.entities.len(), 3);
-    let alice = form.entities.iter().find(|e| e.eid == fx.users["alice"]).unwrap();
+    let alice = form
+        .entities
+        .iter()
+        .find(|e| e.eid == fx.users["alice"])
+        .unwrap();
     assert_eq!(alice.children[0].entities.len(), 1);
 
     // grandchildren: posts -> author -> posts
@@ -632,8 +677,17 @@ async fn pagination_null_order_values() {
         json!({"users": {"$": {"order": {"age": "asc"}, "limit": 2}}}),
     )
     .await;
-    assert_eq!(handles(&entity_maps(&res, &attrs, "users")), vec!["dave", "bob"]);
-    let end = res.forms[0].page_info.as_ref().unwrap().end_cursor.clone().unwrap();
+    assert_eq!(
+        handles(&entity_maps(&res, &attrs, "users")),
+        vec!["dave", "bob"]
+    );
+    let end = res.forms[0]
+        .page_info
+        .as_ref()
+        .unwrap()
+        .end_cursor
+        .clone()
+        .unwrap();
     let res = run_query(
         &pool,
         fx.app,
@@ -651,7 +705,12 @@ async fn aggregate_count() {
     let pool = pool().await;
     let fx = fixture(&pool).await;
 
-    let res = run_query(&pool, fx.app, json!({"users": {"$": {"aggregate": "count"}}})).await;
+    let res = run_query(
+        &pool,
+        fx.app,
+        json!({"users": {"$": {"aggregate": "count"}}}),
+    )
+    .await;
     assert_eq!(res.forms[0].aggregate, Some(3));
     assert_eq!(res.forms[0].entities.len(), 0);
 
@@ -664,7 +723,12 @@ async fn aggregate_count() {
     assert_eq!(res.forms[0].aggregate, Some(2));
 
     // non-admin -> error
-    let err = run_query_err(&pool, fx.app, json!({"users": {"$": {"aggregate": "count"}}})).await;
+    let err = run_query_err(
+        &pool,
+        fx.app,
+        json!({"users": {"$": {"aggregate": "count"}}}),
+    )
+    .await;
     assert_eq!(err.error_type, "validation-failed");
 }
 

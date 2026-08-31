@@ -166,11 +166,7 @@ impl Attr {
             .get("forward-identity")
             .and_then(|v| v.as_array())
             .ok_or_else(|| {
-                InstantError::validation_failed(
-                    "attributes",
-                    "missing forward-identity",
-                    json!([]),
-                )
+                InstantError::validation_failed("attributes", "missing forward-identity", json!([]))
             })?;
         if fwd.len() < 3 {
             return Err(InstantError::validation_failed(
@@ -191,10 +187,14 @@ impl Attr {
             _ => (None, None, None),
         };
         let value_type = ValueType::parse(
-            obj.get("value-type").and_then(|v| v.as_str()).unwrap_or("blob"),
+            obj.get("value-type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("blob"),
         )?;
         let cardinality = Cardinality::parse(
-            obj.get("cardinality").and_then(|v| v.as_str()).unwrap_or("one"),
+            obj.get("cardinality")
+                .and_then(|v| v.as_str())
+                .unwrap_or("one"),
         )?;
         if value_type == ValueType::Ref && reverse_ident.is_none() {
             return Err(InstantError::validation_failed(
@@ -213,9 +213,15 @@ impl Attr {
             reverse_ident,
             reverse_etype,
             reverse_label,
-            is_unique: obj.get("unique?").and_then(|v| v.as_bool()).unwrap_or(false),
+            is_unique: obj
+                .get("unique?")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             is_indexed: obj.get("index?").and_then(|v| v.as_bool()).unwrap_or(false),
-            is_required: obj.get("required?").and_then(|v| v.as_bool()).unwrap_or(false),
+            is_required: obj
+                .get("required?")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             checked_data_type: match obj.get("checked-data-type").and_then(|v| v.as_str()) {
                 Some(s) => Some(CheckedDataType::parse(s)?),
                 None => None,
@@ -269,7 +275,8 @@ impl AttrMap {
 
     pub fn remove(&mut self, id: &Uuid) {
         if let Some(attr) = self.by_id.remove(id) {
-            self.by_fwd.remove(&(attr.etype.clone(), attr.label.clone()));
+            self.by_fwd
+                .remove(&(attr.etype.clone(), attr.label.clone()));
             if let (Some(re), Some(rl)) = (&attr.reverse_etype, &attr.reverse_label) {
                 self.by_rev.remove(&(re.clone(), rl.clone()));
             }
@@ -357,7 +364,9 @@ fn row_to_attr(row: &sqlx::postgres::PgRow) -> Result<Attr> {
             Some(s) => Some(CheckedDataType::parse(&s)?),
             None => None,
         },
-        on_delete_cascade: row.get::<Option<bool>, _>("on_delete_cascade").unwrap_or(false),
+        on_delete_cascade: row
+            .get::<Option<bool>, _>("on_delete_cascade")
+            .unwrap_or(false),
         on_delete_reverse_cascade: row
             .get::<Option<bool>, _>("on_delete_reverse_cascade")
             .unwrap_or(false),

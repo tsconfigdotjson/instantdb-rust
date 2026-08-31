@@ -16,8 +16,8 @@ use crate::service;
 use crate::state::AppState;
 
 pub fn err_response(e: &InstantError) -> Response {
-    let status = axum::http::StatusCode::from_u16(e.status)
-        .unwrap_or(axum::http::StatusCode::BAD_REQUEST);
+    let status =
+        axum::http::StatusCode::from_u16(e.status).unwrap_or(axum::http::StatusCode::BAD_REQUEST);
     (status, Json(e.to_body())).into_response()
 }
 
@@ -43,7 +43,11 @@ fn coerce_email(raw: &str) -> Result<String> {
     let email = raw.trim().to_lowercase();
     let ok = email.contains('@')
         && email.split('@').count() == 2
-        && email.split('@').nth(1).map(|d| d.contains('.')).unwrap_or(false)
+        && email
+            .split('@')
+            .nth(1)
+            .map(|d| d.contains('.'))
+            .unwrap_or(false)
         && !email.contains(' ');
     if !ok {
         return Err(InstantError::param_malformed("Malformed parameter: email"));
@@ -79,7 +83,9 @@ pub async fn user_json(
     let id_attr = sc::attr_id("$users", "id");
     for row in &rows {
         let attr_id: Uuid = row.get("attr_id");
-        let Some(attr) = attrs.get(&attr_id) else { continue };
+        let Some(attr) = attrs.get(&attr_id) else {
+            continue;
+        };
         if attr.etype != "$users" {
             continue;
         }
@@ -96,8 +102,8 @@ pub async fn user_json(
     let is_guest = m.get("type").and_then(|t| t.as_str()) == Some("guest");
     m.insert("isGuest".into(), json!(is_guest));
     if created_at_ms > 0 {
-        let dt = chrono::DateTime::from_timestamp_millis(created_at_ms)
-            .unwrap_or_else(chrono::Utc::now);
+        let dt =
+            chrono::DateTime::from_timestamp_millis(created_at_ms).unwrap_or_else(chrono::Utc::now);
         m.insert(
             "created_at".into(),
             json!(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
@@ -126,13 +132,30 @@ async fn send_magic_code_impl(state: &AppState, body: &Value) -> Result<Value> {
     let code: String = {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        (0..6).map(|_| char::from(b'0' + rng.gen_range(0..9))).collect()
+        (0..6)
+            .map(|_| char::from(b'0' + rng.gen_range(0..9)))
+            .collect()
     };
     let entity = Uuid::new_v4();
     let steps = json!([
-        ["add-triple", entity, sc::attr_id("$magicCodes", "id"), entity],
-        ["add-triple", entity, sc::attr_id("$magicCodes", "codeHash"), auth::hash_string(&code)],
-        ["add-triple", entity, sc::attr_id("$magicCodes", "email"), email]
+        [
+            "add-triple",
+            entity,
+            sc::attr_id("$magicCodes", "id"),
+            entity
+        ],
+        [
+            "add-triple",
+            entity,
+            sc::attr_id("$magicCodes", "codeHash"),
+            auth::hash_string(&code)
+        ],
+        [
+            "add-triple",
+            entity,
+            sc::attr_id("$magicCodes", "email"),
+            email
+        ]
     ]);
     service::run_system_transact(state, app_id, &steps).await?;
     // Email delivery is stubbed: log the code so local flows can complete.
@@ -244,7 +267,10 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value) -> Result<Value>
                 ["add-triple", uid, sc::attr_id("$users", "type"), "user"]
             ]);
             service::run_system_transact(state, app_id, &steps).await?;
-            auth::AppUser { id: uid, email: None }
+            auth::AppUser {
+                id: uid,
+                email: None,
+            }
         }
     };
     // guest linking
@@ -255,9 +281,12 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value) -> Result<Value>
                 .map(|u| u.get("isGuest").and_then(|g| g.as_bool()).unwrap_or(false))
                 .unwrap_or(false);
             if is_guest {
-                let steps = json!([
-                    ["add-triple", guest.id, sc::attr_id("$users", "linkedPrimaryUser"), user.id]
-                ]);
+                let steps = json!([[
+                    "add-triple",
+                    guest.id,
+                    sc::attr_id("$users", "linkedPrimaryUser"),
+                    user.id
+                ]]);
                 service::run_system_transact(state, app_id, &steps).await?;
             }
         }

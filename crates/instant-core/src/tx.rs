@@ -10,8 +10,8 @@ use crate::attr::{Attr, AttrMap};
 use crate::error::{InstantError, Result};
 use crate::system_catalog;
 use crate::triple::{
-    backfill_indexed_nulls, backfill_nulls_for_new_attr, delete_entities, delete_triples,
-    deep_merge_triples, expand_delete_cascade, insert_triples, parse_eid, resolve_etypes_for_delete,
+    backfill_indexed_nulls, backfill_nulls_for_new_attr, deep_merge_triples, delete_entities,
+    delete_triples, expand_delete_cascade, insert_triples, parse_eid, resolve_etypes_for_delete,
     validate_required, value_lookup, CanonicalValue, EidRef, LookupResolver, ResolvedTriple,
 };
 
@@ -28,11 +28,32 @@ pub enum TxStep {
     UpdateAttr(Value),
     DeleteAttr(Uuid),
     RestoreAttr(Uuid),
-    AddTriple { eid: EidRef, attr_id: Uuid, value: Value, mode: WriteMode },
-    DeepMergeTriple { eid: EidRef, attr_id: Uuid, value: Value, mode: WriteMode },
-    RetractTriple { eid: EidRef, attr_id: Uuid, value: Value },
-    DeleteEntity { eid: EidRef, etype: Option<String> },
-    RuleParams { eid: EidRef, etype: Option<String>, params: Value },
+    AddTriple {
+        eid: EidRef,
+        attr_id: Uuid,
+        value: Value,
+        mode: WriteMode,
+    },
+    DeepMergeTriple {
+        eid: EidRef,
+        attr_id: Uuid,
+        value: Value,
+        mode: WriteMode,
+    },
+    RetractTriple {
+        eid: EidRef,
+        attr_id: Uuid,
+        value: Value,
+    },
+    DeleteEntity {
+        eid: EidRef,
+        etype: Option<String>,
+    },
+    RuleParams {
+        eid: EidRef,
+        etype: Option<String>,
+        params: Value,
+    },
 }
 
 impl TxStep {
@@ -81,7 +102,9 @@ pub fn parse_tx_steps(steps: &Value) -> Result<Vec<TxStep>> {
             InstantError::validation_failed("tx-steps", "tx-step missing op", json!([]))
         })?;
         let parsed = match op {
-            "add-attr" => TxStep::AddAttr(Attr::from_wire(step_arr.get(1).unwrap_or(&Value::Null))?),
+            "add-attr" => {
+                TxStep::AddAttr(Attr::from_wire(step_arr.get(1).unwrap_or(&Value::Null))?)
+            }
             "update-attr" => {
                 let patch = step_arr.get(1).cloned().unwrap_or(Value::Null);
                 if !patch.is_object() {
@@ -114,11 +137,17 @@ pub fn parse_tx_steps(steps: &Value) -> Result<Vec<TxStep>> {
             },
             "delete-entity" => TxStep::DeleteEntity {
                 eid: parse_eid(step_arr.get(1).unwrap_or(&Value::Null))?,
-                etype: step_arr.get(2).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                etype: step_arr
+                    .get(2)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
             },
             "rule-params" => TxStep::RuleParams {
                 eid: parse_eid(step_arr.get(1).unwrap_or(&Value::Null))?,
-                etype: step_arr.get(2).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                etype: step_arr
+                    .get(2)
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 params: step_arr.get(3).cloned().unwrap_or(Value::Null),
             },
             other => {
@@ -152,15 +181,10 @@ pub struct TxReport {
     pub resolved_lookups: HashMap<(Uuid, CanonicalValue), Uuid>,
 }
 
+#[derive(Default)]
 pub struct TxOptions {
     /// bypass the system-catalog write guard (server-internal writes)
     pub allow_system_catalog_writes: bool,
-}
-
-impl Default for TxOptions {
-    fn default() -> Self {
-        TxOptions { allow_system_catalog_writes: false }
-    }
 }
 
 /// Execute tx-steps inside the given open DB transaction. The caller commits.
@@ -210,7 +234,10 @@ pub async fn transact(
                     }
                 }
             }
-            if let TxStep::DeleteEntity { etype: Some(etype), .. } = step {
+            if let TxStep::DeleteEntity {
+                etype: Some(etype), ..
+            } = step
+            {
                 if etype.starts_with('$') && !matches!(etype.as_str(), "$users" | "$files") {
                     return Err(InstantError::validation_failed(
                         "tx-steps",
@@ -255,7 +282,9 @@ pub async fn transact(
         match op {
             "add-attr" => {
                 for step in group {
-                    let TxStep::AddAttr(attr) = step else { unreachable!() };
+                    let TxStep::AddAttr(attr) = step else {
+                        unreachable!()
+                    };
                     // Ignore exact re-adds of attrs that already exist under the
                     // same forward name (client-generated ids may differ).
                     if let Some(existing) = attrs.by_fwd_name(&attr.etype, &attr.label) {
@@ -272,7 +301,9 @@ pub async fn transact(
             }
             "update-attr" => {
                 for step in group {
-                    let TxStep::UpdateAttr(patch) = step else { unreachable!() };
+                    let TxStep::UpdateAttr(patch) = step else {
+                        unreachable!()
+                    };
                     let id = parse_attr_uuid(patch.get("id"))?;
                     let existing = attrs.get(&id).cloned().ok_or_else(|| {
                         InstantError::record_not_found("attr", format!("attr {id} not found"))
@@ -284,7 +315,8 @@ pub async fn transact(
                             json!([]),
                         ));
                     }
-                    let updated = crate::attr::update(&mut *conn, app_id, &existing, &patch).await?;
+                    let updated =
+                        crate::attr::update(&mut *conn, app_id, &existing, &patch).await?;
                     attrs.remove(&id);
                     attrs.insert(updated);
                     report.attrs_changed = true;
@@ -292,7 +324,9 @@ pub async fn transact(
             }
             "delete-attr" => {
                 for step in group {
-                    let TxStep::DeleteAttr(id) = step else { unreachable!() };
+                    let TxStep::DeleteAttr(id) = step else {
+                        unreachable!()
+                    };
                     let existing = attrs.get(&id).cloned().ok_or_else(|| {
                         InstantError::record_not_found("attr", format!("attr {id} not found"))
                     })?;
@@ -315,7 +349,13 @@ pub async fn transact(
             "add-triple" => {
                 let mut items: Vec<(EidRef, Uuid, Value, WriteMode)> = vec![];
                 for step in group {
-                    let TxStep::AddTriple { eid, attr_id, value, mode } = step else {
+                    let TxStep::AddTriple {
+                        eid,
+                        attr_id,
+                        value,
+                        mode,
+                    } = step
+                    else {
                         unreachable!()
                     };
                     items.push((eid, attr_id, value, mode));
@@ -343,7 +383,13 @@ pub async fn transact(
                 let mut merges: Vec<(Uuid, Attr, Vec<Value>)> = vec![];
                 let mut order: HashMap<(Uuid, Uuid), usize> = HashMap::new();
                 for step in group {
-                    let TxStep::DeepMergeTriple { eid, attr_id, value, mode } = step else {
+                    let TxStep::DeepMergeTriple {
+                        eid,
+                        attr_id,
+                        value,
+                        mode,
+                    } = step
+                    else {
                         unreachable!()
                     };
                     let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
@@ -360,8 +406,16 @@ pub async fn transact(
                         &attr.etype,
                     )
                     .await?;
-                    validate_mode(&mut *conn, app_id, attrs, eid, &attr.etype, mode, &created_etypes)
-                        .await?;
+                    validate_mode(
+                        &mut *conn,
+                        app_id,
+                        attrs,
+                        eid,
+                        &attr.etype,
+                        mode,
+                        &created_etypes,
+                    )
+                    .await?;
                     report.touched.push((eid, attr.etype.clone()));
                     let key = (eid, attr.id);
                     match order.get(&key) {
@@ -382,7 +436,12 @@ pub async fn transact(
             "retract-triple" => {
                 let mut dels: Vec<(Uuid, Uuid, Value)> = vec![];
                 for step in group {
-                    let TxStep::RetractTriple { eid, attr_id, value } = step else {
+                    let TxStep::RetractTriple {
+                        eid,
+                        attr_id,
+                        value,
+                    } = step
+                    else {
                         unreachable!()
                     };
                     let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
@@ -391,14 +450,19 @@ pub async fn transact(
                     let eid = match eid {
                         EidRef::Id(id) => Some(id),
                         EidRef::Lookup(a, v) => {
-                            resolver.resolve(&mut *conn, app_id, attrs, a, &v, false).await?
+                            resolver
+                                .resolve(&mut *conn, app_id, attrs, a, &v, false)
+                                .await?
                         }
                     };
                     let Some(eid) = eid else { continue };
                     // Value may itself be a lookup ref (unlink by lookup).
                     let value = match value_lookup(&value) {
                         Some((a, v)) if attrs.get(&a).map(|x| x.is_unique).unwrap_or(false) => {
-                            match resolver.resolve(&mut *conn, app_id, attrs, a, &v, false).await? {
+                            match resolver
+                                .resolve(&mut *conn, app_id, attrs, a, &v, false)
+                                .await?
+                            {
                                 Some(target) => json!(target),
                                 None => continue,
                             }
@@ -413,11 +477,15 @@ pub async fn transact(
             "delete-entity" => {
                 let mut seed: Vec<(Uuid, String)> = vec![];
                 for step in group {
-                    let TxStep::DeleteEntity { eid, etype } = step else { unreachable!() };
+                    let TxStep::DeleteEntity { eid, etype } = step else {
+                        unreachable!()
+                    };
                     let eid = match eid {
                         EidRef::Id(id) => Some(id),
                         EidRef::Lookup(a, v) => {
-                            resolver.resolve(&mut *conn, app_id, attrs, a, &v, false).await?
+                            resolver
+                                .resolve(&mut *conn, app_id, attrs, a, &v, false)
+                                .await?
                         }
                     };
                     let Some(eid) = eid else { continue };
@@ -438,11 +506,15 @@ pub async fn transact(
             }
             "rule-params" => {
                 for step in group {
-                    let TxStep::RuleParams { eid, etype, params } = step else { unreachable!() };
+                    let TxStep::RuleParams { eid, etype, params } = step else {
+                        unreachable!()
+                    };
                     let eid = match eid {
                         EidRef::Id(id) => Some(id),
                         EidRef::Lookup(a, v) => {
-                            resolver.resolve(&mut *conn, app_id, attrs, a, &v, false).await?
+                            resolver
+                                .resolve(&mut *conn, app_id, attrs, a, &v, false)
+                                .await?
                         }
                     };
                     if let (Some(eid), Some(etype)) = (eid, etype) {
@@ -454,8 +526,10 @@ pub async fn transact(
         }
     }
 
-    let new_entities: Vec<(Uuid, String)> =
-        created_etypes.iter().map(|(k, v)| (*k, v.clone())).collect();
+    let new_entities: Vec<(Uuid, String)> = created_etypes
+        .iter()
+        .map(|(k, v)| (*k, v.clone()))
+        .collect();
     backfill_indexed_nulls(&mut *conn, app_id, attrs, &new_entities).await?;
     report.created = new_entities;
 
@@ -466,6 +540,7 @@ pub async fn transact(
     Ok(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_eid(
     conn: &mut PgConnection,
     app_id: Uuid,
@@ -576,13 +651,24 @@ async fn resolve_add_batch(
         )
         .await?;
         if mode != WriteMode::Upsert && mode_checked.insert((eid, attr.etype.clone())) {
-            validate_mode(&mut *conn, app_id, attrs, eid, &attr.etype, mode, created_etypes).await?;
+            validate_mode(
+                &mut *conn,
+                app_id,
+                attrs,
+                eid,
+                &attr.etype,
+                mode,
+                created_etypes,
+            )
+            .await?;
         }
         // Ref values (and id-triple values) may be lookup refs to resolve.
         let value = if attr.value_type == crate::attr::ValueType::Ref || attr.label == "id" {
             match value_lookup(&value) {
                 Some((a, v)) => {
-                    let target = resolver.resolve(&mut *conn, app_id, attrs, a, &v, true).await?;
+                    let target = resolver
+                        .resolve(&mut *conn, app_id, attrs, a, &v, true)
+                        .await?;
                     match target {
                         Some(t) => {
                             if resolver.created.contains(&t) {
@@ -606,7 +692,11 @@ async fn resolve_add_batch(
         } else {
             value
         };
-        out.push(ResolvedTriple { entity_id: eid, attr, value });
+        out.push(ResolvedTriple {
+            entity_id: eid,
+            attr,
+            value,
+        });
     }
     Ok(out)
 }

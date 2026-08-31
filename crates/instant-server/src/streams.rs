@@ -37,7 +37,12 @@ async fn stream_by_client_id(
     Ok(row.map(|r| r.get("entity_id")))
 }
 
-async fn stream_field(state: &AppState, app_id: Uuid, stream_id: Uuid, label: &str) -> Option<Value> {
+async fn stream_field(
+    state: &AppState,
+    app_id: Uuid,
+    stream_id: Uuid,
+    label: &str,
+) -> Option<Value> {
     let attr = sc::attr_id("$streams", label);
     let row = sqlx::query(
         "SELECT value FROM triples
@@ -69,7 +74,10 @@ async fn check_stream_perm(
     let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
     let rules = instant_core::perms::Rules::load(&mut conn, app_id).await?;
     let program = rules.program("$streams", action);
-    let auth_ctx = instant_core::perms::AuthCtx { user_id, user_map: None };
+    let auth_ctx = instant_core::perms::AuthCtx {
+        user_id,
+        user_map: None,
+    };
     let attrs = service::load_attrs(state, app_id).await?;
     let auth_val = if let Some(uid) = user_id {
         instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$users", uid)
@@ -136,13 +144,28 @@ pub async fn handle_start_stream(
             let sid = Uuid::new_v4();
             let mut steps = vec![
                 json!(["add-triple", sid, sc::attr_id("$streams", "id"), sid]),
-                json!(["add-triple", sid, sc::attr_id("$streams", "clientId"), client_id]),
-                json!(["add-triple", sid, sc::attr_id("$streams", "machineId"), state.node_id.to_string()]),
+                json!([
+                    "add-triple",
+                    sid,
+                    sc::attr_id("$streams", "clientId"),
+                    client_id
+                ]),
+                json!([
+                    "add-triple",
+                    sid,
+                    sc::attr_id("$streams", "machineId"),
+                    state.node_id.to_string()
+                ]),
                 json!(["add-triple", sid, sc::attr_id("$streams", "size"), 0]),
                 json!(["add-triple", sid, sc::attr_id("$streams", "done"), false]),
             ];
             if let Some(t) = reconnect_token {
-                steps.push(json!(["add-triple", sid, sc::attr_id("$streams", "hashedReconnectToken"), crate::auth::hash_string(t)]));
+                steps.push(json!([
+                    "add-triple",
+                    sid,
+                    sc::attr_id("$streams", "hashedReconnectToken"),
+                    crate::auth::hash_string(t)
+                ]));
             }
             service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
             (sid, 0)
@@ -190,7 +213,11 @@ pub async fn handle_append_stream(
     let chunks: Vec<String> = msg
         .get("chunks")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|c| c.as_str().map(|s| s.to_string())).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c.as_str().map(|s| s.to_string()))
+                .collect()
+        })
         .unwrap_or_default();
     let offset = msg.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
     let done = msg.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -210,11 +237,26 @@ pub async fn handle_append_stream(
 
     // update metadata
     let mut steps = vec![
-        json!(["add-triple", stream_id, sc::attr_id("$streams", "size"), new_size]),
-        json!(["add-triple", stream_id, sc::attr_id("$streams", "done"), done]),
+        json!([
+            "add-triple",
+            stream_id,
+            sc::attr_id("$streams", "size"),
+            new_size
+        ]),
+        json!([
+            "add-triple",
+            stream_id,
+            sc::attr_id("$streams", "done"),
+            done
+        ]),
     ];
     if let Some(reason) = abort_reason {
-        steps.push(json!(["add-triple", stream_id, sc::attr_id("$streams", "abortReason"), reason]));
+        steps.push(json!([
+            "add-triple",
+            stream_id,
+            sc::attr_id("$streams", "abortReason"),
+            reason
+        ]));
     }
     service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
 
@@ -255,8 +297,9 @@ pub async fn handle_subscribe_stream(
     };
     check_stream_perm(state, app_id, session, "view", msg.get("rule-params")).await?;
     let stream_id = match msg.get("stream-id").and_then(|v| v.as_str()) {
-        Some(s) => Uuid::parse_str(s)
-            .map_err(|_| InstantError::param_malformed("malformed stream-id"))?,
+        Some(s) => {
+            Uuid::parse_str(s).map_err(|_| InstantError::param_malformed("malformed stream-id"))?
+        }
         None => {
             let client_id = msg
                 .get("client-id")
@@ -325,7 +368,8 @@ pub async fn handle_unsubscribe_stream(
         .unwrap_or_default()
         .to_string();
     state.stream_subs.iter_mut().for_each(|mut e| {
-        e.value_mut().retain(|(sid, ev)| !(*sid == session.id && *ev == target));
+        e.value_mut()
+            .retain(|(sid, ev)| !(*sid == session.id && *ev == target));
     });
     Ok(())
 }
@@ -333,15 +377,28 @@ pub async fn handle_unsubscribe_stream(
 /// Deliver a live append to this node's subscribers (from the NOTIFY listener).
 pub async fn deliver_append(state: &Arc<AppState>, payload: &Value) {
     let (Some(app_id), Some(stream_id)) = (
-        payload.get("app_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()),
-        payload.get("stream_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()),
+        payload
+            .get("app_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok()),
+        payload
+            .get("stream_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok()),
     ) else {
         return;
     };
-    let Some(subs) = state.stream_subs.get(&(app_id, stream_id)).map(|s| s.clone()) else {
+    let Some(subs) = state
+        .stream_subs
+        .get(&(app_id, stream_id))
+        .map(|s| s.clone())
+    else {
         return;
     };
-    let done = payload.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+    let done = payload
+        .get("done")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     for (session_id, event_id) in subs {
         if let Some(session) = state.sessions.get(&session_id).map(|s| s.clone()) {
             let mut msg = json!({

@@ -43,6 +43,7 @@ fn oauth_err_response(e: &InstantError) -> Response {
 #[derive(Debug, Clone)]
 pub struct OAuthClient {
     pub id: Uuid,
+    #[allow(dead_code)]
     pub client_name: String,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -69,14 +70,13 @@ pub async fn client_by_name(
     .map_err(InstantError::from)?;
     let Some(row) = row else { return Ok(None) };
     let eid: Uuid = row.get("entity_id");
-    let rows = sqlx::query(
-        "SELECT attr_id, value FROM triples WHERE app_id = $1 AND entity_id = $2",
-    )
-    .bind(app_id)
-    .bind(eid)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(InstantError::from)?;
+    let rows =
+        sqlx::query("SELECT attr_id, value FROM triples WHERE app_id = $1 AND entity_id = $2")
+            .bind(app_id)
+            .bind(eid)
+            .fetch_all(&state.pool)
+            .await
+            .map_err(InstantError::from)?;
     let mut client = OAuthClient {
         id: eid,
         client_name: name.to_string(),
@@ -107,11 +107,7 @@ pub async fn client_by_name(
 // ---------------------------------------------------------------------------
 // Discovery + JWKS caches
 
-async fn fetch_json_cached(
-    state: &AppState,
-    cache_key: &str,
-    url: &str,
-) -> Result<Value> {
+async fn fetch_json_cached(state: &AppState, cache_key: &str, url: &str) -> Result<Value> {
     if let Some(entry) = state.oauth_cache.get(cache_key) {
         let (v, at) = entry.value();
         if at.elapsed().as_secs() < 3600 {
@@ -125,9 +121,10 @@ async fn fetch_json_cached(
         .json()
         .await
         .map_err(|e| oauth_err(format!("Invalid JSON from {url}: {e}")))?;
-    state
-        .oauth_cache
-        .insert(cache_key.to_string(), (v.clone(), std::time::Instant::now()));
+    state.oauth_cache.insert(
+        cache_key.to_string(),
+        (v.clone(), std::time::Instant::now()),
+    );
     Ok(v)
 }
 
@@ -193,12 +190,10 @@ async fn origin_authorized(state: &AppState, app_id: Uuid, url: &str) -> Result<
                     }
                 }
             }
-            "vercel" => {
-                if params.len() >= 2 {
-                    let h = parsed.host_str().unwrap_or("");
-                    if h.starts_with(&params[1]) && h.ends_with(&params[0]) {
-                        return Ok(true);
-                    }
+            "vercel" if params.len() >= 2 => {
+                let h = parsed.host_str().unwrap_or("");
+                if h.starts_with(&params[1]) && h.ends_with(&params[0]) {
+                    return Ok(true);
                 }
             }
             _ => {}
@@ -262,7 +257,11 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
     // append app state to the final redirect url
     let mut final_redirect = redirect_uri.clone();
     if let Some(app_state) = params.get("state") {
-        let sep = if final_redirect.contains('?') { '&' } else { '?' };
+        let sep = if final_redirect.contains('?') {
+            '&'
+        } else {
+            '?'
+        };
         final_redirect = format!(
             "{final_redirect}{sep}state={}",
             urlencoding::encode(app_state)
@@ -274,20 +273,60 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
     let entity = Uuid::new_v4();
     let callback_url = format!("{}/runtime/oauth/callback", state.cfg.base_url);
     let mut steps = vec![
-        json!(["add-triple", entity, sc::attr_id("$oauthRedirects", "id"), entity]),
-        json!(["add-triple", entity, sc::attr_id("$oauthRedirects", "stateHash"), auth::hash_string(&state_uuid.to_string())]),
-        json!(["add-triple", entity, sc::attr_id("$oauthRedirects", "cookieHash"), auth::hash_string(&cookie_uuid.to_string())]),
-        json!(["add-triple", entity, sc::attr_id("$oauthRedirects", "redirectUrl"), final_redirect]),
-        json!(["add-triple", entity, sc::attr_id("$oauthRedirects", "redirectTo"), callback_url]),
-        json!(["add-triple", entity, sc::attr_id("$oauthRedirects", "$oauthClient"), client.id]),
+        json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthRedirects", "id"),
+            entity
+        ]),
+        json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthRedirects", "stateHash"),
+            auth::hash_string(&state_uuid.to_string())
+        ]),
+        json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthRedirects", "cookieHash"),
+            auth::hash_string(&cookie_uuid.to_string())
+        ]),
+        json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthRedirects", "redirectUrl"),
+            final_redirect
+        ]),
+        json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthRedirects", "redirectTo"),
+            callback_url
+        ]),
+        json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthRedirects", "$oauthClient"),
+            client.id
+        ]),
     ];
     if let Some(challenge) = params.get("code_challenge") {
-        steps.push(json!(["add-triple", entity, sc::attr_id("$oauthRedirects", "codeChallenge"), challenge]));
+        steps.push(json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthRedirects", "codeChallenge"),
+            challenge
+        ]));
         let method = params
             .get("code_challenge_method")
             .cloned()
             .unwrap_or_else(|| "plain".to_string());
-        steps.push(json!(["add-triple", entity, sc::attr_id("$oauthRedirects", "codeChallengeMethod"), method]));
+        steps.push(json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthRedirects", "codeChallengeMethod"),
+            method
+        ]));
     }
     service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
 
@@ -297,8 +336,8 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
         .and_then(|v| v.as_str())
         .ok_or_else(|| oauth_err("Discovery document missing authorization_endpoint."))?;
     let oauth_state = format!("{app_id}{state_uuid}");
-    let mut auth_url = url::Url::parse(auth_endpoint)
-        .map_err(|_| oauth_err("Invalid authorization endpoint."))?;
+    let mut auth_url =
+        url::Url::parse(auth_endpoint).map_err(|_| oauth_err("Invalid authorization endpoint."))?;
     {
         let mut qp = auth_url.query_pairs_mut();
         qp.append_pair("scope", "email openid");
@@ -306,10 +345,7 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
         qp.append_pair("response_mode", "form_post");
         qp.append_pair("state", &oauth_state);
         qp.append_pair("redirect_uri", &callback_url);
-        qp.append_pair(
-            "client_id",
-            client.client_id.as_deref().unwrap_or_default(),
-        );
+        qp.append_pair("client_id", client.client_id.as_deref().unwrap_or_default());
         if let Some(hd) = params.get("hd") {
             qp.append_pair("hd", hd);
         }
@@ -491,31 +527,59 @@ async fn callback_inner(
         .ok_or_else(|| fail(oauth_err("Missing oauth client.")))?;
     let client = load_client_by_id(state, app_id, client_entity)
         .await
-        .map_err(|e| fail(e))?
+        .map_err(&fail)?
         .ok_or_else(|| fail(oauth_err("Could not find oauth client.")))?;
 
-    let user_info = exchange_code(state, &client, code)
-        .await
-        .map_err(|e| fail(e))?;
+    let user_info = exchange_code(state, &client, code).await.map_err(&fail)?;
 
     // one-time app-level code
     let app_code = Uuid::new_v4();
     let entity = Uuid::new_v4();
     let mut steps = vec![
-        json!(["add-triple", entity, sc::attr_id("$oauthCodes", "id"), entity]),
-        json!(["add-triple", entity, sc::attr_id("$oauthCodes", "codeHash"), auth::hash_string(&app_code.to_string())]),
-        json!(["add-triple", entity, sc::attr_id("$oauthCodes", "userInfo"), user_info]),
-        json!(["add-triple", entity, sc::attr_id("$oauthCodes", "$oauthClient"), client.id]),
+        json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthCodes", "id"),
+            entity
+        ]),
+        json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthCodes", "codeHash"),
+            auth::hash_string(&app_code.to_string())
+        ]),
+        json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthCodes", "userInfo"),
+            user_info
+        ]),
+        json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthCodes", "$oauthClient"),
+            client.id
+        ]),
     ];
     if let Some(challenge) = &ent.code_challenge {
-        steps.push(json!(["add-triple", entity, sc::attr_id("$oauthCodes", "codeChallenge"), challenge]));
+        steps.push(json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthCodes", "codeChallenge"),
+            challenge
+        ]));
     }
     if let Some(method) = &ent.code_challenge_method {
-        steps.push(json!(["add-triple", entity, sc::attr_id("$oauthCodes", "codeChallengeMethod"), method]));
+        steps.push(json!([
+            "add-triple",
+            entity,
+            sc::attr_id("$oauthCodes", "codeChallengeMethod"),
+            method
+        ]));
     }
     service::run_system_transact(state, app_id, &Value::Array(steps))
         .await
-        .map_err(|e| fail(e))?;
+        .map_err(fail)?;
 
     let sep = if redirect_url.contains('?') { '&' } else { '?' };
     let url = format!("{redirect_url}{sep}code={app_code}&_instant_oauth_redirect=true");
@@ -558,7 +622,10 @@ async fn exchange_code(state: &AppState, client: &OAuthClient, code: &str) -> Re
         .post(token_endpoint)
         .form(&[
             ("client_id", client.client_id.as_deref().unwrap_or_default()),
-            ("client_secret", client.client_secret.as_deref().unwrap_or_default()),
+            (
+                "client_secret",
+                client.client_secret.as_deref().unwrap_or_default(),
+            ),
             ("code", code),
             ("grant_type", "authorization_code"),
             ("redirect_uri", &callback_url),
@@ -708,8 +775,12 @@ async fn token_impl(state: &AppState, body: &Value) -> Result<Value> {
             created_at = r.get::<Option<i64>, _>("created_at").unwrap_or(0);
         }
     }
-    service::run_system_transact(state, app_id, &json!([["delete-entity", eid, "$oauthCodes"]]))
-        .await?;
+    service::run_system_transact(
+        state,
+        app_id,
+        &json!([["delete-entity", eid, "$oauthCodes"]]),
+    )
+    .await?;
     if chrono::Utc::now().timestamp_millis() - created_at > 5 * 60_000 {
         return Err(InstantError::new(
             "record-expired",
@@ -720,7 +791,10 @@ async fn token_impl(state: &AppState, body: &Value) -> Result<Value> {
     }
 
     // PKCE
-    match (&challenge, body.get("code_verifier").and_then(|v| v.as_str())) {
+    match (
+        &challenge,
+        body.get("code_verifier").and_then(|v| v.as_str()),
+    ) {
         (None, _) => {}
         (Some(_), None) => {
             return Err(InstantError::validation_failed(
@@ -797,7 +871,10 @@ async fn id_token_impl(state: &AppState, body: &Value) -> Result<Value> {
         })?;
 
     let disc = discovery(state, &client).await?;
-    let issuer = disc.get("issuer").and_then(|v| v.as_str()).unwrap_or_default();
+    let issuer = disc
+        .get("issuer")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
 
     // verify signature via JWKS
     let claims = verify_jwt(state, &disc, jwt).await?;
@@ -912,7 +989,11 @@ async fn verify_jwt(state: &AppState, disc: &Value, jwt: &str) -> Result<Value> 
     let jwks = fetch_json_cached(state, &format!("jwks:{jwks_uri}"), jwks_uri).await?;
     let header =
         decode_header(jwt).map_err(|_| oauth_err("Error validating JWT. Malformed token."))?;
-    let keys = jwks.get("keys").and_then(|k| k.as_array()).cloned().unwrap_or_default();
+    let keys = jwks
+        .get("keys")
+        .and_then(|k| k.as_array())
+        .cloned()
+        .unwrap_or_default();
     let jwk = keys
         .iter()
         .find(|k| {
@@ -997,7 +1078,8 @@ async fn upsert_oauth_link(
             if let Some(uid) = user_row.get::<Option<Uuid>, _>("uid") {
                 // refresh imageURL
                 if let Some(img) = image_url {
-                    let steps = json!([["add-triple", uid, sc::attr_id("$users", "imageURL"), img]]);
+                    let steps =
+                        json!([["add-triple", uid, sc::attr_id("$users", "imageURL"), img]]);
                     let _ = service::run_system_transact(state, app_id, &steps).await;
                 }
                 return Ok((uid, false));
@@ -1019,7 +1101,12 @@ async fn upsert_oauth_link(
                     json!(["add-triple", uid, sc::attr_id("$users", "type"), "user"]),
                 ];
                 if let Some(img) = image_url {
-                    steps.push(json!(["add-triple", uid, sc::attr_id("$users", "imageURL"), img]));
+                    steps.push(json!([
+                        "add-triple",
+                        uid,
+                        sc::attr_id("$users", "imageURL"),
+                        img
+                    ]));
                 }
                 service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
                 uid
@@ -1040,11 +1127,36 @@ async fn upsert_oauth_link(
     // create the link
     let link = Uuid::new_v4();
     let steps = json!([
-        ["add-triple", link, sc::attr_id("$oauthUserLinks", "id"), link],
-        ["add-triple", link, sc::attr_id("$oauthUserLinks", "sub"), sub],
-        ["add-triple", link, sc::attr_id("$oauthUserLinks", "sub+$oauthProvider"), composite],
-        ["add-triple", link, sc::attr_id("$oauthUserLinks", "$user"), user_id],
-        ["add-triple", link, sc::attr_id("$oauthUserLinks", "$oauthProvider"), provider_id]
+        [
+            "add-triple",
+            link,
+            sc::attr_id("$oauthUserLinks", "id"),
+            link
+        ],
+        [
+            "add-triple",
+            link,
+            sc::attr_id("$oauthUserLinks", "sub"),
+            sub
+        ],
+        [
+            "add-triple",
+            link,
+            sc::attr_id("$oauthUserLinks", "sub+$oauthProvider"),
+            composite
+        ],
+        [
+            "add-triple",
+            link,
+            sc::attr_id("$oauthUserLinks", "$user"),
+            user_id
+        ],
+        [
+            "add-triple",
+            link,
+            sc::attr_id("$oauthUserLinks", "$oauthProvider"),
+            provider_id
+        ]
     ]);
     service::run_system_transact(state, app_id, &steps).await?;
     Ok((user_id, created))

@@ -25,7 +25,12 @@ pub async fn run(state: Arc<AppState>) {
 async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
     let mut listener = PgListener::connect_with(&state.pool).await?;
     listener
-        .listen_all(["instant_tx", "instant_room", "instant_broadcast", "instant_stream"])
+        .listen_all([
+            "instant_tx",
+            "instant_room",
+            "instant_broadcast",
+            "instant_stream",
+        ])
         .await?;
     loop {
         let notification = listener.recv().await?;
@@ -40,7 +45,10 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
         match notification.channel() {
             "instant_tx" => {
                 let (Some(app_id), Some(tx_id)) = (
-                    payload.get("app_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()),
+                    payload
+                        .get("app_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Uuid::parse_str(s).ok()),
                     payload.get("tx_id").and_then(|v| v.as_i64()),
                 ) else {
                     continue;
@@ -52,8 +60,14 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
             }
             "instant_room" => {
                 let (Some(app_id), Some(room_id)) = (
-                    payload.get("app_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()),
-                    payload.get("room_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    payload
+                        .get("app_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Uuid::parse_str(s).ok()),
+                    payload
+                        .get("room_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 ) else {
                     continue;
                 };
@@ -64,8 +78,14 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
             }
             "instant_broadcast" => {
                 let (Some(app_id), Some(room_id)) = (
-                    payload.get("app_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()),
-                    payload.get("room_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    payload
+                        .get("app_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Uuid::parse_str(s).ok()),
+                    payload
+                        .get("room_id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
                 ) else {
                     continue;
                 };

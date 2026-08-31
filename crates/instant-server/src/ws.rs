@@ -116,7 +116,9 @@ pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>
         "start-stream" => crate::streams::handle_start_stream(state, session, &msg).await,
         "append-stream" => crate::streams::handle_append_stream(state, session, &msg).await,
         "subscribe-stream" => crate::streams::handle_subscribe_stream(state, session, &msg).await,
-        "unsubscribe-stream" => crate::streams::handle_unsubscribe_stream(state, session, &msg).await,
+        "unsubscribe-stream" => {
+            crate::streams::handle_unsubscribe_stream(state, session, &msg).await
+        }
         _ => Ok(()), // unknown ops ignored (client tolerates)
     };
     if let Err(e) = result {
@@ -154,7 +156,10 @@ async fn handle_init(state: &Arc<AppState>, session: &Arc<Session>, msg: &Value)
     if let Some(token) = msg.get("refresh-token").and_then(|v| v.as_str()) {
         match crate::auth::user_by_refresh_token(state, app_id, token).await? {
             Some(u) => {
-                user = Some(SessionUser { id: u.id, email: u.email });
+                user = Some(SessionUser {
+                    id: u.id,
+                    email: u.email,
+                });
             }
             None => {
                 return Err(InstantError::record_not_found(
@@ -195,7 +200,9 @@ async fn handle_init(state: &Arc<AppState>, session: &Arc<Session>, msg: &Value)
     Ok(())
 }
 
-async fn session_ctx(session: &Arc<Session>) -> std::result::Result<(Uuid, PermsCtx), InstantError> {
+async fn session_ctx(
+    session: &Arc<Session>,
+) -> std::result::Result<(Uuid, PermsCtx), InstantError> {
     let st = session.state.lock().await;
     let app_id = st
         .app_id
@@ -241,7 +248,10 @@ async fn handle_add_query(
         let mut st = session.state.lock().await;
         st.queries.insert(
             key,
-            QueryEntry { q: q.clone(), result_hash: value_hash(&ws_result) },
+            QueryEntry {
+                q: q.clone(),
+                result_hash: value_hash(&ws_result),
+            },
         );
     }
     session.send(json!({
