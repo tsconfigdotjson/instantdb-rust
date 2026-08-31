@@ -549,6 +549,79 @@ async fn explicit_unlink_rules() {
 }
 
 #[tokio::test]
+async fn missing_keys_are_null_safe() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let e = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", e, ids.todos_id, e],
+            ["add-triple", e, ids.todos_title, "t"]
+        ]),
+    )
+    .await
+    .unwrap();
+
+    // keys absent from the schema read as null instead of erroring to deny
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"view": "data.someTypo == null && ruleParams.unknown == null && auth.missing == null"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"todos": {}})).await;
+    assert_eq!(res.forms[0].entities.len(), 1);
+
+    // a typo'd key used as the whole rule is a null result: deny, not error
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"view": "data.someTypo"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"todos": {}})).await;
+    assert_eq!(res.forms[0].entities.len(), 0);
+
+    // same on the transact path: update rule over a missing key denies
+    // cleanly instead of erroring
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"update": "newData.someTypo == 'x'"}}}),
+    )
+    .await;
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["add-triple", e, ids.todos_title, "edited"]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+
+    // and allows when the rule expects null
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"update": "newData.someTypo == null"}}}),
+    )
+    .await;
+    transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["add-triple", e, ids.todos_title, "edited"]]),
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn field_rules_filter_columns() {
     let pool = pool().await;
     let app = mk_app(&pool).await;

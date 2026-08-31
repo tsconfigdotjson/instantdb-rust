@@ -345,6 +345,101 @@ fn json_to_cel(v: &Value) -> cel::Value {
     }
 }
 
+/// Collect every map key a compiled CEL expression can statically mention:
+/// select fields (`x.foo`, `has(x.foo)`) and string literals (covering
+/// `x['k']` and `'k' in x`).
+///
+/// Legacy's CelMap answers null for any missing key and its `containsKey`
+/// always returns true (docs/PERMS.md §2), while the cel crate errors on
+/// missing keys. Pre-inserting the collected keys as null into the rule-scope
+/// maps (see [`null_safe_augment`]) reproduces the legacy semantics for every
+/// key a rule can reference. Keys computed at runtime (`x[someVar]`) can't be
+/// known statically; those still error and deny, like any CEL error.
+fn collect_static_keys(expr: &cel::IdedExpr, out: &mut HashSet<String>) {
+    use cel::common::ast::{EntryExpr, Expr, LiteralValue};
+    match &expr.expr {
+        Expr::Unspecified | Expr::Ident(_) => {}
+        Expr::Literal(v) => {
+            if let LiteralValue::String(s) = v {
+                out.insert(s.inner().to_string());
+            }
+        }
+        Expr::Call(c) => {
+            if let Some(t) = &c.target {
+                collect_static_keys(t, out);
+            }
+            for a in &c.args {
+                collect_static_keys(a, out);
+            }
+        }
+        Expr::Comprehension(c) => {
+            for e in [
+                &c.iter_range,
+                &c.accu_init,
+                &c.loop_cond,
+                &c.loop_step,
+                &c.result,
+            ] {
+                collect_static_keys(e, out);
+            }
+        }
+        Expr::List(l) => {
+            for e in &l.elements {
+                collect_static_keys(e, out);
+            }
+        }
+        Expr::Map(m) => {
+            for e in &m.entries {
+                if let EntryExpr::MapEntry(me) = &e.expr {
+                    collect_static_keys(&me.key, out);
+                    collect_static_keys(&me.value, out);
+                }
+            }
+        }
+        Expr::Select(s) => {
+            out.insert(s.field.clone());
+            collect_static_keys(&s.operand, out);
+        }
+        Expr::Struct(st) => {
+            for e in &st.entries {
+                match &e.expr {
+                    EntryExpr::StructField(f) => collect_static_keys(&f.value, out),
+                    EntryExpr::MapEntry(me) => {
+                        collect_static_keys(&me.key, out);
+                        collect_static_keys(&me.value, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Insert `keys` as null into every nested object of `v` (skipping the
+/// internal "_refs" maps, which are keyed by ref paths and consulted by the
+/// `ref` custom function).
+fn null_safe_augment(v: &mut Value, keys: &HashSet<String>) {
+    match v {
+        Value::Object(m) => {
+            for k in keys {
+                if !m.contains_key(k.as_str()) {
+                    m.insert(k.clone(), Value::Null);
+                }
+            }
+            for (k, child) in m.iter_mut() {
+                if k != "_refs" {
+                    null_safe_augment(child, keys);
+                }
+            }
+        }
+        Value::Array(a) => {
+            for child in a {
+                null_safe_augment(child, keys);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Evaluate one program with the given bindings. `data`/`auth` objects carry
 /// prefetched ref results under "_refs".
 pub fn eval_program(
@@ -372,6 +467,42 @@ pub fn eval_program_full(
     if program.is_false() && program.binds.is_empty() {
         return Ok(false);
     }
+    let compiled = cel::Program::compile(&program.expr).map_err(|e| {
+        InstantError::permission_denied(json!([]), format!("Invalid permission rule: {e}"))
+    })?;
+    let compiled_binds: Vec<(String, Option<cel::Program>)> = program
+        .binds
+        .iter()
+        .map(|(name, expr)| (name.clone(), cel::Program::compile(expr).ok()))
+        .collect();
+
+    // legacy CelMap null-safety: pre-insert every statically-mentioned key
+    let mut static_keys = HashSet::new();
+    collect_static_keys(compiled.expression(), &mut static_keys);
+    for (_, p) in &compiled_binds {
+        if let Some(p) = p {
+            collect_static_keys(p.expression(), &mut static_keys);
+        }
+    }
+    let mut data = data.clone();
+    null_safe_augment(&mut data, &static_keys);
+    // legacy: a nil user binds an empty map, so `auth.id == null` holds
+    let mut auth = match auth {
+        Value::Null => Value::Object(Map::new()),
+        v => v.clone(),
+    };
+    null_safe_augment(&mut auth, &static_keys);
+    let mut rule_params = rule_params.clone();
+    null_safe_augment(&mut rule_params, &static_keys);
+    let mut new_data = new_data.cloned();
+    if let Some(nd) = new_data.as_mut() {
+        null_safe_augment(nd, &static_keys);
+    }
+    let mut linked_data = linked_data.cloned();
+    if let Some(ld) = linked_data.as_mut() {
+        null_safe_augment(ld, &static_keys);
+    }
+
     let mut ctx = cel::Context::default();
     ctx.add_function(
         "ref",
@@ -390,45 +521,46 @@ pub fn eval_program_full(
             Ok(cel::Value::List(std::sync::Arc::new(vec![])))
         },
     );
-    ctx.add_variable_from_value("data", json_to_cel(data));
-    ctx.add_variable_from_value("auth", json_to_cel(auth));
-    ctx.add_variable_from_value("ruleParams", json_to_cel(rule_params));
-    if let Some(nd) = new_data {
-        ctx.add_variable_from_value("newData", json_to_cel(nd));
-    } else {
-        ctx.add_variable_from_value("newData", json_to_cel(data));
+    ctx.add_variable_from_value("data", json_to_cel(&data));
+    ctx.add_variable_from_value("auth", json_to_cel(&auth));
+    ctx.add_variable_from_value("ruleParams", json_to_cel(&rule_params));
+    match &new_data {
+        Some(nd) => ctx.add_variable_from_value("newData", json_to_cel(nd)),
+        None => ctx.add_variable_from_value("newData", json_to_cel(&data)),
     }
-    if let Some(ld) = linked_data {
+    if let Some(ld) = &linked_data {
         ctx.add_variable_from_value("linkedData", json_to_cel(ld));
     }
 
     // binds: evaluate in order, retrying to tolerate forward references
-    let mut pending: Vec<(String, String)> = program.binds.clone();
+    let mut pending: Vec<(String, cel::Program)> = vec![];
+    let mut unresolved: Vec<String> = vec![];
+    for (name, p) in compiled_binds {
+        match p {
+            Some(p) => pending.push((name, p)),
+            None => unresolved.push(name),
+        }
+    }
     let mut rounds = 0;
     while !pending.is_empty() && rounds < 5 {
         rounds += 1;
         let mut next = vec![];
-        for (name, expr) in pending {
-            match cel::Program::compile(&expr)
-                .ok()
-                .and_then(|p| p.execute(&ctx).ok())
-            {
-                Some(v) => {
+        for (name, p) in pending {
+            match p.execute(&ctx) {
+                Ok(v) => {
                     ctx.add_variable_from_value(name.as_str(), v);
                 }
-                None => next.push((name, expr)),
+                Err(_) => next.push((name, p)),
             }
         }
         pending = next;
     }
-    for (name, _) in &pending {
-        // unresolved binds evaluate to null so has()-style checks stay sane
+    // unresolved binds evaluate to null so has()-style checks stay sane
+    unresolved.extend(pending.into_iter().map(|(name, _)| name));
+    for name in &unresolved {
         ctx.add_variable_from_value(name.as_str(), cel::Value::Null);
     }
 
-    let compiled = cel::Program::compile(&program.expr).map_err(|e| {
-        InstantError::permission_denied(json!([]), format!("Invalid permission rule: {e}"))
-    })?;
     match compiled.execute(&ctx) {
         Ok(cel::Value::Bool(b)) => Ok(b),
         Ok(_) => Ok(false),
@@ -1129,4 +1261,124 @@ pub async fn permissioned_transact_checked(
     }
 
     Ok((report, check_results))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eval(expr: &str, data: Value, auth: Value, rule_params: Value) -> bool {
+        let program = Program {
+            expr: expr.to_string(),
+            binds: vec![],
+        };
+        eval_program(&program, &data, None, &auth, &rule_params).unwrap()
+    }
+
+    #[test]
+    fn missing_keys_resolve_to_null() {
+        assert!(eval(
+            "data.someTypo == null",
+            json!({"id": "1", "title": "t"}),
+            Value::Null,
+            json!({})
+        ));
+        assert!(eval(
+            "ruleParams.unknown == null",
+            json!({}),
+            Value::Null,
+            json!({})
+        ));
+        assert!(eval(
+            "data['someKey'] == null",
+            json!({}),
+            Value::Null,
+            json!({})
+        ));
+    }
+
+    #[test]
+    fn typoed_key_denies_by_false_not_error() {
+        // rule evaluates to null -> non-boolean -> deny, not an error
+        assert!(!eval(
+            "data.someTypo",
+            json!({"id": "1"}),
+            Value::Null,
+            json!({})
+        ));
+    }
+
+    #[test]
+    fn has_and_in_lie_like_legacy() {
+        assert!(eval(
+            "has(data.notThere)",
+            json!({}),
+            Value::Null,
+            json!({})
+        ));
+        assert!(eval(
+            "'notThere' in data",
+            json!({}),
+            Value::Null,
+            json!({})
+        ));
+    }
+
+    #[test]
+    fn nested_maps_are_null_safe() {
+        assert!(eval(
+            "data.profile.missing == null",
+            json!({"profile": {"name": "a"}}),
+            Value::Null,
+            json!({})
+        ));
+        // chained access through a null value still denies (legacy errors too)
+        assert!(!eval(
+            "data.missing.b == null",
+            json!({}),
+            Value::Null,
+            json!({})
+        ));
+    }
+
+    #[test]
+    fn anonymous_auth_reads_as_empty_map() {
+        assert!(eval("auth.id == null", json!({}), Value::Null, json!({})));
+        assert!(!eval(
+            "auth.id == null",
+            json!({}),
+            json!({"id": "u1"}),
+            json!({})
+        ));
+    }
+
+    #[test]
+    fn binds_see_null_safe_maps() {
+        let program = Program {
+            expr: "isOwner".to_string(),
+            binds: vec![(
+                "isOwner".to_string(),
+                "data.creatorTypo == auth.id".to_string(),
+            )],
+        };
+        let ok = eval_program(
+            &program,
+            &json!({"id": "1"}),
+            None,
+            &json!({"id": "u1"}),
+            &json!({}),
+        )
+        .unwrap();
+        assert!(!ok);
+        let ok = eval_program(
+            &program,
+            &json!({"id": "1"}),
+            None,
+            &Value::Null,
+            &json!({}),
+        )
+        .unwrap();
+        // both sides null -> equal -> allow, as on hosted Instant
+        assert!(ok);
+    }
 }
