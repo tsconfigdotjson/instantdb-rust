@@ -1,0 +1,375 @@
+// Shared machinery for the differential harness: ws capture clients,
+// client-visible normalization, and diffing.
+//
+// Normalization philosophy: two servers are wire-equivalent when a client
+// computes identical state from their frames. Frames are normalized down to
+// exactly what the client reads (PROTOCOL.md §3, with file:line citations),
+// with volatile server-chosen values (ids, timestamps, isns, hashes,
+// trace ids) replaced by placeholders. Anything left must match byte-for-byte
+// unless an entry in allowed-divergences.json (with a client-code citation)
+// says otherwise.
+
+import { execSync } from "node:child_process";
+
+export const uuid = () => crypto.randomUUID();
+
+// Deterministic uuids so both servers receive byte-identical client input.
+// Derived from the app id (attr ids are globally unique in the legacy schema,
+// so ids must be fresh per provisioned app) — but identical between the two
+// servers, which share the app id.
+let fixedPrefix = "00000000";
+export function makeIdFactory(appId) {
+  if (appId) fixedPrefix = appId.replaceAll("-", "").slice(0, 8);
+  let n = 0;
+  return () => {
+    n++;
+    return `${fixedPrefix}-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  };
+}
+
+export const isFixedId = (s) =>
+  typeof s === "string" && s.includes("-0000-4000-8000-") && s.startsWith(fixedPrefix);
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function psql(url, sql) {
+  execSync(`psql "${url}" -q -v ON_ERROR_STOP=1 -f -`, { input: sql });
+}
+
+// ---------------------------------------------------------------------------
+// capture client
+
+export function connect(serverUrl, appId, name) {
+  const ws = new WebSocket(`${serverUrl.replace(/^http/, "ws")}/runtime/session?app_id=${appId}`);
+  const frames = []; // all frames ever, in arrival order
+  let cursorMark = 0; // frames before this index belong to earlier steps
+  const waiters = [];
+  let lastFrameAt = Date.now();
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    for (const m of Array.isArray(msg) ? msg : [msg]) {
+      frames.push(m);
+      lastFrameAt = Date.now();
+      for (let i = waiters.length - 1; i >= 0; i--) {
+        const [pred, resolve] = waiters[i];
+        if (pred(m)) {
+          waiters.splice(i, 1);
+          resolve(m);
+        }
+      }
+    }
+  };
+  const send = (msg) => {
+    ws.send(JSON.stringify(msg));
+    return msg["client-event-id"];
+  };
+  const waitFor = (pred, timeout = 15000) =>
+    new Promise((resolve, reject) => {
+      const existing = frames.slice(cursorMark).find(pred);
+      if (existing) return resolve(existing);
+      const t = setTimeout(
+        () => reject(new Error(`timeout waiting on ${name}`)),
+        timeout,
+      );
+      waiters.push([pred, (m) => { clearTimeout(t); resolve(m); }]);
+    });
+  return {
+    name,
+    ws,
+    send,
+    waitFor,
+    frames,
+    open: new Promise((r, j) => {
+      ws.onopen = r;
+      ws.onerror = (e) => j(new Error(`ws error on ${name}: ${e.message ?? e}`));
+    }),
+    close: () => ws.close(),
+    takeNewFrames() {
+      const out = frames.slice(cursorMark);
+      cursorMark = frames.length;
+      return out;
+    },
+    quietSince: () => Date.now() - lastFrameAt,
+  };
+}
+
+// wait until every connection has been frame-silent for quietMs
+export async function settle(conns, quietMs = 700, maxMs = 15000) {
+  const start = Date.now();
+  for (;;) {
+    if (conns.every((c) => c.quietSince() >= quietMs)) return;
+    if (Date.now() - start > maxMs) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// client-visible projection + volatile-value normalization
+
+const VOLATILE_KEYS = {
+  "trace-id": "<trace>",
+  "duration-ms": "<ms>",
+  isn: "<isn>",
+  "processed-isn": "<isn>",
+  "instaql-query-hash": "<hash>",
+  "tx-id": "<tx>",
+  "processed-tx-id": "<tx>",
+  token: "<uuid>",
+  "session-id": "<uuid>",
+  "subscription-id": "<uuid>",
+  "stream-id": "<uuid>",
+  "machine-id": "<uuid>",
+  "sse-token": "<uuid>",
+  "client-event-id": "<ceid>", // fixed ids stay recognizable below
+  // inferred-types tracking is a documented gap (docs/PARITY.md: attrs report
+  // null); the client only reads it for editor tooling hints
+  "inferred-types": "<inferred>",
+};
+
+export function normalize(value, key = null) {
+  if (typeof value === "string") {
+    if (isFixedId(value)) return value; // scenario-chosen id: identical on both
+    if (UUID_RE.test(value)) return "<uuid>";
+    return value;
+  }
+  if (typeof value === "number") {
+    // epoch-ms timestamps (triple t values, created)
+    if (value > 1e12) return "<ts>";
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((v) => normalize(v));
+  if (value !== null && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (k in VOLATILE_KEYS) {
+        out[k] = isFixedId(v) ? v : VOLATILE_KEYS[k];
+      } else {
+        out[k] = normalize(v, k);
+      }
+    }
+    return out;
+  }
+  return value;
+}
+
+export const canon = (v) => JSON.stringify(sortDeep(v));
+function sortDeep(v) {
+  if (Array.isArray(v)) return v.map(sortDeep);
+  if (v !== null && typeof v === "object") {
+    const out = {};
+    for (const k of Object.keys(v).sort()) out[k] = sortDeep(v[k]);
+    return out;
+  }
+  return v;
+}
+
+// The client's only consumption of an instaql-result tree: flatten all
+// join-rows to triples (model/instaqlResult.js:1-25) and read
+// page-info/aggregate off result[0].data (Reactor.js:671-672).
+export function projectResult(result) {
+  const triples = [];
+  const walk = (nodes) => {
+    for (const node of nodes ?? []) {
+      for (const rows of node?.data?.["datalog-result"]?.["join-rows"] ?? []) {
+        for (const t of rows) triples.push(t);
+      }
+      walk(node?.["child-nodes"]);
+    }
+  };
+  walk(result);
+  const norm = triples.map((t) => normalize(t));
+  norm.sort((x, y) => (canon(x) < canon(y) ? -1 : 1));
+  // dedupe: grouping differences can repeat triples; the client's store dedupes
+  const deduped = [...new Map(norm.map((t) => [canon(t), t])).values()];
+  return {
+    triples: deduped,
+    "page-info": normalize(result?.[0]?.data?.["page-info"] ?? null),
+    aggregate: normalize(result?.[0]?.data?.aggregate ?? null),
+  };
+}
+
+// Fold a step's frames into (a) directly comparable normalized frames,
+// (b) per-query latest results, (c) per-room presence state — mirroring
+// client state application. Async because stream readers fetch `files` URLs
+// exactly like the client does (Stream.ts:1077-1084).
+export async function foldFrames(frames, state) {
+  const direct = [];
+  for (const m of frames) {
+    switch (m.op) {
+      case "refresh-presence": {
+        // client keeps only entry.data per session (Reactor.js:2699-2710)
+        state.rooms[m["room-id"]] = Object.fromEntries(
+          Object.entries(m.data).map(([sid, v]) => [sid, v.data]),
+        );
+        break;
+      }
+      case "patch-presence": {
+        // Reactor.js:2672-2697
+        const room = (state.rooms[m["room-id"]] ??= {});
+        for (const [path, op, val] of m.edits) {
+          if (op === "-") delete room[path[0]];
+          else if (path.length === 1) room[path[0]] = val.data;
+          else if (path.length === 2 && path[1] === "data") room[path[0]] = val;
+        }
+        break;
+      }
+      case "refresh-ok": {
+        for (const comp of m.computations ?? []) {
+          state.queries[canon(normalize(comp["instaql-query"]))] = projectResult(
+            comp["instaql-result"],
+          );
+        }
+        if (m.attrs) state.attrs = projectAttrs(m.attrs);
+        break;
+      }
+      case "add-query-ok": {
+        state.queries[canon(normalize(m.q))] = projectResult(m.result);
+        direct.push({
+          op: m.op,
+          q: normalize(m.q),
+          result: projectResult(m.result),
+          "processed-tx-id": "<tx>",
+        });
+        break;
+      }
+      case "error": {
+        // client-read projection: type/status/message drive app-visible
+        // errors (Reactor.js:513-548); original-event routing reads only
+        // op/q/subscription-id/stream-id (Reactor.js:1009-1046); of hint,
+        // only record-type is pattern-matched (Reactor.js:1020-1029) and
+        // data-type names the failing input — the rest is debugging detail
+        // whose shape differs (documented in docs/PARITY.md).
+        const oe = m["original-event"] ?? {};
+        direct.push({
+          op: "error",
+          status: m.status,
+          type: m.type,
+          message: m.message,
+          "original-event": normalize(
+            Object.fromEntries(
+              ["op", "q", "subscription-id", "stream-id", "tx-steps", "client-event-id"]
+                .filter((k) => k in oe)
+                .map((k) => [k, oe[k]]),
+            ),
+          ),
+          hint: m.hint
+            ? normalize(
+                Object.fromEntries(
+                  ["data-type", "record-type"]
+                    .filter((k) => k in m.hint)
+                    .map((k) => [k, m.hint[k]]),
+                ),
+              )
+            : null,
+        });
+        break;
+      }
+      case "init-ok": {
+        state.attrs = projectAttrs(m.attrs);
+        state.selfSid = m["session-id"];
+        direct.push({
+          op: m.op,
+          "app-status": m["app-status"],
+          // auth contents are unread by the client (Reactor.js:644-660)
+        });
+        break;
+      }
+      case "sync-load-batch": {
+        const sub = (state.sync ??= { entities: {} });
+        for (const rows of m["join-rows"]) {
+          for (const t of rows) {
+            (sub.entities[t[0]] ??= []).push(normalize(t));
+          }
+        }
+        break;
+      }
+      case "sync-update-triples": {
+        const sub = (state.sync ??= { entities: {} });
+        for (const tx of m.txes) {
+          for (const c of tx.changes) {
+            const t = normalize(c.triple);
+            const list = (sub.entities[c.triple[0]] ??= []);
+            if (c.action === "added") list.push(t);
+            else {
+              const i = list.findIndex((x) => canon(x) === canon(t));
+              if (i >= 0) list.splice(i, 1);
+            }
+          }
+        }
+        break;
+      }
+      case "stream-append": {
+        // reader applies files then content at offset (Stream.ts:1077-1090)
+        const st = (state.streams ??= {});
+        const s = (st[m["client-id"] ?? "?"] ??= { content: "", done: false });
+        if (typeof m.offset === "number") {
+          let payload = "";
+          for (const f of m.files ?? []) {
+            try {
+              payload += await (await fetch(f.url)).text();
+            } catch {
+              payload += `<unfetchable:${f.size}>`;
+            }
+          }
+          if (typeof m.content === "string") payload += m.content;
+          s.content = s.content.slice(0, m.offset) + payload;
+        }
+        if (m.done) s.done = true;
+        if (m["abort-reason"]) s.abortReason = m["abort-reason"];
+        break;
+      }
+      case "stream-flushed": {
+        // writer only trims its buffer on flush (Stream.ts:994 onFlush);
+        // flush timing/chunking is server-internal, so fold to high-water mark
+        const wf = (state.writerFlushed ??= { offset: 0, done: false });
+        wf.offset = Math.max(wf.offset, m.offset ?? 0);
+        if (m.done) wf.done = true;
+        break;
+      }
+      default:
+        direct.push(normalize(m));
+    }
+  }
+  direct.sort((x, y) => (canon(x) < canon(y) ? -1 : 1));
+  return direct;
+}
+
+// attrs array → stable client-visible projection, keyed by etype.label
+export function projectAttrs(attrs) {
+  const out = {};
+  for (const at of attrs) {
+    const key = `${at["forward-identity"]?.[1]}.${at["forward-identity"]?.[2]}`;
+    out[key] = normalize(at);
+  }
+  return out;
+}
+
+export function newState() {
+  return { rooms: {}, queries: {}, attrs: null, selfSid: null };
+}
+
+// Comparable projection of a connection's folded state: presence rooms become
+// sorted multisets of peer presence data (the client strips its own session
+// and peers' session ids are server-chosen).
+export function projectState(state) {
+  const rooms = {};
+  for (const [roomId, peers] of Object.entries(state.rooms)) {
+    rooms[roomId] = Object.entries(peers)
+      .filter(([sid]) => sid !== state.selfSid)
+      .map(([, data]) => normalize(data))
+      .sort((x, y) => (canon(x) < canon(y) ? -1 : 1));
+  }
+  const out = { rooms, queries: state.queries, attrs: state.attrs };
+  if (state.writerFlushed) out.writerFlushed = state.writerFlushed;
+  if (state.sync) {
+    const entities = {};
+    for (const [eid, triples] of Object.entries(state.sync.entities)) {
+      const sorted = [...triples].sort((x, y) => (canon(x) < canon(y) ? -1 : 1));
+      if (sorted.length) entities[eid] = sorted;
+    }
+    out.sync = entities;
+  }
+  if (state.streams) out.streams = state.streams;
+  return out;
+}
+

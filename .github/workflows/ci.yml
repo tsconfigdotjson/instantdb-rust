@@ -115,10 +115,16 @@ jobs:
 
       - name: "e2e: ws smoke"
         run: node scripts/smoke-ws.mjs "$APP_ID"
+      - name: "e2e: wire-protocol conformance"
+        run: |
+          ./scripts/create-app.sh "conformance app" | tee /tmp/conf-app.txt
+          node scripts/conformance-test.mjs \
+            "$(grep '^app_id=' /tmp/conf-app.txt | cut -d= -f2)" \
+            "$(grep '^admin_token=' /tmp/conf-app.txt | cut -d= -f2)"
       - name: "e2e: sse transport"
         run: node scripts/sse-test.mjs "$APP_ID"
       - name: "e2e: sync tables"
-        run: node scripts/synctable-test.mjs "$APP_ID"
+        run: node scripts/synctable-test.mjs "$APP_ID" "$ADMIN_TOKEN"
       - name: "e2e: streams"
         run: node scripts/streams-test.mjs "$APP_ID"
       - name: "e2e: oauth (mock OIDC)"
@@ -135,6 +141,54 @@ jobs:
         run: |
           echo "=== node 1 (:8888) ==="; cat /tmp/server1.log || true
           echo "=== node 2 (:8889) ==="; cat /tmp/server2.log || true
+
+  differential:
+    name: differential vs legacy server
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: instant
+          POSTGRES_PASSWORD: instant
+          POSTGRES_DB: instant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U instant"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://instant:instant@localhost:5432/instant
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply migrations
+        run: ./scripts/apply-migrations.sh
+      - name: Boot rust server
+        run: |
+          cargo build -p instant-server
+          PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/rust-server.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8888/health >/dev/null && exit 0
+            sleep 1
+          done
+          echo "rust server failed to boot"; cat /tmp/rust-server.log; exit 1
+      - name: Differential replay + fuzz vs legacy server
+        run: KEEP=1 ./scripts/differential/run.sh
+      - name: Server logs
+        if: failure()
+        run: |
+          echo "=== rust server ==="; cat /tmp/rust-server.log || true
+          echo "=== legacy server ==="; docker compose -f scripts/differential/docker-compose.yml logs legacy-server | tail -100 || true
 
   docker:
     name: docker build

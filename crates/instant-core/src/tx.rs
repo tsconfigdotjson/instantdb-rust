@@ -88,19 +88,32 @@ fn parse_attr_uuid(v: Option<&Value>) -> Result<Uuid> {
         })
 }
 
+/// Step-shape (spec-level) failure. Legacy's message for these is the bare
+/// "Validation failed for tx-steps" — spec explain data lives in the hint
+/// (util/exception.clj throw-validation-err! with coercion errors).
+fn coerce_err(detail: impl Into<String>) -> InstantError {
+    InstantError::new(
+        "validation-failed",
+        400,
+        "Validation failed for tx-steps",
+        Some(json!({"data-type": "tx-steps", "errors": [{"message": detail.into()}]})),
+    )
+}
+
 /// Parse the wire `tx-steps` array.
 pub fn parse_tx_steps(steps: &Value) -> Result<Vec<TxStep>> {
-    let arr = steps.as_array().ok_or_else(|| {
-        InstantError::validation_failed("tx-steps", "tx-steps must be an array", json!([]))
-    })?;
+    let arr = steps
+        .as_array()
+        .ok_or_else(|| coerce_err("tx-steps must be an array"))?;
     let mut out = vec![];
     for step in arr {
-        let step_arr = step.as_array().ok_or_else(|| {
-            InstantError::validation_failed("tx-steps", "each tx-step must be an array", json!([]))
-        })?;
-        let op = step_arr.first().and_then(|v| v.as_str()).ok_or_else(|| {
-            InstantError::validation_failed("tx-steps", "tx-step missing op", json!([]))
-        })?;
+        let step_arr = step
+            .as_array()
+            .ok_or_else(|| coerce_err("each tx-step must be an array"))?;
+        let op = step_arr
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| coerce_err("tx-step missing op"))?;
         let parsed = match op {
             "add-attr" => {
                 TxStep::AddAttr(Attr::from_wire(step_arr.get(1).unwrap_or(&Value::Null))?)
@@ -150,13 +163,7 @@ pub fn parse_tx_steps(steps: &Value) -> Result<Vec<TxStep>> {
                     .map(|s| s.to_string()),
                 params: step_arr.get(3).cloned().unwrap_or(Value::Null),
             },
-            other => {
-                return Err(InstantError::validation_failed(
-                    "tx-steps",
-                    format!("unknown tx-step op {other:?}"),
-                    json!([]),
-                ))
-            }
+            other => return Err(coerce_err(format!("unknown tx-step op {other:?}"))),
         };
         out.push(parsed);
     }
@@ -608,17 +615,23 @@ async fn validate_mode(
     .await?
     .is_some()
         && !created_etypes.contains_key(&eid);
+    // legacy reports these under the singular `tx-step` input type
+    // (LEGACY transaction.clj:346-358)
     match mode {
-        WriteMode::Create if existed_before_tx => Err(InstantError::validation_failed(
-            "tx-steps",
-            format!("Creating entities that exist: {eid}"),
-            json!([]),
-        )),
-        WriteMode::Update if !existed_before_tx && !created_etypes.contains_key(&eid) => {
+        WriteMode::Create if existed_before_tx => {
+            let m = format!("Creating entities that exist: {eid}");
             Err(InstantError::validation_failed(
-                "tx-steps",
-                format!("Updating entities that don't exist: {eid}"),
-                json!([]),
+                "tx-step",
+                m.clone(),
+                json!([{"message": m}]),
+            ))
+        }
+        WriteMode::Update if !existed_before_tx && !created_etypes.contains_key(&eid) => {
+            let m = format!("Updating entities that don't exist: {eid}");
+            Err(InstantError::validation_failed(
+                "tx-step",
+                m.clone(),
+                json!([{"message": m}]),
             ))
         }
         _ => Ok(()),

@@ -1,0 +1,17 @@
+[
+  {
+    "path": "^keyset/init-ok/server-hostname$",
+    "reason": "Legacy emits server-hostname/server-port when config/dev? is true (the self-hosted image runs in dev mode); dev-only tooling keys.",
+    "citation": "LEGACY/server/src/instant/reactive/session.clj:192-196; unknown keys ignored at Reactor.js:932-934"
+  },
+  {
+    "path": "^keyset/init-ok/server-port$",
+    "reason": "Same as server-hostname: dev-mode-only key.",
+    "citation": "LEGACY/server/src/instant/reactive/session.clj:192-196; unknown keys ignored at Reactor.js:932-934"
+  },
+  {
+    "path": "^keyset/stream-append/files$",
+    "reason": "Legacy serves flushed stream segments as S3 file URLs plus inline content for the buffered tail; this server always inlines content. The reader consumes files-then-content, so delivered bytes are identical (asserted via the folded reader state).",
+    "citation": "LEGACY/client/packages/core/src/Stream.ts:1077-1084"
+  }
+]

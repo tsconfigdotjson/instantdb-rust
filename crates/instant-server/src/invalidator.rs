@@ -150,7 +150,7 @@ async fn refresh_session(
     let _guard = session.refresh_lock.lock().await;
     crate::sync_table::push_updates(&state, &session, app_id, tx_id).await;
     // snapshot queries + auth under the state lock
-    let (queries, perms) = {
+    let (queries, perms, skip_attrs, prev_attrs_hash) = {
         let st = session.state.lock().await;
         if st.app_id != Some(app_id) {
             return;
@@ -161,19 +161,34 @@ async fn refresh_session(
             user_map: None,
             rule_params: None,
         };
-        (st.queries.clone(), perms)
+        (
+            st.queries.clone(),
+            perms,
+            st.supports_skip_attrs,
+            st.attrs_hash,
+        )
     };
     let mut computations = vec![];
     let mut new_hashes = vec![];
     for (key, entry) in &queries {
+        let started = std::time::Instant::now();
         match service::run_query(&state, app_id, &attrs, &perms, &entry.q).await {
             Ok(result) => {
                 let ws_result = result.to_ws_result();
                 let h = value_hash(&ws_result);
                 if h != entry.result_hash {
+                    // key set mirrors legacy recompute-instaql-query!
+                    // (session.clj:459-465); result-meta is only populated for
+                    // the tree return-type, and instaql-topic? reports whether
+                    // topic narrowing applies (never, for this server).
                     computations.push(json!({
                         "instaql-query": entry.q,
+                        "instaql-query-hash": value_hash(&entry.q) as u32,
                         "instaql-result": ws_result,
+                        "result-meta": Value::Null,
+                        "result-changed?": true,
+                        "duration-ms": started.elapsed().as_millis() as u64,
+                        "instaql-topic?": false,
                     }));
                     new_hashes.push((key.clone(), h));
                 }
@@ -183,7 +198,10 @@ async fn refresh_session(
             }
         }
     }
-    if computations.is_empty() {
+    let wire_attrs = attrs.to_wire_visible();
+    let attrs_hash = value_hash(&wire_attrs);
+    let attrs_changed = prev_attrs_hash != Some(attrs_hash);
+    if computations.is_empty() && !(skip_attrs && attrs_changed) {
         return;
     }
     {
@@ -193,11 +211,20 @@ async fn refresh_session(
                 entry.result_hash = h;
             }
         }
+        if skip_attrs {
+            st.attrs_hash = Some(attrs_hash);
+        }
     }
-    session.send(json!({
+    // legacy omits attrs for core > 0.20.4 unless they changed
+    // (session.clj:503-533 skip-attrs gating).
+    let mut msg = json!({
         "op": "refresh-ok",
         "processed-tx-id": tx_id,
-        "attrs": attrs.to_wire_visible(),
+        "processed-isn": service::current_isn(&state).await,
         "computations": computations,
-    }));
+    });
+    if !skip_attrs || attrs_changed {
+        msg["attrs"] = wire_attrs;
+    }
+    session.send(msg);
 }

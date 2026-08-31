@@ -1161,35 +1161,59 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
     });
 
     // Resolve order attr
-    let (order_attr, order_type): (Attr, Option<CheckedDataType>) =
-        if order.key == "serverCreatedAt" {
-            (id_attr.clone(), None)
-        } else {
-            let a = ctx
-                .attrs
-                .by_fwd_name(&form.etype, &order.key)
-                .cloned()
-                .ok_or_else(|| {
-                    verr(format!(
-                        "There is no `{}` attribute on `{}` to order by.",
-                        order.key, form.etype
-                    ))
-                })?;
-            if a.value_type != ValueType::Blob || a.cardinality != crate::attr::Cardinality::One {
-                return Err(verr(format!(
-                    "The `{}.{}` attribute can not be used to order by.",
-                    form.etype, order.key
-                )));
-            }
-            if !a.is_indexed || a.checked_data_type.is_none() {
-                return Err(verr(format!(
-                    "The `{}.{}` attribute must be indexed with an enforced type to order by.",
-                    form.etype, order.key
-                )));
-            }
-            let t = a.checked_data_type.unwrap();
-            (a, Some(t))
-        };
+    let (order_attr, order_type): (Attr, Option<CheckedDataType>) = if order.key
+        == "serverCreatedAt"
+    {
+        (id_attr.clone(), None)
+    } else {
+        let a = ctx
+            .attrs
+            .by_fwd_name(&form.etype, &order.key)
+            .cloned()
+            .ok_or_else(|| {
+                verr(format!(
+                    "There is no `{}` attribute on `{}` to order by.",
+                    order.key, form.etype
+                ))
+            })?;
+        // legacy per-condition messages (LEGACY instaql.clj:951-969)
+        let name = format!("{}.{}", form.etype, order.key);
+        let mut order_errors: Vec<String> = vec![];
+        if !a.is_indexed {
+            order_errors.push(format!(
+                    "The `{name}` attribute is not indexed. Only indexed and typed attributes can be used to order by."
+                ));
+        }
+        if a.checked_data_type.is_none() {
+            order_errors.push(format!(
+                    "The `{name}` attribute is not typed. Only typed and indexed attributes can be used to order by."
+                ));
+        }
+        if a.cardinality != crate::attr::Cardinality::One {
+            order_errors.push(format!(
+                    "The `{name}` attribute has cardinality `many`. Only attributes with cardinality `one` can be used to order by."
+                ));
+        }
+        if !order_errors.is_empty() {
+            let errors: Vec<Value> = order_errors
+                .iter()
+                .map(|m| {
+                    json!({
+                        "expected": "supported-order?",
+                        "in": [form.k, "$", "order"],
+                        "message": m,
+                    })
+                })
+                .collect();
+            return Err(InstantError::validation_failed(
+                "query",
+                order_errors.join(", "),
+                Value::Array(errors),
+            ));
+        }
+        let t = a.checked_data_type.unwrap();
+        (a, Some(t))
+    };
 
     // Validate cursors reference the order attr
     for cursor in [&form.opts.before, &form.opts.after].into_iter().flatten() {

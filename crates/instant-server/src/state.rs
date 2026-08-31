@@ -53,6 +53,10 @@ pub struct SessionState {
     pub versions: Option<Value>,
     /// client accepts patch-presence (core > 0.17.5)
     pub supports_patch_presence: bool,
+    /// client accepts refresh-ok without attrs when unchanged (core > 0.20.4)
+    pub supports_skip_attrs: bool,
+    /// hash of the last attrs array sent, for skip-attrs change detection
+    pub attrs_hash: Option<u64>,
     /// set for SSE-transport sessions; validates /runtime/sse pushes
     pub sse_token: Option<Uuid>,
     /// active sync-table subscriptions: sub id -> state
@@ -80,12 +84,24 @@ pub struct Session {
     pub state: Mutex<SessionState>,
     /// serializes refreshes per session
     pub refresh_lock: Mutex<()>,
+    /// client accepts JSON-array frames (core > 0.22.75); read by the ws writer
+    pub batch_messages: std::sync::atomic::AtomicBool,
 }
 
 impl Session {
-    pub fn send(&self, msg: Value) {
+    pub fn send(&self, mut msg: Value) {
+        // Legacy stamps every outgoing event with a trace-id (rs/send-event!).
+        if let Value::Object(m) = &mut msg {
+            m.entry("trace-id").or_insert_with(|| new_trace_id().into());
+        }
         let _ = self.tx.send(msg);
     }
+}
+
+/// Random 32-hex-char trace id, matching the OTel-style ids legacy emits.
+pub fn new_trace_id() -> String {
+    let id = Uuid::new_v4();
+    id.simple().to_string()
 }
 
 pub struct AppState {

@@ -433,38 +433,30 @@ pub async fn backfill_nulls_for_new_attr(
 
 /// Deep-merge patches into a cardinality-one blob triple.
 /// JSON objects merge recursively; null deletes keys; other values replace.
+/// Server-side merge, matching legacy `jsonb_deep_merge` byte-for-byte
+/// (LEGACY migrations/24_deep_merge_null.up.sql, behavior verified against
+/// the live legacy server by scripts/differential/fuzz.mjs):
+/// - both sides objects: per-key — nested objects merge recursively, a null
+///   patch value DELETES the key, anything else is set;
+/// - a non-object on either side returns the patch VERBATIM (nulls kept);
+/// - an empty-object patch leaves an object base unchanged.
 pub fn deep_merge(base: &Value, patch: &Value) -> Value {
     match (base, patch) {
         (Value::Object(b), Value::Object(p)) => {
             let mut out = b.clone();
             for (k, pv) in p {
-                if pv.is_null() {
+                if out.get(k).is_some_and(|bv| bv.is_object()) && pv.is_object() {
+                    let merged = deep_merge(&out[k], pv);
+                    out.insert(k.clone(), merged);
+                } else if pv.is_null() {
                     out.remove(k);
                 } else {
-                    let merged = match out.get(k) {
-                        Some(bv) => deep_merge(bv, pv),
-                        None => strip_nulls(pv),
-                    };
-                    out.insert(k.clone(), merged);
+                    out.insert(k.clone(), pv.clone());
                 }
             }
             Value::Object(out)
         }
-        (_, p) => strip_nulls(p),
-    }
-}
-
-/// Remove null-valued keys recursively (a null in a merge payload means
-/// "delete", so fresh values shouldn't carry them).
-fn strip_nulls(v: &Value) -> Value {
-    match v {
-        Value::Object(m) => Value::Object(
-            m.iter()
-                .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| (k.clone(), strip_nulls(v)))
-                .collect(),
-        ),
-        other => other.clone(),
+        (_, p) => p.clone(),
     }
 }
 
@@ -732,19 +724,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deep_merge_semantics() {
+    fn deep_merge_matches_legacy_jsonb_deep_merge() {
+        // nulls delete existing keys when both sides are objects
         let base = json!({"a": {"b": 1, "c": 2}, "d": 3});
         let patch = json!({"a": {"b": null, "e": 4}, "d": 5});
         assert_eq!(
             deep_merge(&base, &patch),
             json!({"a": {"c": 2, "e": 4}, "d": 5})
         );
+        // a null patch value for a missing key stays absent
+        assert_eq!(
+            deep_merge(&json!({"k0": 3.5}), &json!({"k2": null})),
+            json!({"k0": 3.5})
+        );
         // non-object replaces
         assert_eq!(deep_merge(&json!({"a": 1}), &json!(7)), json!(7));
-        // merging into null/missing
+        // an empty-object patch leaves an object base unchanged
+        assert_eq!(deep_merge(&json!({"a": 1}), &json!({})), json!({"a": 1}));
+        // merging into null/missing keeps the patch VERBATIM — nulls included
         assert_eq!(
             deep_merge(&Value::Null, &json!({"a": 1, "b": null})),
-            json!({"a": 1})
+            json!({"a": 1, "b": null})
+        );
+        // a null value deletes a whole nested object
+        assert_eq!(
+            deep_merge(&json!({"a": {"b": 2}}), &json!({"a": null})),
+            json!({})
         );
     }
 }

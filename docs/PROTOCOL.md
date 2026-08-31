@@ -800,10 +800,16 @@ tuple in each update/merge expansion).
 
 - **`["deep-merge-triple", eid, attr-id, value]`** (+ optional
   `{"mode": "update"}`) — deep-merge `value` (JSON) into the existing blob
-  value (`expandDeepMerge`, `instaml.ts:318-345`). `null` values inside the
-  merge payload delete keys (client-side merge semantics:
-  `utils/object.js` `immutableDeepMerge`). Always preceded by the entity's
-  id `add-triple`.
+  value (`expandDeepMerge`, `instaml.ts:318-345`). Server-side semantics
+  (legacy `jsonb_deep_merge`, migrations/24_deep_merge_null.up.sql, verified
+  live by scripts/differential/fuzz.mjs): when both sides are objects, nested
+  objects merge recursively, a `null` patch value **deletes** the key, and an
+  empty-object patch is a no-op; when either side is a non-object (including
+  a missing triple), the patch replaces the base **verbatim — nulls kept**.
+  The client-local merge (`utils/object.js` `immutableDeepMerge`) always
+  drops nulls, so an optimistic value can briefly lack a null the server
+  keeps on the verbatim path. Always preceded by the entity's id
+  `add-triple`.
 
 - **`["delete-entity", eid, etype]`** — delete an entity and its triples
   (`expandDelete`, `instaml.ts:313-316`). `eid` may be a lookup ref.

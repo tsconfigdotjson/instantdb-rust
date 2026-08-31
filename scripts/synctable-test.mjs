@@ -1,7 +1,10 @@
 // Sync-table protocol test: start-sync / load batches / incremental updates /
-// resync / remove-sync. Usage: node synctable-test.mjs <app-id>
+// resync / remove-sync. Usage: node synctable-test.mjs <app-id> <admin-token>
+// (start-sync is admin-only, matching legacy session.clj:281-284)
 const appId = process.argv[2];
-if (!appId) throw new Error("usage: node synctable-test.mjs <app-id>");
+const adminToken = process.argv[3];
+if (!appId || !adminToken)
+  throw new Error("usage: node synctable-test.mjs <app-id> <admin-token>");
 const uuid = () => crypto.randomUUID();
 const assert = (c, m) => {
   if (!c) throw new Error("ASSERT FAILED: " + m);
@@ -39,7 +42,7 @@ function connect(name) {
 
 const a = connect("A");
 await a.open;
-a.send({ op: "init", "app-id": appId });
+a.send({ op: "init", "app-id": appId, "__admin-token": adminToken });
 await a.waitFor((m) => m.op === "init-ok");
 
 // seed schema + two rows
@@ -116,7 +119,7 @@ const lastTx = upd3.txes[upd3.txes.length - 1]["tx-id"];
 // resync from a new session replays txes after the given watermark
 const b = connect("B");
 await b.open;
-b.send({ op: "init", "app-id": appId });
+b.send({ op: "init", "app-id": appId, "__admin-token": adminToken });
 await b.waitFor((m) => m.op === "init-ok");
 b.send({
   op: "resync-table",
@@ -139,8 +142,18 @@ const err = await b.waitFor(
 );
 assert(err["original-event"]["subscription-id"] === subId, "resync error echoes sub id");
 
-// remove-sync deletes the subscription
+// remove-sync deletes the subscription (no reply, matching legacy); after it,
+// new txes must not produce sync-update-triples for this sub anymore
 a.send({ op: "remove-sync", "subscription-id": subId, "keep-subscription": false });
-await a.waitFor((m) => m.op === "remove-sync-ok");
+await new Promise((r) => setTimeout(r, 300));
+const inboxLen = a.inbox.length;
+const e4 = uuid();
+a.send({ op: "transact", "tx-steps": [["add-triple", e4, idAttr, e4], ["add-triple", e4, nameAttr, "doc four"]] });
+await a.waitFor((m) => m.op === "transact-ok" && a.inbox.indexOf(m) >= inboxLen);
+await new Promise((r) => setTimeout(r, 500));
+assert(
+  !a.inbox.slice(inboxLen).some((m) => m.op === "sync-update-triples"),
+  "no sync updates after remove-sync",
+);
 console.log("SYNC TABLE TEST PASSED");
 process.exit(0);
