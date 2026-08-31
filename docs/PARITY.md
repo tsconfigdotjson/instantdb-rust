@@ -68,7 +68,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | attr-level (field) rules | ✅ | `[etype].fields.[field]` view programs filter triples per entity |
 | `request.*` / `rateLimit.*` CEL bindings | ❌ | |
 | rule-where query rewriting | ❌ | optimization only; per-entity evaluation gives the same results |
-| CEL null-safety (`missing key -> null`) | 🟡 | entity maps pre-populate all schema fields as null; unknown ad-hoc keys still error inside CEL |
+| CEL null-safety (`missing key -> null`) | ✅ | every key a rule statically mentions (select fields + string literals) is pre-inserted as null into `data`/`newData`/`auth`/`ruleParams`/`linkedData` and their nested maps; `has()`/`in` answer true like legacy; anonymous `auth` is an empty map; only keys computed at runtime (`data[someVar]`) still error → deny |
 
 ## Auth
 
