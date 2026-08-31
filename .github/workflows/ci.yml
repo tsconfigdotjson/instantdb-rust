@@ -73,11 +73,22 @@ jobs:
       - name: Run Rust tests
         run: cargo test --workspace
 
+      # The legacy SDK is frozen reference code — cache its build output and
+      # skip the tsc/tshy compile entirely on a hit. pnpm install still runs
+      # (fast via the store cache): dist imports resolve deps via node_modules.
+      - name: Cache admin SDK dist
+        id: sdk-dist
+        uses: actions/cache@v4
+        with:
+          path: LEGACY/client/packages/*/dist
+          key: admin-sdk-dist-${{ hashFiles('LEGACY/client/pnpm-lock.yaml', 'LEGACY/client/packages/**/src/**', 'LEGACY/client/packages/**/package.json') }}
       - name: Build admin SDK (e2e dependency)
         working-directory: LEGACY/client
         run: |
           pnpm install --frozen-lockfile --filter "@instantdb/admin..."
-          pnpm --filter "@instantdb/admin..." run build
+          if [ "${{ steps.sdk-dist.outputs.cache-hit }}" != "true" ]; then
+            pnpm --filter "@instantdb/admin..." run build
+          fi
 
       - name: Boot two server nodes
         run: |
