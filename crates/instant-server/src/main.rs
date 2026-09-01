@@ -2,6 +2,7 @@ mod auth;
 mod email;
 mod invalidator;
 mod presence;
+mod rate_limit;
 mod routes;
 mod service;
 mod state;

@@ -12,8 +12,19 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::auth;
+use crate::rate_limit;
 use crate::service;
 use crate::state::AppState;
+
+/// Per-app limit shared by the /runtime/auth/* routes (legacy's
+/// with-rate-limiting wrapper, docs/AUTH.md §0).
+fn check_auth_limit(state: &AppState, app_id: Uuid) -> Result<()> {
+    state
+        .limiters
+        .auth
+        .check(app_id, 1.0)
+        .map_err(rate_limit::rate_limited_err)
+}
 
 pub fn err_response(e: &InstantError) -> Response {
     let status =
@@ -126,8 +137,16 @@ pub async fn send_magic_code(
 
 async fn send_magic_code_impl(state: &Arc<AppState>, body: &Value) -> Result<Value> {
     let app_id = get_app_id(body, "app-id")?;
+    check_auth_limit(state, app_id)?;
     let app = service::get_app(state, app_id).await?;
     let email = coerce_email(get_str(body, "email")?)?;
+    // per-(app, email) budget, matching legacy's 20/hour default
+    // (magic_code_auth.clj:32-59)
+    state
+        .limiters
+        .magic_code_send
+        .check((app_id, email.clone()), 1.0)
+        .map_err(rate_limit::email_rate_limited_err)?;
     // 6-digit numeric code (legacy quirk: digits 0-8)
     let code: String = {
         use rand::Rng;
@@ -168,7 +187,22 @@ pub async fn verify_magic_code(
     State(state): State<Arc<AppState>>,
     Json(body): Json<Value>,
 ) -> Response {
-    json_or_err(verify_magic_code_impl(&state, &body).await)
+    json_or_err(verify_magic_code_runtime(&state, &body).await)
+}
+
+/// Client-facing path only: admin verify (verify_magic_code_shared) is
+/// already covered by the /admin/* bucket and its token check. The
+/// (app, email) bucket doubles as the 6-digit-code brute-force guard.
+async fn verify_magic_code_runtime(state: &AppState, body: &Value) -> Result<Value> {
+    let app_id = get_app_id(body, "app-id")?;
+    check_auth_limit(state, app_id)?;
+    let email = coerce_email(get_str(body, "email")?)?;
+    state
+        .limiters
+        .magic_code_verify
+        .check((app_id, email), 1.0)
+        .map_err(rate_limit::email_rate_limited_err)?;
+    verify_magic_code_impl(state, body).await
 }
 
 pub async fn verify_magic_code_shared(state: &AppState, body: &Value) -> Result<Value> {
@@ -305,6 +339,7 @@ pub async fn verify_refresh_token(
 
 async fn verify_refresh_token_impl(state: &AppState, body: &Value) -> Result<Value> {
     let app_id = get_app_id(body, "app-id")?;
+    check_auth_limit(state, app_id)?;
     let token = get_str(body, "refresh-token")?;
     let user = auth::user_by_refresh_token(state, app_id, token)
         .await?
@@ -323,6 +358,7 @@ pub async fn sign_in_guest(
 
 async fn sign_in_guest_impl(state: &AppState, body: &Value) -> Result<Value> {
     let app_id = get_app_id(body, "app-id")?;
+    check_auth_limit(state, app_id)?;
     service::get_app(state, app_id).await?;
     let uid = Uuid::new_v4();
     let steps = json!([
