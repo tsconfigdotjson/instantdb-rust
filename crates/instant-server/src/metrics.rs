@@ -121,7 +121,9 @@ fn gauge(out: &mut String, name: &str, help: &str, v: impl std::fmt::Display) {
     let _ = writeln!(out, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {v}");
 }
 
-/// (rss bytes, cpu seconds) of this process from procfs; zeros elsewhere.
+/// (rss bytes, cpu seconds) of this process: procfs on Linux, task info on
+/// macOS; zeros elsewhere.
+#[cfg(target_os = "linux")]
 fn process_stats() -> (u64, f64) {
     let rss = std::fs::read_to_string("/proc/self/status")
         .ok()
@@ -145,6 +147,44 @@ fn process_stats() -> (u64, f64) {
         })
         .unwrap_or(0.0);
     (rss, cpu)
+}
+
+#[cfg(target_os = "macos")]
+fn process_stats() -> (u64, f64) {
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+    // SAFETY: proc_pidinfo writes at most `size` bytes into `info`, which is
+    // a properly sized, zero-initialised proc_taskinfo.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            std::process::id() as i32,
+            libc::PROC_PIDTASKINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if n != size {
+        return (0, 0.0);
+    }
+    // process cpu time straight from the kernel clock (nanoseconds)
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: plain out-parameter call.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
+    let cpu = if rc == 0 {
+        ts.tv_sec as f64 + ts.tv_nsec as f64 / 1e9
+    } else {
+        0.0
+    };
+    (info.pti_resident_size, cpu)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_stats() -> (u64, f64) {
+    (0, 0.0)
 }
 
 pub fn render(state: &AppState) -> String {

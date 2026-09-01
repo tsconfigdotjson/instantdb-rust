@@ -119,13 +119,14 @@ topics of every registered query (`crates/instant-core/src/topics.rs`, see
 `docs/QUERY.md` §6), recomputes only the matching queries — once per distinct
 (query, auth) across all sessions — and pushes `refresh-ok` to the sessions
 whose result changed. Bursts of transactions coalesce into one batch per app.
-`docs/PERF.md` has the load-test methodology and before/after numbers;
-`scripts/loadtest.mjs` reproduces them against any server:
+`docs/PERF.md` has the load-test methodology and before/after numbers; the
+`instant-loadtest` binary (`crates/instant-loadtest`) reproduces them against
+any server, from any machine that can reach it:
 
 ```sh
 ./scripts/create-app.sh "loadtest" | tee /tmp/app.txt   # app id + token
 INSTANT_RATE_LIMITS=off ./target/release/instant-server &
-node scripts/loadtest.mjs --apps "$(grep '^app_id=' /tmp/app.txt | cut -d= -f2)" \
+cargo run --release -p instant-loadtest -- --apps "$(grep '^app_id=' /tmp/app.txt | cut -d= -f2)" \
   --clients 2000 --queries 3 --writers 8 --duration 30 --cleanup
 ```
 

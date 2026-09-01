@@ -13,12 +13,12 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::state::{AppState, Session};
+use crate::state::{AppState, Outgoing, Session};
 
 pub async fn stream(State(state): State<Arc<AppState>>) -> Response {
     let session_id = Uuid::new_v4();
     let sse_token = Uuid::new_v4();
-    let (tx, rx) = mpsc::unbounded_channel::<Value>();
+    let (tx, rx) = mpsc::unbounded_channel::<Outgoing>();
     let session = state.new_session(session_id, tx);
     {
         let mut st = session.state.lock().await;
@@ -49,7 +49,7 @@ pub async fn stream(State(state): State<Arc<AppState>>) -> Response {
         match guard.rx().recv().await {
             Some(msg) => {
                 guard.session.dequeued(1);
-                let event = Event::default().data(msg.to_string());
+                let event = Event::default().data(msg.into_string());
                 Some((Ok::<Event, Infallible>(event), guard))
             }
             None => None,
@@ -63,13 +63,13 @@ pub async fn stream(State(state): State<Arc<AppState>>) -> Response {
 
 /// Holds the receiver and cleans up the session when the SSE stream drops.
 struct RxGuard {
-    rx: Option<mpsc::UnboundedReceiver<Value>>,
+    rx: Option<mpsc::UnboundedReceiver<Outgoing>>,
     state: Arc<AppState>,
     session: Arc<Session>,
 }
 
 impl RxGuard {
-    fn rx(&mut self) -> &mut mpsc::UnboundedReceiver<Value> {
+    fn rx(&mut self) -> &mut mpsc::UnboundedReceiver<Outgoing> {
         self.rx.as_mut().unwrap()
     }
 }

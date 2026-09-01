@@ -16,6 +16,8 @@ use std::time::Instant;
 use futures::StreamExt;
 use instant_core::perms::Rules;
 use instant_core::topics::{QueryTopics, TxChange, TxTopics};
+use serde::Serialize;
+use serde_json::value::RawValue;
 use serde_json::{json, Value};
 use sqlx::postgres::PgListener;
 use sqlx::Row;
@@ -251,10 +253,49 @@ type JobKey = (String, bool, Option<Uuid>);
 type JobOutcome = (Vec<(usize, String)>, Option<JobResult>);
 
 struct JobResult {
-    ws_result: Value,
+    /// the instaql-result, serialized once for every subscriber
+    ws_json: Box<RawValue>,
     hash: u64,
     topics: Arc<QueryTopics>,
     duration_ms: u64,
+}
+
+/// refresh-ok on the wire; the result is spliced in as raw bytes. Key set
+/// mirrors legacy recompute-instaql-query! (session.clj:459-465).
+#[derive(Serialize)]
+struct RefreshOkWire<'a> {
+    op: &'static str,
+    #[serde(rename = "processed-tx-id")]
+    processed_tx_id: i64,
+    #[serde(rename = "processed-isn")]
+    processed_isn: &'a Value,
+    computations: Vec<ComputationWire<'a>>,
+    /// legacy omits attrs for core > 0.20.4 unless they changed
+    /// (session.clj:503-533 skip-attrs gating)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attrs: Option<&'a Value>,
+    #[serde(rename = "trace-id")]
+    trace_id: String,
+}
+
+#[derive(Serialize)]
+struct ComputationWire<'a> {
+    #[serde(rename = "instaql-query")]
+    instaql_query: &'a Value,
+    #[serde(rename = "instaql-query-hash")]
+    instaql_query_hash: u32,
+    #[serde(rename = "instaql-result")]
+    instaql_result: &'a RawValue,
+    /// only populated for the tree return-type
+    #[serde(rename = "result-meta")]
+    result_meta: (),
+    #[serde(rename = "result-changed?")]
+    result_changed: bool,
+    #[serde(rename = "duration-ms")]
+    duration_ms: u64,
+    /// whether a refined topic program was compiled (never — coarse topics)
+    #[serde(rename = "instaql-topic?")]
+    instaql_topic: bool,
 }
 
 /// Snapshot of one session's registered queries taken under its lock.
@@ -291,15 +332,6 @@ pub async fn refresh_batch(
         load_tx_topics(state, app_id, tx_ids).await
     };
 
-    // sync tables: independent per session, fire and forget
-    for session in &sessions {
-        let state = state.clone();
-        let session = session.clone();
-        tokio::spawn(async move {
-            crate::sync_table::push_updates(&state, &session, app_id, latest).await;
-        });
-    }
-
     // 1. snapshot queries under each session lock; decide what to recompute
     let mut plans: Vec<SessionPlan> = Vec::with_capacity(sessions.len());
     let mut jobs: HashMap<JobKey, Job> = HashMap::new();
@@ -307,6 +339,15 @@ pub async fn refresh_batch(
         let st = session.state.lock().await;
         if st.app_id != Some(app_id) {
             continue;
+        }
+        if !st.sync_subs.is_empty() {
+            // sync tables: independent per session, fire and forget (only
+            // the few sessions that subscribed — not a task per session)
+            let state = state.clone();
+            let session = session.clone();
+            tokio::spawn(async move {
+                crate::sync_table::push_updates(&state, &session, app_id, latest).await;
+            });
         }
         let perms = PermsCtx {
             admin: st.admin,
@@ -399,9 +440,12 @@ pub async fn refresh_batch(
                 let result = match out {
                     Ok(out) => {
                         let ws_result = out.result.to_ws_result();
+                        let hash = value_hash(&ws_result);
+                        let ws_json = RawValue::from_string(ws_result.to_string())
+                            .expect("serde_json output is valid JSON");
                         Some(JobResult {
-                            hash: value_hash(&ws_result),
-                            ws_result,
+                            ws_json,
+                            hash,
                             topics: Arc::new(out.topics),
                             duration_ms: started.elapsed().as_millis() as u64,
                         })
@@ -449,8 +493,7 @@ pub async fn refresh_batch(
         if computations.is_empty() && !(plan.skip_attrs && attrs_changed_for_session) {
             continue;
         }
-        let mut computation_json = Vec::with_capacity(computations.len());
-        {
+        let frame = {
             let mut st = plan.session.state.lock().await;
             if st.app_id != Some(app_id) {
                 continue;
@@ -465,40 +508,45 @@ pub async fn refresh_batch(
                     entry.topics = Some(topics);
                 }
             }
-            for (key, r) in computations {
-                // the client may have removed the query meanwhile
-                let Some(entry) = st.queries.get(&key) else {
-                    continue;
-                };
-                computation_json.push(json!({
-                    "instaql-query": entry.q,
-                    "instaql-query-hash": value_hash(&entry.q) as u32,
-                    "instaql-result": r.ws_result,
-                    "result-meta": Value::Null,
-                    "result-changed?": true,
-                    "duration-ms": r.duration_ms,
-                    "instaql-topic?": false,
-                }));
-            }
             if plan.skip_attrs {
                 st.attrs_hash = Some(attrs_hash);
             }
-        }
-        if computation_json.is_empty() && !(plan.skip_attrs && attrs_changed_for_session) {
-            continue;
-        }
-        let mut msg = json!({
-            "op": "refresh-ok",
-            "processed-tx-id": latest,
-            "processed-isn": processed_isn,
-            "computations": computation_json,
-        });
-        // legacy omits attrs for core > 0.20.4 unless they changed
-        // (session.clj:503-533 skip-attrs gating).
-        if !plan.skip_attrs || attrs_changed_for_session {
-            msg["attrs"] = wire_attrs.clone();
-        }
+            let mut wire = Vec::with_capacity(computations.len());
+            for (key, r) in &computations {
+                // the client may have removed the query meanwhile
+                let Some(entry) = st.queries.get(key) else {
+                    continue;
+                };
+                wire.push(ComputationWire {
+                    instaql_query: &entry.q,
+                    instaql_query_hash: value_hash(&entry.q) as u32,
+                    instaql_result: &r.ws_json,
+                    result_meta: (),
+                    result_changed: true,
+                    duration_ms: r.duration_ms,
+                    instaql_topic: false,
+                });
+            }
+            if wire.is_empty() && !(plan.skip_attrs && attrs_changed_for_session) {
+                continue;
+            }
+            let msg = RefreshOkWire {
+                op: "refresh-ok",
+                processed_tx_id: latest,
+                processed_isn: &processed_isn,
+                computations: wire,
+                attrs: (!plan.skip_attrs || attrs_changed_for_session).then_some(&wire_attrs),
+                trace_id: crate::state::new_trace_id(),
+            };
+            match serde_json::to_string(&msg) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("refresh-ok serialization failed: {e}");
+                    continue;
+                }
+            }
+        };
         METRICS.refresh_ok_sent_total.inc();
-        plan.session.send(msg);
+        plan.session.send_raw(frame);
     }
 }

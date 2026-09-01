@@ -13,18 +13,24 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::service::{self, PermsCtx};
-use crate::state::{value_hash, AppState, QueryEntry, Session, SessionUser};
+use crate::state::{value_hash, AppState, Outgoing, QueryEntry, Session, SessionUser};
 
 pub async fn handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| session_loop(socket, state))
+    // tungstenite preallocates read_buffer_size (128 KiB by default) per
+    // connection — ~1.3 GB for 10k idle sockets. Client frames are small
+    // (the buffer still grows for a large transact), and every outgoing
+    // frame is flushed as it is sent, so neither buffer needs to be large.
+    ws.read_buffer_size(8 * 1024)
+        .write_buffer_size(0)
+        .on_upgrade(move |socket| session_loop(socket, state))
 }
 
 async fn session_loop(socket: WebSocket, state: Arc<AppState>) {
     let session_id = Uuid::new_v4();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
     let session = state.new_session(session_id, tx);
 
     let (mut ws_tx, mut ws_rx) = socket.split();
@@ -63,9 +69,23 @@ async fn session_loop(socket: WebSocket, state: Arc<AppState>) {
                         break;
                     }
                     let frame = if pending.len() == 1 {
-                        pending.pop().unwrap().to_string()
+                        pending.pop().unwrap().into_string()
                     } else {
-                        Value::Array(pending).to_string()
+                        // JSON-array frame without re-parsing raw members
+                        let parts: Vec<String> =
+                            pending.into_iter().map(Outgoing::into_string).collect();
+                        let mut frame = String::with_capacity(
+                            parts.iter().map(|p| p.len() + 1).sum::<usize>() + 2,
+                        );
+                        frame.push('[');
+                        for (i, p) in parts.iter().enumerate() {
+                            if i > 0 {
+                                frame.push(',');
+                            }
+                            frame.push_str(p);
+                        }
+                        frame.push(']');
+                        frame
                     };
                     if ws_tx.send(Message::Text(frame.into())).await.is_err() {
                         break;

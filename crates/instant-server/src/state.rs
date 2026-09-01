@@ -105,9 +105,26 @@ pub struct QueryEntry {
     pub topics: Option<Arc<QueryTopics>>,
 }
 
+/// One outgoing message: a JSON value, or a frame already serialized (the
+/// refresh fan-out serializes each shared result once and hands every
+/// subscriber the bytes).
+pub enum Outgoing {
+    Json(Value),
+    Raw(String),
+}
+
+impl Outgoing {
+    pub fn into_string(self) -> String {
+        match self {
+            Outgoing::Json(v) => v.to_string(),
+            Outgoing::Raw(s) => s,
+        }
+    }
+}
+
 pub struct Session {
     pub id: Uuid,
-    pub tx: mpsc::UnboundedSender<Value>,
+    pub tx: mpsc::UnboundedSender<Outgoing>,
     pub state: Mutex<SessionState>,
     /// client accepts JSON-array frames (core > 0.22.75); read by the ws writer
     pub batch_messages: AtomicBool,
@@ -121,7 +138,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(id: Uuid, tx: mpsc::UnboundedSender<Value>, max_queued: usize) -> Session {
+    pub fn new(id: Uuid, tx: mpsc::UnboundedSender<Outgoing>, max_queued: usize) -> Session {
         Session {
             id,
             tx,
@@ -134,6 +151,19 @@ impl Session {
     }
 
     pub fn send(&self, mut msg: Value) {
+        // Legacy stamps every outgoing event with a trace-id (rs/send-event!).
+        if let Value::Object(m) = &mut msg {
+            m.entry("trace-id").or_insert_with(|| new_trace_id().into());
+        }
+        self.enqueue(Outgoing::Json(msg));
+    }
+
+    /// Queue an already-serialized frame (must carry its own trace-id).
+    pub fn send_raw(&self, frame: String) {
+        self.enqueue(Outgoing::Raw(frame));
+    }
+
+    fn enqueue(&self, msg: Outgoing) {
         if self.overflowed.load(Ordering::Relaxed) {
             return;
         }
@@ -145,10 +175,6 @@ impl Session {
             self.overflowed.store(true, Ordering::Relaxed);
             crate::metrics::METRICS.ws_sessions_overflowed_total.inc();
             return;
-        }
-        // Legacy stamps every outgoing event with a trace-id (rs/send-event!).
-        if let Value::Object(m) = &mut msg {
-            m.entry("trace-id").or_insert_with(|| new_trace_id().into());
         }
         self.queued.fetch_add(1, Ordering::Relaxed);
         crate::metrics::METRICS.ws_messages_sent_total.inc();
@@ -173,9 +199,6 @@ pub fn new_trace_id() -> String {
 pub struct AttrCacheEntry {
     pub attrs: Arc<AttrMap>,
     pub loaded_at: std::time::Instant,
-    /// attr_gen value observed before the load started; a bump in between
-    /// (concurrent attr change) means this entry must not be trusted
-    pub generation: u64,
 }
 
 pub struct AppState {
@@ -225,7 +248,7 @@ impl AppState {
         })
     }
 
-    pub fn new_session(&self, id: Uuid, tx: mpsc::UnboundedSender<Value>) -> Arc<Session> {
+    pub fn new_session(&self, id: Uuid, tx: mpsc::UnboundedSender<Outgoing>) -> Arc<Session> {
         let session = Arc::new(Session::new(id, tx, self.cfg.max_queued_messages));
         self.sessions.insert(id, session.clone());
         crate::metrics::METRICS.ws_connections_total.inc();

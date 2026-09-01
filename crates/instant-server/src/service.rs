@@ -64,7 +64,6 @@ pub async fn load_attrs(state: &AppState, app_id: Uuid) -> Result<Arc<AttrMap>> 
             crate::state::AttrCacheEntry {
                 attrs: attrs.clone(),
                 loaded_at: std::time::Instant::now(),
-                generation,
             },
         );
     }

@@ -977,6 +977,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "instant-loadtest"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "uuid",
+]
+
+[[package]]
 name = "instant-server"
 version = "0.1.0"
 dependencies = [
@@ -988,6 +1000,7 @@ dependencies = [
  "futures",
  "instant-core",
  "jsonwebtoken",
+ "libc",
  "mimalloc",
  "rand 0.8.8",
  "reqwest",

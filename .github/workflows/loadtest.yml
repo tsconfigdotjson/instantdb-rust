@@ -66,15 +66,11 @@ jobs:
         with:
           key: release
           cache-on-failure: true
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
       - name: Apply migrations
         run: ./scripts/apply-migrations.sh
 
-      - name: Build release server
-        run: cargo build --release -p instant-server
+      - name: Build release server + harness
+        run: cargo build --release -p instant-server -p instant-loadtest
 
       - name: Sizing
         id: sizing
@@ -135,7 +131,7 @@ jobs:
         run: |
           set -o pipefail
           ulimit -n 65536
-          node --max-old-space-size=6144 scripts/loadtest.mjs \
+          ./target/release/instant-loadtest \
             --apps "$APP_IDS" \
             --clients ${{ steps.sizing.outputs.clients }} \
             --queries ${{ steps.sizing.outputs.queries }} \
