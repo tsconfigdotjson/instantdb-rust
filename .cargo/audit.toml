@@ -1,0 +1,10 @@
+# cargo-audit configuration (used by the CI `cargo audit` job).
+
+[advisories]
+# RUSTSEC-2023-0071 (Marvin timing sidechannel in the `rsa` crate): rsa is in
+# Cargo.lock only as a dependency of sqlx-mysql, which this workspace never
+# enables or compiles (sqlx runs with the postgres feature only; the lockfile
+# records the full graph regardless of features). No patched rsa release
+# exists yet — drop this ignore once one does or if a mysql feature is ever
+# enabled.
+ignore = ["RUSTSEC-2023-0071"]
