@@ -38,9 +38,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      # Prebuilt binary — rustsec/audit-check compiles cargo-audit from
+      # source on every run (~6 minutes); this installs in seconds.
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit
 
   test:
     name: cargo test + e2e
