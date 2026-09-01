@@ -195,7 +195,7 @@ class Client {
       const rows = c["instaql-result"]?.[0]?.data?.["datalog-result"]?.["join-rows"]?.[0];
       if (!rows) continue;
       for (const [e, a, v] of rows) {
-        if (a !== schema.counters.seq) continue;
+        if (!seqAttrIds.has(a)) continue;
         const writer = writersByCounter.get(e);
         if (!writer) continue;
         const prev = this.lastSeen.get(e) ?? 0;
@@ -241,11 +241,19 @@ class Client {
 // ---------------------------------------------------------------------------
 // schema + seed (per app)
 
-const schema = {
-  todos: { id: uuid(), title: uuid(), done: uuid(), owner: uuid() },
-  notes: { id: uuid(), body: uuid() },
-  counters: { id: uuid(), seq: uuid(), writer: uuid() },
-};
+// Attr ids are global in the attrs table, so every app gets its own set.
+const schemas = new Map(); // appId -> schema
+const seqAttrIds = new Set(); // counters.seq attr ids across apps
+function makeSchema(appId) {
+  const schema = {
+    todos: { id: uuid(), title: uuid(), done: uuid(), owner: uuid() },
+    notes: { id: uuid(), body: uuid() },
+    counters: { id: uuid(), seq: uuid(), writer: uuid() },
+  };
+  schemas.set(appId, schema);
+  seqAttrIds.add(schema.counters.seq);
+  return schema;
+}
 const attrStep = (etype, label, id) => [
   "add-attr",
   {
@@ -271,6 +279,7 @@ async function setupApp(appId) {
   await c.connect();
   const init = await c.request({ op: "init", "app-id": appId, versions: { "@instantdb/core": CORE_VERSION } }, "init-ok");
   if (init.op === "error") die(`init failed for app ${appId}: ${init.message}`);
+  const schema = makeSchema(appId);
   const steps = [];
   for (const [etype, attrs] of Object.entries(schema)) {
     for (const [label, id] of Object.entries(attrs)) steps.push(attrStep(etype, label, id));
@@ -296,6 +305,7 @@ async function setupApp(appId) {
 
 async function cleanupApp(appId) {
   const { todos, notes, client } = seeded.get(appId);
+  const schema = schemas.get(appId);
   const steps = [];
   for (const t of todos) steps.push(["delete-entity", t, "todos"]);
   for (const n of notes) steps.push(["delete-entity", n, "notes"]);
@@ -325,6 +335,7 @@ class Writer {
     await this.client.connect();
     const init = await this.client.request({ op: "init", "app-id": this.appId, versions: { "@instantdb/core": CORE_VERSION } }, "init-ok");
     if (init.op === "error") die(`writer init failed: ${init.message}`);
+    const schema = schemas.get(this.appId);
     const r = await this.client.request(
       {
         op: "transact",
@@ -340,6 +351,7 @@ class Writer {
   }
   async run(untilMs) {
     const { todos } = seeded.get(this.appId);
+    const schema = schemas.get(this.appId);
     const loop = async () => {
       while (performance.now() < untilMs && !this.client.closed) {
         const seq = ++this.seq;

@@ -352,7 +352,6 @@ mod tests {
         todos_title: Uuid,
         todos_done: Uuid,
         todos_owner: Uuid,
-        users_id: Uuid,
         users_name: Uuid,
     }
 
@@ -369,7 +368,6 @@ mod tests {
             todos_title: a_title.id,
             todos_done: a_done.id,
             todos_owner: a_owner.id,
-            users_id: u_id.id,
             users_name: u_name.id,
             attrs: AttrMap::default(),
         };
