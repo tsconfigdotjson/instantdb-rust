@@ -1,6 +1,7 @@
 mod auth;
 mod email;
 mod invalidator;
+mod metrics;
 mod presence;
 mod rate_limit;
 mod routes;
@@ -16,6 +17,23 @@ use axum::Router;
 use sqlx::postgres::PgPoolOptions;
 use state::{AppState, Config};
 use tower_http::cors::CorsLayer;
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Prometheus text exposition of the node's counters/histograms/gauges.
+async fn metrics_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>,
+) -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        metrics::render(&state),
+    )
+}
 
 /// Request-body cap for JSON/API endpoints (transacts, admin queries, sse).
 const JSON_BODY_LIMIT: usize = 10 * 1024 * 1024;
@@ -33,7 +51,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cfg = Config::from_env();
     let pool = PgPoolOptions::new()
-        .max_connections(20)
+        .max_connections(cfg.pg_pool_max)
+        .min_connections(cfg.pg_pool_min.min(cfg.pg_pool_max))
         .connect(&cfg.database_url)
         .await?;
 
@@ -90,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(|| async { "instant-server" }))
         .route("/health", get(|| async { "ok" }))
+        .route("/metrics", get(metrics_handler))
         .route("/runtime/session", get(ws::handler))
         .route(
             "/runtime/sse",

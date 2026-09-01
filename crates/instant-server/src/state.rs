@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use instant_core::attr::AttrMap;
+use instant_core::topics::QueryTopics;
 use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::{mpsc, Mutex};
@@ -17,14 +20,28 @@ pub struct Config {
     /// unset — resolved at boot to a random secret persisted in Postgres
     /// (service::load_or_generate_secret), so there is no guessable default.
     pub secret: String,
+    /// Postgres pool sizing (`PG_POOL_MAX` / `PG_POOL_MIN`).
+    pub pg_pool_max: u32,
+    pub pg_pool_min: u32,
+    /// Max concurrent query recomputations per app refresh batch
+    /// (`INSTANT_REFRESH_CONCURRENCY`); bounded so one busy app can't drain
+    /// the pool for everyone else.
+    pub refresh_concurrency: usize,
+    /// Outgoing messages a session may have queued before it is treated as a
+    /// dead/slow consumer and disconnected (`INSTANT_MAX_QUEUED_MESSAGES`).
+    pub max_queued_messages: usize,
+}
+
+fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 impl Config {
     pub fn from_env() -> Self {
-        let port = std::env::var("PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(8888);
+        let port = env_num("PORT", 8888u16);
         Config {
             database_url: std::env::var("DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://instant:instant@localhost:5432/instant".into()),
@@ -33,6 +50,10 @@ impl Config {
                 .unwrap_or_else(|_| format!("http://localhost:{port}")),
             // Empty means "not configured"; main() fills it in from Postgres.
             secret: std::env::var("SERVER_SECRET").unwrap_or_default(),
+            pg_pool_max: env_num("PG_POOL_MAX", 20u32).max(2),
+            pg_pool_min: env_num("PG_POOL_MIN", 2u32),
+            refresh_concurrency: env_num("INSTANT_REFRESH_CONCURRENCY", 8usize).max(1),
+            max_queued_messages: env_num("INSTANT_MAX_QUEUED_MESSAGES", 10_000usize).max(100),
         }
     }
 }
@@ -79,25 +100,66 @@ pub struct QueryEntry {
     pub q: Value,
     /// hash of the last result sent, for refresh spam suppression
     pub result_hash: u64,
+    /// invalidation topics of the last result (instant_core::topics); None
+    /// means "unknown — recompute on every tx"
+    pub topics: Option<Arc<QueryTopics>>,
 }
 
 pub struct Session {
     pub id: Uuid,
     pub tx: mpsc::UnboundedSender<Value>,
     pub state: Mutex<SessionState>,
-    /// serializes refreshes per session
-    pub refresh_lock: Mutex<()>,
     /// client accepts JSON-array frames (core > 0.22.75); read by the ws writer
-    pub batch_messages: std::sync::atomic::AtomicBool,
+    pub batch_messages: AtomicBool,
+    /// messages queued for the transport writer but not yet written
+    pub queued: AtomicUsize,
+    /// queue cap; exceeding it flags the session as overflowed
+    pub max_queued: usize,
+    /// set once the outgoing queue overflowed — the transport closes the
+    /// session instead of buffering without bound
+    pub overflowed: AtomicBool,
 }
 
 impl Session {
+    pub fn new(id: Uuid, tx: mpsc::UnboundedSender<Value>, max_queued: usize) -> Session {
+        Session {
+            id,
+            tx,
+            state: Default::default(),
+            batch_messages: Default::default(),
+            queued: AtomicUsize::new(0),
+            max_queued,
+            overflowed: AtomicBool::new(false),
+        }
+    }
+
     pub fn send(&self, mut msg: Value) {
+        if self.overflowed.load(Ordering::Relaxed) {
+            return;
+        }
+        if self.queued.load(Ordering::Relaxed) >= self.max_queued {
+            // Slow/dead consumer: stop feeding it. The transport task sees
+            // the flag and closes the connection; the client reconnects and
+            // re-registers its queries, which is cheaper than unbounded
+            // buffering on the server.
+            self.overflowed.store(true, Ordering::Relaxed);
+            crate::metrics::METRICS.ws_sessions_overflowed_total.inc();
+            return;
+        }
         // Legacy stamps every outgoing event with a trace-id (rs/send-event!).
         if let Value::Object(m) = &mut msg {
             m.entry("trace-id").or_insert_with(|| new_trace_id().into());
         }
-        let _ = self.tx.send(msg);
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        crate::metrics::METRICS.ws_messages_sent_total.inc();
+        if self.tx.send(msg).is_err() {
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Called by the transport after taking a message off the queue.
+    pub fn dequeued(&self, n: usize) {
+        self.queued.fetch_sub(n, Ordering::Relaxed);
     }
 }
 
@@ -105,6 +167,15 @@ impl Session {
 pub fn new_trace_id() -> String {
     let id = Uuid::new_v4();
     id.simple().to_string()
+}
+
+/// Cached attr catalog for one app (service::load_attrs).
+pub struct AttrCacheEntry {
+    pub attrs: Arc<AttrMap>,
+    pub loaded_at: std::time::Instant,
+    /// attr_gen value observed before the load started; a bump in between
+    /// (concurrent attr change) means this entry must not be trusted
+    pub generation: u64,
 }
 
 pub struct AppState {
@@ -125,6 +196,13 @@ pub struct AppState {
     pub stream_subs: DashMap<(Uuid, Uuid), HashSet<(Uuid, String)>>,
     /// per-app token buckets (issue #1)
     pub limiters: crate::rate_limit::Limiters,
+    /// per-app attr catalog cache (issue #11), invalidated on attrs_changed
+    /// tx notifications
+    pub attr_cache: DashMap<Uuid, AttrCacheEntry>,
+    /// per-app invalidation generation for the attr cache
+    pub attr_gen: DashMap<Uuid, u64>,
+    /// per-app pending refresh work (invalidator::RefreshQueue)
+    pub refresh_queues: DashMap<Uuid, Arc<crate::invalidator::RefreshQueue>>,
 }
 
 impl AppState {
@@ -141,7 +219,17 @@ impl AppState {
             room_snapshots: DashMap::new(),
             stream_subs: DashMap::new(),
             limiters: crate::rate_limit::Limiters::from_env(),
+            attr_cache: DashMap::new(),
+            attr_gen: DashMap::new(),
+            refresh_queues: DashMap::new(),
         })
+    }
+
+    pub fn new_session(&self, id: Uuid, tx: mpsc::UnboundedSender<Value>) -> Arc<Session> {
+        let session = Arc::new(Session::new(id, tx, self.cfg.max_queued_messages));
+        self.sessions.insert(id, session.clone());
+        crate::metrics::METRICS.ws_connections_total.inc();
+        session
     }
 
     pub fn register_app_session(&self, app_id: Uuid, session_id: Uuid) {
@@ -155,8 +243,9 @@ impl AppState {
         if let Some((_, session)) = self.sessions.remove(&session_id) {
             drop(session);
         }
-        self.app_sessions.iter_mut().for_each(|mut e| {
-            e.value_mut().remove(&session_id);
+        self.app_sessions.retain(|_, set| {
+            set.remove(&session_id);
+            !set.is_empty()
         });
         self.room_sessions.iter_mut().for_each(|mut e| {
             e.value_mut().remove(&session_id);

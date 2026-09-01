@@ -25,14 +25,7 @@ pub async fn handler(
 async fn session_loop(socket: WebSocket, state: Arc<AppState>) {
     let session_id = Uuid::new_v4();
     let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
-    let session = Arc::new(Session {
-        id: session_id,
-        tx,
-        state: Default::default(),
-        refresh_lock: Default::default(),
-        batch_messages: Default::default(),
-    });
-    state.sessions.insert(session_id, session.clone());
+    let session = state.new_session(session_id, tx);
 
     let (mut ws_tx, mut ws_rx) = socket.split();
 
@@ -57,6 +50,17 @@ async fn session_loop(socket: WebSocket, state: Arc<AppState>) {
                                 Err(_) => break,
                             }
                         }
+                    }
+                    writer_session.dequeued(pending.len());
+                    if writer_session
+                        .overflowed
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                    {
+                        // slow consumer: the queue cap was hit and messages
+                        // were dropped, so the client's view is no longer
+                        // consistent — close and let it reconnect
+                        let _ = ws_tx.send(Message::Close(None)).await;
+                        break;
                     }
                     let frame = if pending.len() == 1 {
                         pending.pop().unwrap().to_string()
@@ -83,6 +87,7 @@ async fn session_loop(socket: WebSocket, state: Arc<AppState>) {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
+                crate::metrics::METRICS.ws_messages_received_total.inc();
                 handle_message(&state, &session, parsed).await;
             }
             Message::Close(_) => break,
@@ -307,9 +312,10 @@ async fn handle_add_query(
             return Ok(());
         }
     }
+    let started = std::time::Instant::now();
     let attrs = service::load_attrs(state, app_id).await?;
-    let result = service::run_query(state, app_id, &attrs, &perms, &q).await?;
-    let ws_result = result.to_ws_result();
+    let outcome = service::run_query_full(state, app_id, &attrs, &perms, &q, None).await?;
+    let ws_result = outcome.result.to_ws_result();
     let processed_tx_id = service::max_tx_id(state, app_id).await?;
     {
         let mut st = session.state.lock().await;
@@ -318,9 +324,13 @@ async fn handle_add_query(
             QueryEntry {
                 q: q.clone(),
                 result_hash: value_hash(&ws_result),
+                topics: Some(Arc::new(outcome.topics)),
             },
         );
     }
+    crate::metrics::METRICS
+        .add_query_seconds
+        .observe_since(started);
     session.send(json!({
         "op": "add-query-ok",
         "q": q,

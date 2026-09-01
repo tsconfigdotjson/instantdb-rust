@@ -12,6 +12,15 @@ license = "MIT"
 # boxing it everywhere isn't worth the churn.
 result_large_err = "allow"
 
+# Production binary (Dockerfile builds --release): whole-program LTO and a
+# single codegen unit buy ~10-20% on the serialize/hash-heavy fan-out paths
+# at the cost of a slower release build.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+debug = false
+
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
