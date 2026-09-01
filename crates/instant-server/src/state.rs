@@ -13,7 +13,9 @@ pub struct Config {
     pub port: u16,
     /// Public base URL of this server (for oauth redirects, file urls).
     pub base_url: String,
-    /// Secret for signing storage URLs and oauth cookies.
+    /// Secret for signing storage URLs. Taken from SERVER_SECRET, or — when
+    /// unset — resolved at boot to a random secret persisted in Postgres
+    /// (service::load_or_generate_secret), so there is no guessable default.
     pub secret: String,
 }
 
@@ -29,7 +31,8 @@ impl Config {
             port,
             base_url: std::env::var("BASE_URL")
                 .unwrap_or_else(|_| format!("http://localhost:{port}")),
-            secret: std::env::var("SERVER_SECRET").unwrap_or_else(|_| "dev-secret".into()),
+            // Empty means "not configured"; main() fills it in from Postgres.
+            secret: std::env::var("SERVER_SECRET").unwrap_or_default(),
         }
     }
 }

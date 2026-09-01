@@ -37,7 +37,9 @@ services:
       DATABASE_URL: postgres://instant:instant@postgres:5432/instant
       PORT: 8888
       BASE_URL: http://localhost:8888
-      SERVER_SECRET: change-me-in-production
+      # SERVER_SECRET is optional: when unset the server generates a random
+      # secret on first boot and persists it in Postgres. Set it explicitly
+      # to control rotation or share it across environments.
       STORAGE_DIR: /data/storage
     volumes:
       - storage:/data/storage
