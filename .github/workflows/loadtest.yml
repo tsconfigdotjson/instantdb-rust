@@ -1,0 +1,161 @@
+name: loadtest
+
+# Performance harness (issue #11). Pull requests run a small smoke variant
+# that fails on lost refreshes / errors, so fan-out regressions are caught;
+# workflow_dispatch runs the full sizing (defaults: 5k clients on a server
+# pinned to 2 vCPUs, mirroring the "2-vCPU node" target).
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      clients:
+        description: websocket clients
+        default: "5000"
+      queries:
+        description: queries per client (1-4)
+        default: "3"
+      writers:
+        description: concurrent writers
+        default: "16"
+      inflight:
+        description: transacts in flight per writer
+        default: "1"
+      duration:
+        description: write phase seconds
+        default: "60"
+      apps:
+        description: apps to spread clients across
+        default: "4"
+      cpus:
+        description: cpu list the server is pinned to (taskset)
+        default: "0,1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgres://instant:instant@localhost:5432/instant
+
+jobs:
+  loadtest:
+    name: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: instant
+          POSTGRES_PASSWORD: instant
+          POSTGRES_DB: instant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U instant"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+          cache-on-failure: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Apply migrations
+        run: ./scripts/apply-migrations.sh
+
+      - name: Build release server
+        run: cargo build --release -p instant-server
+
+      - name: Sizing
+        id: sizing
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "clients=${{ inputs.clients }}" >> "$GITHUB_OUTPUT"
+            echo "queries=${{ inputs.queries }}" >> "$GITHUB_OUTPUT"
+            echo "writers=${{ inputs.writers }}" >> "$GITHUB_OUTPUT"
+            echo "inflight=${{ inputs.inflight }}" >> "$GITHUB_OUTPUT"
+            echo "duration=${{ inputs.duration }}" >> "$GITHUB_OUTPUT"
+            echo "apps=${{ inputs.apps }}" >> "$GITHUB_OUTPUT"
+            echo "cpus=${{ inputs.cpus }}" >> "$GITHUB_OUTPUT"
+            echo "extra=" >> "$GITHUB_OUTPUT"
+          else
+            echo "clients=300" >> "$GITHUB_OUTPUT"
+            echo "queries=3" >> "$GITHUB_OUTPUT"
+            echo "writers=4" >> "$GITHUB_OUTPUT"
+            echo "inflight=1" >> "$GITHUB_OUTPUT"
+            echo "duration=10" >> "$GITHUB_OUTPUT"
+            echo "apps=2" >> "$GITHUB_OUTPUT"
+            echo "cpus=0,1" >> "$GITHUB_OUTPUT"
+            echo "extra=--smoke --max-p99-ms 5000" >> "$GITHUB_OUTPUT"
+          fi
+          nproc; free -m
+
+      - name: Boot server (pinned to ${{ steps.sizing.outputs.cpus }})
+        run: |
+          ulimit -n 65536
+          # Rate limits off: the harness deliberately exceeds the per-app
+          # free-tier buckets (issue #1) to find the real ceiling.
+          INSTANT_RATE_LIMITS=off PORT=8888 BASE_URL=http://localhost:8888 RUST_LOG=warn \
+            taskset -c "${{ steps.sizing.outputs.cpus }}" ./target/release/instant-server > /tmp/server.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8888/health >/dev/null && exit 0
+            sleep 1
+          done
+          echo "server failed to boot"; cat /tmp/server.log; exit 1
+
+      - name: Provision apps
+        run: |
+          ids=""
+          for i in $(seq 1 ${{ steps.sizing.outputs.apps }}); do
+            id=$(./scripts/create-app.sh "loadtest app $i" | grep '^app_id=' | cut -d= -f2)
+            ids="${ids:+$ids,}$id"
+          done
+          echo "APP_IDS=$ids" >> "$GITHUB_ENV"
+
+      - name: Run harness
+        run: |
+          ulimit -n 65536
+          node --max-old-space-size=6144 scripts/loadtest.mjs \
+            --apps "$APP_IDS" \
+            --clients ${{ steps.sizing.outputs.clients }} \
+            --queries ${{ steps.sizing.outputs.queries }} \
+            --writers ${{ steps.sizing.outputs.writers }} \
+            --inflight ${{ steps.sizing.outputs.inflight }} \
+            --duration ${{ steps.sizing.outputs.duration }} \
+            --out loadtest-results.json \
+            ${{ steps.sizing.outputs.extra }} | tee /tmp/loadtest.out
+          {
+            echo "server: \`$(git rev-parse --short HEAD)\`, pinned to cpus ${{ steps.sizing.outputs.cpus }} of $(nproc)"
+            echo
+            sed -n '/^### loadtest/,/^$/p' /tmp/loadtest.out
+            echo
+            echo '```'
+            grep -E '^(PASS|FAIL) ' /tmp/loadtest.out || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Server metrics snapshot
+        if: always()
+        run: curl -sf http://localhost:8888/metrics > loadtest-metrics.txt || echo "no /metrics endpoint" > loadtest-metrics.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loadtest-${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}-${{ github.sha }}
+          path: |
+            loadtest-results.json
+            loadtest-metrics.txt
+          if-no-files-found: ignore
+
+      - name: Server logs
+        if: failure()
+        run: cat /tmp/server.log || true
