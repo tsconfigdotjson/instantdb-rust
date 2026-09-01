@@ -1,12 +1,13 @@
 name: loadtest
 
-# Performance harness (issue #11). Pull requests run a small smoke variant
-# that fails on lost refreshes / errors, so fan-out regressions are caught;
-# workflow_dispatch runs the full sizing (defaults: 5k clients on a server
-# pinned to 2 vCPUs, mirroring the "2-vCPU node" target).
+# Performance harness (issue #11). Every push runs a small smoke variant
+# that fails on lost refreshes / errors, so fan-out regressions are caught.
+# The full sizing (defaults: 5k clients on a server pinned to 2 vCPUs,
+# mirroring the "2-vCPU node" target) runs on workflow_dispatch, or on a
+# push whose head commit message contains `[loadtest-full]`.
 
 on:
-  pull_request:
+  push:
   workflow_dispatch:
     inputs:
       clients:
@@ -41,7 +42,7 @@ env:
 
 jobs:
   loadtest:
-    name: ${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}
+    name: ${{ (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[loadtest-full]')) && 'full' || 'smoke' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -77,15 +78,24 @@ jobs:
 
       - name: Sizing
         id: sizing
+        env:
+          FULL: ${{ contains(github.event.head_commit.message, '[loadtest-full]') }}
+          IN_CLIENTS: ${{ inputs.clients || '5000' }}
+          IN_QUERIES: ${{ inputs.queries || '3' }}
+          IN_WRITERS: ${{ inputs.writers || '16' }}
+          IN_INFLIGHT: ${{ inputs.inflight || '1' }}
+          IN_DURATION: ${{ inputs.duration || '60' }}
+          IN_APPS: ${{ inputs.apps || '4' }}
+          IN_CPUS: ${{ inputs.cpus || '0,1' }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "clients=${{ inputs.clients }}" >> "$GITHUB_OUTPUT"
-            echo "queries=${{ inputs.queries }}" >> "$GITHUB_OUTPUT"
-            echo "writers=${{ inputs.writers }}" >> "$GITHUB_OUTPUT"
-            echo "inflight=${{ inputs.inflight }}" >> "$GITHUB_OUTPUT"
-            echo "duration=${{ inputs.duration }}" >> "$GITHUB_OUTPUT"
-            echo "apps=${{ inputs.apps }}" >> "$GITHUB_OUTPUT"
-            echo "cpus=${{ inputs.cpus }}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$FULL" = "true" ]; then
+            echo "clients=$IN_CLIENTS" >> "$GITHUB_OUTPUT"
+            echo "queries=$IN_QUERIES" >> "$GITHUB_OUTPUT"
+            echo "writers=$IN_WRITERS" >> "$GITHUB_OUTPUT"
+            echo "inflight=$IN_INFLIGHT" >> "$GITHUB_OUTPUT"
+            echo "duration=$IN_DURATION" >> "$GITHUB_OUTPUT"
+            echo "apps=$IN_APPS" >> "$GITHUB_OUTPUT"
+            echo "cpus=$IN_CPUS" >> "$GITHUB_OUTPUT"
             echo "extra=" >> "$GITHUB_OUTPUT"
           else
             echo "clients=300" >> "$GITHUB_OUTPUT"
@@ -123,6 +133,7 @@ jobs:
 
       - name: Run harness
         run: |
+          set -o pipefail
           ulimit -n 65536
           node --max-old-space-size=6144 scripts/loadtest.mjs \
             --apps "$APP_IDS" \
@@ -150,7 +161,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: loadtest-${{ github.event_name == 'workflow_dispatch' && 'full' || 'smoke' }}-${{ github.sha }}
+          name: loadtest-${{ (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[loadtest-full]')) && 'full' || 'smoke' }}-${{ github.sha }}
           path: |
             loadtest-results.json
             loadtest-metrics.txt
