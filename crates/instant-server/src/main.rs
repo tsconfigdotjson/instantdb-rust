@@ -17,6 +17,11 @@ use sqlx::postgres::PgPoolOptions;
 use state::{AppState, Config};
 use tower_http::cors::CorsLayer;
 
+/// Request-body cap for JSON/API endpoints (transacts, admin queries, sse).
+const JSON_BODY_LIMIT: usize = 10 * 1024 * 1024;
+/// Request-body cap for storage uploads (matches the legacy 100MB limit).
+const STORAGE_BODY_LIMIT: usize = 100 * 1024 * 1024;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -26,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cfg = Config::from_env();
+    let mut cfg = Config::from_env();
     let pool = PgPoolOptions::new()
         .max_connections(20)
         .connect(&cfg.database_url)
@@ -49,6 +54,14 @@ async fn main() -> anyhow::Result<()> {
             storage::ensure_blob_table(&pool)
                 .await
                 .map_err(|e| anyhow::anyhow!("blob table bootstrap failed: {e}"))?;
+            if cfg.secret.is_empty() {
+                cfg.secret = service::load_or_generate_secret(&pool)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("server secret bootstrap failed: {e}"))?;
+                tracing::info!(
+                    "SERVER_SECRET not set; using a generated secret persisted in Postgres"
+                );
+            }
             Ok(())
         }
         .await;
@@ -59,10 +72,20 @@ async fn main() -> anyhow::Result<()> {
         result?;
     }
 
+    if cfg.secret.len() < 16 {
+        tracing::warn!("SERVER_SECRET is very short; use a long random value in production");
+    }
+
     let state = AppState::new(cfg.clone(), pool);
 
     tokio::spawn(invalidator::run(state.clone()));
     tokio::spawn(presence::heartbeat_loop(state.clone()));
+
+    // Storage uploads keep the larger body cap on their own router.
+    let storage_uploads = Router::new()
+        .route("/admin/storage/upload", put(routes::admin::storage_upload))
+        .route("/storage/upload", put(routes::admin::client_storage_upload))
+        .layer(axum::extract::DefaultBodyLimit::max(STORAGE_BODY_LIMIT));
 
     let app = Router::new()
         .route("/", get(|| async { "instant-server" }))
@@ -138,14 +161,12 @@ async fn main() -> anyhow::Result<()> {
             "/admin/transact_perms_check",
             post(routes::admin::transact_perms_check),
         )
-        // storage
-        .route("/admin/storage/upload", put(routes::admin::storage_upload))
+        // storage (non-upload)
         .route(
             "/admin/storage/files",
             delete(routes::admin::storage_delete),
         )
         .route("/storage/serve/{app_id}/{location_id}", get(storage::serve))
-        .route("/storage/upload", put(routes::admin::client_storage_upload))
         .route(
             "/storage/files",
             delete(routes::admin::client_storage_delete),
@@ -154,8 +175,17 @@ async fn main() -> anyhow::Result<()> {
             "/storage/signed-download-url",
             get(routes::admin::client_signed_download_url),
         )
-        .layer(CorsLayer::very_permissive())
-        .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024))
+        // JSON endpoints: transacts and admin batches are at most a few MB;
+        // keep them an order of magnitude below the storage-upload cap so a
+        // single request can't buffer 100MB of JSON.
+        .layer(axum::extract::DefaultBodyLimit::max(JSON_BODY_LIMIT))
+        .merge(storage_uploads)
+        // Wildcard CORS without credential reflection: every browser-facing
+        // route authenticates via bearer headers, never cookies, so the
+        // origin-reflection + allow-credentials of very_permissive() is
+        // unnecessary exposure. The oauth __session cookie is SameSite=Lax
+        // and only read on top-level navigations, which CORS doesn't govern.
+        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", cfg.port);

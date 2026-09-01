@@ -32,6 +32,17 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # Prebuilt binary — rustsec/audit-check compiles cargo-audit from
+      # source on every run (~6 minutes); this installs in seconds.
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit
+
   test:
     name: cargo test + e2e
     runs-on: ubuntu-latest

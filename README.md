@@ -82,7 +82,7 @@ works exactly as with the hosted service. A complete example lives in
 | `DATABASE_URL` | `postgres://instant:instant@localhost:5432/instant` | any standard Postgres |
 | `PORT` | `8888` | |
 | `BASE_URL` | `http://localhost:$PORT` | public URL (oauth redirects, file URLs) |
-| `SERVER_SECRET` | `dev-secret` | signs storage URLs — set in production |
+| `SERVER_SECRET` | generated & persisted | signs storage download URLs; auto-generated on first boot and stored in Postgres when unset — set explicitly to control rotation |
 | `STORAGE_BACKEND` | `postgres` | blob store: `postgres` (multi-node correct) or `disk` |
 | `STORAGE_DIR` | `./storage-data` | blob directory for the `disk` backend |
 | `EMAIL_PROVIDER` | `log` | magic-code email delivery: `log` (print code to server log) or `cloudflare` ([Email Service](https://developers.cloudflare.com/email-service/) REST API) |
@@ -98,6 +98,38 @@ in an unlogged Postgres table with node heartbeats. Run as many replicas as
 you like behind any websocket-capable load balancer
 (`docker compose up --scale server=3`). `scripts/multinode-ws.mjs`
 demonstrates two clients on two different nodes syncing live.
+
+## Production deployment
+
+The server speaks plain HTTP/WS and expects to sit behind a TLS-terminating
+reverse proxy:
+
+- **TLS / websockets**: terminate TLS at a proxy (Caddy, nginx, a cloud load
+  balancer) and forward to the server port. The proxy must support websocket
+  upgrades on `/runtime/session` and SSE on `/runtime/sse`. Point clients at
+  `https://…` / `wss://…` and set `BASE_URL` to the public https URL so oauth
+  redirects and file URLs are generated correctly.
+- **Secrets**: `SERVER_SECRET` signs storage download URLs. If unset, a random
+  secret is generated on first boot and persisted in Postgres (all nodes share
+  it automatically). Set it explicitly only if you want to manage rotation
+  yourself — never ship a guessable value.
+- **Postgres**: use a strong password (the `instant:instant` credentials in
+  the examples are dev-only), enable TLS to the database where it crosses a
+  network, and keep Postgres unreachable from the public internet — only the
+  server nodes need to talk to it.
+- **Network isolation**: expose only the proxy. The server has no separate
+  management port; `/admin/*` is part of the public API surface and is
+  protected by per-app admin tokens (accepted via the `Authorization: Bearer`
+  header only — tokens never appear in URLs, and the server does not log
+  request URLs or headers).
+- **Request caps**: JSON endpoints accept bodies up to 10MB; storage uploads
+  up to 100MB; per-app rate limits apply to all route groups (see
+  `crates/instant-server/src/rate_limit.rs`). Size any proxy body limits at or
+  above these.
+- **CORS**: responses use wildcard CORS without credentials — auth is
+  bearer-token based, so browser cookies are never accepted cross-origin.
+- **Dependencies**: CI runs `cargo audit` (RustSec advisory database) on every
+  push alongside the test suite.
 
 ## Migrating from hosted Instant
 
