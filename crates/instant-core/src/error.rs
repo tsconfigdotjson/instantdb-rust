@@ -103,6 +103,17 @@ impl InstantError {
         Self::new("internal-error", 500, message, None)
     }
 
+    /// 429 rate-limited (util/exception.clj:484-509): hint carries a
+    /// machine-readable `retry-after` in whole seconds, rounded up.
+    pub fn rate_limited(message: impl Into<String>, retry_after_secs: u64) -> Self {
+        Self::new(
+            "rate-limited",
+            429,
+            message,
+            Some(json!({"retry-after": retry_after_secs})),
+        )
+    }
+
     /// JSON body for HTTP error responses / fields for ws `error` op.
     pub fn to_body(&self) -> Value {
         let mut body = json!({"type": self.error_type, "message": self.message});

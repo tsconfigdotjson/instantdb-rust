@@ -284,6 +284,11 @@ pub async fn serve(
     if now_day - day > 7 || sign(&state.cfg.secret, app_id, &location_id, day) != sig {
         return (StatusCode::FORBIDDEN, "invalid signature").into_response();
     }
+    // After the signature check so scanners without valid urls (already a
+    // cheap 403) can't drain an app's download budget.
+    if let Err(retry) = state.limiters.storage_serve.check(app_id, 1.0) {
+        return crate::routes::runtime::err_response(&crate::rate_limit::rate_limited_err(retry));
+    }
     match read_blob(&state, app_id, &location_id).await {
         Some(bytes) => {
             let content_type = file_content_type(&state, app_id, &location_id)

@@ -116,6 +116,26 @@ fn err_msg(original: &Value, e: &InstantError) -> Value {
 
 pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>, msg: Value) {
     let op = msg.get("op").and_then(|o| o.as_str()).unwrap_or("");
+    // Per-app rate limit (issue #1). `init` carries the app id in the
+    // message; every later op uses the session's app. Pre-init ops have no
+    // app scope and fail in their handlers anyway.
+    let limit_app_id = if op == "init" {
+        msg.get("app-id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    } else {
+        session.state.lock().await.app_id
+    };
+    if let Some(app_id) = limit_app_id {
+        if let Err(retry) = state
+            .limiters
+            .ws
+            .check(app_id, crate::rate_limit::ws_op_cost(op))
+        {
+            session.send(err_msg(&msg, &crate::rate_limit::rate_limited_err(retry)));
+            return;
+        }
+    }
     let result = match op {
         "init" => handle_init(state, session, &msg).await,
         "add-query" => handle_add_query(state, session, &msg).await,

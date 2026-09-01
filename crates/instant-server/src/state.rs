@@ -120,6 +120,8 @@ pub struct AppState {
     pub room_snapshots: DashMap<(Uuid, String), Value>,
     /// live stream subscribers on this node: (app, stream) -> (session, subscribe event id)
     pub stream_subs: DashMap<(Uuid, Uuid), HashSet<(Uuid, String)>>,
+    /// per-app token buckets (issue #1)
+    pub limiters: crate::rate_limit::Limiters,
 }
 
 impl AppState {
@@ -135,6 +137,7 @@ impl AppState {
             oauth_cache: DashMap::new(),
             room_snapshots: DashMap::new(),
             stream_subs: DashMap::new(),
+            limiters: crate::rate_limit::Limiters::from_env(),
         })
     }
 

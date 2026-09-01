@@ -41,6 +41,15 @@ pub async fn authed(
         .and_then(|s| Uuid::parse_str(&s).ok())
         .ok_or_else(|| InstantError::param_missing("Missing parameter: app-id"))?;
 
+    // Per-app limit on all /admin/* routes (legacy with-rate-limiting,
+    // docs/ADMIN.md §2). Checked before token auth so a hammering client
+    // can't run a DB lookup per request.
+    state
+        .limiters
+        .admin
+        .check(app_id, 1.0)
+        .map_err(crate::rate_limit::rate_limited_err)?;
+
     let bearer = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -1317,6 +1326,11 @@ async fn client_storage_upload_impl(
     body: Bytes,
 ) -> Result<Value> {
     let (app_id, perms) = client_storage_ctx(state, headers, params).await?;
+    state
+        .limiters
+        .storage_upload
+        .check(app_id, 1.0)
+        .map_err(crate::rate_limit::rate_limited_err)?;
     let path = headers
         .get("path")
         .or_else(|| headers.get("filename"))
@@ -1405,6 +1419,11 @@ async fn client_storage_delete_impl(
     params: &HashMap<String, String>,
 ) -> Result<Value> {
     let (app_id, perms) = client_storage_ctx(state, headers, params).await?;
+    state
+        .limiters
+        .storage_upload
+        .check(app_id, 1.0)
+        .map_err(crate::rate_limit::rate_limited_err)?;
     let filename = params
         .get("filename")
         .ok_or_else(|| InstantError::param_missing("Missing parameter: filename"))?;
@@ -1450,6 +1469,11 @@ async fn client_signed_download_url_impl(
     params: &HashMap<String, String>,
 ) -> Result<Value> {
     let (app_id, perms) = client_storage_ctx(state, headers, params).await?;
+    state
+        .limiters
+        .storage_serve
+        .check(app_id, 1.0)
+        .map_err(crate::rate_limit::rate_limited_err)?;
     let filename = params
         .get("filename")
         .ok_or_else(|| InstantError::param_missing("Missing parameter: filename"))?;
