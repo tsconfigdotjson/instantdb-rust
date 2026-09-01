@@ -352,6 +352,19 @@ pub async fn handle_subscribe_stream(
         .to_string();
     let offset = msg.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
 
+    // Register before reading the catch-up snapshot so an append landing
+    // between the two is delivered live instead of lost. The subscriber may
+    // then see a range twice (once live, once in the catch-up), but frames
+    // apply content at their absolute offset (Stream.ts:1077-1090), so
+    // overlap is idempotent; and a live frame can only precede the catch-up
+    // frame if its write committed first, in which case the catch-up read
+    // includes it and cannot truncate it away.
+    state
+        .stream_subs
+        .entry((app_id, stream_id))
+        .or_default()
+        .insert((session.id, subscribe_event_id.clone()));
+
     // catch-up: send stored content from offset
     let stored = crate::storage::read_blob(state, app_id, &stream_key(stream_id))
         .await
@@ -375,7 +388,7 @@ pub async fn handle_subscribe_stream(
     // abort-reason key is present only when the stream was aborted.
     let mut reply = json!({
         "op": "stream-append",
-        "client-event-id": subscribe_event_id,
+        "client-event-id": subscribe_event_id.clone(),
         "stream-id": stream_id,
         "client-id": client_id,
         "offset": offset.min(stored.len() as i64),
@@ -387,12 +400,12 @@ pub async fn handle_subscribe_stream(
     }
     session.send(reply);
 
-    if !done {
-        state
-            .stream_subs
-            .entry((app_id, stream_id))
-            .or_default()
-            .insert((session.id, subscribe_event_id));
+    if done {
+        // already-done streams get no live appends; drop the registration
+        // (mirrors deliver_append's cleanup on done)
+        if let Some(mut subs) = state.stream_subs.get_mut(&(app_id, stream_id)) {
+            subs.remove(&(session.id, subscribe_event_id));
+        }
     }
     Ok(())
 }
