@@ -252,7 +252,8 @@ mod tests {
         let rl: RateLimiter<u32> = RateLimiter::new(10.0, 1.0, true);
         let t0 = Instant::now();
         rl.check_at(1, 10.0, t0).unwrap(); // key 1 drained (full again in 10s)
-        rl.check_at(2, 1.0, t0 + SWEEP_EVERY + Duration::from_secs(5)).unwrap();
+        rl.check_at(2, 1.0, t0 + SWEEP_EVERY + Duration::from_secs(5))
+            .unwrap();
         // key 2's check crossed the sweep interval: key 1 refilled long ago
         // and is dropped; key 2 (touched just now, not full) is kept.
         assert!(!rl.buckets.contains_key(&1));
@@ -286,7 +287,10 @@ mod tests {
         for _ in 0..20 {
             assert!(l.magic_code_send.check_at(key.clone(), 1.0, t0).is_ok());
         }
-        let retry = l.magic_code_send.check_at(key.clone(), 1.0, t0).unwrap_err();
+        let retry = l
+            .magic_code_send
+            .check_at(key.clone(), 1.0, t0)
+            .unwrap_err();
         // next token in 3600/20 = 180s
         assert_eq!(retry, 180);
         // other emails unaffected
