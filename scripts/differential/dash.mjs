@@ -16,7 +16,7 @@ import fs from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { canon, makeIdFactory } from "./lib.mjs";
+import { canon, connectSse, makeIdFactory } from "./lib.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appId = process.argv[2];
@@ -606,6 +606,46 @@ async function runAgainst(name) {
     : errView(pulled);
   raw("24-admin-ref-lookups", r24);
   record("24-admin-ref-lookups", r24);
+
+  // 25 admin SSE transports (issue #8): the HTTP side of subscribe-query /
+  // sse / sse/push — auth and parameter errors before a stream opens, and
+  // the push envelope checks (admin/routes.clj:160-210, session.clj:1250-1261).
+  // Frames on an open stream are covered by replay.mjs steps 23-24.
+  const r25 = {};
+  const sseCall = (p, body, extra = {}) =>
+    call(base, "POST", p, { body, headers: { "app-id": appId, ...extra } });
+  r25.subscribeNoQuery = errView(await sseCall(`/admin/subscribe-query?local_connection_id=${ids.t1}`, { "inference?": true }));
+  r25.subscribeQueryNotMap = errView(await sseCall(`/admin/subscribe-query?local_connection_id=${ids.t1}`, { query: [1] }));
+  r25.subscribeBadToken = errView(await call(base, "POST", `/admin/subscribe-query?local_connection_id=${ids.t1}`, {
+    token: ids.p1, body: { query: { posts: {} } }, headers: { "app-id": appId },
+  }));
+  r25.subscribeNoAppId = errView(await call(base, "POST", `/admin/subscribe-query?local_connection_id=${ids.t1}`, { body: { query: { posts: {} } } }));
+  r25.sseBadToken = errView(await call(base, "POST", `/admin/sse?app_id=${appId}`, { token: ids.p1, body: { "inference?": false } }));
+  r25.sseUnknownAsEmail = errView(await sseCall(`/admin/sse?app_id=${appId}`, { "inference?": false }, { "as-email": "nobody@example.com" }));
+  // push envelope: every field is a required uuid; messages must be present
+  const push = (body, qs = `?app_id=${appId}`) => call(base, "POST", `/admin/sse/push${qs}`, { token: null, body });
+  r25.pushEmpty = errView(await push({}));
+  r25.pushMalformedMachine = errView(await push({ machine_id: "nope" }));
+  r25.pushNoAppId = errView(await push({ machine_id: ids.p1 }, ""));
+  r25.pushNoSession = errView(await push({ machine_id: ids.p1 }));
+  r25.pushNoToken = errView(await push({ machine_id: ids.p1, session_id: ids.p2 }));
+  r25.pushNoMessages = errView(await push({ machine_id: ids.p1, session_id: ids.p2, sse_token: ids.p3 }));
+  // a live session: wrong token and unknown session are both "session missing";
+  // an unknown machine id is "member missing"
+  const live = connectSse(base, appId, `${name}:dash-sse`, {
+    path: `/admin/sse?app_id=${appId}`,
+    headers: { "app-id": appId, authorization: `Bearer ${adminToken}` },
+    body: { "inference?": false },
+  });
+  await live.open;
+  const env = { machine_id: live.init["machine-id"], session_id: live.init["session-id"], sse_token: live.init["sse-token"] };
+  r25.pushWrongToken = errView(await push({ ...env, sse_token: ids.p3, messages: [] }));
+  r25.pushUnknownSession = errView(await push({ ...env, session_id: ids.p2, messages: [] }));
+  r25.pushUnknownMachine = errView(await push({ ...env, machine_id: ids.p1, session_id: ids.p2, messages: [] }));
+  r25.pushOk = plainView(await push({ ...env, messages: [] }));
+  live.close();
+  raw("25-admin-sse", r25);
+  record("25-admin-sse", r25);
 
   return out;
 }

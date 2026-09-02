@@ -28,18 +28,92 @@ pub struct AdminCtx {
     pub perms: PermsCtx,
 }
 
+/// The app id of an /admin request: `app-id` header, else `app_id` query
+/// param (legacy req->app-id-untrusted! via get-some-param!, which names the
+/// first path in its error and lists the rest as `possible-ins`).
+pub(crate) fn app_id_param(headers: &HeaderMap, params: &HashMap<String, String>) -> Result<Uuid> {
+    let header = headers
+        .get("app-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| (["headers", "app-id"], s.to_string()));
+    let (path, raw) = header
+        .or_else(|| {
+            params
+                .get("app_id")
+                .map(|s| (["query-params", "app_id"], s.clone()))
+        })
+        .ok_or_else(|| {
+            InstantError::new(
+                "param-missing",
+                400,
+                "Missing parameter: [\"headers\" \"app-id\"]",
+                Some(json!({
+                    "in": ["headers", "app-id"],
+                    "possible-ins": [["query-params", "app_id"]],
+                })),
+            )
+        })?;
+    Uuid::parse_str(&raw).map_err(|_| {
+        InstantError::new(
+            "param-malformed",
+            400,
+            format!("Malformed parameter: [\"{}\" \"{}\"]", path[0], path[1]),
+            Some(json!({"in": path, "original-input": raw})),
+        )
+    })
+}
+
+/// `[:body :query]` must be a map (legacy `get-param!` with a `map?`
+/// coercer: absent → param-missing, anything else → param-malformed).
+pub(crate) fn body_query(body: &Value) -> Result<&Value> {
+    match body.get("query") {
+        None | Some(Value::Null) => Err(InstantError::new(
+            "param-missing",
+            400,
+            "Missing parameter: [\"body\" \"query\"]",
+            Some(json!({"in": ["body", "query"]})),
+        )),
+        Some(q) if q.is_object() => Ok(q),
+        Some(q) => Err(InstantError::new(
+            "param-malformed",
+            400,
+            "Malformed parameter: [\"body\" \"query\"]",
+            Some(json!({"in": ["body", "query"], "original-input": q})),
+        )),
+    }
+}
+
+/// Legacy app-admin-token-model/fetch!: the hint carries the lookup args
+/// and the explanatory message; the message itself is the bare record name.
+fn admin_token_not_found(app_id: Uuid, token: &str) -> InstantError {
+    InstantError::new(
+        "record-not-found",
+        400,
+        "Record not found: app-admin-token",
+        Some(json!({
+            "record-type": "app-admin-token",
+            "args": [{"app-id": app_id, "token": token}],
+            "message": "This admin token may be expired or invalid. Or you may have provided an incorrect app ID.",
+        })),
+    )
+}
+
+/// Legacy `ex/assert-record! ... :app-user {:args [params]}`.
+fn app_user_not_found(args: Value) -> InstantError {
+    InstantError::new(
+        "record-not-found",
+        400,
+        "Record not found: app-user",
+        Some(json!({"record-type": "app-user", "args": [args]})),
+    )
+}
+
 pub async fn authed(
     state: &AppState,
     headers: &HeaderMap,
     params: &HashMap<String, String>,
 ) -> Result<AdminCtx> {
-    let app_id = headers
-        .get("app-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or_else(|| params.get("app_id").cloned())
-        .and_then(|s| Uuid::parse_str(&s).ok())
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: app-id"))?;
+    let app_id = app_id_param(headers, params)?;
 
     // Per-app limit on all /admin/* routes (legacy with-rate-limiting,
     // docs/ADMIN.md §2). Checked before token auth so a hammering client
@@ -50,11 +124,10 @@ pub async fn authed(
         .check(app_id, 1.0)
         .map_err(crate::rate_limit::rate_limited_err)?;
 
-    let bearer = headers
+    let auth_header = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|s| s.trim().to_string());
+        .map(|s| s.to_string());
 
     // request.ip / request.origin for rules come from this HTTP request
     // (legacy binds *request-info* around every handler, util/http.clj:84-118)
@@ -65,11 +138,18 @@ pub async fn authed(
 
     // impersonation (as-token/as-guest work without a valid admin token)
     if let Some(token) = as_token {
+        // legacy coerces the header to a uuid first (routes.clj:86-91)
+        if Uuid::parse_str(token).is_err() {
+            return Err(InstantError::new(
+                "param-malformed",
+                400,
+                "Malformed parameter: [\"asUser\" \"token\"]",
+                Some(json!({"in": ["asUser", "token"], "original-input": token})),
+            ));
+        }
         let user = auth::user_by_refresh_token(state, app_id, token)
             .await?
-            .ok_or_else(|| {
-                InstantError::record_not_found("app-user", "Record not found: app-user")
-            })?;
+            .ok_or_else(|| app_user_not_found(json!({"app-id": app_id, "refresh-token": token})))?;
         return Ok(AdminCtx {
             app_id,
             perms: PermsCtx {
@@ -82,28 +162,39 @@ pub async fn authed(
             },
         });
     }
-    let check_admin = |token: Option<String>| async move {
-        let token = token.ok_or_else(|| {
-            InstantError::record_not_found(
-                "app-admin-token",
-                "Record not found: app-admin-token. This admin token may be expired or invalid. Or you may have provided an incorrect app ID.",
+    // legacy req->bearer-token!: the header is a required param, then the
+    // token row must exist (routes.clj:69-72, util/http.clj:22-25)
+    let check_admin = |header: Option<String>| async move {
+        let header = header.ok_or_else(|| {
+            InstantError::new(
+                "param-missing",
+                400,
+                "Missing parameter: [\"headers\" \"authorization\"]",
+                Some(json!({"in": ["headers", "authorization"]})),
             )
         })?;
-        if !auth::check_admin_token(state, app_id, &token).await? {
-            return Err(InstantError::record_not_found(
-                "app-admin-token",
-                "Record not found: app-admin-token. This admin token may be expired or invalid. Or you may have provided an incorrect app ID.",
-            ));
+        let token = header
+            .strip_prefix("Bearer ")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                InstantError::new(
+                    "param-malformed",
+                    400,
+                    "Malformed parameter: [\"headers\" \"authorization\"]",
+                    Some(json!({"in": ["headers", "authorization"], "original-input": header})),
+                )
+            })?;
+        if !auth::check_admin_token(state, app_id, token).await? {
+            return Err(admin_token_not_found(app_id, token));
         }
         Ok(())
     };
     if let Some(email) = as_email {
-        check_admin(bearer).await?;
+        check_admin(auth_header).await?;
         let user = auth::user_by_email(state, app_id, email)
             .await?
-            .ok_or_else(|| {
-                InstantError::record_not_found("app-user", "Record not found: app-user")
-            })?;
+            .ok_or_else(|| app_user_not_found(json!({"app-id": app_id, "email": email})))?;
         return Ok(AdminCtx {
             app_id,
             perms: PermsCtx {
@@ -129,7 +220,7 @@ pub async fn authed(
             },
         });
     }
-    check_admin(bearer).await?;
+    check_admin(auth_header).await?;
     Ok(AdminCtx {
         app_id,
         perms: PermsCtx {
@@ -185,9 +276,9 @@ fn node_to_object(
             location_id = t.v.as_str().map(|s| s.to_string());
             continue;
         }
-        if !t.v.is_null() {
-            m.insert(attr.label.clone(), t.v.clone());
-        }
+        // legacy triples->map keeps every triple, nulls included (indexed
+        // attrs backfill a null triple, so `score: null` is on the wire)
+        m.insert(attr.label.clone(), t.v.clone());
     }
     if node.etype == "$files" {
         if let Some(loc) = &location_id {
@@ -342,6 +433,32 @@ pub fn object_tree(
     Value::Object(out)
 }
 
+/// `result-meta` of a tree-shaped result: page-info and aggregate keyed by
+/// top-level form, both maps always present (legacy
+/// util/instaql.clj instaql-nodes->object-meta; read by
+/// admin/src/subscribe.ts formatPageInfo).
+pub fn object_meta(result: &QueryResult) -> Value {
+    let mut page_info = Map::new();
+    let mut aggregate = Map::new();
+    for form in &result.forms {
+        if let Some(pi) = &form.page_info {
+            page_info.insert(
+                form.k.clone(),
+                json!({
+                    "start-cursor": pi.start_cursor,
+                    "end-cursor": pi.end_cursor,
+                    "has-next-page?": pi.has_next_page,
+                    "has-previous-page?": pi.has_previous_page,
+                }),
+            );
+        }
+        if let Some(count) = form.aggregate {
+            aggregate.insert(form.k.clone(), json!({"count": count}));
+        }
+    }
+    json!({"page-info": page_info, "aggregate": aggregate})
+}
+
 /// AuthCtx for the perms-check debug routes: the request's own ip/origin,
 /// overridable per call (`ip-override` / `origin-override`; legacy
 /// admin/routes.clj:230-246, :332-363; non-blank strings only).
@@ -386,10 +503,7 @@ async fn query_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed(state, headers, params).await?;
-    let q = body
-        .get("query")
-        .filter(|q| q.is_object())
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"query\"]"))?;
+    let q = body_query(body)?;
     let inference = body
         .get("inference?")
         .and_then(|v| v.as_bool())
@@ -1619,10 +1733,7 @@ async fn query_perms_check_impl(
             json!([{"message": "Cannot test perms as admin"}]),
         ));
     }
-    let q = body
-        .get("query")
-        .filter(|q| q.is_object())
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"query\"]"))?;
+    let q = body_query(body)?;
     let inference = body
         .get("inference?")
         .and_then(|v| v.as_bool())

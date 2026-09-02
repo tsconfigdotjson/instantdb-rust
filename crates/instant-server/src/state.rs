@@ -95,6 +95,9 @@ pub struct SessionState {
     pub attrs_hash: Option<u64>,
     /// set for SSE-transport sessions; validates /runtime/sse pushes
     pub sse_token: Option<Uuid>,
+    /// legacy `:session/inference?` (admin SSE sessions, `inference?` in the
+    /// request body): singular links in tree-shaped results
+    pub inference: bool,
     /// active sync-table subscriptions: sub id -> state
     pub sync_subs: HashMap<Uuid, SyncSub>,
     /// stream ids this session is the writer for
@@ -120,6 +123,9 @@ pub struct QueryEntry {
     /// invalidation topics of the last result (instant_core::topics); None
     /// means "unknown — recompute on every tx"
     pub topics: Option<Arc<QueryTopics>>,
+    /// legacy `:instaql-query/return-type`: `tree` (admin SSE subscribeQuery,
+    /// object tree + result-meta) instead of the default join-rows
+    pub tree: bool,
 }
 
 /// One outgoing message: a JSON value, or a frame already serialized (the

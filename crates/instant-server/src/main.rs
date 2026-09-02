@@ -158,6 +158,12 @@ async fn main() -> anyhow::Result<()> {
         )
         // admin
         .route("/admin/query", post(routes::admin::query))
+        .route(
+            "/admin/subscribe-query",
+            post(routes::sse::admin_subscribe_query),
+        )
+        .route("/admin/sse", post(routes::sse::admin_stream))
+        .route("/admin/sse/push", post(routes::sse::admin_push))
         .route("/admin/transact", post(routes::admin::transact))
         .route("/admin/refresh_tokens", post(routes::admin::refresh_tokens))
         .route("/admin/sign_out", post(routes::admin::sign_out))

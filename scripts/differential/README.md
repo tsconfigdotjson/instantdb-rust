@@ -19,7 +19,7 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   server (host :8891) from `ghcr.io/instantdb`.
 - `provision.sh` — creates the same app id + admin token in both servers'
   databases (both run the same legacy schema).
-- `replay.mjs` — 22-step scenario across init, schemaless transacts, queries
+- `replay.mjs` — 24-step scenario across init, schemaless transacts, queries
   (nested/paginated/cursor round-trip/aggregate), typed-attr query breadth
   ($gt/$lt/$like/$ilike/$in/$not/$isNull/or/and, typed ordering, offset,
   last, fields projection, dot-paths), authed sessions + permissions (real
@@ -29,7 +29,13 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   read-only / disabled gates, linked-guest `$users` access after a magic-code
   upgrade, `delete-attr` / `restore-attr` round trips, `request.*` rule
   bindings (origin / x-forwarded-for ride on the upgrade request), `$rateLimits`
-  buckets, and the system-column / system-entity guards. `inferred-types` on
+  buckets, the system-column / system-entity guards, and the admin SSE
+  transports (issue #8): `POST /admin/subscribe-query` sessions (admin and
+  `as-token`-impersonated, object-tree `add-query-ok` / `refresh-ok` with
+  `result-meta` page-info compared whole) and the generic `POST /admin/sse` +
+  `/admin/sse/push` session driving join-rows queries, transacts and a stream a
+  socket subscriber tails (`connectSse` in lib.mjs mirrors the SDK's
+  transports). `inferred-types` on
   attrs is compared for real (it used to be normalized away). Frames are folded into the
   **client-visible projection** (exactly what `Reactor.js`/`SyncTable.ts`/
   `Stream.ts` read, with volatile server-chosen values normalized) and must
@@ -49,7 +55,9 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   compared, and the pulled attrs checked for lingering in-flight markers)
   (completed and errored jobs with their invalid-data samples), server-side
   `schema/push/{plan,apply}`, perms pull, rules push (valid, unchanged and
-  invalid rules), and the auth/param error matrix. Responses are folded to
+  invalid rules), the auth/param error matrix, and the HTTP side of the admin
+  SSE routes (auth / query / push-envelope errors, `session-missing` and
+  `member-missing` against a live session). Responses are folded to
   what the CLI reads (server-chosen ids, timestamps and CEL diagnostics
   normalized) and must match. `node dash.mjs <app> <token> [<app2> <token2>]`.
 - `fuzz.mjs` — seeded random tx-steps + queries replayed on both servers;

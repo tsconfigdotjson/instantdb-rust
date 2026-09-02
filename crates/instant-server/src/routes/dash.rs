@@ -30,7 +30,7 @@ use crate::state::AppState;
 // ---------------------------------------------------------------------------
 // auth
 
-fn param_missing(ks: &[&str]) -> InstantError {
+pub(crate) fn param_missing(ks: &[&str]) -> InstantError {
     InstantError::new(
         "param-missing",
         400,
@@ -39,7 +39,7 @@ fn param_missing(ks: &[&str]) -> InstantError {
     )
 }
 
-fn param_malformed(ks: &[&str], original: Value) -> InstantError {
+pub(crate) fn param_malformed(ks: &[&str], original: Value) -> InstantError {
     InstantError::new(
         "param-malformed",
         400,

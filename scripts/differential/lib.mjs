@@ -99,6 +99,121 @@ export function connect(serverUrl, appId, name, headers) {
   };
 }
 
+// SSE capture client with the same surface as `connect`: the admin SDK's
+// transports (admin/src/subscribe.ts subscribe(), core/src/Connection.ts
+// SSEConnection). `path` is opened with a POST carrying `headers` + JSON
+// `body`; the stream is open once `sse-init` arrives, and `send` POSTs the
+// message envelope (machine_id / session_id / sse_token / messages) to
+// `pushPath` like SSEConnection.postMessages.
+export function connectSse(serverUrl, appId, name, { path, pushPath, headers = {}, body }) {
+  const frames = [];
+  let cursorMark = 0;
+  const waiters = [];
+  let lastFrameAt = Date.now();
+  let init = null;
+  let httpStatus = null;
+  const deliver = (m) => {
+    frames.push(m);
+    lastFrameAt = Date.now();
+    if (m.op === "sse-init") init = m;
+    for (let i = waiters.length - 1; i >= 0; i--) {
+      const [pred, resolve] = waiters[i];
+      if (pred(m)) {
+        waiters.splice(i, 1);
+        resolve(m);
+      }
+    }
+  };
+  const controller = new AbortController();
+  const open = (async () => {
+    const res = await fetch(serverUrl + path, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream", ...headers },
+      body: JSON.stringify(body ?? {}),
+      signal: controller.signal,
+    });
+    httpStatus = res.status;
+    if (!res.ok) throw new Error(`sse open failed on ${name}: ${res.status} ${(await res.text()).slice(0, 300)}`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    (async () => {
+      let buf = "";
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf("\n\n")) >= 0) {
+            const chunk = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            const data = chunk
+              .split("\n")
+              .filter((l) => l.startsWith("data:"))
+              .map((l) => l.slice(5).trim())
+              .join("\n");
+            if (!data) continue;
+            let parsed;
+            try {
+              parsed = JSON.parse(data);
+            } catch {
+              continue;
+            }
+            for (const m of Array.isArray(parsed) ? parsed : [parsed]) deliver(m);
+          }
+        }
+      } catch {
+        // stream closed
+      }
+    })();
+    await new Promise((resolve, reject) => {
+      if (init) return resolve();
+      const t = setTimeout(() => reject(new Error(`timeout waiting for sse-init on ${name}`)), 15000);
+      waiters.push([(m) => m.op === "sse-init", () => { clearTimeout(t); resolve(); }]);
+    });
+  })();
+  const send = (msg) => {
+    if (!init) throw new Error(`sse ${name} not open`);
+    const envelope = {
+      machine_id: init["machine-id"],
+      session_id: init["session-id"],
+      sse_token: init["sse-token"],
+      messages: [msg],
+    };
+    fetch(serverUrl + (pushPath ?? `/admin/sse/push?app_id=${appId}`), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(envelope),
+    }).then(async (r) => {
+      if (!r.ok) console.error(`push failed on ${name}: ${r.status} ${(await r.text()).slice(0, 300)}`);
+    });
+    return msg["client-event-id"];
+  };
+  const waitFor = (pred, timeout = 15000) =>
+    new Promise((resolve, reject) => {
+      const existing = frames.slice(cursorMark).find(pred);
+      if (existing) return resolve(existing);
+      const t = setTimeout(() => reject(new Error(`timeout waiting on ${name}`)), timeout);
+      waiters.push([pred, (m) => { clearTimeout(t); resolve(m); }]);
+    });
+  return {
+    name,
+    send,
+    waitFor,
+    frames,
+    open,
+    get httpStatus() { return httpStatus; },
+    get init() { return init; },
+    close: () => controller.abort(),
+    takeNewFrames() {
+      const out = frames.slice(cursorMark);
+      cursorMark = frames.length;
+      return out;
+    },
+    quietSince: () => Date.now() - lastFrameAt,
+  };
+}
+
 // wait until every connection has been frame-silent for quietMs
 export async function settle(conns, quietMs = 700, maxMs = 15000) {
   const start = Date.now();
@@ -191,6 +306,28 @@ export function projectResult(result) {
   };
 }
 
+// Tree-shaped results (admin SSE `return-type: tree`): the admin SDK hands
+// the object tree to the app as-is (subscribe.ts:305-320), so compare it
+// whole. Top-level order is what the query asked for; nested link arrays
+// are sorted by id (both servers order them by server-created-at with an
+// id tie-break, and entities seeded in one tx share a timestamp).
+export const isTreeResult = (result) => result !== null && typeof result === "object" && !Array.isArray(result);
+export function projectTree(result, top = true) {
+  if (Array.isArray(result)) {
+    const items = result.map((v) => projectTree(v, false));
+    if (!top) items.sort((x, y) => (canon(x) < canon(y) ? -1 : 1));
+    return items;
+  }
+  if (result !== null && typeof result === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(result)) out[k] = projectTree(v, false);
+    return out;
+  }
+  return normalize(result);
+}
+export const projectAnyResult = (result) =>
+  isTreeResult(result) ? { tree: projectTree(result) } : projectResult(result);
+
 // Fold a step's frames into (a) directly comparable normalized frames,
 // (b) per-query latest results, (c) per-room presence state — mirroring
 // client state application. Async because stream readers fetch `files` URLs
@@ -231,19 +368,24 @@ export async function foldFrames(frames, state) {
       }
       case "refresh-ok": {
         for (const comp of m.computations ?? []) {
-          state.queries[canon(normalize(comp["instaql-query"]))] = projectResult(
-            comp["instaql-result"],
-          );
+          const key = canon(normalize(comp["instaql-query"]));
+          state.queries[key] = projectAnyResult(comp["instaql-result"]);
+          // admin SSE reads result-meta.page-info per computation (subscribe.ts:322-327)
+          if (isTreeResult(comp["instaql-result"])) {
+            state.queries[key]["result-meta"] = normalize(comp["result-meta"] ?? null);
+          }
         }
         if (m.attrs) state.attrs = projectAttrs(m.attrs);
         break;
       }
       case "add-query-ok": {
-        state.queries[canon(normalize(m.q))] = projectResult(m.result);
+        const projected = projectAnyResult(m.result);
+        if (isTreeResult(m.result)) projected["result-meta"] = normalize(m["result-meta"] ?? null);
+        state.queries[canon(normalize(m.q))] = projected;
         direct.push({
           op: m.op,
           q: normalize(m.q),
-          result: projectResult(m.result),
+          result: projected,
           "processed-tx-id": "<tx>",
         });
         break;

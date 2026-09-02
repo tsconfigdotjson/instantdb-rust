@@ -90,4 +90,44 @@ try {
   assert(true, "signOut revokes tokens");
 }
 
+// 10. subscribeQuery over SSE (/admin/subscribe-query): first payload is the
+// current object tree with page-info, later payloads follow transacts
+const withTimeout = (p, ms, what) =>
+  Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout: ${what}`)), ms))]);
+const subGoal = id();
+await db.transact([tx.goals[subGoal].update({ title: "sub goal", level: 9 })]);
+const sub = db.subscribeQuery({ goals: { $: { where: { title: "sub goal" }, limit: 5 }, sdktodos: {} } });
+const iter = sub[Symbol.asyncIterator]();
+const first = (await withTimeout(iter.next(), 10000, "first subscribeQuery payload")).value;
+assert(first.type === "ok", "subscribeQuery first payload ok: " + JSON.stringify(first.error?.body ?? null));
+assert(first.data.goals.length === 1 && first.data.goals[0].id === subGoal, "subscribeQuery initial tree");
+assert(Array.isArray(first.data.goals[0].sdktodos), "nested link is an array without a schema");
+assert(first.pageInfo?.goals?.hasNextPage === false, "subscribeQuery page-info formatted");
+assert(sub.sessionInfo?.sessionId && sub.sessionInfo?.machineId, "sse-init session info");
+await db.transact([tx.goals[subGoal].update({ level: 10 })]);
+const second = (await withTimeout(iter.next(), 10000, "refresh payload")).value;
+assert(second.type === "ok" && second.data.goals[0].level === 10, "subscribeQuery refresh delivers the new tree");
+sub.close();
+assert(sub.isClosed, "subscribeQuery close");
+
+// 11. streams over the generic admin SSE session (/admin/sse + /admin/sse/push)
+const clientId = "sdk-stream-" + id();
+const writer = db.streams.createWriteStream({ clientId }).getWriter();
+await writer.write("hello ");
+await writer.write("streams");
+await writer.close();
+const reader = db.streams.createReadStream({ clientId });
+let received = "";
+await withTimeout(
+  (async () => {
+    for await (const chunk of reader) received += chunk;
+  })(),
+  15000,
+  "read stream to completion",
+);
+assert(received === "hello streams", "stream written and read back over admin SSE: " + JSON.stringify(received));
+
 console.log("ADMIN SDK TEST PASSED");
+// the SDK keeps its generic /admin/sse EventSource open (no shutdown API),
+// which would keep the process alive forever
+process.exit(0);

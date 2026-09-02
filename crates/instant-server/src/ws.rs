@@ -348,6 +348,30 @@ async fn session_ctx(
     ))
 }
 
+/// Formats a query result for the wire. `tree`: legacy's `:tree`
+/// return-type (admin SSE subscribeQuery) — the object tree plus
+/// `result-meta`; otherwise the join-rows nodes with a null result-meta.
+/// The hash covers the join-rows form in both cases, so result-changed
+/// detection does not depend on the shape a session asked for.
+pub(crate) fn format_query_result(
+    state: &AppState,
+    app_id: Uuid,
+    result: &instant_core::instaql::QueryResult,
+    attrs: &instant_core::attr::AttrMap,
+    q: &Value,
+    tree: bool,
+    inference: bool,
+) -> (Value, Value, u64) {
+    let ws_result = result.to_ws_result();
+    let hash = value_hash(&ws_result);
+    if tree {
+        let obj = crate::routes::admin::object_tree(state, app_id, result, attrs, q, inference);
+        (obj, crate::routes::admin::object_meta(result), hash)
+    } else {
+        (ws_result, Value::Null, hash)
+    }
+}
+
 async fn handle_add_query(
     state: &Arc<AppState>,
     session: &Arc<Session>,
@@ -358,9 +382,12 @@ async fn handle_add_query(
         .get("q")
         .cloned()
         .ok_or_else(|| InstantError::param_missing("missing q"))?;
+    // legacy `(keyword (or return-type "join-rows"))`: only `tree` is
+    // special, anything else renders join-rows (session.clj:249, query.clj:139-144)
+    let tree = msg.get("return-type").and_then(|v| v.as_str()) == Some("tree");
     service::assert_read_allowed(state, app_id).await?;
     let key = q.to_string();
-    {
+    let inference = {
         let st = session.state.lock().await;
         if st.queries.contains_key(&key) {
             session.send(json!({
@@ -370,13 +397,17 @@ async fn handle_add_query(
             }));
             return Ok(());
         }
-    }
+        st.inference
+    };
     let started = std::time::Instant::now();
     // Watermark first, so a cached result is never older than the tx id the
     // client is told it reflects.
     let processed_tx_id = service::max_tx_id(state, app_id).await?;
-    let cacheable =
-        perms.user_map.is_none() && perms.rule_params.is_none() && q.get("$$ruleParams").is_none();
+    // the shared cache holds join-rows frames; tree subscribers are few
+    let cacheable = !tree
+        && perms.user_map.is_none()
+        && perms.rule_params.is_none()
+        && q.get("$$ruleParams").is_none();
     let cache_key: QueryCacheKey = (
         app_id,
         key.clone(),
@@ -396,6 +427,7 @@ async fn handle_add_query(
     } else {
         None
     };
+    let mut result_meta = Value::Null;
     let (ws_json, hash, topics) = match cached {
         Some(hit) => {
             crate::metrics::METRICS.query_cache_hits_total.inc();
@@ -405,11 +437,11 @@ async fn handle_add_query(
             crate::metrics::METRICS.query_cache_misses_total.inc();
             let attrs = service::load_attrs(state, app_id).await?;
             let outcome = service::run_query_full(state, app_id, &attrs, &perms, &q, None).await?;
-            let ws_result = outcome.result.to_ws_result();
-            let hash = value_hash(&ws_result);
+            let (wire, meta, hash) =
+                format_query_result(state, app_id, &outcome.result, &attrs, &q, tree, inference);
+            result_meta = meta;
             let ws_json = Arc::new(
-                RawValue::from_string(ws_result.to_string())
-                    .expect("serde_json output is valid JSON"),
+                RawValue::from_string(wire.to_string()).expect("serde_json output is valid JSON"),
             );
             let topics = Arc::new(outcome.topics);
             if cacheable {
@@ -436,6 +468,7 @@ async fn handle_add_query(
                 q: q.clone(),
                 result_hash: hash,
                 topics: Some(topics),
+                tree,
             },
         );
     }
@@ -449,7 +482,7 @@ async fn handle_add_query(
         op: "add-query-ok",
         q: &q,
         result: &ws_json,
-        result_meta: (),
+        result_meta: &result_meta,
         processed_tx_id,
         processed_isn: service::current_isn(state).await,
         client_event_id: msg.get("client-event-id"),
@@ -470,7 +503,7 @@ struct AddQueryOkWire<'a> {
     q: &'a Value,
     result: &'a RawValue,
     #[serde(rename = "result-meta")]
-    result_meta: (),
+    result_meta: &'a Value,
     #[serde(rename = "processed-tx-id")]
     processed_tx_id: i64,
     #[serde(rename = "processed-isn")]
