@@ -672,6 +672,8 @@ mod tests {
             indexing: false,
             checking_data_type: false,
             setting_unique: false,
+            inferred_types: None,
+            metadata: None,
         }
     }
 

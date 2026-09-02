@@ -17,6 +17,11 @@
   {
     "path": "^dash:23-errors/badAttr$",
     "reason": "An add-attr step whose attr map is garbage (`{id: \"x\"}`) reaches the legacy SQL layer and surfaces as a 500 `sql-exception`; this server rejects it as a 400 `validation-failed` on parse. The CLI never sends such a step (its steps come from @instantdb/platform convertTxSteps) and only prints `message` on failure either way.",
-    "citation": "LEGACY/client/packages/cli/src/lib/http.ts:67-101 (error body \u2192 message); LEGACY/client/packages/platform/src/migrations.ts:230-252"
+    "citation": "LEGACY/client/packages/cli/src/lib/http.ts:67-101 (error body → message); LEGACY/client/packages/platform/src/migrations.ts:230-252"
+  },
+  {
+    "path": "^dash:24-admin-ref-lookups/queryAfterDelete$",
+    "reason": "Legacy silently drops a `delete` step whose eid is a ref lookup (`lookup(\"primaryOwner.id\", <uuid>)`): admin/model.clj expand-delete emits [:delete-entity [attr value] etype], transaction.clj resolve-lookups-for-delete-entity only keeps steps whose lookup resolved through resolve-lookups, and that resolution comes back empty for ref attrs on the live server (verified: the doc stays, tx-id is still returned; plain lookups and the same ref lookup on update/merge/link all resolve). This server resolves ref lookups with the same resolver for every op, so the delete happens. The admin SDK only reads tx-id from the response either way; the divergence is the entity surviving, which is the legacy defect, not a wire shape.",
+    "citation": "LEGACY/server/src/instant/admin/model.clj:236-238 (expand-delete); LEGACY/server/src/instant/db/transaction.clj:229-250, :360-378; LEGACY/client/packages/admin/src/index.ts transact() reads only tx-id"
   }
 ]

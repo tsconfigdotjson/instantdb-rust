@@ -224,11 +224,20 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value) -> Result<Value>
     let code = get_str(body, "code")?.trim().to_string();
     let code_hash = auth::hash_string(&code);
 
-    // guest-upgrade token must resolve if provided
+    // guest-upgrade token must resolve if provided; legacy only treats it
+    // as a guest upgrade when that user's type is "guest" (routes.clj:99-104)
     let mut guest_user: Option<auth::AppUser> = None;
     if let Some(token) = body.get("refresh-token").and_then(|v| v.as_str()) {
         match auth::user_by_refresh_token(state, app_id, token).await? {
-            Some(u) => guest_user = Some(u),
+            Some(u) => {
+                let is_guest = user_json(state, app_id, u.id, None)
+                    .await
+                    .map(|j| j.get("isGuest").and_then(|g| g.as_bool()).unwrap_or(false))
+                    .unwrap_or(false);
+                if is_guest {
+                    guest_user = Some(u);
+                }
+            }
             None => {
                 return Err(InstantError::record_not_found(
                     "app-user",
@@ -303,7 +312,12 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value) -> Result<Value>
     let user = match existing {
         Some(u) => u,
         None => {
-            let uid = Uuid::new_v4();
+            // legacy magic_code_auth.clj:284 `(or guest-user-id (random-uuid))`:
+            // a guest upgrading to a NEW email is upgraded in place (same id)
+            let uid = guest_user
+                .as_ref()
+                .map(|g| g.id)
+                .unwrap_or_else(Uuid::new_v4);
             let steps = json!([
                 ["add-triple", uid, sc::attr_id("$users", "id"), uid],
                 ["add-triple", uid, sc::attr_id("$users", "email"), email],
@@ -316,22 +330,17 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value) -> Result<Value>
             }
         }
     };
-    // guest linking
+    // guest linking (legacy link-guest): the email already belongs to another
+    // user, so the guest row points at it via $users.linkedPrimaryUser
     if let Some(guest) = guest_user {
         if guest.id != user.id {
-            let is_guest = user_json(state, app_id, guest.id, None)
-                .await
-                .map(|u| u.get("isGuest").and_then(|g| g.as_bool()).unwrap_or(false))
-                .unwrap_or(false);
-            if is_guest {
-                let steps = json!([[
-                    "add-triple",
-                    guest.id,
-                    sc::attr_id("$users", "linkedPrimaryUser"),
-                    user.id
-                ]]);
-                service::run_system_transact(state, app_id, &steps).await?;
-            }
+            let steps = json!([[
+                "add-triple",
+                guest.id,
+                sc::attr_id("$users", "linkedPrimaryUser"),
+                user.id
+            ]]);
+            service::run_system_transact(state, app_id, &steps).await?;
         }
     }
     let token = auth::mint_refresh_token(state, app_id, user.id).await?;

@@ -19,18 +19,27 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   server (host :8891) from `ghcr.io/instantdb`.
 - `provision.sh` — creates the same app id + admin token in both servers'
   databases (both run the same legacy schema).
-- `replay.mjs` — 16-step scenario across init, schemaless transacts, queries
+- `replay.mjs` — 22-step scenario across init, schemaless transacts, queries
   (nested/paginated/cursor round-trip/aggregate), typed-attr query breadth
   ($gt/$lt/$like/$ilike/$in/$not/$isNull/or/and, typed ordering, offset,
   last, fields projection, dot-paths), authed sessions + permissions (real
   refresh-token init, bind rules, view-rule filtering, $users defaults,
   allowed/denied writes), the error matrix, rooms and presence, sync tables,
-  and streams. Frames are folded into the
+  streams, and the issue #10 polish: `app-status-changed` pushes with the
+  read-only / disabled gates, linked-guest `$users` access after a magic-code
+  upgrade, `delete-attr` / `restore-attr` round trips, `request.*` rule
+  bindings (origin / x-forwarded-for ride on the upgrade request), `$rateLimits`
+  buckets, and the system-column / system-entity guards. `inferred-types` on
+  attrs is compared for real (it used to be normalized away). Frames are folded into the
   **client-visible projection** (exactly what `Reactor.js`/`SyncTable.ts`/
   `Stream.ts` read, with volatile server-chosen values normalized) and must
   match byte-for-byte. Key sets per op are compared raw. Remaining diffs must
   be listed in `allowed-divergences.json` with a client-code citation, and the
-  run fails on anything unlisted.
+  run fails on anything unlisted. `DUMP_STEPS=<name,...>` prints the folded
+  frames of a step per server; `DUMP_OPS=1` prints the raw op sequence per
+  step and connection (which queries a `refresh-ok` recomputed, whether it
+  carried attrs) — the quickest way to see why one server refreshed a session
+  the other did not.
 - `dash.mjs` — the `/dash/*` routes `instant-cli` uses (issue #6): schema
   pull, `schema/steps/apply` with the exact add-attr + unique/index/required/
   check-data-type job steps `@instantdb/platform` emits, indexing-job polling

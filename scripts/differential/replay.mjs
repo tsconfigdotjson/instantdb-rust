@@ -6,6 +6,8 @@
 // Usage: node replay.mjs <app-id-legacy> <app-id-rust> <admin-token>
 //   (app ids may be equal; both apps must exist on their server, see provision.sh)
 // Env: LEGACY_URL (default http://localhost:8891), RUST_URL (default http://localhost:8888),
+//      DUMP_STEPS=<step-name>[,...] prints the folded frames of those steps per server,
+//      DUMP_OPS=1 prints the raw op sequence of every step per server and connection,
 //      LEGACY_DATABASE_URL, RUST_DATABASE_URL (for rules setup via psql)
 
 import fs from "node:fs";
@@ -61,7 +63,15 @@ function buildScenario() {
     // authed perms namespace (step 15)
     secretsId: mk(), secretsOwner: mk(), secretsTitle: mk(),
     s1: mk(), s2: mk(), s3: mk(), s4: mk(),
+    // issue #10 parity polish (steps 17+)
+    nicknameAttr: mk(),
+    reqsId: mk(), reqsTitle: mk(), reqsSecret: mk(), r1: mk(), r2: mk(), r3: mk(),
+    limitedId: mk(), limitedTitle: mk(), l1: mk(), l2: mk(), l3: mk(),
   };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  // rules written straight to Postgres: legacy evicts its rule cache off the
+  // WAL feed, so give it a beat before the next op
+  const RULES_SETTLE_MS = 1200;
   const attr = (id, etype, label, { unique = false, fwd, rev } = {}) => [
     "add-attr",
     {
@@ -510,6 +520,227 @@ function buildScenario() {
         });
       },
     },
+    {
+      // apps.status flips reach live sessions as `app-status-changed` (legacy
+      // cache_evict.clj off the WAL feed); read-only rejects writes, disabled
+      // rejects reads too, with the app-read-only / app-disabled error types
+      name: "17-app-status",
+      run: async (env) => {
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        psql(env.db, `UPDATE apps SET status = 'read-only' WHERE id = '${env.appId}'`);
+        await env.conns.A.waitFor((m) => m.op === "app-status-changed" && m.status === "read-only");
+        await env.conns.B.waitFor((m) => m.op === "app-status-changed" && m.status === "read-only");
+        await expectErr(env.conns.A, {
+          op: "transact",
+          "tx-steps": [["add-triple", ids.e1, ids.todosTitle, "blocked"]],
+        });
+        msg(env.conns.A, { op: "add-query", q: { todos: { $: { where: { title: "reads-still-ok" } } } } });
+        await env.conns.A.waitFor((m) => m.op === "add-query-ok" && m.q?.todos?.$?.where?.title === "reads-still-ok");
+        psql(env.db, `UPDATE apps SET status = 'disabled' WHERE id = '${env.appId}'`);
+        await env.conns.A.waitFor((m) => m.op === "app-status-changed" && m.status === "disabled");
+        await expectErr(env.conns.A, { op: "add-query", q: { todos: { $: { where: { title: "reads-blocked" } } } } });
+        await expectErr(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [["add-triple", ids.e1, ids.todosTitle, "blocked-admin"]],
+        });
+        psql(env.db, `UPDATE apps SET status = 'active' WHERE id = '${env.appId}'`);
+        await env.conns.A.waitFor((m) => m.op === "app-status-changed" && m.status === "active");
+        await env.conns.ADMIN.waitFor((m) => m.op === "app-status-changed" && m.status === "active");
+      },
+    },
+    {
+      // a guest upgraded with an existing user's email is linked to it
+      // ($users.linkedPrimaryUser); the default $users rules let the primary
+      // user view and update that guest row (rule.clj:198-210)
+      name: "18-users-linked-guest",
+      run: async (env) => {
+        const hdr = { "content-type": "application/json", "app-id": env.appId, authorization: `Bearer ${adminToken}` };
+        const post = async (p, body) => (await fetch(`${env.url}${p}`, { method: "POST", headers: hdr, body: JSON.stringify(body) })).json();
+        const email = "primary-diff@example.com";
+        const primary = (await post("/admin/refresh_tokens", { email })).user;
+        const guest = (await post("/admin/sign_in_guest", {})).user;
+        const code = (await post("/admin/magic_code", { email })).code;
+        const upgraded = await post("/runtime/auth/verify_magic_code", { "app-id": env.appId, email, code, "refresh-token": guest.refresh_token });
+        if (upgraded?.user?.id !== primary.id) throw new Error(`guest upgrade did not return the primary user on ${env.serverName}: ${JSON.stringify(upgraded).slice(0, 200)}`);
+        // a fresh email upgrades the guest row in place (same id)
+        const guest2 = (await post("/admin/sign_in_guest", {})).user;
+        const email2 = "fresh-diff@example.com";
+        const code2 = (await post("/admin/magic_code", { email: email2 })).code;
+        const upgraded2 = await post("/runtime/auth/verify_magic_code", { "app-id": env.appId, email: email2, code: code2, "refresh-token": guest2.refresh_token });
+        if (upgraded2?.user?.id !== guest2.id) throw new Error(`fresh-email upgrade did not keep the guest id on ${env.serverName}`);
+        env.scratch.guestId = guest.id;
+        env.scratch.strangerId = guest2.id;
+        // a user-editable $users column (system columns are locked, see step 22)
+        msg(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [[
+            "add-attr",
+            { id: ids.nicknameAttr, "forward-identity": [ids.nicknameAttr, "$users", "nickname"], "value-type": "blob", cardinality: "one", "unique?": false, "index?": false, isUnsynced: true },
+          ]],
+        });
+        await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok" && env.conns.ADMIN.frames.filter((f) => f.op === "transact-ok").length >= 2);
+        env.conns.PRIMARY = connect(env.url, env.appId, `${env.serverName}:PRIMARY`);
+        await env.conns.PRIMARY.open;
+        msg(env.conns.PRIMARY, { op: "init", "app-id": env.appId, "refresh-token": upgraded.user.refresh_token, versions: { "@instantdb/core": "v0.21.0" } });
+        await env.conns.PRIMARY.waitFor((m) => m.op === "init-ok");
+        // sees self + linked guest, not the stranger
+        msg(env.conns.PRIMARY, { op: "add-query", q: { $users: {} } });
+        await env.conns.PRIMARY.waitFor((m) => m.op === "add-query-ok");
+        // may update the linked guest row, not the stranger's
+        msg(env.conns.PRIMARY, { op: "transact", "tx-steps": [["add-triple", guest.id, ids.nicknameAttr, "my-guest"]] });
+        await env.conns.PRIMARY.waitFor((m) => m.op === "transact-ok");
+        const ceid = msg(env.conns.PRIMARY, { op: "transact", "tx-steps": [["add-triple", guest2.id, ids.nicknameAttr, "not-mine"]] });
+        await env.conns.PRIMARY.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+      },
+    },
+    {
+      // delete-attr soft-deletes (brands names, keeps triples); restore-attr
+      // brings the attr and its triples back, un-indexed; admin-only
+      name: "19-restore-attr",
+      run: async (env) => {
+        const ceid = msg(env.conns.A, { op: "transact", "tx-steps": [["restore-attr", ids.extraAttr]] });
+        await env.conns.A.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        msg(env.conns.ADMIN, { op: "transact", "tx-steps": [["delete-attr", ids.extraAttr]] });
+        await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok" && env.conns.ADMIN.frames.filter((f) => f.op === "transact-ok").length >= 3);
+        msg(env.conns.B, { op: "add-query", q: { todos: { $: { where: { title: "one" } } } } });
+        await env.conns.B.waitFor((m) => m.op === "add-query-ok" && m.q?.todos?.$?.where?.title === "one");
+        // unknown id: no-op like delete-attr
+        msg(env.conns.ADMIN, { op: "transact", "tx-steps": [["restore-attr", ids.r3], ["restore-attr", ids.extraAttr]] });
+        await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok" && env.conns.ADMIN.frames.filter((f) => f.op === "transact-ok").length >= 4);
+        msg(env.conns.B, { op: "add-query", q: { todos: { $: { where: { title: "one" }, fields: ["title", "extra"] } } } });
+        await env.conns.B.waitFor((m) => m.op === "add-query-ok" && m.q?.todos?.$?.fields);
+      },
+    },
+    {
+      // request.origin / request.ip come from the upgrade headers,
+      // request.modifiedFields from the tx, request.time is a timestamp
+      name: "20-request-bindings",
+      run: async (env) => {
+        const attr = (id, label) => [
+          "add-attr",
+          { id, "forward-identity": [id, "reqs", label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true },
+        ];
+        msg(env.conns.ADMIN, { op: "transact", "tx-steps": [attr(ids.reqsId, "id"), attr(ids.reqsTitle, "title"), attr(ids.reqsSecret, "secret"), ["add-triple", ids.r1, ids.reqsId, ids.r1], ["add-triple", ids.r1, ids.reqsTitle, "seeded"]] });
+        await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok" && env.conns.ADMIN.frames.filter((f) => f.op === "transact-ok").length >= 5);
+        const rules = {
+          reqs: {
+            allow: {
+              view: "request.origin == 'https://app.example' && request.ip == '203.0.113.9' && size(request.modifiedFields) == 0 && request.time > timestamp('2020-01-01T00:00:00Z')",
+              create: "'title' in request.modifiedFields && !('secret' in request.modifiedFields) && request.origin.startsWith('https://')",
+              update: "request.modifiedFields == ['title'] && has(request.ip) && has(request.origin)",
+              delete: "request.modifiedFields.size() == 0 && request.ip == ''",
+            },
+          },
+        };
+        psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(rules)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
+        await sleep(RULES_SETTLE_MS);
+        env.conns.HDR = connect(env.url, env.appId, `${env.serverName}:HDR`, {
+          origin: "https://app.example",
+          // legacy takes the second-to-last hop (the last one is the load balancer's)
+          "x-forwarded-for": "10.0.0.1, 203.0.113.9, 172.16.0.1",
+        });
+        await env.conns.HDR.open;
+        msg(env.conns.HDR, { op: "init", "app-id": env.appId, versions: { "@instantdb/core": "v0.21.0" } });
+        await env.conns.HDR.waitFor((m) => m.op === "init-ok");
+        // view: only the headers session sees reqs
+        msg(env.conns.HDR, { op: "add-query", q: { reqs: {} } });
+        await env.conns.HDR.waitFor((m) => m.op === "add-query-ok");
+        msg(env.conns.A, { op: "add-query", q: { reqs: {} } });
+        await env.conns.A.waitFor((m) => m.op === "add-query-ok" && m.q?.reqs);
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        // create: title only passes, title+secret fails, no-origin session fails
+        msg(env.conns.HDR, { op: "transact", "tx-steps": [["add-triple", ids.r2, ids.reqsId, ids.r2], ["add-triple", ids.r2, ids.reqsTitle, "created"]] });
+        await env.conns.HDR.waitFor((m) => m.op === "transact-ok");
+        await expectErr(env.conns.HDR, { op: "transact", "tx-steps": [["add-triple", ids.r3, ids.reqsId, ids.r3], ["add-triple", ids.r3, ids.reqsTitle, "t"], ["add-triple", ids.r3, ids.reqsSecret, "s"]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["add-triple", ids.r3, ids.reqsId, ids.r3], ["add-triple", ids.r3, ids.reqsTitle, "t"]] });
+        // update: exactly [title] passes (id excluded, deep-merge counts), secret fails
+        msg(env.conns.HDR, { op: "transact", "tx-steps": [["add-triple", ids.r2, ids.reqsId, ids.r2], ["deep-merge-triple", ids.r2, ids.reqsTitle, "renamed"]] });
+        await env.conns.HDR.waitFor((m) => m.op === "transact-ok" && env.conns.HDR.frames.filter((f) => f.op === "transact-ok").length >= 2);
+        await expectErr(env.conns.HDR, { op: "transact", "tx-steps": [["add-triple", ids.r2, ids.reqsSecret, "s"]] });
+        // retractions are not modified fields; the no-header session has ip ''
+        await expectErr(env.conns.HDR, { op: "transact", "tx-steps": [["delete-entity", ids.r2, "reqs"]] });
+        msg(env.conns.A, { op: "transact", "tx-steps": [["delete-entity", ids.r2, "reqs"]] });
+        await env.conns.A.waitFor((m) => m.op === "transact-ok" && env.conns.A.frames.filter((f) => f.op === "transact-ok").length >= 7);
+      },
+    },
+    {
+      // $rateLimits buckets via rateLimit.<name>.limit(key[, tokens]):
+      // token bucket per (app, bucket, config, key); exhaustion is a
+      // rate-limited error, charged once per checked entity
+      name: "21-rate-limits",
+      run: async (env) => {
+        const attr = (id, label) => [
+          "add-attr",
+          { id, "forward-identity": [id, "limited", label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true },
+        ];
+        msg(env.conns.ADMIN, { op: "transact", "tx-steps": [attr(ids.limitedId, "id"), attr(ids.limitedTitle, "title")] });
+        await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok" && env.conns.ADMIN.frames.filter((f) => f.op === "transact-ok").length >= 6);
+        const rules = {
+          $rateLimits: {
+            creates: { limits: [{ capacity: 2, refill: { amount: 2, period: "1 hour", type: "interval" } }] },
+            views: { limits: [{ capacity: 5 }] },
+          },
+          limited: {
+            allow: {
+              create: "rateLimit.creates.limit('shared')",
+              update: "rateLimit['creates'].limit('shared', 5)",
+              view: "rateLimit.views.limit('viewer')",
+            },
+          },
+        };
+        psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(rules)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
+        await sleep(RULES_SETTLE_MS);
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        const create = (e, t) => ({ op: "transact", "tx-steps": [["add-triple", e, ids.limitedId, e], ["add-triple", e, ids.limitedTitle, t]] });
+        msg(env.conns.B, create(ids.l1, "one"));
+        await env.conns.B.waitFor((m) => m.op === "transact-ok");
+        msg(env.conns.B, create(ids.l2, "two"));
+        await env.conns.B.waitFor((m) => m.op === "transact-ok" && env.conns.B.frames.filter((f) => f.op === "transact-ok").length >= 2);
+        await expectErr(env.conns.B, create(ids.l3, "three"));
+        // 5 tokens on a capacity-2 bucket can never be granted
+        await expectErr(env.conns.B, { op: "transact", "tx-steps": [["add-triple", ids.l1, ids.limitedTitle, "renamed"]] });
+        // view charges one token per entity: 2 entities fit twice into 5, not thrice
+        msg(env.conns.B, { op: "add-query", q: { limited: {} } });
+        await env.conns.B.waitFor((m) => m.op === "add-query-ok" && m.q?.limited && !m.q.limited.$);
+        msg(env.conns.B, { op: "add-query", q: { limited: { $: { where: { title: "one" } } } } });
+        await env.conns.B.waitFor((m) => m.op === "add-query-ok" && m.q?.limited?.$?.where?.title === "one");
+        msg(env.conns.B, { op: "add-query", q: { limited: { $: { where: { title: "two" } } } } });
+        await env.conns.B.waitFor((m) => m.op === "add-query-ok" && m.q?.limited?.$?.where?.title === "two");
+        await expectErr(env.conns.B, { op: "add-query", q: { limited: { $: { order: { serverCreatedAt: "desc" } } } } });
+      },
+    },
+    {
+      // system-catalog guards (permissioned_transaction.clj:44-71): users
+      // can't write system columns or delete system entities, admins can
+      name: "22-system-guards",
+      run: async (env) => {
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        const initOk = env.conns.AUTH.frames.find((f) => f.op === "init-ok");
+        const selfId = initOk?.auth?.user?.id;
+        if (!selfId) throw new Error(`no user id in init-ok on ${env.serverName}`);
+        const imageUrl = initOk.attrs.find((a) => a["forward-identity"][1] === "$users" && a["forward-identity"][2] === "imageURL").id;
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", selfId, imageUrl, "https://x/me.png"]] });
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["delete-entity", selfId, "$users"]] });
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["delete-entity", env.scratch.strangerId, "$users"]] });
+        // admins may write system columns (not $files / $streams) and delete system entities
+        msg(env.conns.ADMIN, { op: "transact", "tx-steps": [["add-triple", env.scratch.strangerId, imageUrl, "https://x/stranger.png"]] });
+        await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok" && env.conns.ADMIN.frames.filter((f) => f.op === "transact-ok").length >= 7);
+        msg(env.conns.ADMIN, { op: "transact", "tx-steps": [["delete-entity", env.scratch.strangerId, "$users"]] });
+        await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok" && env.conns.ADMIN.frames.filter((f) => f.op === "transact-ok").length >= 8);
+      },
+    },
   ];
   return steps;
 }
@@ -530,7 +761,8 @@ async function runAgainst(serverName) {
     } catch (e) {
       console.error(`step ${step.name} failed on ${serverName}: ${e.message}`);
       for (const [name, conn] of Object.entries(env.conns)) {
-        console.error(`  last frames on ${name}:`, JSON.stringify(conn.frames.slice(-3))?.slice(0, 1500));
+        const brief = conn.frames.slice(-3).map((f) => ({ ...f, attrs: f.attrs ? `<${f.attrs.length} attrs>` : undefined }));
+        console.error(`  last frames on ${name}:`, JSON.stringify(brief)?.slice(0, 1500));
       }
       throw e;
     }
@@ -542,10 +774,22 @@ async function runAgainst(serverName) {
         (keySets[f.op] ??= new Set());
         for (const k of Object.keys(f)) keySets[f.op].add(k);
       }
+      if (process.env.DUMP_OPS) {
+        // raw op trace (refresh-ok: which queries recomputed, attrs carried?)
+        const ops = frames.map((f) =>
+          f.op === "refresh-ok"
+            ? `refresh-ok(${(f.computations ?? []).map((c) => JSON.stringify(c["instaql-query"])).join("|")}${f.attrs ? " +attrs" : ""})`
+            : f.op,
+        );
+        if (ops.length) console.log(`--- [${serverName}] ${step.name} ${name}: ${ops.join(", ")}`);
+      }
       states[name] ??= newState();
       byConn[name] = await foldFrames(frames, states[name]);
     }
     stepResults.push({ name: step.name, byConn });
+    if (process.env.DUMP_STEPS && process.env.DUMP_STEPS.split(",").includes(step.name)) {
+      console.log(`### [${serverName}] ${step.name}\n${JSON.stringify(byConn, null, 1).slice(0, 20000)}`);
+    }
   }
   for (const conn of Object.values(env.conns)) conn.close();
   return {

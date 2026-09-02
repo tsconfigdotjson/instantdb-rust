@@ -12,7 +12,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | `add-query` / `add-query-ok` / `add-query-exists` | ✅ | result join-rows + page-info + aggregate |
 | `remove-query` | ✅ | |
 | `transact` / `transact-ok` (tx-id watermark) | ✅ | |
-| `refresh-ok` push with computations + attrs | ✅ | result-hash suppression; per-app coalesced refresh batches, identical (query, auth) recomputed once across sessions |
+| `refresh-ok` push with computations + attrs | ✅ | result-hash suppression; per-app coalesced refresh batches, identical (query, auth, request.ip/origin) recomputed once across sessions. Fan-out follows legacy's invalidator: only sessions with a topic-stale query are refreshed (triple topics plus a wildcard per changed attrs row, `topics-for-attr-upsert`), except attr inserts / deletes and ident changes (`schema-changes-require-refreshing-sessions?`), which refresh every session; flag flips and inferred-types writes therefore reach only sessions whose queries mention the attr |
 | topic-based invalidation narrowing | ✅ | coarse topics per registered query (`instant_core::topics`, QUERY.md §6.2 shapes with result substitution on the entity fetch) matched against the tx's `rust_tx_changes` rows; unresolvable shapes and `.ref(` rules fall back to catch-all; result-hash suppression remains the backstop |
 | error shapes (`type`, `hint`, `original-event` echo) | ✅ | full legacy key set incl. null `hint`/`client-event-id` (conformance error matrix) |
 | rooms: join/leave/set-presence/refresh-presence | ✅ | cross-node via Postgres; in-room asserts + `set-presence-ok`/`client-broadcast-ok` acks like legacy |
@@ -50,12 +50,12 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | delete-entity + on-delete / on-delete-reverse cascades | ✅ | |
 | lookup refs (eid + value position, id-attr lookups) | ✅ | |
 | create/update/upsert modes | ✅ | |
-| inline add-attr (schemaless), update-attr (flag rewrite), delete-attr (soft) | ✅ | restore-attr is a no-op |
+| inline add-attr (schemaless), update-attr (flag rewrite), delete-attr (soft), restore-attr | ✅ | delete-attr soft-deletes like legacy `soft-delete-multi!` (brands names with `{id}_deleted$`, drops index/required, stores `soft_delete_snapshot` in `attrs.metadata`, keeps triples); restore-attr is legacy `restore-multi!` (un-brands, clears the snapshot, leaves the attr un-indexed / not required; unknown or live ids are a no-op); admin-only, users get the attr-scope `permission-denied` (differential step 19-restore-attr) |
 | unique constraint errors (`record-not-unique`) | ✅ | |
 | required-attr validation | ✅ | |
 | indexed-null backfill | ✅ | |
 | checked-data-type validation, oversized-value errors | ✅ | enforced by the schema's check constraints |
-| inferred-types tracking | ❌ | attrs report `inferred-types: null` |
+| inferred-types tracking | ✅ | `attrs.inferred_types` bitset OR'd per add-triple / deep-merge-triple (patch values, not the merged result) like legacy `insert-attr-inferred-types-cte`; system-catalog attrs seeded string/json like legacy; wire order `number, string, json, boolean` as legacy renders its keyword set (differential harness no longer normalizes `inferred-types`) |
 
 ## Permissions
 
@@ -65,10 +65,10 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | `bind` | ✅ | evaluated as pre-bound variables rather than cel.bind textual expansion |
 | `data.ref` / `auth.ref` | ✅ | literal-path prefetch |
 | `ruleParams` (query `$$ruleParams` + `rule-params` steps) | ✅ | |
-| `$users` default rules (view/update self, create true, delete false) | 🟡 | linkedPrimaryUser guest clause simplified to `auth.id == data.id` |
+| `$users` default rules (view/update self + linked guests, create true, delete false) | ✅ | `auth.id == data.id \|\| (data.linkedPrimaryUser != null && auth.id == data.linkedPrimaryUser)` (rule.clj:198-210); a guest upgrading with an existing user's email gets `linkedPrimaryUser`, a guest upgrading with a fresh email keeps its id (differential step 18-users-linked-guest) |
 | link/unlink rules per label | ✅ | explicit `allow.link`/`allow.unlink` label maps with `linkedData` binding; update+view fallback otherwise |
 | attr-level (field) rules | ✅ | `[etype].fields.[field]` view programs filter triples per entity |
-| `request.*` / `rateLimit.*` CEL bindings | ❌ | |
+| `request.*` / `rateLimit.*` CEL bindings | ✅ | `request.modifiedFields` (labels written to the checked entity, create/update checks only, `id` excluded, retractions ignored), `request.time` (CEL timestamp), `request.ip` (second-to-last `x-forwarded-for` hop, like util/http.clj) and `request.origin` (Origin header) from the ws upgrade / HTTP request; `has(request.ip)` follows proto semantics, unknown fields fail like legacy's `undefined field 'x'`; `ip-override` / `origin-override` on the perms-check debug routes. `rateLimit.<name>.limit(key[, tokens])` charges token buckets configured in `$rateLimits` (greedy / interval refill, bucket identity covers the config); exhaustion is `rate-limited` with `retry-at` / `retry-after` / `remaining-tokens` (status 400 on the socket like every request error, session.clj:1040-1060). Bucket state lives in `rust_rate_limit_buckets` so every node shares it (legacy: in-memory bucket4j per machine). Query caches / refresh dedupe are keyed on ip+origin. Differential steps 20-request-bindings, 21-rate-limits |
 | rule-where query rewriting | ❌ | optimization only; per-entity evaluation gives the same results |
 | CEL null-safety (`missing key -> null`) | ✅ | every key a rule statically mentions (select fields + string literals) is pre-inserted as null into `data`/`newData`/`auth`/`ruleParams`/`linkedData` and their nested maps; `has()`/`in` answer true like legacy; anonymous `auth` is an empty map; only keys computed at runtime (`data[someVar]`) still error → deny |
 
@@ -92,7 +92,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | Feature | Status | Notes |
 |---|---|---|
 | /admin/query (object tree, `inference?` singular links) | ✅ | |
-| /admin/transact (create/update/merge/link/unlink/delete/ruleParams, lookup strings, attr auto-create, `throw-on-missing-attrs?`) | ✅ | ref-lookup attr names (`owner.id`) not supported |
+| /admin/transact (create/update/merge/link/unlink/delete/ruleParams, lookup strings, ref lookups, attr auto-create, `throw-on-missing-attrs?`) | ✅ | `lookup("owner.id", <uuid>)` names the unique forward link `<etype>.owner` (legacy `extract-lookup`); a missing one is auto-created as a unique cardinality-one link, `throw-on-missing-attrs?` reports `<etype>.owner`; `x.name` / `x.id.id` / non-unique links fail with legacy's `lookup` validation messages (differential dash step 24-admin-ref-lookups) |
 | impersonation headers (`as-token`/`as-email`/`as-guest`) | ✅ | |
 | refresh_tokens / sign_out / users GET+DELETE | ✅ | |
 | magic_code / send_magic_code / verify_magic_code / sign_in_guest | ✅ | |
@@ -114,8 +114,8 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | stateless horizontal scaling | ✅ | pg LISTEN/NOTIFY coordination; multinode test |
 | legacy Postgres schema, migrations replay on stock PG | ✅ | tested on Postgres 18 |
 | deterministic system-catalog UUIDs | ✅ | verified against hardcoded legacy values |
-| app status gates (read-only / disabled) | 🟡 | write gate enforced; `app-status-changed` push not sent |
-| rate limiting | ❌ | |
+| app status gates (read-only / disabled) | ✅ | read-only rejects writes (`app-read-only`), disabled rejects reads too (`app-disabled`), legacy messages; an `apps.status` flip (dashboard, psql) pushes `app-status-changed {status}` to every live session of the app on every node (row trigger + NOTIFY standing in for legacy's WAL-fed cache_evict), and a per-app status cache with a TTL safety net backs the gates (differential step 17-app-status) |
+| rate limiting | ✅ | per-app + per-email token buckets (issue #1, `rate_limit.rs`, per node like legacy bucket4j; `INSTANT_RATE_LIMITS=off` disables) and rule-level `rateLimit.*` buckets shared through Postgres (issue #10) |
 | backups/restore tooling, attr sketches | ❌ | ops tooling of the hosted service |
 
 ## Wire-level divergences
@@ -142,7 +142,8 @@ client-code citation proving it is unread (client paths relative to
 | `stream-append` payload | file URLs for flushed segments + inline `content` for the tail | always inline `content` | reader consumes `files` (if any) then `content` (`Stream.ts:1077-1084`); bytes delivered are identical |
 | `client-broadcast-ok` payload | includes fanned-out envelope | same | no client handler for the op at all (unknown ops ignored, `Reactor.js:932-934`) |
 | refresh-ok with zero changed computations | old (≤0.20.4) clients still get an empty `refresh-ok` whenever their queries were stale (session.clj:523) | not sent (nothing to say) | an empty `computations` array with unchanged `attrs` is a no-op client-side (`Reactor.js:733-814`) |
-| rate limiting (`rate-limited` errors) | per-app flag-driven (reactive/session.clj:983-987) | not implemented | client has no special handling for `rate-limited`; it surfaces like any other event error |
+| rate limiting (`rate-limited` errors) | per-app limits are flag-driven (reactive/session.clj:983-987); `rateLimit.*` rule buckets are in-memory bucket4j per machine | per-app limits always on (sized in `rate_limit.rs`, `INSTANT_RATE_LIMITS=off` to disable); rule buckets are Postgres rows shared by every node | same error type, message and hint fields; the client has no special handling for `rate-limited`, it surfaces like any other event error |
 | error `hint` detail | spec explain data / `input` echo / `expected`+`in` paths per error (util/exception.clj) | `{data-type, errors: [{message}]}` (+ `record-type` where applicable) | the client treats `hint` as opaque debugging JSON; the only pattern-matched key is `hint.record-type` (`Reactor.js:1020-1029`), which matches byte-for-byte |
 | `add-query-ok.processed-tx-id` freshness | the invalidator's processed watermark, which can lag the latest confirmed tx | exact `max(tx-id)` at query time | client compares with `>=` to GC optimistic mutations (`Reactor.js:1676-1691`); our value is never ahead of what the result reflects, so behavior is identical with earlier GC |
+| admin `delete` by ref lookup (`lookup("owner.id", <uuid>)`) | silently dropped: `resolve-lookups-for-delete-entity` keeps only deletes whose lookup resolved, and the ref-attr lookup resolves to nothing on the live server (transaction.clj:229-250, :360-378) | the doc is deleted (one resolver for every op) | admin SDK reads only `tx-id`; legacy's behavior loses the caller's intent, so this server keeps the delete (differential dash step 24, allowlisted) |
 | `join-room-error` op | defined in the client (`Reactor.js:921-927`) but never emitted by the legacy server either | never emitted; join failures use the generic `error` op | matches legacy behavior (no emitter in LEGACY/server) |

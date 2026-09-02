@@ -206,8 +206,20 @@ pub struct TxReport {
     pub deleted: Vec<(Uuid, String)>,
     /// all touched (eid, etype), for perms/required checks
     pub touched: Vec<(Uuid, String)>,
-    /// true when the tx changed the attr catalog
+    /// true when the tx changed the attr catalog in any way (flags, idents,
+    /// inferred types): attr caches must be reloaded
     pub attrs_changed: bool,
+    /// legacy `schema-changes-require-refreshing-sessions?`
+    /// (reactive/invalidator.clj:45-63): attr inserts / deletes and ident
+    /// changes refresh EVERY session of the app so they all see the new
+    /// catalog; other attr updates (flags, inferred types) only reach
+    /// sessions whose queries went stale anyway
+    pub schema_changed: bool,
+    /// attrs whose rows this tx wrote (added, updated, deleted, restored,
+    /// inferred types): legacy derives a `[_ #{attr-id} _]` topic from every
+    /// attrs-row change (reactive/topics.clj topics-for-attr-upsert), so any
+    /// query mentioning the attr is refreshed
+    pub changed_attrs: Vec<Uuid>,
     /// rule-params per (eid, etype)
     pub rule_params: HashMap<(Uuid, String), Value>,
     /// resolved eids for lookup refs used in the tx
@@ -218,6 +230,10 @@ pub struct TxReport {
 pub struct TxOptions {
     /// bypass the system-catalog write guard (server-internal writes)
     pub allow_system_catalog_writes: bool,
+    /// admin transact: legacy `prevent-system-column-updates` lets admins
+    /// write system columns (except `$files` / `$streams`) and delete any
+    /// system entity
+    pub admin: bool,
 }
 
 /// Execute tx-steps inside the given open DB transaction. The caller commits.
@@ -253,16 +269,20 @@ pub async fn transact(
             };
             if let Some(attr_id) = attr_id {
                 if let Some(attr) = attrs.get(&attr_id) {
-                    if attr.is_system
-                        && !system_catalog::is_editable_triple_ident(&attr.etype, &attr.label)
-                    {
+                    // legacy validate-system-triple-op! (permissioned_transaction.clj:49-71)
+                    let editable =
+                        system_catalog::is_editable_triple_ident(&attr.etype, &attr.label);
+                    let admin_ok =
+                        opts.admin && !matches!(attr.etype.as_str(), "$files" | "$streams");
+                    if attr.is_system && !editable && !admin_ok {
+                        let message = format!(
+                            "{}.{} is a system column. You aren't allowed to change this directly.",
+                            attr.etype, attr.label
+                        );
                         return Err(InstantError::validation_failed(
-                            "tx-steps",
-                            format!(
-                                "The attribute {}.{} is read-only and cannot be modified.",
-                                attr.etype, attr.label
-                            ),
-                            json!([]),
+                            "tx-step",
+                            message.clone(),
+                            json!([{"message": message}]),
                         ));
                     }
                 }
@@ -271,11 +291,16 @@ pub async fn transact(
                 etype: Some(etype), ..
             } = step
             {
-                if etype.starts_with('$') && !matches!(etype.as_str(), "$users" | "$files") {
+                // legacy validate-system-delete-entity!: only admins delete
+                // system entities, except $files
+                if etype.starts_with('$') && !(opts.admin || etype == "$files") {
+                    let message = format!(
+                        "{etype} is a system entity. You aren't allowed to delete this directly."
+                    );
                     return Err(InstantError::validation_failed(
-                        "tx-steps",
-                        format!("Cannot delete entities of system type {etype}"),
-                        json!([]),
+                        "tx-step",
+                        message.clone(),
+                        json!([{"message": message}]),
                     ));
                 }
             }
@@ -305,6 +330,8 @@ pub async fn transact(
         deleted: vec![],
         touched: vec![],
         attrs_changed: false,
+        schema_changed: false,
+        changed_attrs: vec![],
         rule_params: HashMap::new(),
         resolved_lookups: HashMap::new(),
     };
@@ -328,8 +355,10 @@ pub async fn transact(
                     }
                     crate::attr::insert(&mut *conn, app_id, &attr).await?;
                     backfill_nulls_for_new_attr(&mut *conn, app_id, attrs, &attr).await?;
+                    report.changed_attrs.push(attr.id);
                     attrs.insert(attr);
                     report.attrs_changed = true;
+                    report.schema_changed = true;
                 }
             }
             "update-attr" => {
@@ -348,11 +377,18 @@ pub async fn transact(
                             json!([]),
                         ));
                     }
+                    // legacy update-multi! only writes idents rows when the
+                    // step carries an identity (ident-table-values), and
+                    // only ident rows count as a schema change
+                    let touches_idents = patch.get("forward-identity").is_some()
+                        || patch.get("reverse-identity").is_some();
                     let updated =
                         crate::attr::update(&mut *conn, app_id, &existing, &patch).await?;
                     attrs.remove(&id);
                     attrs.insert(updated);
                     report.attrs_changed = true;
+                    report.schema_changed |= touches_idents;
+                    report.changed_attrs.push(id);
                 }
             }
             "delete-attr" => {
@@ -375,11 +411,32 @@ pub async fn transact(
                     crate::attr::soft_delete(&mut *conn, app_id, &existing).await?;
                     attrs.remove(&id);
                     report.attrs_changed = true;
+                    report.schema_changed = true; // idents are branded
+                    report.changed_attrs.push(id);
                 }
             }
             "restore-attr" => {
-                // Rarely used; treated as a no-op for now (restore of soft
-                // deletes is an admin dashboard operation).
+                // Legacy restore-multi! (attr.clj:657-726): un-brand the
+                // soft-deleted attr and its idents, clear the snapshot, and
+                // leave it un-indexed / not required. Unknown or live ids
+                // match nothing (plain UPDATE), like delete-attr.
+                let ids: Vec<Uuid> = group
+                    .into_iter()
+                    .map(|step| {
+                        let TxStep::RestoreAttr(id) = step else {
+                            unreachable!()
+                        };
+                        id
+                    })
+                    .collect();
+                let restored = crate::attr::restore(&mut *conn, app_id, &ids).await?;
+                for attr in restored {
+                    report.changed_attrs.push(attr.id);
+                    attrs.remove(&attr.id);
+                    attrs.insert(attr);
+                    report.attrs_changed = true;
+                    report.schema_changed = true; // idents are un-branded
+                }
             }
             "add-triple" => {
                 let mut items: Vec<(EidRef, Uuid, Value, WriteMode)> = vec![];
@@ -413,6 +470,16 @@ pub async fn transact(
                     if let Some(t) = resolved.iter().find(|t| t.entity_id == eid) {
                         created_etypes.insert(eid, t.attr.etype.clone());
                     }
+                }
+                let inferred = resolved
+                    .iter()
+                    .filter_map(|t| Some((t.attr.id, crate::attr::inferred_type_bit(&t.value)?)))
+                    .collect::<Vec<_>>();
+                let changed =
+                    crate::attr::record_inferred_types(&mut *conn, app_id, attrs, inferred).await?;
+                if !changed.is_empty() {
+                    report.attrs_changed = true;
+                    report.changed_attrs.extend(changed);
                 }
             }
             "deep-merge-triple" => {
@@ -468,6 +535,22 @@ pub async fn transact(
                     if let Some((_, attr, _)) = merges.iter().find(|(e, _, _)| *e == eid) {
                         created_etypes.insert(eid, attr.etype.clone());
                     }
+                }
+                // legacy deep-merge-multi! infers from the PATCH values, not
+                // the merged result (transaction_test.clj:4180-4210)
+                let inferred = merges
+                    .iter()
+                    .flat_map(|(_, attr, vals)| {
+                        vals.iter().filter_map(move |v| {
+                            Some((attr.id, crate::attr::inferred_type_bit(v)?))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let changed =
+                    crate::attr::record_inferred_types(&mut *conn, app_id, attrs, inferred).await?;
+                if !changed.is_empty() {
+                    report.attrs_changed = true;
+                    report.changed_attrs.extend(changed);
                 }
             }
             "retract-triple" => {
@@ -755,19 +838,47 @@ pub async fn assert_write_allowed(conn: &mut PgConnection, app_id: Uuid) -> Resu
         Some(r) => r.get("status"),
         None => return Err(InstantError::record_not_found("app", "app not found")),
     };
-    match status.as_str() {
-        "active" => Ok(()),
-        "read-only" => Err(InstantError::new(
-            "validation-failed",
-            400,
-            "The app is read-only.",
-            Some(json!({"status": "read-only"})),
-        )),
-        _ => Err(InstantError::new(
-            "validation-failed",
-            400,
-            "The app is disabled.",
-            Some(json!({"status": "disabled"})),
-        )),
+    match write_gate_error(&status) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Legacy `throw-app-read-only!` / `throw-app-disabled!` (util/exception.clj:331-339).
+pub fn app_read_only_error() -> InstantError {
+    InstantError::new(
+        "app-read-only",
+        400,
+        "This app is in read-only mode.",
+        Some(json!({"status": "read-only"})),
+    )
+}
+
+pub fn app_disabled_error() -> InstantError {
+    InstantError::new(
+        "app-disabled",
+        400,
+        "This app is currently disabled.",
+        Some(json!({"status": "disabled"})),
+    )
+}
+
+/// Legacy `assert-write-allowed!` (model/app.clj:375-380): read-only and
+/// disabled apps reject writes; anything else (incl. unknown values, which
+/// legacy `get-own-status` coerces to active) is writable.
+pub fn write_gate_error(status: &str) -> Option<InstantError> {
+    match status {
+        "read-only" => Some(app_read_only_error()),
+        "disabled" => Some(app_disabled_error()),
+        _ => None,
+    }
+}
+
+/// Legacy `assert-read-allowed!` (model/app.clj:382-387): only a disabled
+/// app rejects reads.
+pub fn read_gate_error(status: &str) -> Option<InstantError> {
+    match status {
+        "disabled" => Some(app_disabled_error()),
+        _ => None,
     }
 }

@@ -56,6 +56,9 @@ pub async fn authed(
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.trim().to_string());
 
+    // request.ip / request.origin for rules come from this HTTP request
+    // (legacy binds *request-info* around every handler, util/http.clj:84-118)
+    let request = crate::ws::request_ctx_from_headers(headers);
     let as_token = headers.get("as-token").and_then(|v| v.to_str().ok());
     let as_email = headers.get("as-email").and_then(|v| v.to_str().ok());
     let as_guest = headers.get("as-guest").is_some();
@@ -74,6 +77,8 @@ pub async fn authed(
                 user_id: Some(user.id),
                 user_map: None,
                 rule_params: None,
+                ip: request.ip.clone(),
+                origin: request.origin.clone(),
             },
         });
     }
@@ -106,6 +111,8 @@ pub async fn authed(
                 user_id: Some(user.id),
                 user_map: None,
                 rule_params: None,
+                ip: request.ip.clone(),
+                origin: request.origin.clone(),
             },
         });
     }
@@ -117,6 +124,8 @@ pub async fn authed(
                 user_id: None,
                 user_map: None,
                 rule_params: None,
+                ip: request.ip.clone(),
+                origin: request.origin.clone(),
             },
         });
     }
@@ -128,6 +137,8 @@ pub async fn authed(
             user_id: None,
             user_map: None,
             rule_params: None,
+            ip: request.ip,
+            origin: request.origin,
         },
     })
 }
@@ -152,7 +163,13 @@ fn node_to_object(
     inference: bool,
 ) -> Value {
     let mut m = Map::new();
-    m.insert("id".into(), json!(node.eid));
+    // legacy builds the object from the entity's triples, so `id` is only
+    // there when the etype has an id attr: a link auto-created for a bare
+    // label (`link docs.owner`) has reverse etype `owner`, which has no
+    // attrs, and its nested entities come back as `{}`
+    if attrs.id_attr_of(&node.etype).is_some() {
+        m.insert("id".into(), json!(node.eid));
+    }
     let mut location_id: Option<String> = None;
     for t in &node.triples {
         let Some(attr) = attrs.get(&t.a) else {
@@ -325,6 +342,31 @@ pub fn object_tree(
     Value::Object(out)
 }
 
+/// AuthCtx for the perms-check debug routes: the request's own ip/origin,
+/// overridable per call (`ip-override` / `origin-override`; legacy
+/// admin/routes.clj:230-246, :332-363; non-blank strings only).
+fn perms_check_auth_ctx(
+    state: &AppState,
+    perms: &PermsCtx,
+    body: &Value,
+) -> instant_core::perms::AuthCtx {
+    let mut auth = perms.auth_ctx(state);
+    let non_blank = |k: &str| {
+        body.get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+    if let Some(ip) = non_blank("ip-override") {
+        auth.request.ip = Some(ip);
+    }
+    if let Some(origin) = non_blank("origin-override") {
+        auth.request.origin = Some(origin);
+    }
+    auth
+}
+
 // ---------------------------------------------------------------------------
 // /admin/query
 
@@ -352,6 +394,7 @@ async fn query_impl(
         .get("inference?")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    service::assert_read_allowed(state, ctx.app_id).await?;
     let attrs = service::load_attrs(state, ctx.app_id).await?;
     let result = service::run_query(state, ctx.app_id, &attrs, &ctx.perms, q).await?;
     Ok(object_tree(
@@ -367,7 +410,6 @@ fn eid_to_lookup(
     etype: &str,
     v: &Value,
     new_attrs: &mut Vec<Value>,
-    throw_missing: bool,
 ) -> Result<Value> {
     // -> client eid: uuid string or [attr-uuid, value]
     match v {
@@ -380,8 +422,7 @@ fn eid_to_lookup(
                 let attr_name = parts.next().unwrap_or_default();
                 let raw = parts.next().unwrap_or_default();
                 let value: Value = serde_json::from_str(raw).map_err(|_| invalid_eid(s))?;
-                let attr_id =
-                    resolve_lookup_attr(attrs, etype, attr_name, new_attrs, throw_missing)?;
+                let attr_id = resolve_lookup_attr(attrs, etype, attr_name, &value, v, new_attrs)?;
                 return Ok(json!([attr_id, value]));
             }
             Err(invalid_eid(s))
@@ -391,12 +432,12 @@ fn eid_to_lookup(
             if Uuid::parse_str(attr_name).is_ok() {
                 return Ok(v.clone());
             }
-            let attr_id = resolve_lookup_attr(attrs, etype, attr_name, new_attrs, throw_missing)?;
+            let attr_id = resolve_lookup_attr(attrs, etype, attr_name, &arr[1], v, new_attrs)?;
             Ok(json!([attr_id, arr[1]]))
         }
         Value::Object(m) if m.len() == 1 => {
             let (attr_name, value) = m.iter().next().unwrap();
-            let attr_id = resolve_lookup_attr(attrs, etype, attr_name, new_attrs, throw_missing)?;
+            let attr_id = resolve_lookup_attr(attrs, etype, attr_name, value, v, new_attrs)?;
             Ok(json!([attr_id, value]))
         }
         other => Err(invalid_eid(&other.to_string())),
@@ -411,65 +452,115 @@ fn invalid_eid(x: &str) -> InstantError {
     )
 }
 
+fn lookup_err(message: String, input: Value) -> InstantError {
+    // legacy admin/model.clj throw-validation-err! :lookup <input> [...]
+    let mut e =
+        InstantError::validation_failed("lookup", message.clone(), json!([{"message": message}]));
+    if let Some(Value::Object(h)) = e.hint.as_mut() {
+        h.insert("input".into(), input);
+    }
+    e
+}
+
+fn pending_attr_id(new_attrs: &[Value], etype: &str, label: &str) -> Option<Uuid> {
+    new_attrs.iter().find_map(|na| {
+        let obj = na.get(1)?;
+        let fwd = obj.get("forward-identity")?;
+        (fwd.get(1)?.as_str() == Some(etype) && fwd.get(2)?.as_str() == Some(label))
+            .then(|| {
+                obj.get("id")?
+                    .as_str()
+                    .and_then(|s| Uuid::parse_str(s).ok())
+            })
+            .flatten()
+    })
+}
+
+/// Legacy `extract-lookup` (admin/model.clj:31-93). A dotted name that is
+/// not itself an attr (`ref-lookup?`) is a ref lookup: `owner.id` names the
+/// unique forward link `<etype>.owner`, matched on the linked entity's id.
+/// Missing attrs are auto-created (schemaless): a plain lookup becomes a
+/// unique indexed blob, a ref lookup a unique indexed cardinality-one link
+/// (`add-attrs-for-ref-lookup`); `throw-on-missing-attrs?` is checked once
+/// every step is translated (legacy `transform`), see [`translate_steps`].
+/// Error hints echo legacy's `input`: the raw eid for the unique check, the
+/// `[name, value]` pair for a bad ref path.
 fn resolve_lookup_attr(
     attrs: &AttrMap,
     etype: &str,
     attr_name: &str,
+    value: &Value,
+    raw_eid: &Value,
     new_attrs: &mut Vec<Value>,
-    throw_missing: bool,
 ) -> Result<Uuid> {
-    if let Some(a) = attrs.by_fwd_name(etype, attr_name) {
+    let ref_lookup = attr_name.contains('.')
+        && attrs.by_fwd_name(etype, attr_name).is_none()
+        && pending_attr_id(new_attrs, etype, attr_name).is_none();
+    let label = if ref_lookup {
+        let mut parts = attr_name.split('.');
+        let fwd_name = parts.next().unwrap_or_default();
+        let id_ident = parts.next();
+        if id_ident != Some("id") || parts.next().is_some() {
+            return Err(lookup_err(
+                format!("{attr_name} is not a valid lookup attribute."),
+                json!([attr_name, value]),
+            ));
+        }
+        fwd_name
+    } else {
+        attr_name
+    };
+    if let Some(a) = attrs.by_fwd_name(etype, label) {
         if !a.is_unique {
-            return Err(InstantError::validation_failed(
-                "steps",
+            return Err(lookup_err(
                 format!("{attr_name} is not a unique attribute on {etype}"),
-                json!([]),
+                raw_eid.clone(),
             ));
         }
         return Ok(a.id);
     }
-    // check pending new attrs
-    for na in new_attrs.iter() {
-        if let Some(obj) = na.get(1) {
-            if obj
-                .get("forward-identity")
-                .and_then(|f| f.get(1))
-                .and_then(|v| v.as_str())
-                == Some(etype)
-                && obj
-                    .get("forward-identity")
-                    .and_then(|f| f.get(2))
-                    .and_then(|v| v.as_str())
-                    == Some(attr_name)
-            {
-                return Ok(obj
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| Uuid::parse_str(s).ok())
-                    .unwrap());
-            }
-        }
+    if let Some(id) = pending_attr_id(new_attrs, etype, label) {
+        return Ok(id);
     }
-    if throw_missing {
-        return Err(missing_attrs_err(&[format!("{etype}.{attr_name}")]));
+    if ref_lookup && attrs.by_rev_name(etype, label).is_some() {
+        // legacy only seeks the forward name and never auto-creates over an
+        // existing reverse link: `(:unique? nil)` fails the unique check
+        return Err(lookup_err(
+            format!("{attr_name} is not a unique attribute on {etype}"),
+            raw_eid.clone(),
+        ));
     }
     let id = Uuid::new_v4();
-    new_attrs.push(json!(["add-attr", {
-        "id": id,
-        "forward-identity": [Uuid::new_v4(), etype, attr_name],
-        "value-type": "blob", "cardinality": "one",
-        "unique?": true, "index?": true
-    }]));
+    if ref_lookup {
+        new_attrs.push(json!(["add-attr", {
+            "id": id,
+            "forward-identity": [Uuid::new_v4(), etype, label],
+            "reverse-identity": [Uuid::new_v4(), label, etype],
+            "value-type": "ref", "cardinality": "one",
+            "unique?": true, "index?": true
+        }]));
+    } else {
+        new_attrs.push(json!(["add-attr", {
+            "id": id,
+            "forward-identity": [Uuid::new_v4(), etype, label],
+            "value-type": "blob", "cardinality": "one",
+            "unique?": true, "index?": true
+        }]));
+    }
     Ok(id)
 }
 
-fn missing_attrs_err(names: &[String]) -> InstantError {
+/// Legacy `transform` (admin/model.clj:381-396): with
+/// `throw-on-missing-attrs?`, every attr the steps would have auto-created
+/// is reported at once, via throw-validation-err! :steps <steps>.
+fn missing_attrs_err(names: &[String], steps: &Value) -> InstantError {
     InstantError::new(
         "validation-failed",
         400,
-        "Attributes are missing in your schema",
+        "Validation failed for steps: Attributes are missing in your schema",
         Some(json!({
             "data-type": "steps",
+            "input": steps,
             "errors": [{
                 "message": "Attributes are missing in your schema",
                 "hint": {"attributes": names}
@@ -483,7 +574,6 @@ fn resolve_obj_attr(
     etype: &str,
     label: &str,
     new_attrs: &mut Vec<Value>,
-    throw_missing: bool,
 ) -> Result<Uuid> {
     if let Some(a) = attrs.by_fwd_name(etype, label) {
         return Ok(a.id);
@@ -502,9 +592,6 @@ fn resolve_obj_attr(
             }
         }
     }
-    if throw_missing {
-        return Err(missing_attrs_err(&[format!("{etype}.{label}")]));
-    }
     let id = Uuid::new_v4();
     new_attrs.push(json!(["add-attr", {
         "id": id,
@@ -520,7 +607,6 @@ fn resolve_link_attr(
     etype: &str,
     label: &str,
     new_attrs: &mut Vec<Value>,
-    throw_missing: bool,
 ) -> Result<(Uuid, bool)> {
     // returns (attr id, forward?)
     if let Some(a) = attrs.by_fwd_name(etype, label) {
@@ -546,9 +632,6 @@ fn resolve_link_attr(
                 ));
             }
         }
-    }
-    if throw_missing {
-        return Err(missing_attrs_err(&[format!("{etype}.{label}")]));
     }
     let id = Uuid::new_v4();
     new_attrs.push(json!(["add-attr", {
@@ -583,7 +666,6 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                    throw_missing,
                 )?;
                 let obj = sarr
                     .get(3)
@@ -602,7 +684,7 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     _ => None,
                 };
                 // id triple first
-                let id_attr = resolve_obj_attr(attrs, etype, "id", &mut new_attrs, throw_missing)?;
+                let id_attr = resolve_obj_attr(attrs, etype, "id", &mut new_attrs)?;
                 let mut push_step = |op: &str, attr_id: Uuid, value: Value| {
                     let mut s = vec![json!(op), eid.clone(), json!(attr_id), value];
                     if let Some(m) = mode {
@@ -615,8 +697,7 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     if label == "id" {
                         continue;
                     }
-                    let attr_id =
-                        resolve_obj_attr(attrs, etype, label, &mut new_attrs, throw_missing)?;
+                    let attr_id = resolve_obj_attr(attrs, etype, label, &mut new_attrs)?;
                     let op = if action == "merge" {
                         "deep-merge-triple"
                     } else {
@@ -634,7 +715,6 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                    throw_missing,
                 )?;
                 let obj = sarr
                     .get(3)
@@ -648,7 +728,7 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                 };
                 for (label, value) in &obj {
                     let (attr_id, forward) =
-                        resolve_link_attr(attrs, etype, label, &mut new_attrs, throw_missing)?;
+                        resolve_link_attr(attrs, etype, label, &mut new_attrs)?;
                     let targets: Vec<Value> = match value {
                         Value::Array(a)
                             if !(a.len() == 2 && a[0].is_string() && !a[1].is_array()) =>
@@ -669,14 +749,8 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                         })
                         .unwrap_or_default();
                     for target in targets {
-                        let target = eid_to_lookup(
-                            attrs,
-                            &target_etype,
-                            &target,
-                            &mut new_attrs,
-                            throw_missing,
-                        )
-                        .unwrap_or(target.clone());
+                        let target = eid_to_lookup(attrs, &target_etype, &target, &mut new_attrs)
+                            .unwrap_or(target.clone());
                         if forward {
                             out.push(json!([op, eid, attr_id, target]));
                         } else {
@@ -692,7 +766,6 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                    throw_missing,
                 )?;
                 out.push(json!(["delete-entity", eid, etype]));
             }
@@ -703,7 +776,6 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                    throw_missing,
                 )?;
                 out.push(json!([
                     "rule-params",
@@ -724,6 +796,20 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                 ))
             }
         }
+    }
+    if throw_missing && !new_attrs.is_empty() {
+        let names: Vec<String> = new_attrs
+            .iter()
+            .filter_map(|na| {
+                let fwd = na.get(1)?.get("forward-identity")?;
+                Some(format!(
+                    "{}.{}",
+                    fwd.get(1)?.as_str()?,
+                    fwd.get(2)?.as_str()?
+                ))
+            })
+            .collect();
+        return Err(missing_attrs_err(&names, steps));
     }
     let mut all = new_attrs;
     all.extend(out);
@@ -1264,6 +1350,7 @@ async fn client_storage_ctx(
             .map(|u| u.id),
         None => None,
     };
+    let request = crate::ws::request_ctx_from_headers(headers);
     Ok((
         app_id,
         PermsCtx {
@@ -1271,6 +1358,8 @@ async fn client_storage_ctx(
             user_id,
             user_map: None,
             rule_params: None,
+            ip: request.ip,
+            origin: request.origin,
         },
     ))
 }
@@ -1286,10 +1375,8 @@ async fn check_files_perm(
     let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
     let rules = instant_core::perms::Rules::load(&mut conn, app_id).await?;
     let program = rules.program("$files", action);
-    let auth_ctx = instant_core::perms::AuthCtx {
-        user_id: perms.user_id,
-        user_map: None,
-    };
+    let auth_ctx = perms.auth_ctx(state);
+    let env = instant_core::perms::EvalEnv::new(app_id, &rules, &auth_ctx.request);
     let auth_val = if let Some(uid) = auth_ctx.user_id {
         let attrs = service::load_attrs(state, app_id).await?;
         instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$users", uid)
@@ -1300,7 +1387,8 @@ async fn check_files_perm(
         Value::Null
     };
     let data = json!({"path": path});
-    let ok = instant_core::perms::eval_program(&program, &data, None, &auth_val, &json!({}))?;
+    let ok = instant_core::perms::eval_program(&program, &data, None, &auth_val, &json!({}), &env)
+        .await?;
     if !ok {
         return Err(InstantError::permission_denied(
             json!(["$files", action]),
@@ -1539,14 +1627,13 @@ async fn query_perms_check_impl(
         .get("inference?")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    service::assert_read_allowed(state, ctx.app_id).await?;
     let attrs = service::load_attrs(state, ctx.app_id).await?;
 
     // run unfiltered, then evaluate view per top-level entity for check-results
     let admin_perms = PermsCtx {
         admin: true,
-        user_id: None,
-        user_map: None,
-        rule_params: None,
+        ..PermsCtx::default()
     };
     let unfiltered = service::run_query(state, ctx.app_id, &attrs, &admin_perms, q).await?;
 
@@ -1555,10 +1642,10 @@ async fn query_perms_check_impl(
         Some(code) if code.is_object() => instant_core::perms::Rules { code: code.clone() },
         _ => instant_core::perms::Rules::load(&mut conn, ctx.app_id).await?,
     };
-    let auth_ctx = instant_core::perms::AuthCtx {
-        user_id: ctx.perms.user_id,
-        user_map: None,
-    };
+    // debugQuery / debugTransact may override request.ip / request.origin
+    // (admin/routes.clj:230-231, :332-333 ip-override / origin-override)
+    let auth_ctx = perms_check_auth_ctx(state, &ctx.perms, body);
+    let env = instant_core::perms::EvalEnv::new(ctx.app_id, &rules, &auth_ctx.request);
     let mut check_results = vec![];
     for form in &unfiltered.forms {
         let program = rules.program(&form.etype, "view");
@@ -1591,7 +1678,9 @@ async fn query_perms_check_impl(
                 None,
                 &auth_val,
                 &rule_params,
-            )?;
+                &env,
+            )
+            .await?;
             check_results.push(json!({
                 "id": e.eid,
                 "entity": form.etype,
@@ -1660,10 +1749,7 @@ async fn transact_perms_check_impl(
         Some(code) if code.is_object() => instant_core::perms::Rules { code: code.clone() },
         _ => instant_core::perms::Rules::load(&mut dbtx, ctx.app_id).await?,
     };
-    let auth_ctx = instant_core::perms::AuthCtx {
-        user_id: ctx.perms.user_id,
-        user_map: None,
-    };
+    let auth_ctx = perms_check_auth_ctx(state, &ctx.perms, body);
     let (report, checks) = instant_core::perms::permissioned_transact_checked(
         &mut dbtx,
         ctx.app_id,
@@ -1683,7 +1769,7 @@ async fn transact_perms_check_impl(
     let committed = commit && all_ok;
     if committed {
         dbtx.commit().await.map_err(InstantError::from)?;
-        service::notify_tx(state, ctx.app_id, report.tx_id, report.attrs_changed).await;
+        service::notify_tx(state, ctx.app_id, &service::TxNotice::from(&report)).await;
     } else {
         dbtx.rollback().await.map_err(InstantError::from)?;
     }

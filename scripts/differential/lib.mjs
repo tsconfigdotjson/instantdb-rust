@@ -39,8 +39,14 @@ export function psql(url, sql) {
 // ---------------------------------------------------------------------------
 // capture client
 
-export function connect(serverUrl, appId, name) {
-  const ws = new WebSocket(`${serverUrl.replace(/^http/, "ws")}/runtime/session?app_id=${appId}`);
+// `headers` (Origin, X-Forwarded-For) ride on the upgrade request like a
+// browser's would; both servers read them into request.origin / request.ip
+// for rule evaluation (node's WebSocket accepts them as an undici option).
+export function connect(serverUrl, appId, name, headers) {
+  const ws = new WebSocket(
+    `${serverUrl.replace(/^http/, "ws")}/runtime/session?app_id=${appId}`,
+    headers ? { headers } : undefined,
+  );
   const frames = []; // all frames ever, in arrival order
   let cursorMark = 0; // frames before this index belong to earlier steps
   const waiters = [];
@@ -121,9 +127,6 @@ const VOLATILE_KEYS = {
   "machine-id": "<uuid>",
   "sse-token": "<uuid>",
   "client-event-id": "<ceid>", // fixed ids stay recognizable below
-  // inferred-types tracking is a documented gap (docs/PARITY.md: attrs report
-  // null); the client only reads it for editor tooling hints
-  "inferred-types": "<inferred>",
 };
 
 export function normalize(value, key = null) {
@@ -275,6 +278,17 @@ export async function foldFrames(frames, state) {
               )
             : null,
         });
+        break;
+      }
+      case "app-status-changed": {
+        // the client handler is idempotent (Reactor.js:899-920 sets the
+        // status; the disabled branch fires only on a transition), and
+        // legacy delivers every flip twice because both of its WAL consumers
+        // run cache eviction (jdbc/wal.clj:692 and :766 -> cache_evict.clj
+        // notify-app-status-changed), so fold repeats of the same status
+        if (state.appStatus === m.status) break;
+        state.appStatus = m.status;
+        direct.push(normalize(m));
         break;
       }
       case "init-ok": {

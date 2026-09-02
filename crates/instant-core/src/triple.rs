@@ -416,7 +416,13 @@ pub async fn backfill_indexed_nulls(
     let mut cols = InsertCols::with_capacity(new_entities.len());
     for (eid, etype) in new_entities {
         for attr in attrs.attrs_of_etype(etype) {
-            if attr.value_type != ValueType::Blob || !attr.is_indexed || attr.label == "id" {
+            // legacy indexed-null-triples joins attrs on the user's app id, so
+            // system-catalog attrs ($users.email) are never null-backfilled
+            if attr.value_type != ValueType::Blob
+                || !attr.is_indexed
+                || attr.label == "id"
+                || attr.is_system
+            {
                 continue;
             }
             cols.push(&ResolvedTriple {

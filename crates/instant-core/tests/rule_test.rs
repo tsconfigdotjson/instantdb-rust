@@ -84,6 +84,7 @@ async fn mk_user(pool: &PgPool, app: Uuid, email: &str) -> Uuid {
         parsed,
         &TxOptions {
             allow_system_catalog_writes: true,
+            ..TxOptions::default()
         },
     )
     .await
@@ -204,10 +205,12 @@ async fn auth_binding_and_owner_rule() {
     let alice_auth = AuthCtx {
         user_id: Some(alice),
         user_map: None,
+        request: Default::default(),
     };
     let bob_auth = AuthCtx {
         user_id: Some(bob),
         user_map: None,
+        request: Default::default(),
     };
 
     let res = run_filtered(&pool, app, &alice_auth, json!({"todos": {}})).await;
@@ -415,6 +418,7 @@ async fn users_default_rules() {
     let alice_auth = AuthCtx {
         user_id: Some(alice),
         user_map: None,
+        request: Default::default(),
     };
     let res = run_filtered(&pool, app, &alice_auth, json!({"$users": {}})).await;
     assert_eq!(res.forms[0].entities.len(), 1);
@@ -424,10 +428,12 @@ async fn users_default_rules() {
     let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"$users": {}})).await;
     assert_eq!(res.forms[0].entities.len(), 0);
 
-    // bob can't delete alice
+    // bob can't delete alice: legacy validate-system-delete-entity! rejects
+    // non-admin $users deletes before any rule runs
     let bob_auth = AuthCtx {
         user_id: Some(bob),
         user_map: None,
+        request: Default::default(),
     };
     let err = transact_with_perms(
         &pool,
@@ -437,7 +443,49 @@ async fn users_default_rules() {
     )
     .await
     .unwrap_err();
-    assert_eq!(err.error_type, "permission-denied");
+    assert_eq!(err.error_type, "validation-failed");
+    assert_eq!(
+        err.message,
+        "Validation failed for tx-step: $users is a system entity. You aren't allowed to delete this directly."
+    );
+
+    // an upgraded guest row (linkedPrimaryUser -> alice) is visible to alice
+    // through the default rule's linkedPrimaryUser clause (rule.clj:198-210)
+    let guest = mk_user(&pool, app, "guest2@example.com").await;
+    {
+        use instant_core::system_catalog as sc;
+        use instant_core::tx::TxOptions;
+        let steps = json!([[
+            "add-triple",
+            guest,
+            sc::attr_id("$users", "linkedPrimaryUser"),
+            alice
+        ]]);
+        let parsed = tx::parse_tx_steps(&steps).unwrap();
+        let mut attrs = attrs_of(&pool, app).await;
+        let mut dbtx = pool.begin().await.unwrap();
+        tx::transact(
+            &mut dbtx,
+            app,
+            &mut attrs,
+            parsed,
+            &TxOptions {
+                allow_system_catalog_writes: true,
+                ..TxOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+        dbtx.commit().await.unwrap();
+    }
+    let res = run_filtered(&pool, app, &alice_auth, json!({"$users": {}})).await;
+    let mut seen: Vec<Uuid> = res.forms[0].entities.iter().map(|e| e.eid).collect();
+    seen.sort();
+    let mut want = vec![alice, guest];
+    want.sort();
+    assert_eq!(seen, want);
+    let res = run_filtered(&pool, app, &bob_auth, json!({"$users": {}})).await;
+    assert_eq!(res.forms[0].entities.len(), 1);
 }
 
 #[tokio::test]

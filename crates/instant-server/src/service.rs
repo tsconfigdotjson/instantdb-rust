@@ -36,6 +36,40 @@ pub async fn get_app(state: &AppState, app_id: Uuid) -> Result<AppRow> {
     })
 }
 
+/// App status cache safety net (a missed `instant_app_status` NOTIFY heals
+/// within this window).
+const APP_STATUS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Current `apps.status`, from the per-app cache. Legacy caches the whole
+/// app row and evicts it from the WAL feed; here the `apps` trigger's NOTIFY
+/// updates the cache (see `ensure_server_tables` / invalidator).
+pub async fn app_status(state: &AppState, app_id: Uuid) -> Result<String> {
+    if let Some(entry) = state.app_status_cache.get(&app_id) {
+        if entry.1.elapsed() < APP_STATUS_CACHE_TTL {
+            return Ok(entry.0.clone());
+        }
+    }
+    let status = get_app(state, app_id).await?.status;
+    set_app_status(state, app_id, status.clone());
+    Ok(status)
+}
+
+pub fn set_app_status(state: &AppState, app_id: Uuid, status: String) {
+    state
+        .app_status_cache
+        .insert(app_id, (status, std::time::Instant::now()));
+}
+
+/// Legacy `assert-read-allowed!` (instaql.clj:1817): queries against a
+/// disabled app fail with `app-disabled`.
+pub async fn assert_read_allowed(state: &AppState, app_id: Uuid) -> Result<()> {
+    let status = app_status(state, app_id).await?;
+    match tx::read_gate_error(&status) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 /// Attr cache safety net: entries older than this are reloaded even without
 /// an invalidation, so a missed NOTIFY (listener reconnect) self-heals.
 const ATTR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -113,6 +147,29 @@ pub struct PermsCtx {
     pub user_id: Option<Uuid>,
     pub user_map: Option<Value>,
     pub rule_params: Option<Value>,
+    /// `request.ip` / `request.origin` for rules (legacy `*request-info*`):
+    /// the ws upgrade's or HTTP request's headers
+    pub ip: Option<String>,
+    pub origin: Option<String>,
+}
+
+impl PermsCtx {
+    /// The rule-evaluation request context, with the pool for rate limits.
+    pub fn request_ctx(&self, state: &AppState) -> instant_core::perms::RequestCtx {
+        instant_core::perms::RequestCtx {
+            ip: self.ip.clone(),
+            origin: self.origin.clone(),
+            pool: Some(state.pool.clone()),
+        }
+    }
+
+    pub fn auth_ctx(&self, state: &AppState) -> instant_core::perms::AuthCtx {
+        instant_core::perms::AuthCtx {
+            user_id: self.user_id,
+            user_map: self.user_map.clone(),
+            request: self.request_ctx(state),
+        }
+    }
 }
 
 pub async fn run_query(
@@ -174,10 +231,7 @@ pub async fn run_query_full(
             // see; fall back to refreshing on every tx for this query.
             topics = QueryTopics::catch_all();
         }
-        let auth = instant_core::perms::AuthCtx {
-            user_id: perms.user_id,
-            user_map: perms.user_map.clone(),
-        };
+        let auth = perms.auth_ctx(state);
         let filter = instant_core::perms::PermsFilter {
             rules,
             auth: &auth,
@@ -265,13 +319,20 @@ pub async fn run_transact(
     tx::assert_write_allowed(&mut dbtx, app_id).await?;
 
     let report = if perms.admin {
-        tx::transact(&mut dbtx, app_id, &mut attrs, steps, &TxOptions::default()).await?
+        tx::transact(
+            &mut dbtx,
+            app_id,
+            &mut attrs,
+            steps,
+            &TxOptions {
+                admin: true,
+                ..TxOptions::default()
+            },
+        )
+        .await?
     } else {
         let rules = instant_core::perms::Rules::load(&mut dbtx, app_id).await?;
-        let auth = instant_core::perms::AuthCtx {
-            user_id: perms.user_id,
-            user_map: perms.user_map.clone(),
-        };
+        let auth = perms.auth_ctx(state);
         instant_core::perms::permissioned_transact(
             &mut dbtx,
             app_id,
@@ -285,7 +346,7 @@ pub async fn run_transact(
     };
 
     dbtx.commit().await.map_err(InstantError::from)?;
-    notify_tx(state, app_id, report.tx_id, report.attrs_changed).await;
+    notify_tx(state, app_id, &TxNotice::from(&report)).await;
     crate::metrics::METRICS
         .transact_seconds
         .observe_since(started);
@@ -308,19 +369,50 @@ pub async fn run_system_transact(
         steps,
         &TxOptions {
             allow_system_catalog_writes: true,
+            admin: true,
         },
     )
     .await?;
     dbtx.commit().await.map_err(InstantError::from)?;
-    notify_tx(state, app_id, report.tx_id, report.attrs_changed).await;
+    notify_tx(state, app_id, &TxNotice::from(&report)).await;
     Ok(report)
 }
 
+/// What the invalidator needs to know about a committed tx.
+pub struct TxNotice {
+    pub tx_id: i64,
+    /// the attr catalog changed in any way: drop attr caches
+    pub attrs_changed: bool,
+    /// legacy `schema-changes-require-refreshing-sessions?` (attr inserts /
+    /// deletes, ident changes): refresh every session of the app
+    pub schema_changed: bool,
+    /// attrs whose rows changed: queries mentioning them are refreshed
+    /// (legacy topics-for-attr-upsert)
+    pub changed_attrs: Vec<Uuid>,
+}
+
+impl From<&instant_core::tx::TxReport> for TxNotice {
+    fn from(r: &instant_core::tx::TxReport) -> Self {
+        TxNotice {
+            tx_id: r.tx_id,
+            attrs_changed: r.attrs_changed,
+            schema_changed: r.schema_changed,
+            changed_attrs: r.changed_attrs.clone(),
+        }
+    }
+}
+
 /// Announce a committed tx to every node (including this one). The payload
-/// carries `attrs_changed` so nodes can drop their attr cache before the
-/// refresh runs, and the commit timestamp (ms) for NOTIFY-lag metrics.
-pub async fn notify_tx(state: &AppState, app_id: Uuid, tx_id: i64, attrs_changed: bool) {
-    if attrs_changed {
+/// carries the [`TxNotice`] fields (attr caches are dropped before the
+/// refresh runs) and the commit timestamp (ms) for NOTIFY-lag metrics.
+pub async fn notify_tx(state: &AppState, app_id: Uuid, notice: &TxNotice) {
+    let TxNotice {
+        tx_id,
+        attrs_changed,
+        schema_changed,
+        changed_attrs,
+    } = notice;
+    if *attrs_changed {
         // Local requests racing the NOTIFY must not serve the old catalog.
         invalidate_attrs(state, app_id);
     }
@@ -328,6 +420,8 @@ pub async fn notify_tx(state: &AppState, app_id: Uuid, tx_id: i64, attrs_changed
         "app_id": app_id,
         "tx_id": tx_id,
         "attrs_changed": attrs_changed,
+        "schema_changed": schema_changed,
+        "changed_attrs": changed_attrs,
         "ts": chrono::Utc::now().timestamp_millis(),
     })
     .to_string();
@@ -504,6 +598,76 @@ pub async fn ensure_server_tables(pool: &sqlx::PgPool) -> Result<()> {
           RETURN NULL;
         END $fn$ LANGUAGE plpgsql
         "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
+    // `rateLimit.<name>.limit(key)` bucket state (instant_core::perms): one row
+    // per bandwidth of a bucket, shared by every node (legacy: bucket4j in
+    // Hazelcast backed by rate_limit_keys)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rust_rate_limit_buckets (
+           key uuid NOT NULL,
+           idx int4 NOT NULL,
+           tokens float8 NOT NULL,
+           refilled_at timestamptz NOT NULL,
+           updated_at timestamptz NOT NULL DEFAULT now(),
+           PRIMARY KEY (key, idx))",
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
+    // rules edits (dashboard route, CLI push, psql) invalidate every node's
+    // add-query result cache for the app: cached results embed the rules'
+    // view filtering (legacy evicts its rule cache off the WAL feed).
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION rust_notify_rules_changed() RETURNS trigger AS $fn$
+        BEGIN
+          PERFORM pg_notify('instant_rules',
+                            json_build_object('app_id', coalesce(NEW.app_id, OLD.app_id))::text);
+          RETURN NULL;
+        END $fn$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
+    sqlx::query("DROP TRIGGER IF EXISTS rust_rules_trigger ON rules")
+        .execute(pool)
+        .await
+        .map_err(InstantError::from)?;
+    sqlx::query(
+        "CREATE TRIGGER rust_rules_trigger AFTER INSERT OR UPDATE OR DELETE ON rules
+         FOR EACH ROW EXECUTE FUNCTION rust_notify_rules_changed()",
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
+    // apps.status flips push `app-status-changed` to every session of the app
+    // (legacy: cache_evict.clj notify-app-status-changed off the WAL feed).
+    // A row trigger catches direct SQL edits (dashboard, psql) like the WAL did.
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION rust_notify_app_status() RETURNS trigger AS $fn$
+        BEGIN
+          PERFORM pg_notify('instant_app_status',
+                            json_build_object('app_id', NEW.id, 'status', NEW.status)::text);
+          RETURN NULL;
+        END $fn$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
+    sqlx::query("DROP TRIGGER IF EXISTS rust_app_status_trigger ON apps")
+        .execute(pool)
+        .await
+        .map_err(InstantError::from)?;
+    sqlx::query(
+        "CREATE TRIGGER rust_app_status_trigger AFTER UPDATE OF status ON apps
+         FOR EACH ROW WHEN (OLD.status IS DISTINCT FROM NEW.status)
+         EXECUTE FUNCTION rust_notify_app_status()",
     )
     .execute(pool)
     .await

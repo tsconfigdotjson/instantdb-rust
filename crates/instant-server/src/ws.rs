@@ -22,21 +22,43 @@ use serde_json::value::RawValue;
 
 pub async fn handler(
     ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    let request = request_ctx_from_headers(&headers);
     // tungstenite preallocates read_buffer_size (128 KiB by default) per
     // connection — ~1.3 GB for 10k idle sockets. Client frames are small
     // (the buffer still grows for a large transact), and every outgoing
     // frame is flushed as it is sent, so neither buffer needs to be large.
     ws.read_buffer_size(8 * 1024)
         .write_buffer_size(0)
-        .on_upgrade(move |socket| session_loop(socket, state))
+        .on_upgrade(move |socket| session_loop(socket, state, request))
 }
 
-async fn session_loop(socket: WebSocket, state: Arc<AppState>) {
+/// `request.ip` / `request.origin` for rules, from the Origin and
+/// x-forwarded-for headers exactly like legacy (util/http.clj:84-118).
+pub fn request_ctx_from_headers(
+    headers: &axum::http::HeaderMap,
+) -> instant_core::perms::RequestCtx {
+    instant_core::perms::RequestCtx::from_headers(
+        headers.get("origin").and_then(|v| v.to_str().ok()),
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
+    )
+}
+
+async fn session_loop(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    request: instant_core::perms::RequestCtx,
+) {
     let session_id = Uuid::new_v4();
     let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
     let session = state.new_session(session_id, tx);
+    {
+        let mut st = session.state.lock().await;
+        st.ip = request.ip;
+        st.origin = request.origin;
+    }
 
     let (mut ws_tx, mut ws_rx) = socket.split();
 
@@ -135,9 +157,16 @@ async fn session_loop(socket: WebSocket, state: Arc<AppState>) {
 /// status/client-event-id/original-event/type/message/hint are always present,
 /// null when unknown.
 fn err_msg(original: &Value, e: &InstantError) -> Value {
+    // legacy session.clj:1040-1060 sends every request-scoped error type,
+    // rate-limited included, with status 400 on the socket (429 is HTTP-only)
+    let status = if e.error_type == "rate-limited" {
+        400
+    } else {
+        e.status
+    };
     json!({
         "op": "error",
-        "status": e.status,
+        "status": status,
         "type": e.error_type,
         "message": e.message,
         "hint": e.hint.clone().unwrap_or(Value::Null),
@@ -313,6 +342,8 @@ async fn session_ctx(
             user_id: st.user.as_ref().map(|u| u.id),
             user_map: None,
             rule_params: None,
+            ip: st.ip.clone(),
+            origin: st.origin.clone(),
         },
     ))
 }
@@ -327,6 +358,7 @@ async fn handle_add_query(
         .get("q")
         .cloned()
         .ok_or_else(|| InstantError::param_missing("missing q"))?;
+    service::assert_read_allowed(state, app_id).await?;
     let key = q.to_string();
     {
         let st = session.state.lock().await;
@@ -345,7 +377,14 @@ async fn handle_add_query(
     let processed_tx_id = service::max_tx_id(state, app_id).await?;
     let cacheable =
         perms.user_map.is_none() && perms.rule_params.is_none() && q.get("$$ruleParams").is_none();
-    let cache_key: QueryCacheKey = (app_id, key.clone(), perms.admin, perms.user_id);
+    let cache_key: QueryCacheKey = (
+        app_id,
+        key.clone(),
+        perms.admin,
+        perms.user_id,
+        perms.ip.clone(),
+        perms.origin.clone(),
+    );
     let attr_gen = service::attr_generation(state, app_id);
     let cached = if cacheable {
         state.query_cache.get(&cache_key).and_then(|e| {

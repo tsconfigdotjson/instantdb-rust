@@ -9,7 +9,7 @@
 //! (query, auth) across all sessions — and pushes refresh-ok to each session
 //! whose result hash changed.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -47,6 +47,8 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
             "instant_room",
             "instant_broadcast",
             "instant_stream",
+            "instant_app_status",
+            "instant_rules",
         ])
         .await?;
     loop {
@@ -74,6 +76,21 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                     .get("attrs_changed")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                // older nodes (rolling deploy) omit the key: treat every
+                // catalog change as a schema change like they did
+                let schema_changed = payload
+                    .get("schema_changed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(attrs_changed);
+                let changed_attrs: Vec<Uuid> = payload
+                    .get("changed_attrs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().and_then(|s| Uuid::parse_str(s).ok()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 if let Some(ts) = payload.get("ts").and_then(|v| v.as_i64()) {
                     let lag_ms = chrono::Utc::now().timestamp_millis() - ts;
                     METRICS
@@ -83,7 +100,7 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                 if attrs_changed {
                     service::invalidate_attrs(state, app_id);
                 }
-                enqueue_tx(state, app_id, tx_id, attrs_changed);
+                enqueue_tx(state, app_id, tx_id, schema_changed, changed_attrs);
             }
             "instant_room" => {
                 let (Some(app_id), Some(room_id)) = (
@@ -146,6 +163,34 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
             "instant_stream" => {
                 crate::streams::deliver_append(state, &payload).await;
             }
+            "instant_rules" => {
+                let Some(app_id) = payload
+                    .get("app_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                else {
+                    continue;
+                };
+                state.query_cache.retain(|k, _| k.0 != app_id);
+            }
+            "instant_app_status" => {
+                let (Some(app_id), Some(status)) = (
+                    payload
+                        .get("app_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| Uuid::parse_str(s).ok()),
+                    payload.get("status").and_then(|v| v.as_str()),
+                ) else {
+                    continue;
+                };
+                service::set_app_status(state, app_id, status.to_string());
+                // legacy frame: {op, status} (+ trace-id), no version gating
+                // (cache_evict.clj:74-83; Reactor.js:899-920)
+                let msg = json!({"op": "app-status-changed", "status": status});
+                for s in state.sessions_for_app(app_id) {
+                    s.send(msg.clone());
+                }
+            }
             _ => {}
         }
     }
@@ -163,7 +208,11 @@ pub struct RefreshQueue {
 #[derive(Default)]
 struct Pending {
     tx_ids: BTreeSet<i64>,
-    attrs_changed: bool,
+    /// a pending tx requires refreshing every session (attr insert / delete,
+    /// ident change)
+    schema_changed: bool,
+    /// attrs whose rows a pending tx changed (attr-wildcard topics)
+    changed_attrs: HashSet<Uuid>,
     /// when the oldest pending tx was enqueued (for batch latency)
     since: Option<Instant>,
     /// a worker task is draining this queue
@@ -177,12 +226,19 @@ impl RefreshQueue {
 }
 
 /// Queue a tx for refresh; starts the app's worker if none is running.
-pub fn enqueue_tx(state: &Arc<AppState>, app_id: Uuid, tx_id: i64, attrs_changed: bool) {
+pub fn enqueue_tx(
+    state: &Arc<AppState>,
+    app_id: Uuid,
+    tx_id: i64,
+    schema_changed: bool,
+    changed_attrs: Vec<Uuid>,
+) {
     let queue = state.refresh_queues.entry(app_id).or_default().clone();
     let start_worker = {
         let mut p = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
         p.tx_ids.insert(tx_id);
-        p.attrs_changed |= attrs_changed;
+        p.schema_changed |= schema_changed;
+        p.changed_attrs.extend(changed_attrs);
         p.since.get_or_insert_with(Instant::now);
         if p.running {
             false
@@ -208,14 +264,15 @@ async fn refresh_worker(state: Arc<AppState>, app_id: Uuid, queue: Arc<RefreshQu
                 break;
             }
             let tx_ids: Vec<i64> = std::mem::take(&mut p.tx_ids).into_iter().collect();
-            let attrs_changed = std::mem::take(&mut p.attrs_changed);
+            let schema_changed = std::mem::take(&mut p.schema_changed);
+            let changed_attrs = std::mem::take(&mut p.changed_attrs);
             let since = p.since.take().unwrap_or_else(Instant::now);
-            (tx_ids, attrs_changed, since)
+            (tx_ids, schema_changed, changed_attrs, since)
         };
-        let (tx_ids, attrs_changed, since) = batch;
+        let (tx_ids, schema_changed, changed_attrs, since) = batch;
         METRICS.refresh_batches_total.inc();
         METRICS.refresh_txs_total.add(tx_ids.len() as u64);
-        refresh_batch(&state, app_id, &tx_ids, attrs_changed).await;
+        refresh_batch(&state, app_id, &tx_ids, schema_changed, &changed_attrs).await;
         METRICS.refresh_batch_seconds.observe_since(since);
     }
 }
@@ -223,7 +280,15 @@ async fn refresh_worker(state: Arc<AppState>, app_id: Uuid, queue: Arc<RefreshQu
 /// Load the triple changes of a set of transactions as tx topics. Unknown
 /// changes (query error, nothing logged, catalog change) degrade to a
 /// catch-all so no query is ever wrongly skipped.
-async fn load_tx_topics(state: &AppState, app_id: Uuid, tx_ids: &[i64]) -> TxTopics {
+/// Topics of a batch of txs: the captured triple changes plus a wildcard
+/// per changed attr row (legacy topics-for-attr-upsert). A batch with
+/// neither is unknown (nothing was captured) and refreshes every query.
+async fn load_tx_topics(
+    state: &AppState,
+    app_id: Uuid,
+    tx_ids: &[i64],
+    changed_attrs: &HashSet<Uuid>,
+) -> TxTopics {
     let rows = sqlx::query(
         "SELECT entity_id, attr_id, value FROM rust_tx_changes
          WHERE app_id = $1 AND tx_id = ANY($2)",
@@ -232,18 +297,20 @@ async fn load_tx_topics(state: &AppState, app_id: Uuid, tx_ids: &[i64]) -> TxTop
     .bind(tx_ids)
     .fetch_all(&state.pool)
     .await;
-    match rows {
+    let triples = match rows {
         Ok(rows) if !rows.is_empty() => TxTopics::from_changes(rows.iter().map(|r| TxChange {
             e: r.get("entity_id"),
             a: r.get("attr_id"),
             v: r.get("value"),
         })),
-        Ok(_) => TxTopics::catch_all(),
+        Ok(_) if !changed_attrs.is_empty() => TxTopics::default(),
+        Ok(_) => return TxTopics::catch_all(),
         Err(e) => {
             tracing::warn!("refresh: failed to load tx changes: {e}");
-            TxTopics::catch_all()
+            return TxTopics::catch_all();
         }
-    }
+    };
+    triples.with_attr_wildcards(changed_attrs.iter().copied())
 }
 
 /// One (query, auth) recomputation shared by every session registering it.
@@ -255,7 +322,7 @@ struct Job {
 }
 
 /// (query key, admin?, user id): sessions sharing this see identical results.
-type JobKey = (String, bool, Option<Uuid>);
+type JobKey = (String, bool, Option<Uuid>, Option<String>, Option<String>);
 /// Subscribers of a job and its outcome (None when the query failed).
 type JobOutcome = (Vec<(usize, String)>, Option<JobResult>);
 
@@ -320,7 +387,8 @@ pub async fn refresh_batch(
     state: &Arc<AppState>,
     app_id: Uuid,
     tx_ids: &[i64],
-    attrs_changed: bool,
+    schema_changed: bool,
+    changed_attrs: &HashSet<Uuid>,
 ) {
     let sessions = state.sessions_for_app(app_id);
     if sessions.is_empty() {
@@ -334,10 +402,13 @@ pub async fn refresh_batch(
             return;
         }
     };
-    let tx_topics = if attrs_changed {
+    // legacy invalidator.clj:225-231: a schema change refreshes every
+    // session (all queries recomputed, attrs included); anything else
+    // reaches only the sessions whose query topics went stale
+    let tx_topics = if schema_changed {
         TxTopics::catch_all()
     } else {
-        load_tx_topics(state, app_id, tx_ids).await
+        load_tx_topics(state, app_id, tx_ids, changed_attrs).await
     };
 
     // 1. snapshot queries under each session lock; decide what to recompute
@@ -362,6 +433,8 @@ pub async fn refresh_batch(
             user_id: st.user.as_ref().map(|u| u.id),
             user_map: None,
             rule_params: None,
+            ip: st.ip.clone(),
+            origin: st.origin.clone(),
         };
         let mut stale = vec![];
         for (key, entry) in &st.queries {
@@ -374,7 +447,15 @@ pub async fn refresh_batch(
                 continue;
             }
             let idx = plans.len();
-            let job_key = (key.clone(), perms.admin, perms.user_id);
+            // rules may read request.ip / request.origin, so only sessions
+            // with the same request facts share a recomputation
+            let job_key = (
+                key.clone(),
+                perms.admin,
+                perms.user_id,
+                perms.ip.clone(),
+                perms.origin.clone(),
+            );
             match jobs.get_mut(&job_key) {
                 Some(job) => {
                     METRICS.refresh_queries_deduped_total.inc();
@@ -392,6 +473,13 @@ pub async fn refresh_batch(
                 }
             }
             stale.push((key.clone(), entry.result_hash));
+        }
+        // legacy only runs handle-refresh! for sockets the invalidator
+        // picked (a stale query, or every socket on a schema change); a
+        // session with nothing stale gets no frame, not even an attrs-only
+        // refresh-ok when the attrs hash moved (session.clj:467-530)
+        if stale.is_empty() && !tx_topics.catch_all {
+            continue;
         }
         let skip_attrs = st.supports_skip_attrs;
         let prev_attrs_hash = st.attrs_hash;
