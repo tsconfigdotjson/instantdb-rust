@@ -15,6 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   connect,
+  connectSse,
   settle,
   foldFrames,
   newState,
@@ -67,6 +68,8 @@ function buildScenario() {
     nicknameAttr: mk(),
     reqsId: mk(), reqsTitle: mk(), reqsSecret: mk(), r1: mk(), r2: mk(), r3: mk(),
     limitedId: mk(), limitedTitle: mk(), l1: mk(), l2: mk(), l3: mk(),
+    // admin SSE transports (issue #8, steps 23-24)
+    sseTodo: mk(), sseSecret: mk(), sseTodo2: mk(),
   };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // rules written straight to Postgres: legacy evicts its rule cache off the
@@ -413,6 +416,8 @@ function buildScenario() {
         const tokenBody = await resp.json();
         const refreshToken = tokenBody?.user?.refresh_token;
         if (!refreshToken) throw new Error(`no refresh token from ${env.serverName}: ${JSON.stringify(tokenBody).slice(0, 300)}`);
+        env.scratch = env.scratch ?? {};
+        env.scratch.refreshToken = refreshToken;
 
         // rules: owner-only view via bind, owner-only create, no updates
         psql(
@@ -739,6 +744,102 @@ function buildScenario() {
         await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok" && env.conns.ADMIN.frames.filter((f) => f.op === "transact-ok").length >= 7);
         msg(env.conns.ADMIN, { op: "transact", "tx-steps": [["delete-entity", env.scratch.strangerId, "$users"]] });
         await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok" && env.conns.ADMIN.frames.filter((f) => f.op === "transact-ok").length >= 8);
+      },
+    },
+    {
+      // @instantdb/admin subscribeQuery (issue #8): POST /admin/subscribe-query
+      // opens an admin session over SSE that registers the body's query with
+      // the `tree` return-type — sse-init, then add-query-ok with the object
+      // tree + result-meta page-info, then refresh-ok computations with the
+      // same shape (admin/src/subscribe.ts:300-345). One admin subscription
+      // (paginated, nested link, inference on) and one impersonated with
+      // `as-token` (secrets view rule filters to the user's own rows).
+      name: "23-admin-sse-subscribe-query",
+      run: async (env) => {
+        const versions = { "@instantdb/admin": "v0.22.0", "@instantdb/core": "v0.22.0" };
+        env.conns.SSEQ = connectSse(env.url, env.appId, `${env.serverName}:SSEQ`, {
+          path: `/admin/subscribe-query?local_connection_id=${ids.sseTodo}`,
+          headers: { "app-id": env.appId, authorization: `Bearer ${adminToken}` },
+          body: {
+            query: { todos: { $: { limit: 2, order: { serverCreatedAt: "desc" } }, owner: {} } },
+            "inference?": true,
+            versions,
+          },
+        });
+        await env.conns.SSEQ.open;
+        await env.conns.SSEQ.waitFor((m) => m.op === "add-query-ok");
+        env.conns.SSEU = connectSse(env.url, env.appId, `${env.serverName}:SSEU`, {
+          path: `/admin/subscribe-query?local_connection_id=${ids.sseSecret}`,
+          headers: { "app-id": env.appId, "as-token": env.scratch.refreshToken },
+          body: {
+            query: { secrets: { $: { order: { serverCreatedAt: "asc" } } } },
+            "inference?": false,
+            versions,
+          },
+        });
+        await env.conns.SSEU.open;
+        await env.conns.SSEU.waitFor((m) => m.op === "add-query-ok");
+
+        // a new todo (linked to an owner) lands at the top of the desc page
+        msg(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [
+            ["add-triple", ids.sseTodo, ids.todosId, ids.sseTodo],
+            ["add-triple", ids.sseTodo, ids.todosTitle, "over sse"],
+            ["add-triple", ids.sseTodo, ids.todosDone, true],
+            ["add-triple", ids.sseTodo, ids.ownerRef, ids.owner1],
+          ],
+        });
+        await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok" && env.conns.ADMIN.frames.filter((f) => f.op === "transact-ok").length >= 9);
+        await env.conns.SSEQ.waitFor((m) => m.op === "refresh-ok");
+        // a secret owned by the impersonated user refreshes only its subscription
+        msg(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [
+            ["add-triple", ids.sseSecret, ids.secretsId, ids.sseSecret],
+            ["add-triple", ids.sseSecret, ids.secretsOwner, "authuser@example.com"],
+            ["add-triple", ids.sseSecret, ids.secretsTitle, "mine too"],
+          ],
+        });
+        await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok" && env.conns.ADMIN.frames.filter((f) => f.op === "transact-ok").length >= 10);
+        await env.conns.SSEU.waitFor((m) => m.op === "refresh-ok");
+      },
+    },
+    {
+      // the generic admin session (db.streams): POST /admin/sse opens it,
+      // POST /admin/sse/push feeds it the same ops the socket takes —
+      // join-rows queries, add-query-exists, transacts, and a stream a ws
+      // subscriber tails (core/src/Connection.ts SSEConnection.postMessages).
+      name: "24-admin-sse-generic",
+      run: async (env) => {
+        env.conns.SSEG = connectSse(env.url, env.appId, `${env.serverName}:SSEG`, {
+          path: `/admin/sse?app_id=${env.appId}`,
+          headers: { "app-id": env.appId, authorization: `Bearer ${adminToken}` },
+          body: { "inference?": false, versions: { "@instantdb/admin": "v0.22.0", "@instantdb/core": "v0.22.0" } },
+        });
+        await env.conns.SSEG.open;
+        const q = { todos: { $: { where: { title: "over sse" } } } };
+        msg(env.conns.SSEG, { op: "add-query", q });
+        await env.conns.SSEG.waitFor((m) => m.op === "add-query-ok");
+        msg(env.conns.SSEG, { op: "add-query", q });
+        await env.conns.SSEG.waitFor((m) => m.op === "add-query-exists");
+        msg(env.conns.SSEG, {
+          op: "transact",
+          "tx-steps": [
+            ["add-triple", ids.sseTodo2, ids.todosId, ids.sseTodo2],
+            ["add-triple", ids.sseTodo2, ids.todosTitle, "over sse"],
+          ],
+        });
+        await env.conns.SSEG.waitFor((m) => m.op === "transact-ok");
+        await env.conns.SSEG.waitFor((m) => m.op === "refresh-ok");
+        // stream written over the admin session, tailed over the socket
+        msg(env.conns.SSEG, { op: "start-stream", "client-id": "sse-stream", "reconnect-token": "00000000-0000-4000-8000-0000000055ee" });
+        const started = await env.conns.SSEG.waitFor((m) => m.op === "start-stream-ok");
+        msg(env.conns.SSEG, { op: "append-stream", "stream-id": started["stream-id"], chunks: ["from sse"], offset: 0, done: false });
+        msg(env.conns.B, { op: "subscribe-stream", "client-id": "sse-stream", offset: 0 });
+        await env.conns.B.waitFor((m) => m.op === "stream-append" && (m.content ?? "").includes("from sse"), 20000);
+        msg(env.conns.SSEG, { op: "append-stream", "stream-id": started["stream-id"], chunks: [], offset: 8, done: true });
+        await env.conns.SSEG.waitFor((m) => m.op === "stream-flushed" && m.done === true, 20000);
       },
     },
   ];

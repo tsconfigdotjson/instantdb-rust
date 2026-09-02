@@ -317,18 +317,33 @@ async fn load_tx_topics(
 struct Job {
     q: Value,
     perms: PermsCtx,
+    /// tree return-type (admin SSE subscribeQuery) and the session's
+    /// `inference?`, which shape the frame
+    tree: bool,
+    inference: bool,
     /// (session index, query key) pairs waiting on this job
     subscribers: Vec<(usize, String)>,
 }
 
-/// (query key, admin?, user id): sessions sharing this see identical results.
-type JobKey = (String, bool, Option<Uuid>, Option<String>, Option<String>);
+/// (query key, admin?, user id, ip, origin, tree?, inference?): sessions
+/// sharing this see identical frames.
+type JobKey = (
+    String,
+    bool,
+    Option<Uuid>,
+    Option<String>,
+    Option<String>,
+    bool,
+    bool,
+);
 /// Subscribers of a job and its outcome (None when the query failed).
 type JobOutcome = (Vec<(usize, String)>, Option<JobResult>);
 
 struct JobResult {
     /// the instaql-result, serialized once for every subscriber
     ws_json: Box<RawValue>,
+    /// page-info / aggregate for tree results, null for join-rows
+    result_meta: Value,
     hash: u64,
     topics: Arc<QueryTopics>,
     duration_ms: u64,
@@ -362,7 +377,7 @@ struct ComputationWire<'a> {
     instaql_result: &'a RawValue,
     /// only populated for the tree return-type
     #[serde(rename = "result-meta")]
-    result_meta: (),
+    result_meta: &'a Value,
     #[serde(rename = "result-changed?")]
     result_changed: bool,
     #[serde(rename = "duration-ms")]
@@ -455,6 +470,8 @@ pub async fn refresh_batch(
                 perms.user_id,
                 perms.ip.clone(),
                 perms.origin.clone(),
+                entry.tree,
+                st.inference,
             );
             match jobs.get_mut(&job_key) {
                 Some(job) => {
@@ -467,6 +484,8 @@ pub async fn refresh_batch(
                         Job {
                             q: entry.q.clone(),
                             perms: perms.clone(),
+                            tree: entry.tree,
+                            inference: st.inference,
                             subscribers: vec![(idx, key.clone())],
                         },
                     );
@@ -535,12 +554,20 @@ pub async fn refresh_batch(
                         .await;
                 let result = match out {
                     Ok(out) => {
-                        let ws_result = out.result.to_ws_result();
-                        let hash = value_hash(&ws_result);
-                        let ws_json = RawValue::from_string(ws_result.to_string())
+                        let (wire, result_meta, hash) = crate::ws::format_query_result(
+                            &state,
+                            app_id,
+                            &out.result,
+                            &attrs,
+                            &job.q,
+                            job.tree,
+                            job.inference,
+                        );
+                        let ws_json = RawValue::from_string(wire.to_string())
                             .expect("serde_json output is valid JSON");
                         Some(JobResult {
                             ws_json,
+                            result_meta,
                             hash,
                             topics: Arc::new(out.topics),
                             duration_ms: started.elapsed().as_millis() as u64,
@@ -617,7 +644,7 @@ pub async fn refresh_batch(
                     instaql_query: &entry.q,
                     instaql_query_hash: value_hash(&entry.q) as u32,
                     instaql_result: &r.ws_json,
-                    result_meta: (),
+                    result_meta: &r.result_meta,
                     result_changed: true,
                     duration_ms: r.duration_ms,
                     instaql_topic: false,

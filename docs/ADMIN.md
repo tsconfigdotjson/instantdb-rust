@@ -455,7 +455,29 @@ All are POST requests that hold open a `text/event-stream` response:
   `{"machine_id", "session_id", "sse_token", "messages": [...]}`; token is checked
   against the sha256 hash captured at SSE open. **200** `{}`.
 
-These reuse the WS reactive-session machinery (see `docs/PROTOCOL.md`); implement last.
+These reuse the WS reactive-session machinery (see `docs/PROTOCOL.md`). Implemented in
+`routes/sse.rs`: the session is pre-initialized from the request's auth (legacy
+`admin-init!`, no `init` round trip and no version feature flags), the stream starts
+with a `retry: 500` hint, and `subscribe-query` queues an `add-query` with
+`return-type: tree` behind `sse-init`. Verified against the live legacy server
+(differential replay steps 23-24, dash step 25) — notes from that run:
+
+- The object tree keeps null-valued triples (`triples->map`), so an indexed attr an
+  entity never set shows up as `"score": null`.
+- `result-meta` is `{"page-info": {...}, "aggregate": {...}}` with both maps always
+  present.
+- `sse/push` errors: the wrapper's app-id check fires first (`Missing parameter:
+  ["headers" "app-id"]` with `possible-ins: [["query-params" "app_id"]]`); a wrong
+  token or unknown session is `session-missing` whose message is the Clojure-printed
+  map `Session missing for id: {:sess-id #uuid "..."}` (hint `{"sess-id": {"sess-id":
+  ...}}`) because `sse-on-messages` passes a map to `throw-session-missing!`; a session
+  owned by another machine is `member-missing`.
+- Admin auth errors on every `/admin/*` route: a bad token is `Record not found:
+  app-admin-token` with the explanation in `hint.message` and the lookup in
+  `hint.args`; unknown `as-email` / `as-token` users carry `hint.args` too; a
+  non-uuid `as-token` is `Malformed parameter: ["asUser" "token"]`; a missing
+  `authorization` header is `Missing parameter: ["headers" "authorization"]`; a
+  non-map `query` is `Malformed parameter: ["body" "query"]`.
 
 ---
 

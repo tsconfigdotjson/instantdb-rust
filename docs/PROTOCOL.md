@@ -80,6 +80,14 @@ falls back to SSE at `${apiURI}/runtime/sse?app_id=${appId}`
 A WS-only server implementation can ignore SSE, but clients on networks that
 block WS will then fail.
 
+The admin SDK uses the same session machinery over `POST /admin/subscribe-query`
+and `POST /admin/sse` + `/admin/sse/push` (admin auth headers instead of `init`,
+see `docs/ADMIN.md` §4.13). Those sessions register queries with
+`"return-type": "tree"`, which any client may send on `add-query`: `result` is
+then the admin object tree instead of join-rows nodes and `result-meta` carries
+`{"page-info": {...}, "aggregate": {...}}` keyed by top-level form
+(`reactive/query.clj:139-144`); `refresh-ok` computations keep that shape.
+
 ### 1.4 `client-event-id`
 
 Every client→server message carries a `client-event-id` (a UUIDv4 generated
