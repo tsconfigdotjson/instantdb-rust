@@ -348,6 +348,9 @@ pub fn all_attrs() -> Vec<Attr> {
             on_delete_cascade: d.on_delete_cascade,
             on_delete_reverse_cascade: d.on_delete_reverse_cascade,
             is_system: true,
+            indexing: false,
+            checking_data_type: false,
+            setting_unique: false,
         })
         .collect()
 }

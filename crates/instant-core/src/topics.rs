@@ -343,6 +343,9 @@ mod tests {
             on_delete_cascade: false,
             on_delete_reverse_cascade: false,
             is_system: false,
+            indexing: false,
+            checking_data_type: false,
+            setting_unique: false,
         }
     }
 

@@ -111,6 +111,13 @@ pub struct Attr {
     pub on_delete_reverse_cascade: bool,
     /// true when this attr belongs to the system-catalog app.
     pub is_system: bool,
+    /// In-flight indexing-job markers (attrs.indexing / checking_data_type /
+    /// setting_unique): true while a background job is rewriting the attr's
+    /// triples. Query planning ignores an index / type / uniqueness whose
+    /// job is still running (legacy attr_pat.clj best-index).
+    pub indexing: bool,
+    pub checking_data_type: bool,
+    pub setting_unique: bool,
 }
 
 impl Attr {
@@ -146,7 +153,38 @@ impl Attr {
         if let Some(cdt) = self.checked_data_type {
             m.insert("checked-data-type".into(), json!(cdt.as_str()));
         }
+        // legacy row->attr: present only while true
+        if self.checking_data_type {
+            m.insert("checking-data-type?".into(), json!(true));
+        }
+        if self.indexing {
+            m.insert("indexing?".into(), json!(true));
+        }
+        if self.setting_unique {
+            m.insert("setting-unique?".into(), json!(true));
+        }
         Value::Object(m)
+    }
+
+    /// `index?` as the query planner sees it: an index whose job is still
+    /// running is not usable (triples are only partially flagged).
+    pub fn indexed_for_query(&self) -> bool {
+        self.is_indexed && !self.indexing
+    }
+
+    /// `unique?` as the query planner sees it.
+    pub fn unique_for_query(&self) -> bool {
+        self.is_unique && !self.setting_unique
+    }
+
+    /// `checked-data-type` as the query planner sees it: None while a
+    /// check-data-type job is still flagging triples.
+    pub fn checked_type_for_query(&self) -> Option<CheckedDataType> {
+        if self.checking_data_type {
+            None
+        } else {
+            self.checked_data_type
+        }
     }
 
     /// Parse an attr map from an `add-attr` tx-step (client wire format).
@@ -230,6 +268,9 @@ impl Attr {
             on_delete_reverse_cascade: obj.get("on-delete-reverse").and_then(|v| v.as_str())
                 == Some("cascade"),
             is_system: false,
+            indexing: false,
+            checking_data_type: false,
+            setting_unique: false,
         })
     }
 
@@ -340,7 +381,10 @@ SELECT a.id, a.app_id, a.value_type, a.cardinality, a.is_unique, a.is_indexed,
        a.etype, a.label, a.reverse_etype, a.reverse_label,
        a.checked_data_type::text AS checked_data_type,
        (a.on_delete = 'cascade') AS on_delete_cascade,
-       (a.on_delete_reverse = 'cascade') AS on_delete_reverse_cascade
+       (a.on_delete_reverse = 'cascade') AS on_delete_reverse_cascade,
+       coalesce(a.indexing, false) AS indexing,
+       coalesce(a.checking_data_type, false) AS checking_data_type,
+       coalesce(a.setting_unique, false) AS setting_unique
 FROM attrs a
 WHERE a.deletion_marked_at IS NULL AND a.app_id = ANY($1)
 "#;
@@ -371,6 +415,9 @@ fn row_to_attr(row: &sqlx::postgres::PgRow) -> Result<Attr> {
             .get::<Option<bool>, _>("on_delete_reverse_cascade")
             .unwrap_or(false),
         is_system: app_id == system_catalog::SYSTEM_CATALOG_APP_ID,
+        indexing: row.get("indexing"),
+        checking_data_type: row.get("checking_data_type"),
+        setting_unique: row.get("setting_unique"),
     })
 }
 

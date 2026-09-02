@@ -93,6 +93,9 @@ works exactly as with the hosted service. A complete example lives in
 | `INSTANT_REFRESH_CONCURRENCY` | `8` | concurrent query recomputations per app refresh batch |
 | `INSTANT_MAX_QUEUED_MESSAGES` | `10000` | outgoing messages a session may queue before it is disconnected as a slow consumer |
 | `INSTANT_RATE_LIMITS` | on | `off` disables the per-app token buckets (load testing) |
+| `INSTANT_INDEXING_BATCH_SIZE` | `1000` | triples an indexing job (index / unique / type check / required) rewrites per step; the job is released between steps so large attrs never hold a long lock |
+| `INSTANT_INDEXING_SWEEP_SECS` | `60` | how often each node picks up indexing jobs nobody is driving (created by a node that died, or blocked by a conflicting job) |
+| `INSTANT_INDEXING_STALE_SECS` | `600` | a processing indexing job with no progress for this long is treated as orphaned and reclaimed |
 
 ### Horizontal scaling
 

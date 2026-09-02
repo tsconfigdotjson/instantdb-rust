@@ -13,6 +13,7 @@
 //      http://localhost:8888), DUMP=1 prints raw responses, ONLY=legacy|rust
 
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canon, makeIdFactory } from "./lib.mjs";
@@ -215,6 +216,7 @@ async function runAgainst(name) {
     postsId: mk(), postsTitle: mk(), postsViews: mk(), postsAuthor: mk(), postsAuthorRev: mk(),
     tagsId: mk(), tagsName: mk(), postsTags: mk(), postsTagsRev: mk(), postsSlug: mk(),
     p1: mk(), p2: mk(), p3: mk(), t1: mk(),
+    postsBig: mk(), postsWhen: mk(), postsBody: null,
   };
   const out = {};
   const record = (k, v) => {
@@ -413,6 +415,85 @@ async function runAgainst(name) {
   }
   res = await call(base, "GET", `/dash/apps/${appId}/schema/pull`);
   record("16-pull-final", pullView(res));
+  ids.postsBody = res.body?.schema?.blobs?.posts?.body?.id ?? ids.t1;
+
+  // 16b async indexing jobs, the paths issue #5 adds on top of step 06:
+  // values too large for an index (unique + index abort with
+  // triple-too-large-error), remove-unique / re-unique, remove-required (no
+  // work estimate) / re-required, a date type check failing then passing,
+  // remove-data-type, and required with explicit nulls. After each group
+  // the pulled attrs must carry no in-flight markers.
+  // incompressible: TOAST would shrink a repeated character under the
+  // 1024-byte index limit (legacy's test uses random uuids too)
+  let bigValue = "";
+  for (let h = appId; bigValue.length < 3000; ) {
+    h = createHash("sha256").update(h).digest("hex");
+    bigValue += h;
+  }
+  const seed2 = [
+    addAttr(ids.postsBig, "posts", "big"),
+    addAttr(ids.postsWhen, "posts", "when"),
+  ];
+  res = await call(base, "POST", `/dash/apps/${appId}/schema/steps/apply`, { body: { steps: seed2 } });
+  record("16b-add-attrs", applyView(res));
+  res = await fetch(`${base}/admin/transact`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "app-id": appId, authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({
+      steps: [
+        ["update", "posts", ids.p1, { big: bigValue, when: "2024-01-01T00:00:00Z", body: "x" }],
+        ["update", "posts", ids.p2, { when: 1700000000000, body: null }],
+        ["update", "posts", ids.p3, { when: "not a date" }],
+      ],
+    }),
+  });
+  record("16b-seed", { status: res.status });
+  const steps16c = [
+    job("unique", ids.postsBig, "posts", "big"),
+    job("index", ids.postsBig, "posts", "big"),
+    job("remove-unique", ids.tagsName, "tags", "name"),
+    job("remove-required", ids.postsTitle, "posts", "title"),
+    job("check-data-type", ids.postsWhen, "posts", "when", { "checked-data-type": "date" }),
+    job("required", ids.postsBody, "posts", "body"),
+  ];
+  res = await call(base, "POST", `/dash/apps/${appId}/schema/steps/apply`, { body: { steps: steps16c } });
+  raw("16c-apply", res);
+  record("16c-apply", applyView(res));
+  groupId = res.body?.["indexing-jobs"]?.["group-id"];
+  res = await waitForJobs(base, groupId);
+  raw("16d-jobs", res);
+  record("16d-jobs-errors", jobsView(res));
+  res = await call(base, "GET", `/dash/apps/${appId}/schema/pull`);
+  record("16e-pull-after-errors", pullView(res));
+  // fix the bad date, then the second round must complete
+  res = await fetch(`${base}/admin/transact`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "app-id": appId, authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ steps: [["update", "posts", ids.p3, { when: "2024-03-03T00:00:00Z" }]] }),
+  });
+  record("16f-fix", { status: res.status });
+  const steps16g = [
+    job("unique", ids.tagsName, "tags", "name"),
+    job("required", ids.postsTitle, "posts", "title"),
+    job("check-data-type", ids.postsWhen, "posts", "when", { "checked-data-type": "date" }),
+    job("index", ids.postsWhen, "posts", "when"),
+  ];
+  res = await call(base, "POST", `/dash/apps/${appId}/schema/steps/apply`, { body: { steps: steps16g } });
+  record("16g-apply", applyView(res));
+  groupId = res.body?.["indexing-jobs"]?.["group-id"];
+  res = await waitForJobs(base, groupId);
+  raw("16h-jobs", res);
+  record("16h-jobs-completed", jobsView(res));
+  res = await call(base, "GET", `/dash/apps/${appId}/schema/pull`);
+  record("16i-pull-after-completed", pullView(res));
+  const steps16j = [job("remove-data-type", ids.postsWhen, "posts", "when"), job("remove-index", ids.postsWhen, "posts", "when")];
+  res = await call(base, "POST", `/dash/apps/${appId}/schema/steps/apply`, { body: { steps: steps16j } });
+  record("16j-apply", applyView(res));
+  groupId = res.body?.["indexing-jobs"]?.["group-id"];
+  res = await waitForJobs(base, groupId);
+  record("16k-jobs-removed", jobsView(res));
+  res = await call(base, "GET", `/dash/apps/${appId}/schema/pull`);
+  record("16l-pull-after-removed", pullView(res));
 
   // 17 perms
   res = await call(base, "GET", `/dash/apps/${appId}/perms/pull`);

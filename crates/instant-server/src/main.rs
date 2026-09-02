@@ -101,6 +101,7 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(invalidator::run(state.clone()));
     tokio::spawn(presence::heartbeat_loop(state.clone()));
+    tokio::spawn(indexing_jobs::sweep_loop(state.clone()));
 
     // Storage uploads keep the larger body cap on their own router.
     let storage_uploads = Router::new()
