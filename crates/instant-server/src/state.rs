@@ -30,6 +30,15 @@ pub struct Config {
     /// Outgoing messages a session may have queued before it is treated as a
     /// dead/slow consumer and disconnected (`INSTANT_MAX_QUEUED_MESSAGES`).
     pub max_queued_messages: usize,
+    /// Rows an indexing job rewrites per step (`INSTANT_INDEXING_BATCH_SIZE`,
+    /// legacy batch-size 1000); the job is released between steps.
+    pub indexing_batch_size: usize,
+    /// How often each node looks for unowned indexing jobs
+    /// (`INSTANT_INDEXING_SWEEP_SECS`).
+    pub indexing_sweep_secs: u64,
+    /// A processing job with no progress for this long is treated as
+    /// orphaned by a dead node and reclaimed (`INSTANT_INDEXING_STALE_SECS`).
+    pub indexing_stale_secs: u64,
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -54,6 +63,9 @@ impl Config {
             pg_pool_min: env_num("PG_POOL_MIN", 2u32),
             refresh_concurrency: env_num("INSTANT_REFRESH_CONCURRENCY", 8usize).max(1),
             max_queued_messages: env_num("INSTANT_MAX_QUEUED_MESSAGES", 10_000usize).max(100),
+            indexing_batch_size: env_num("INSTANT_INDEXING_BATCH_SIZE", 1000usize).max(1),
+            indexing_sweep_secs: env_num("INSTANT_INDEXING_SWEEP_SECS", 60u64).max(1),
+            indexing_stale_secs: env_num("INSTANT_INDEXING_STALE_SECS", 600u64).max(30),
         }
     }
 }

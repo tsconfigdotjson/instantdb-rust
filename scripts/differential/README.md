@@ -34,6 +34,10 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
 - `dash.mjs` — the `/dash/*` routes `instant-cli` uses (issue #6): schema
   pull, `schema/steps/apply` with the exact add-attr + unique/index/required/
   check-data-type job steps `@instantdb/platform` emits, indexing-job polling
+  (issue #5: every job type's success and error path — too-large values,
+  duplicate values, invalid / date type checks, required with nulls, the
+  `remove-*` jobs — with job stages, error codes, samples and estimates
+  compared, and the pulled attrs checked for lingering in-flight markers)
   (completed and errored jobs with their invalid-data samples), server-side
   `schema/push/{plan,apply}`, perms pull, rules push (valid, unchanged and
   invalid rules), and the auth/param error matrix. Responses are folded to

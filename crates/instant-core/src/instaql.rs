@@ -736,7 +736,7 @@ impl<'a> SqlCtx<'a> {
                 Ok(step) => {
                     if i == path.len() - 1 {
                         return match step {
-                            PathStep::Forward(a) => a.is_indexed,
+                            PathStep::Forward(a) => a.indexed_for_query(),
                             PathStep::Reverse(_) => false,
                         };
                     }
@@ -823,8 +823,11 @@ impl<'a> SqlCtx<'a> {
         emit: &LeafEmit,
         alias: &str,
     ) -> Result<()> {
-        let typed = if attr.is_indexed {
-            attr.checked_data_type
+        // legacy best-index: the typed `ave` path needs index? AND
+        // checked-data-type with neither job still in flight (a running
+        // index / check-data-type job has only flagged part of the triples)
+        let typed = if attr.indexed_for_query() {
+            attr.checked_type_for_query()
         } else {
             None
         };
@@ -949,6 +952,19 @@ impl<'a> SqlCtx<'a> {
     }
 
     fn require_indexed_checked(&self, attr: &Attr) -> Result<CheckedDataType> {
+        // legacy assert-checked-attr-data-type! (attr_pat.clj), in its order
+        if attr.checking_data_type {
+            return Err(verr(format!(
+                "The `{}.{}` attribute is still in the process of checking its data type. It must finish before using comparison operators.",
+                attr.etype, attr.label
+            )));
+        }
+        if attr.indexing {
+            return Err(verr(format!(
+                "The `{}.{}` attribute is still in the process of indexing. It must finish before using comparison operators.",
+                attr.etype, attr.label
+            )));
+        }
         if !attr.is_indexed {
             return Err(verr(format!(
                 "The `{}.{}` attribute must be indexed to use comparison operators.",
@@ -1180,6 +1196,16 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
         // legacy per-condition messages (LEGACY instaql.clj:951-969)
         let name = format!("{}.{}", form.etype, order.key);
         let mut order_errors: Vec<String> = vec![];
+        if a.checking_data_type {
+            order_errors.push(format!(
+                    "The `{name}` attribute is still in the process of validating its type. It must finish before ordering by the attribute."
+                ));
+        }
+        if a.indexing {
+            order_errors.push(format!(
+                    "The `{name}` attribute is still in the process of indexing. It must finish before ordering by the attribute."
+                ));
+        }
         if !a.is_indexed {
             order_errors.push(format!(
                     "The `{name}` attribute is not indexed. Only indexed and typed attributes can be used to order by."
