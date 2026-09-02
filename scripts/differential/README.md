@@ -31,6 +31,14 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   match byte-for-byte. Key sets per op are compared raw. Remaining diffs must
   be listed in `allowed-divergences.json` with a client-code citation, and the
   run fails on anything unlisted.
+- `dash.mjs` — the `/dash/*` routes `instant-cli` uses (issue #6): schema
+  pull, `schema/steps/apply` with the exact add-attr + unique/index/required/
+  check-data-type job steps `@instantdb/platform` emits, indexing-job polling
+  (completed and errored jobs with their invalid-data samples), server-side
+  `schema/push/{plan,apply}`, perms pull, rules push (valid, unchanged and
+  invalid rules), and the auth/param error matrix. Responses are folded to
+  what the CLI reads (server-chosen ids, timestamps and CEL diagnostics
+  normalized) and must match. `node dash.mjs <app> <token> [<app2> <token2>]`.
 - `fuzz.mjs` — seeded random tx-steps + queries replayed on both servers;
   asserts per-server invariants (monotonic tx-ids) and cross-server equality
   of every query result. `node fuzz.mjs <app> <app> <token> [seed] [rounds]`.

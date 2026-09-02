@@ -1382,3 +1382,479 @@ mod tests {
         assert!(ok);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Rule validation (model/rule.clj validation-errors), used by the dashboard
+// `POST /dash/apps/:app_id/rules` endpoint that `instant-cli push perms` hits.
+
+fn get_in<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut cur = v;
+    for k in path {
+        cur = cur.get(*k)?;
+    }
+    Some(cur)
+}
+
+/// normalize-bind: `[k1 v1 k2 v2]` or `{k1: v1, k2: v2}` → flat sequence.
+fn normalize_bind(bind: Option<&Value>) -> Vec<Value> {
+    match bind {
+        Some(Value::Array(a)) => a.clone(),
+        Some(Value::Object(m)) => m
+            .iter()
+            .flat_map(|(k, v)| [Value::String(k.clone()), v.clone()])
+            .collect(),
+        _ => vec![],
+    }
+}
+
+fn collect_idents(expr: &cel::IdedExpr, out: &mut HashSet<String>) {
+    use cel::common::ast::{EntryExpr, Expr};
+    match &expr.expr {
+        Expr::Unspecified | Expr::Literal(_) => {}
+        Expr::Ident(name) => {
+            out.insert(name.clone());
+        }
+        Expr::Call(c) => {
+            if let Some(t) = &c.target {
+                collect_idents(t, out);
+            }
+            for a in &c.args {
+                collect_idents(a, out);
+            }
+        }
+        Expr::Comprehension(c) => {
+            for e in [
+                &c.iter_range,
+                &c.accu_init,
+                &c.loop_cond,
+                &c.loop_step,
+                &c.result,
+            ] {
+                collect_idents(e, out);
+            }
+        }
+        Expr::List(l) => {
+            for e in &l.elements {
+                collect_idents(e, out);
+            }
+        }
+        Expr::Map(m) => {
+            for e in &m.entries {
+                if let EntryExpr::MapEntry(me) = &e.expr {
+                    collect_idents(&me.key, out);
+                    collect_idents(&me.value, out);
+                }
+            }
+        }
+        Expr::Select(s) => collect_idents(&s.operand, out),
+        Expr::Struct(st) => {
+            for e in &st.entries {
+                match &e.expr {
+                    EntryExpr::StructField(f) => collect_idents(&f.value, out),
+                    EntryExpr::MapEntry(me) => {
+                        collect_idents(&me.key, out);
+                        collect_idents(&me.value, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+const UNEXPECTED_RULE_ERROR: &str = "There was an unexpected error evaluating the rules";
+
+/// The cel crate decorates parse errors with position and a source excerpt
+/// (`ERROR: <input>:1:11: Syntax error: <msg>\n| ...`); legacy reports the
+/// bare ANTLR message, which is the same text.
+fn cel_error_message(e: &cel::ParseErrors) -> String {
+    let full = e.to_string();
+    let core = full
+        .split_once("Syntax error: ")
+        .map(|(_, rest)| rest)
+        .unwrap_or(full.as_str());
+    core.lines().next().unwrap_or_default().trim().to_string()
+}
+
+/// expr-validation-errors + with-binds: compile the rule at `path` (with the
+/// binds it references, transitively) and report compile problems.
+fn expr_validation_errors(rules: &Value, etype: &str, path: &[&str]) -> Vec<Value> {
+    let err = |message: String| vec![json!({"message": message, "in": path})];
+    let Some(raw) = get_in(rules, path) else {
+        return vec![];
+    };
+    let code = match raw {
+        Value::Null => return vec![],
+        Value::Bool(b) => b.to_string(),
+        Value::String(s) => s.clone(),
+        _ => return err(UNEXPECTED_RULE_ERROR.to_string()),
+    };
+    let mut binds = normalize_bind(get_in(rules, &["$default", "bind"]));
+    binds.extend(normalize_bind(get_in(rules, &[etype, "bind"])));
+    if !binds.len().is_multiple_of(2) {
+        return err("bind should have an even number of elements".to_string());
+    }
+    let mut bind_map: HashMap<String, Value> = HashMap::new();
+    for pair in binds.chunks(2) {
+        let name = match &pair[0] {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        bind_map.insert(name, pair[1].clone());
+    }
+    let compiled = match cel::Program::compile(&code) {
+        Ok(p) => p,
+        Err(e) => return err(cel_error_message(&e)),
+    };
+    // Walk the binds the expression references (and the binds those
+    // reference), compiling each; cycles are an error like legacy sort-binds.
+    let mut queue: Vec<(String, Vec<String>)> = vec![];
+    let mut idents = HashSet::new();
+    collect_idents(compiled.expression(), &mut idents);
+    for name in idents {
+        if bind_map.contains_key(&name) {
+            queue.push((name.clone(), vec![name]));
+        }
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    while let Some((name, chain)) = queue.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let bind_code = match &bind_map[&name] {
+            Value::Bool(b) => b.to_string(),
+            Value::String(s) => s.clone(),
+            _ => return err(UNEXPECTED_RULE_ERROR.to_string()),
+        };
+        let compiled = match cel::Program::compile(&bind_code) {
+            Ok(p) => p,
+            Err(e) => return err(cel_error_message(&e)),
+        };
+        let mut refs = HashSet::new();
+        collect_idents(compiled.expression(), &mut refs);
+        for r in refs {
+            if !bind_map.contains_key(&r) {
+                continue;
+            }
+            if chain.contains(&r) {
+                let mut cycle = chain.clone();
+                cycle.push(r);
+                return err(format!(
+                    "The binds have a cyclic dependency {}",
+                    cycle.join(" -> ")
+                ));
+            }
+            let mut next = chain.clone();
+            next.push(r.clone());
+            queue.push((r, next));
+        }
+    }
+    vec![]
+}
+
+/// Postgres-interval-ish duration parser (legacy uses PGInterval):
+/// `"1 hour"`, `"30 minutes"`, `"2 days 4 hours"`, `"01:30:00"`.
+fn parse_interval_secs(s: &str) -> Option<f64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let mut total = 0.0;
+    let mut tokens = s.split_whitespace().peekable();
+    while let Some(tok) = tokens.next() {
+        if tok.contains(':') {
+            let parts: Vec<&str> = tok.split(':').collect();
+            if parts.len() < 2 || parts.len() > 3 {
+                return None;
+            }
+            let h: f64 = parts[0].parse().ok()?;
+            let m: f64 = parts[1].parse().ok()?;
+            let sec: f64 = parts.get(2).map(|x| x.parse().ok()).unwrap_or(Some(0.0))?;
+            total += h * 3600.0 + m * 60.0 + sec;
+            continue;
+        }
+        let n: f64 = tok.parse().ok()?;
+        let unit = tokens.next()?.to_lowercase();
+        let mult = match unit.trim_end_matches('s') {
+            "year" | "yr" | "y" => 365.0 * 86400.0,
+            "month" | "mon" => 30.0 * 86400.0,
+            "week" | "w" => 7.0 * 86400.0,
+            "day" | "d" => 86400.0,
+            "hour" | "hr" | "h" => 3600.0,
+            "minute" | "min" | "m" => 60.0,
+            "second" | "sec" | "" => 1.0,
+            _ => return None,
+        };
+        total += n * mult;
+    }
+    Some(total)
+}
+
+fn pos_int(v: Option<&Value>) -> Option<i64> {
+    v.and_then(|v| v.as_i64()).filter(|n| *n > 0)
+}
+
+/// rate_limit.clj rules-rate-limit-config->bucket-config, validation only.
+/// Returns the legacy error message on failure.
+fn rate_limit_config_error(config: &Value) -> Option<String> {
+    let Some(limits) = config.get("limits") else {
+        return Some("Missing parameter: [\"limits\"]".to_string());
+    };
+    let Some(limits) = limits.as_array().filter(|a| !a.is_empty()) else {
+        return Some(
+            "Validation failed for rules: The rate limit config must have at least one limit in the `limits` array.".to_string(),
+        );
+    };
+    for limit in limits {
+        if limit.get("capacity").is_none() {
+            return Some("Missing parameter: [\"capacity\"]".to_string());
+        }
+        let Some(capacity) = pos_int(limit.get("capacity")) else {
+            return Some("Malformed parameter: [\"capacity\"]".to_string());
+        };
+        let refill = limit.get("refill").cloned().unwrap_or(json!({}));
+        let amount = refill.get("amount").cloned().unwrap_or(json!(capacity));
+        if pos_int(Some(&amount)).is_none() {
+            return Some("Malformed parameter: [\"refill\" \"amount\"]".to_string());
+        }
+        let rtype = refill.get("type").cloned().unwrap_or(json!("greedy"));
+        if !matches!(rtype.as_str(), Some("interval") | Some("greedy")) {
+            return Some("Malformed parameter: [\"refill\" \"type\"]".to_string());
+        }
+        let period = refill.get("period").cloned().unwrap_or(json!("1 hour"));
+        let Some(secs) = period.as_str().and_then(parse_interval_secs) else {
+            return Some("Malformed parameter: [\"refill\" \"period\"]".to_string());
+        };
+        if secs.floor() < 1.0 {
+            return Some(
+                "Validation failed for rules: The refill period must be longer than a second."
+                    .to_string(),
+            );
+        }
+        if secs > 24.0 * 3600.0 {
+            return Some(
+                "Validation failed for rules: The refill period can't be longer than a day."
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
+/// Every problem with a rules document, as `{message, in}` entries
+/// (rule.clj validation-errors: binds, per-action rules, field rules,
+/// $rateLimits). An empty result means the rules can be saved.
+pub fn validation_errors(code: &Value) -> Vec<Value> {
+    let mut errors = vec![];
+    let Some(rules) = code.as_object() else {
+        errors.push(json!({"message": UNEXPECTED_RULE_ERROR, "in": []}));
+        return errors;
+    };
+    // bind-validation-errors
+    for (etype, ns) in rules {
+        let bind = normalize_bind(ns.get("bind"));
+        if !bind.len().is_multiple_of(2) {
+            errors.push(json!({
+                "message": "bind should have an even number of elements",
+                "in": [etype, "bind"],
+            }));
+            continue;
+        }
+        let mut seen = HashSet::new();
+        for pair in bind.chunks(2) {
+            let key = pair[0].to_string();
+            if !seen.insert(key) {
+                errors.push(json!({
+                    "message": "bind should only contain a given variable name once",
+                    "in": [etype, "bind", pair[0]],
+                }));
+                break;
+            }
+        }
+    }
+    // rule-validation-errors
+    for etype in rules.keys() {
+        if etype == "$rateLimits" {
+            continue;
+        }
+        for action in ["view", "create", "update", "delete"] {
+            let path = [etype.as_str(), "allow", action];
+            let users_errors = if etype == "$users" && action == "delete" {
+                match get_in(code, &path) {
+                    Some(v) if v != &Value::String("false".into()) => Some(vec![json!({
+                        "message": "The $users namespace doesn't support permissions for delete. Set `$users.allow.delete` to `\"false\"`.",
+                        "in": path,
+                    })]),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let system_errors = if etype.starts_with('$')
+                && !matches!(
+                    etype.as_str(),
+                    "$users" | "$files" | "$default" | "$streams" | "$rateLimits"
+                ) {
+                Some(vec![json!({
+                    "message": format!("The {etype} namespace is a reserved internal namespace that does not yet support rules."),
+                    "in": path,
+                })])
+            } else {
+                None
+            };
+            let errs = users_errors
+                .or(system_errors)
+                .unwrap_or_else(|| expr_validation_errors(code, etype, &path));
+            errors.extend(errs);
+        }
+    }
+    // field-validation-errors
+    for etype in rules.keys() {
+        let Some(fields) = get_in(code, &[etype, "fields"]).and_then(|f| f.as_object()) else {
+            continue;
+        };
+        for field in fields.keys() {
+            if field == "id" {
+                errors.push(json!({
+                    "in": [etype, "fields"],
+                    "message": format!("You cannot set field rules for `id`. Use {etype} -> allow -> view instead"),
+                }));
+            } else {
+                errors.extend(expr_validation_errors(
+                    code,
+                    etype,
+                    &[etype, "fields", field],
+                ));
+            }
+        }
+    }
+    // rate-limit-validation-errors
+    if let Some(rl) = rules.get("$rateLimits") {
+        match rl.as_object() {
+            None => errors
+                .push(json!({"message": "$rateLimits must be an object", "in": ["$rateLimits"]})),
+            Some(configs) => {
+                for (name, config) in configs {
+                    if let Some(message) = rate_limit_config_error(config) {
+                        errors.push(json!({"message": message, "in": ["$rateLimits", name]}));
+                    }
+                }
+            }
+        }
+    }
+    errors
+}
+
+#[cfg(test)]
+mod rule_validation_tests {
+    use super::*;
+
+    fn msgs(code: Value) -> Vec<(String, Value)> {
+        validation_errors(&code)
+            .into_iter()
+            .map(|e| (e["message"].as_str().unwrap().to_string(), e["in"].clone()))
+            .collect()
+    }
+
+    #[test]
+    fn valid_rules_have_no_errors() {
+        let code = json!({
+            "docs": {
+                "bind": ["isOwner", "auth.id != null && auth.id == data.ownerId"],
+                "allow": {"view": "isOwner", "create": true, "update": "isOwner", "delete": "false"},
+                "fields": {"secret": "isOwner"},
+            },
+            "$users": {"allow": {"view": "auth.id == data.id", "delete": "false"}},
+            "$default": {"bind": {"isAdmin": "auth.email == 'admin@example.com'"}, "allow": {"$default": "isAdmin"}},
+            "$rateLimits": {"burst": {"limits": [{"capacity": 10, "refill": {"period": "1 hour", "amount": 10, "type": "interval"}}]}},
+        });
+        assert_eq!(msgs(code), vec![]);
+    }
+
+    #[test]
+    fn bind_shape_errors() {
+        let code = json!({"docs": {"bind": ["a", "true", "b"]}});
+        let m = msgs(code);
+        assert_eq!(m[0].0, "bind should have an even number of elements");
+        assert_eq!(m[0].1, json!(["docs", "bind"]));
+        let code = json!({"docs": {"bind": ["a", "true", "a", "false"]}});
+        let m = msgs(code);
+        assert_eq!(
+            m[0].0,
+            "bind should only contain a given variable name once"
+        );
+        assert_eq!(m[0].1, json!(["docs", "bind", "a"]));
+    }
+
+    #[test]
+    fn reserved_namespaces_and_users_delete() {
+        let m = msgs(json!({"$magicCodes": {"allow": {"view": "true"}}}));
+        assert_eq!(m.len(), 4);
+        assert!(m[0]
+            .0
+            .contains("$magicCodes namespace is a reserved internal namespace"));
+        assert_eq!(m[0].1, json!(["$magicCodes", "allow", "view"]));
+        let m = msgs(json!({"$users": {"allow": {"delete": "auth.id == data.id"}}}));
+        assert_eq!(m.len(), 1);
+        assert!(m[0].0.contains("doesn't support permissions for delete"));
+    }
+
+    #[test]
+    fn cel_compile_errors_are_reported_with_paths() {
+        let m = msgs(json!({"docs": {"allow": {"view": "auth.id =="}}}));
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].1, json!(["docs", "allow", "view"]));
+        // byte-identical to the legacy (cel-java) message for this input
+        assert_eq!(
+            m[0].0,
+            "mismatched input '<EOF>' expecting {'[', '{', '(', '.', '-', '!', 'true', 'false', 'null', NUM_FLOAT, NUM_INT, NUM_UINT, STRING, BYTES, IDENTIFIER}"
+        );
+        let m = msgs(json!({"docs": {"allow": {"view": 42}}}));
+        assert_eq!(m[0].0, UNEXPECTED_RULE_ERROR);
+        let m = msgs(json!({"docs": {"fields": {"id": "true"}}}));
+        assert!(m[0].0.starts_with("You cannot set field rules for `id`"));
+        assert_eq!(m[0].1, json!(["docs", "fields"]));
+    }
+
+    #[test]
+    fn bind_references_are_checked_transitively() {
+        // unreferenced broken bind is fine (legacy only compiles used binds)
+        let m = msgs(
+            json!({"docs": {"bind": ["broken", "auth.id ==", "ok", "true"], "allow": {"view": "ok"}}}),
+        );
+        assert_eq!(m, vec![]);
+        let m = msgs(json!({"docs": {"bind": ["a", "b", "b", "a"], "allow": {"view": "a"}}}));
+        assert_eq!(m.len(), 1);
+        assert!(m[0].0.starts_with("The binds have a cyclic dependency"));
+        let m = msgs(
+            json!({"docs": {"bind": ["a", "b && x", "b", "auth.id =="], "allow": {"view": "a"}}}),
+        );
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].1, json!(["docs", "allow", "view"]));
+    }
+
+    #[test]
+    fn rate_limit_configs() {
+        let m = msgs(json!({"$rateLimits": "nope"}));
+        assert_eq!(m[0].0, "$rateLimits must be an object");
+        let m = msgs(json!({"$rateLimits": {"a": {}}}));
+        assert_eq!(m[0].0, "Missing parameter: [\"limits\"]");
+        assert_eq!(m[0].1, json!(["$rateLimits", "a"]));
+        let m = msgs(json!({"$rateLimits": {"a": {"limits": []}}}));
+        assert!(m[0].0.contains("at least one limit"));
+        let m = msgs(json!({"$rateLimits": {"a": {"limits": [{"capacity": 0}]}}}));
+        assert_eq!(m[0].0, "Malformed parameter: [\"capacity\"]");
+        let m = msgs(
+            json!({"$rateLimits": {"a": {"limits": [{"capacity": 5, "refill": {"period": "2 days"}}]}}}),
+        );
+        assert_eq!(
+            m[0].0,
+            "Validation failed for rules: The refill period can't be longer than a day."
+        );
+        let m = msgs(
+            json!({"$rateLimits": {"a": {"limits": [{"capacity": 5, "refill": {"period": "500 milliseconds"}}]}}}),
+        );
+        assert_eq!(m[0].0, "Malformed parameter: [\"refill\" \"period\"]");
+        assert_eq!(parse_interval_secs("01:30:00"), Some(5400.0));
+        assert_eq!(parse_interval_secs("2 hours 30 minutes"), Some(9000.0));
+    }
+}

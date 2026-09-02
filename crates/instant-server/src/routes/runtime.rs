@@ -26,10 +26,19 @@ fn check_auth_limit(state: &AppState, app_id: Uuid) -> Result<()> {
         .map_err(rate_limit::rate_limited_err)
 }
 
+/// HTTP error body. Legacy's wrap-errors (util/http.clj) stamps every error
+/// response with the request's trace-id next to type/message/hint.
 pub fn err_response(e: &InstantError) -> Response {
     let status =
         axum::http::StatusCode::from_u16(e.status).unwrap_or(axum::http::StatusCode::BAD_REQUEST);
-    (status, Json(e.to_body())).into_response()
+    let mut body = e.to_body();
+    if let Value::Object(m) = &mut body {
+        m.insert(
+            "trace-id".into(),
+            Value::String(crate::state::new_trace_id()),
+        );
+    }
+    (status, Json(body)).into_response()
 }
 
 pub fn json_or_err(r: Result<Value>) -> Response {

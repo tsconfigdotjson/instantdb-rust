@@ -40,6 +40,15 @@ TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 echo "== differential replay =="
 node replay.mjs "$APP_ID" "$APP_ID" "$TOKEN"
 
+echo "== dashboard/CLI routes =="
+DASH_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+DASH_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+DASH_APP2=$(python3 -c "import uuid; print(uuid.uuid4())")
+DASH_TOKEN2=$(python3 -c "import uuid; print(uuid.uuid4())")
+./provision.sh "$DASH_APP" "$DASH_TOKEN"
+./provision.sh "$DASH_APP2" "$DASH_TOKEN2"
+node dash.mjs "$DASH_APP" "$DASH_TOKEN" "$DASH_APP2" "$DASH_TOKEN2"
+
 echo "== fuzz layer =="
 for SEED in ${FUZZ_SEEDS:-42 99}; do
   FUZZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")

@@ -601,6 +601,37 @@ Used by the CLI (`cli/src/lib/*.ts`):
   (validation errors → 400 `validation-failed`).
 - `GET /dash/cli/version` (`:2794`) → `{"min-version": "..."}`.
 
+### 6.1 What this server implements
+
+All of the routes above except `/dash/cli/auth/*` are served (`crates/instant-server/src/routes/dash.rs`,
+planning in `crates/instant-core/src/schema.rs`, jobs in `crates/instant-server/src/indexing_jobs.rs`).
+Verified against the live legacy server by `scripts/differential/dash.mjs` and with the real
+CLI by `scripts/cli-test.mjs`.
+
+- **Auth.** There is no dashboard, so the CLI authenticates with the **app admin token**:
+  `INSTANT_APP_ADMIN_TOKEN=<token> INSTANT_APP_ID=<id> INSTANT_CLI_API_URI=<server> instant-cli push`
+  (or `--token`). The legacy `admin-token-mismatch` error (400 `validation-failed`,
+  `hint.reason`) is raised when the token belongs to another app. Dashboard refresh tokens
+  present in a migrated `instant_user_refresh_tokens` table are honored for app creators and
+  `app_members` (collaborator+); `per_`/`pat_` platform tokens get a 401. `/dash/cli/auth/*`
+  answers 400 with a message pointing at the admin token instead of the browser login flow.
+- **Jobs.** `index`/`remove-index`/`unique`/`remove-unique`/`required`/`remove-required`/
+  `check-data-type`/`remove-data-type` steps create rows in the legacy `indexing_jobs` table
+  (`waiting` → `processing` → `completed`/`errored`, same `job_stage` names, `worker_id` = node id)
+  and the node that accepted the request runs them, one transaction per job. Error reporting
+  matches the CLI's expectations: `triple-not-unique-error` with `invalid_unique_value`,
+  `invalid-triple-error` with `invalid_triples_sample`, `missing-required-error` with
+  `error_data` (`count`, `etype`, `label`, `entity-ids`); errored jobs keep `done_at` null.
+  Each job also inserts a `transactions` row so connected clients get refreshed attrs.
+  Batched/resumable rewrites for very large attrs are tracked in issue #5.
+- **Shapes worth knowing.** `schema/steps/apply` echoes the input steps with a `job-id` added
+  to job steps and returns the raw `indexing_jobs` rows (all columns) under `indexing-jobs.jobs`,
+  while the group/poll endpoints return the client format (`attr_name`,
+  `invalid_triples_sample`, no `job_serial_key`/`worker_id`/...). `delete-attr` of an unknown
+  attr id is a no-op (legacy's soft delete is a plain `UPDATE`). `GET .../indexing-jobs/:id`
+  for an unknown id returns `{"job": {}}`. Rules pushes that don't change the code return
+  `{"rules": null}`. Error bodies carry a `trace-id` like legacy's `wrap-errors`.
+
 `/superadmin/*` equivalents exist for the OAuth-platform API
 (`superadmin/routes.clj:333-351`: `GET/POST /superadmin/apps`,
 `GET /superadmin/apps/:app_id/schema`, `POST .../schema/push/{plan,apply}`,
