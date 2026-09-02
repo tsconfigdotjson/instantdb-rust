@@ -100,8 +100,12 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | storage upload/delete (admin + client routes) + signed download URLs | ✅ | Postgres-backed blobs by default (multi-node correct; scripts/multinode-storage-test.mjs); STORAGE_BACKEND=disk optional; S3 would slot in beside them |
 | query_perms_check / transact_perms_check (debugQuery/debugTransact) | ✅ | check-results with programs; dry-run/commit semantics |
 | /admin/subscribe-query + /admin/sse (SSE transports) | ❌ | |
-| schema endpoints (`/admin/schema`, `/dash/.../schema/*` CLI push) | ❌ | schema changes go through /admin/transact attr steps |
-| platform tokens (`per_`/`pat_`), dashboard routes | ❌ | out of scope (dashboard is a separate product) |
+| `/dash/apps/:id/schema/pull`, `schema/steps/apply`, `schema/push/{plan,apply}` (instant-cli push/pull schema) | ✅ | `{schema: {blobs, refs}, attrs, app-title}` incl. legacy's Clojure-printed ref keys; add/update/delete-attr steps transact, `index`/`unique`/`required`/`check-data-type` (+ `remove-*`) become indexing jobs; server-side planning (`schemas->ops`, plan errors) ported to `instant_core::schema`; pulled `instant.schema.ts` is byte-identical to legacy's (scripts/cli-test.mjs, scripts/differential/dash.mjs) |
+| indexing jobs (`/dash/apps/:id/indexing-jobs/*`) | 🟡 | legacy `indexing_jobs` rows, statuses, stages and error codes (`triple-not-unique-error` + `invalid_unique_value`, `invalid-triple-error` samples, `missing-required-error` + `error_data`) as the CLI's job poller expects; each job rewrites its attr in one transaction on the accepting node — batched/resumable rewrites for very large attrs are issue #5 |
+| `/dash/apps/:id/perms/pull`, `POST /dash/apps/:id/rules` (instant-cli push/pull perms) | ✅ | full rule validation port (binds, reserved namespaces, `$users.delete`, CEL compile errors with the same ANTLR messages, field rules, `$rateLimits` configs); version bump + `rules: null` on unchanged code like legacy |
+| `/dash/cli/version`, `/dash/cli/auth/*` | 🟡 | version served; the browser login flow needs the hosted dashboard, so `auth/*` returns a 400 pointing at `INSTANT_APP_ADMIN_TOKEN` / `--token` |
+| dashboard-route auth | 🟡 | app admin token (the CLI's `INSTANT_APP_ADMIN_TOKEN`), with legacy's admin-token-mismatch error; dashboard refresh tokens in a migrated `instant_user_refresh_tokens` table work for creators/members; platform tokens (`per_`/`pat_`) are rejected (401) |
+| `/admin/schema`, other dashboard routes | ❌ | out of scope (dashboard is a separate product) |
 
 ## Operations
 
@@ -112,7 +116,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | deterministic system-catalog UUIDs | ✅ | verified against hardcoded legacy values |
 | app status gates (read-only / disabled) | 🟡 | write gate enforced; `app-status-changed` push not sent |
 | rate limiting | ❌ | |
-| backups/restore tooling, indexing jobs, sketches | ❌ | ops tooling of the hosted service |
+| backups/restore tooling, attr sketches | ❌ | ops tooling of the hosted service |
 
 ## Wire-level divergences
 

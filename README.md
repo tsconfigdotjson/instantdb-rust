@@ -169,6 +169,24 @@ legacy schema and deterministic system-catalog IDs, a data export
 (`apps`, `attrs`, `idents`, `triples`, `rules`) restores directly, and
 existing clients keep working after a URL switch.
 
+### Using `instant-cli`
+
+The official CLI's `push`/`pull` (schema and perms) work against this server
+through the same `/dash/...` routes it uses with hosted Instant. There is no
+dashboard login here, so authenticate with the app's admin token:
+
+```bash
+export INSTANT_CLI_API_URI=http://localhost:8888   # this server
+export INSTANT_APP_ID=<app-id>
+export INSTANT_APP_ADMIN_TOKEN=<admin-token>        # or: instant-cli --token <admin-token>
+npx instant-cli@latest pull                        # writes instant.schema.ts / instant.perms.ts
+npx instant-cli@latest push                        # diffs, applies, waits for indexing jobs
+```
+
+`push schema` runs index/unique/required/type changes as indexing jobs and
+reports invalid data exactly like hosted Instant (duplicate values, missing
+required values, wrong types). See `docs/ADMIN.md` §6.
+
 ## Development
 
 ```bash
@@ -179,6 +197,7 @@ node scripts/smoke-ws.mjs <app-id>     # ws protocol smoke test
 node scripts/admin-sdk-test.mjs <app-id> <token>   # official admin SDK suite
 node scripts/oauth-test.mjs <app-id>   # oauth flow against a mock OIDC provider
 node scripts/multinode-ws.mjs <app-id> # two-node coordination test
+node scripts/cli-test.mjs <app-id> <token>         # official instant-cli push/pull (needs the CLI built, see script header)
 ```
 
 Layout:

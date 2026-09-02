@@ -1,5 +1,6 @@
 mod auth;
 mod email;
+mod indexing_jobs;
 mod invalidator;
 mod metrics;
 mod presence;
@@ -174,6 +175,57 @@ async fn main() -> anyhow::Result<()> {
             post(routes::admin::admin_sign_in_guest),
         )
         .route("/admin/rooms/presence", get(routes::admin::presence))
+        // dashboard routes used by instant-cli (docs/ADMIN.md §6)
+        .route(
+            "/dash/apps/{app_id}/schema/pull",
+            get(routes::dash::schema_pull),
+        )
+        .route(
+            "/dash/apps/{app_id}/schema/steps/apply",
+            post(routes::dash::schema_steps_apply),
+        )
+        .route(
+            "/dash/apps/{app_id}/schema/push/plan",
+            post(routes::dash::schema_push_plan),
+        )
+        .route(
+            "/dash/apps/{app_id}/schema/push/apply",
+            post(routes::dash::schema_push_apply),
+        )
+        .route(
+            "/dash/apps/{app_id}/perms/pull",
+            get(routes::dash::perms_pull),
+        )
+        .route("/dash/apps/{app_id}/rules", post(routes::dash::rules_post))
+        .route(
+            "/dash/apps/{app_id}/indexing-jobs",
+            post(routes::dash::indexing_job_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/indexing-jobs/group/{group_id}",
+            get(routes::dash::indexing_jobs_group),
+        )
+        .route(
+            "/dash/apps/{app_id}/indexing-jobs/{job_id}",
+            get(routes::dash::indexing_job_get),
+        )
+        .route("/dash/cli/version", get(routes::dash::cli_version))
+        .route(
+            "/dash/cli/auth/register",
+            post(routes::dash::cli_auth_unsupported),
+        )
+        .route(
+            "/dash/cli/auth/check",
+            post(routes::dash::cli_auth_unsupported),
+        )
+        .route(
+            "/dash/cli/auth/claim",
+            post(routes::dash::cli_auth_unsupported),
+        )
+        .route(
+            "/dash/cli/auth/void",
+            post(routes::dash::cli_auth_unsupported),
+        )
         .route(
             "/admin/query_perms_check",
             post(routes::admin::query_perms_check),

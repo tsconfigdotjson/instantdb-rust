@@ -360,9 +360,11 @@ pub async fn transact(
                     let TxStep::DeleteAttr(id) = step else {
                         unreachable!()
                     };
-                    let existing = attrs.get(&id).cloned().ok_or_else(|| {
-                        InstantError::record_not_found("attr", format!("attr {id} not found"))
-                    })?;
+                    // Legacy soft-delete-multi! is a plain UPDATE ... WHERE id IN
+                    // (...): an unknown (or already deleted) id is a no-op.
+                    let Some(existing) = attrs.get(&id).cloned() else {
+                        continue;
+                    };
                     if existing.is_system {
                         return Err(InstantError::validation_failed(
                             "attributes",

@@ -2,6 +2,7 @@ pub mod attr;
 pub mod error;
 pub mod instaql;
 pub mod perms;
+pub mod schema;
 pub mod system_catalog;
 pub mod topics;
 pub mod triple;

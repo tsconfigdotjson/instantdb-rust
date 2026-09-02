@@ -13,5 +13,10 @@
     "path": "^keyset/stream-append/files$",
     "reason": "Legacy serves flushed stream segments as S3 file URLs plus inline content for the buffered tail; this server always inlines content. The reader consumes files-then-content, so delivered bytes are identical (asserted via the folded reader state).",
     "citation": "LEGACY/client/packages/core/src/Stream.ts:1077-1084"
+  },
+  {
+    "path": "^dash:23-errors/badAttr$",
+    "reason": "An add-attr step whose attr map is garbage (`{id: \"x\"}`) reaches the legacy SQL layer and surfaces as a 500 `sql-exception`; this server rejects it as a 400 `validation-failed` on parse. The CLI never sends such a step (its steps come from @instantdb/platform convertTxSteps) and only prints `message` on failure either way.",
+    "citation": "LEGACY/client/packages/cli/src/lib/http.ts:67-101 (error body \u2192 message); LEGACY/client/packages/platform/src/migrations.ts:230-252"
   }
 ]
