@@ -128,3 +128,6 @@ await withTimeout(
 assert(received === "hello streams", "stream written and read back over admin SSE: " + JSON.stringify(received));
 
 console.log("ADMIN SDK TEST PASSED");
+// the SDK keeps its generic /admin/sse EventSource open (no shutdown API),
+// which would keep the process alive forever
+process.exit(0);
