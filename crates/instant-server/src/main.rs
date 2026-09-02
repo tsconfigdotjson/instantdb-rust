@@ -1,6 +1,7 @@
 mod auth;
 mod email;
 mod invalidator;
+mod metrics;
 mod presence;
 mod rate_limit;
 mod routes;
@@ -17,6 +18,23 @@ use sqlx::postgres::PgPoolOptions;
 use state::{AppState, Config};
 use tower_http::cors::CorsLayer;
 
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Prometheus text exposition of the node's counters/histograms/gauges.
+async fn metrics_handler(
+    axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>,
+) -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        metrics::render(&state),
+    )
+}
+
 /// Request-body cap for JSON/API endpoints (transacts, admin queries, sse).
 const JSON_BODY_LIMIT: usize = 10 * 1024 * 1024;
 /// Request-body cap for storage uploads (matches the legacy 100MB limit).
@@ -31,9 +49,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    raise_fd_limit();
     let mut cfg = Config::from_env();
     let pool = PgPoolOptions::new()
-        .max_connections(20)
+        .max_connections(cfg.pg_pool_max)
+        .min_connections(cfg.pg_pool_min.min(cfg.pg_pool_max))
         .connect(&cfg.database_url)
         .await?;
 
@@ -90,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(|| async { "instant-server" }))
         .route("/health", get(|| async { "ok" }))
+        .route("/metrics", get(metrics_handler))
         .route("/runtime/session", get(ws::handler))
         .route(
             "/runtime/sse",
@@ -194,3 +215,37 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+/// Raise the open-file soft limit to the hard limit: every websocket session
+/// is a file descriptor and the usual 1024 default caps a node at ~1k
+/// clients. Best effort; a failure just leaves the inherited limit.
+#[cfg(unix)]
+fn raise_fd_limit() {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: plain out-parameter calls on a properly sized struct.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return;
+        }
+        if lim.rlim_cur >= lim.rlim_max {
+            return;
+        }
+        let want = lim.rlim_max;
+        lim.rlim_cur = want;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) != 0 {
+            // macOS rejects RLIM_INFINITY for NOFILE; settle for the kernel cap
+            #[cfg(target_os = "macos")]
+            {
+                lim.rlim_cur = 10240.min(want);
+                libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+            }
+        }
+    }
+    tracing::info!(open_files = lim.rlim_cur, "fd limit");
+}
+
+#[cfg(not(unix))]
+fn raise_fd_limit() {}

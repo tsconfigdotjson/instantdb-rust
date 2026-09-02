@@ -5,6 +5,8 @@ use std::sync::Arc;
 use instant_core::attr::AttrMap;
 use instant_core::error::{InstantError, Result};
 use instant_core::instaql::{self, QueryCtx, QueryResult};
+use instant_core::perms::Rules;
+use instant_core::topics::QueryTopics;
 use instant_core::tx::{self, TxOptions, TxReport};
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -34,8 +36,49 @@ pub async fn get_app(state: &AppState, app_id: Uuid) -> Result<AppRow> {
     })
 }
 
-pub async fn load_attrs(state: &AppState, app_id: Uuid) -> Result<AttrMap> {
-    instant_core::attr::get_by_app_id(&state.pool, app_id).await
+/// Attr cache safety net: entries older than this are reloaded even without
+/// an invalidation, so a missed NOTIFY (listener reconnect) self-heals.
+const ATTR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// App attr catalog, served from the per-app cache (issue #11). Every query,
+/// transact and refresh used to hit Postgres for this; now only the first
+/// load per app and reloads after an `attrs_changed` transaction do.
+///
+/// Concurrency: a load that started before an invalidation must not be
+/// cached after it (it may have read the pre-change catalog), so each entry
+/// records the invalidation generation observed before its SELECT and is
+/// only installed if that generation is still current.
+pub async fn load_attrs(state: &AppState, app_id: Uuid) -> Result<Arc<AttrMap>> {
+    if let Some(entry) = state.attr_cache.get(&app_id) {
+        if entry.loaded_at.elapsed() < ATTR_CACHE_TTL {
+            crate::metrics::METRICS.attr_cache_hits_total.inc();
+            return Ok(entry.attrs.clone());
+        }
+    }
+    crate::metrics::METRICS.attr_cache_misses_total.inc();
+    let generation = attr_generation(state, app_id);
+    let attrs = Arc::new(instant_core::attr::get_by_app_id(&state.pool, app_id).await?);
+    if attr_generation(state, app_id) == generation {
+        state.attr_cache.insert(
+            app_id,
+            crate::state::AttrCacheEntry {
+                attrs: attrs.clone(),
+                loaded_at: std::time::Instant::now(),
+            },
+        );
+    }
+    Ok(attrs)
+}
+
+pub fn attr_generation(state: &AppState, app_id: Uuid) -> u64 {
+    state.attr_gen.get(&app_id).map(|g| *g).unwrap_or(0)
+}
+
+/// Drop the cached catalog for an app (its attrs changed, locally or on
+/// another node).
+pub fn invalidate_attrs(state: &AppState, app_id: Uuid) {
+    *state.attr_gen.entry(app_id).or_insert(0) += 1;
+    state.attr_cache.remove(&app_id);
 }
 
 pub async fn max_tx_id(state: &AppState, app_id: Uuid) -> Result<i64> {
@@ -79,6 +122,30 @@ pub async fn run_query(
     perms: &PermsCtx,
     q: &Value,
 ) -> Result<QueryResult> {
+    Ok(run_query_full(state, app_id, attrs, perms, q, None)
+        .await?
+        .result)
+}
+
+/// A query result plus the invalidation topics derived from it.
+pub struct QueryOutcome {
+    pub result: QueryResult,
+    pub topics: QueryTopics,
+}
+
+/// Runs a query and derives its invalidation topics (instant_core::topics).
+/// `rules` lets a refresh batch load the app's rules once instead of once
+/// per query; None loads them here for non-admin contexts.
+#[tracing::instrument(level = "debug", skip_all, fields(app_id = %app_id))]
+pub async fn run_query_full(
+    state: &AppState,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    perms: &PermsCtx,
+    q: &Value,
+    rules: Option<&Rules>,
+) -> Result<QueryOutcome> {
+    let started = std::time::Instant::now();
     let rule_params = q.get("$$ruleParams").cloned();
     let ctx = QueryCtx {
         app_id,
@@ -87,14 +154,32 @@ pub async fn run_query(
     };
     let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
     let mut result = instaql::query(&mut conn, &ctx, q).await?;
+    // Topics come from the pre-permissions result: an entity hidden by a
+    // view rule is still tracked, so a write that makes it visible refreshes.
+    let mut topics = match instaql::parse_query(q) {
+        Ok(forms) => instant_core::topics::query_topics(attrs, &forms, &result),
+        Err(_) => QueryTopics::catch_all(),
+    };
     if !perms.admin {
-        let rules = instant_core::perms::Rules::load(&mut conn, app_id).await?;
+        let loaded;
+        let rules = match rules {
+            Some(r) => r,
+            None => {
+                loaded = Rules::load(&mut conn, app_id).await?;
+                &loaded
+            }
+        };
+        if rules_reference_other_entities(rules) {
+            // data.ref / auth.ref walk links the topic derivation doesn't
+            // see; fall back to refreshing on every tx for this query.
+            topics = QueryTopics::catch_all();
+        }
         let auth = instant_core::perms::AuthCtx {
             user_id: perms.user_id,
             user_map: perms.user_map.clone(),
         };
         let filter = instant_core::perms::PermsFilter {
-            rules: &rules,
+            rules,
             auth: &auth,
             rule_params: rule_params
                 .or(perms.rule_params.clone())
@@ -102,8 +187,16 @@ pub async fn run_query(
         };
         filter.filter(&mut conn, app_id, attrs, &mut result).await?;
     }
+    drop(conn);
     inject_file_urls(state, app_id, attrs, q, &mut result);
-    Ok(result)
+    crate::metrics::METRICS.query_seconds.observe_since(started);
+    Ok(QueryOutcome { result, topics })
+}
+
+/// True when any rule expression uses `.ref(`, i.e. permission results
+/// depend on linked entities beyond the queried ones.
+fn rules_reference_other_entities(rules: &Rules) -> bool {
+    !rules.code.is_null() && rules.code.to_string().contains(".ref(")
 }
 
 /// $files entities get a synthetic `url` triple; `location-id` triples are
@@ -158,14 +251,16 @@ fn inject_file_urls(
 }
 
 /// Runs tx-steps for an app: perms checks (unless admin), commit, notify.
+#[tracing::instrument(level = "debug", skip_all, fields(app_id = %app_id))]
 pub async fn run_transact(
     state: &Arc<AppState>,
     app_id: Uuid,
     perms: &PermsCtx,
     tx_steps: &Value,
 ) -> Result<TxReport> {
+    let started = std::time::Instant::now();
     let steps = tx::parse_tx_steps(tx_steps)?;
-    let mut attrs = load_attrs(state, app_id).await?;
+    let mut attrs = (*load_attrs(state, app_id).await?).clone();
     let mut dbtx = state.pool.begin().await.map_err(InstantError::from)?;
     tx::assert_write_allowed(&mut dbtx, app_id).await?;
 
@@ -190,7 +285,10 @@ pub async fn run_transact(
     };
 
     dbtx.commit().await.map_err(InstantError::from)?;
-    notify_tx(state, app_id, report.tx_id).await;
+    notify_tx(state, app_id, report.tx_id, report.attrs_changed).await;
+    crate::metrics::METRICS
+        .transact_seconds
+        .observe_since(started);
     Ok(report)
 }
 
@@ -201,7 +299,7 @@ pub async fn run_system_transact(
     tx_steps: &Value,
 ) -> Result<TxReport> {
     let steps = tx::parse_tx_steps(tx_steps)?;
-    let mut attrs = load_attrs(state, app_id).await?;
+    let mut attrs = (*load_attrs(state, app_id).await?).clone();
     let mut dbtx = state.pool.begin().await.map_err(InstantError::from)?;
     let report = tx::transact(
         &mut dbtx,
@@ -214,12 +312,25 @@ pub async fn run_system_transact(
     )
     .await?;
     dbtx.commit().await.map_err(InstantError::from)?;
-    notify_tx(state, app_id, report.tx_id).await;
+    notify_tx(state, app_id, report.tx_id, report.attrs_changed).await;
     Ok(report)
 }
 
-pub async fn notify_tx(state: &AppState, app_id: Uuid, tx_id: i64) {
-    let payload = json!({"app_id": app_id, "tx_id": tx_id}).to_string();
+/// Announce a committed tx to every node (including this one). The payload
+/// carries `attrs_changed` so nodes can drop their attr cache before the
+/// refresh runs, and the commit timestamp (ms) for NOTIFY-lag metrics.
+pub async fn notify_tx(state: &AppState, app_id: Uuid, tx_id: i64, attrs_changed: bool) {
+    if attrs_changed {
+        // Local requests racing the NOTIFY must not serve the old catalog.
+        invalidate_attrs(state, app_id);
+    }
+    let payload = json!({
+        "app_id": app_id,
+        "tx_id": tx_id,
+        "attrs_changed": attrs_changed,
+        "ts": chrono::Utc::now().timestamp_millis(),
+    })
+    .to_string();
     let _ = sqlx::query("SELECT pg_notify('instant_tx', $1)")
         .bind(payload)
         .execute(&state.pool)
@@ -370,14 +481,25 @@ pub async fn ensure_server_tables(pool: &sqlx::PgPool) -> Result<()> {
           END IF;
           IF TG_OP = 'INSERT' THEN
             INSERT INTO rust_tx_changes (tx_id, app_id, entity_id, attr_id, value, created_at, action)
-            VALUES (txid_setting::bigint, NEW.app_id, NEW.entity_id, NEW.attr_id, NEW.value, NEW.created_at, 'added');
+            SELECT txid_setting::bigint, n.app_id, n.entity_id, n.attr_id, n.value, n.created_at, 'added'
+            FROM new_rows n;
           ELSIF TG_OP = 'DELETE' THEN
             INSERT INTO rust_tx_changes (tx_id, app_id, entity_id, attr_id, value, created_at, action)
-            VALUES (txid_setting::bigint, OLD.app_id, OLD.entity_id, OLD.attr_id, OLD.value, OLD.created_at, 'removed');
-          ELSIF TG_OP = 'UPDATE' AND NEW.value IS DISTINCT FROM OLD.value THEN
+            SELECT txid_setting::bigint, o.app_id, o.entity_id, o.attr_id, o.value, o.created_at, 'removed'
+            FROM old_rows o;
+          ELSIF TG_OP = 'UPDATE' THEN
+            -- values only change on cardinality-one rows (unique per e/a), which
+            -- is how old and new rows pair up; flag-only updates log nothing
             INSERT INTO rust_tx_changes (tx_id, app_id, entity_id, attr_id, value, created_at, action)
-            VALUES (txid_setting::bigint, OLD.app_id, OLD.entity_id, OLD.attr_id, OLD.value, OLD.created_at, 'removed'),
-                   (txid_setting::bigint, NEW.app_id, NEW.entity_id, NEW.attr_id, NEW.value, NEW.created_at, 'added');
+            SELECT txid_setting::bigint, o.app_id, o.entity_id, o.attr_id, o.value, o.created_at, 'removed'
+            FROM old_rows o
+            JOIN new_rows n ON n.app_id = o.app_id AND n.entity_id = o.entity_id AND n.attr_id = o.attr_id
+            WHERE n.ea AND n.value IS DISTINCT FROM o.value
+            UNION ALL
+            SELECT txid_setting::bigint, n.app_id, n.entity_id, n.attr_id, n.value, n.created_at, 'added'
+            FROM old_rows o
+            JOIN new_rows n ON n.app_id = o.app_id AND n.entity_id = o.entity_id AND n.attr_id = o.attr_id
+            WHERE n.ea AND n.value IS DISTINCT FROM o.value;
           END IF;
           RETURN NULL;
         END $fn$ LANGUAGE plpgsql
@@ -390,13 +512,30 @@ pub async fn ensure_server_tables(pool: &sqlx::PgPool) -> Result<()> {
         .execute(pool)
         .await
         .map_err(InstantError::from)?;
-    sqlx::query(
-        "CREATE TRIGGER rust_capture_trigger
-         AFTER INSERT OR UPDATE OR DELETE ON triples
-         FOR EACH ROW EXECUTE FUNCTION rust_capture_triple_change()",
-    )
-    .execute(pool)
-    .await
-    .map_err(InstantError::from)?;
+    // Statement-level triggers with transition tables: one plpgsql call and
+    // one INSERT ... SELECT per statement instead of per row. Postgres needs
+    // a trigger per event to name the transition tables.
+    for (name, event, tables) in [
+        ("rust_capture_ins", "INSERT", "NEW TABLE AS new_rows"),
+        (
+            "rust_capture_upd",
+            "UPDATE",
+            "OLD TABLE AS old_rows NEW TABLE AS new_rows",
+        ),
+        ("rust_capture_del", "DELETE", "OLD TABLE AS old_rows"),
+    ] {
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS {name} ON triples"))
+            .execute(pool)
+            .await
+            .map_err(InstantError::from)?;
+        sqlx::query(&format!(
+            "CREATE TRIGGER {name} AFTER {event} ON triples
+             REFERENCING {tables}
+             FOR EACH STATEMENT EXECUTE FUNCTION rust_capture_triple_change()"
+        ))
+        .execute(pool)
+        .await
+        .map_err(InstantError::from)?;
+    }
     Ok(())
 }

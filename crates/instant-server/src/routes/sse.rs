@@ -13,24 +13,17 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::state::{AppState, Session};
+use crate::state::{AppState, Outgoing, Session};
 
 pub async fn stream(State(state): State<Arc<AppState>>) -> Response {
     let session_id = Uuid::new_v4();
     let sse_token = Uuid::new_v4();
-    let (tx, rx) = mpsc::unbounded_channel::<Value>();
-    let session = Arc::new(Session {
-        id: session_id,
-        tx,
-        state: Default::default(),
-        refresh_lock: Default::default(),
-        batch_messages: Default::default(),
-    });
+    let (tx, rx) = mpsc::unbounded_channel::<Outgoing>();
+    let session = state.new_session(session_id, tx);
     {
         let mut st = session.state.lock().await;
         st.sse_token = Some(sse_token);
     }
-    state.sessions.insert(session_id, session.clone());
 
     session.send(json!({
         "op": "sse-init",
@@ -42,12 +35,21 @@ pub async fn stream(State(state): State<Arc<AppState>>) -> Response {
     let guard = RxGuard {
         rx: Some(rx),
         state: state.clone(),
-        session_id,
+        session: session.clone(),
     };
     let event_stream = futures::stream::unfold(guard, move |mut guard| async move {
+        if guard
+            .session
+            .overflowed
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            // slow consumer: end the stream, the client reconnects
+            return None;
+        }
         match guard.rx().recv().await {
             Some(msg) => {
-                let event = Event::default().data(msg.to_string());
+                guard.session.dequeued(1);
+                let event = Event::default().data(msg.into_string());
                 Some((Ok::<Event, Infallible>(event), guard))
             }
             None => None,
@@ -61,13 +63,13 @@ pub async fn stream(State(state): State<Arc<AppState>>) -> Response {
 
 /// Holds the receiver and cleans up the session when the SSE stream drops.
 struct RxGuard {
-    rx: Option<mpsc::UnboundedReceiver<Value>>,
+    rx: Option<mpsc::UnboundedReceiver<Outgoing>>,
     state: Arc<AppState>,
-    session_id: Uuid,
+    session: Arc<Session>,
 }
 
 impl RxGuard {
-    fn rx(&mut self) -> &mut mpsc::UnboundedReceiver<Value> {
+    fn rx(&mut self) -> &mut mpsc::UnboundedReceiver<Outgoing> {
         self.rx.as_mut().unwrap()
     }
 }
@@ -75,7 +77,7 @@ impl RxGuard {
 impl Drop for RxGuard {
     fn drop(&mut self) {
         let state = self.state.clone();
-        let session_id = self.session_id;
+        let session_id = self.session.id;
         tokio::spawn(async move {
             state.drop_session(session_id);
             crate::presence::leave_all(&state, session_id).await;

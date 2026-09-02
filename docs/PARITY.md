@@ -12,8 +12,8 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | `add-query` / `add-query-ok` / `add-query-exists` | ✅ | result join-rows + page-info + aggregate |
 | `remove-query` | ✅ | |
 | `transact` / `transact-ok` (tx-id watermark) | ✅ | |
-| `refresh-ok` push with computations + attrs | ✅ | result-hash suppression; recompute-per-app strategy |
-| topic-based invalidation narrowing | 🟡 | legacy matches WAL topics against query topics as an optimization; this server recomputes registered queries per app tx and suppresses unchanged results (identical observable behavior, more compute per tx) |
+| `refresh-ok` push with computations + attrs | ✅ | result-hash suppression; per-app coalesced refresh batches, identical (query, auth) recomputed once across sessions |
+| topic-based invalidation narrowing | ✅ | coarse topics per registered query (`instant_core::topics`, QUERY.md §6.2 shapes with result substitution on the entity fetch) matched against the tx's `rust_tx_changes` rows; unresolvable shapes and `.ref(` rules fall back to catch-all; result-hash suppression remains the backstop |
 | error shapes (`type`, `hint`, `original-event` echo) | ✅ | full legacy key set incl. null `hint`/`client-event-id` (conformance error matrix) |
 | rooms: join/leave/set-presence/refresh-presence | ✅ | cross-node via Postgres; in-room asserts + `set-presence-ok`/`client-broadcast-ok` acks like legacy |
 | `patch-presence` incremental edits | ✅ | diff-based patches for core > 0.17.5; full snapshots for older clients and fresh joiners |
@@ -127,7 +127,7 @@ client-code citation proving it is unread (client paths relative to
 |---|---|---|---|
 | `processed-isn` (add-query-ok, refresh-ok), `isn` (transact-ok) | `"{slotHex}/{LSN}"` from the logical-replication feed (isn.clj) | same format, `'0/' \|\| pg_current_wal_lsn()` read at emission; monotonic, so `refresh isn >= transact isn` holds | no read of `isn`/`processed-isn` anywhere in `Reactor.js` / `Connection.ts` / `SyncTable.ts` / `Stream.ts` |
 | `instaql-query-hash` in refresh-ok computations | Clojure `hash` of normalized query forms (reactive/session.clj:460) | 32-bit hash of the query JSON | client reads only `instaql-query` and `instaql-result` from computations (`Reactor.js:759-788`) |
-| `instaql-topic?` in computations | `true` when a topic program compiled (reactive/query.clj:147) | always `false` (no topic narrowing; every registered query is recomputed) | unread by the client (`Reactor.js:759-788`); observable results identical, more server compute |
+| `instaql-topic?` in computations | `true` when a refined CEL topic program compiled (reactive/query.clj:147) | always `false` (coarse topic matching only, no refined programs) | unread by the client (`Reactor.js:759-788`); observable results identical |
 | `result-meta` | populated only for the `tree` return-type (admin SSE, reactive/query.clj:143-144) | always `null` (ws clients always use `join-rows`) | client never reads `result-meta` (`Reactor.js:665-700`) |
 | `trace-id` on every frame | OTel trace id of the handling span (reactive/store.clj:1601) | random 32-hex id per frame (no tracing backend) | only concatenated into debug logs (`Reactor.js:998-1002`) |
 | `init-ok.auth` contents | full app + user + creator rows | trimmed `{app: {id, title}, user, admin?}` | client reads only `attrs`, `session-id`, `app-status` from init-ok (`Reactor.js:644-660`) |

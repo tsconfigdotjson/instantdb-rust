@@ -89,6 +89,10 @@ works exactly as with the hosted service. A complete example lives in
 | `CLOUDFLARE_ACCOUNT_ID` | — | required for `EMAIL_PROVIDER=cloudflare` |
 | `CLOUDFLARE_API_TOKEN` | — | API token with Email Sending permission |
 | `INSTANT_APP_EMAIL_SENDER_EMAIL` | `verify@auth-pm.instantdb.com` | default From address — set to a sender on your verified Cloudflare domain |
+| `PG_POOL_MAX` / `PG_POOL_MIN` | `20` / `2` | Postgres pool per node |
+| `INSTANT_REFRESH_CONCURRENCY` | `8` | concurrent query recomputations per app refresh batch |
+| `INSTANT_MAX_QUEUED_MESSAGES` | `10000` | outgoing messages a session may queue before it is disconnected as a slow consumer |
+| `INSTANT_RATE_LIMITS` | on | `off` disables the per-app token buckets (load testing) |
 
 ### Horizontal scaling
 
@@ -98,6 +102,33 @@ in an unlogged Postgres table with node heartbeats. Run as many replicas as
 you like behind any websocket-capable load balancer
 (`docker compose up --scale server=3`). `scripts/multinode-ws.mjs`
 demonstrates two clients on two different nodes syncing live.
+
+### Observability
+
+`GET /metrics` serves Prometheus text format: live sessions (total and per
+app), message counters, query/transact/add-query duration histograms,
+NOTIFY lag, refresh batch latency, topic-skip / recompute / dedupe counters,
+attr-cache hits, pool utilization and process RSS/CPU. It is unauthenticated
+and cheap to scrape; keep it behind your proxy's network boundary.
+
+### Performance
+
+The refresh path is where a sync engine spends its CPU. Per app transaction
+this server loads the tx's triple changes once, matches them against the
+topics of every registered query (`crates/instant-core/src/topics.rs`, see
+`docs/QUERY.md` §6), recomputes only the matching queries — once per distinct
+(query, auth) across all sessions — and pushes `refresh-ok` to the sessions
+whose result changed. Bursts of transactions coalesce into one batch per app.
+`docs/PERF.md` has the load-test methodology and before/after numbers; the
+`instant-loadtest` binary (`crates/instant-loadtest`) reproduces them against
+any server, from any machine that can reach it:
+
+```sh
+./scripts/create-app.sh "loadtest" | tee /tmp/app.txt   # app id + token
+INSTANT_RATE_LIMITS=off ./target/release/instant-server &
+cargo run --release -p instant-loadtest -- --apps "$(grep '^app_id=' /tmp/app.txt | cut -d= -f2)" \
+  --clients 2000 --queries 3 --writers 8 --duration 30 --cleanup
+```
 
 ## Production deployment
 

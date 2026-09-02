@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/instant-core", "crates/instant-server"]
+members = ["crates/instant-core", "crates/instant-server", "crates/instant-loadtest"]
 
 [workspace.package]
 edition = "2021"
@@ -12,13 +12,22 @@ license = "MIT"
 # boxing it everywhere isn't worth the churn.
 result_large_err = "allow"
 
+# Production binary (Dockerfile builds --release): whole-program LTO and a
+# single codegen unit buy ~10-20% on the serialize/hash-heavy fan-out paths
+# at the cost of a slower release build.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+debug = false
+
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json", "migrate"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"

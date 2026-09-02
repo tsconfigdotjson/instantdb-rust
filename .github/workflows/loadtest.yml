@@ -1,0 +1,168 @@
+name: loadtest
+
+# Performance harness (issue #11). Every push runs a small smoke variant
+# that fails on lost refreshes / errors, so fan-out regressions are caught.
+# The full sizing (defaults: 5k clients on a server pinned to 2 vCPUs,
+# mirroring the "2-vCPU node" target) runs on workflow_dispatch, or on a
+# push whose head commit message contains `[loadtest-full]`.
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      clients:
+        description: websocket clients
+        default: "5000"
+      queries:
+        description: queries per client (1-4)
+        default: "3"
+      writers:
+        description: concurrent writers
+        default: "16"
+      inflight:
+        description: transacts in flight per writer
+        default: "1"
+      duration:
+        description: write phase seconds
+        default: "60"
+      apps:
+        description: apps to spread clients across
+        default: "4"
+      cpus:
+        description: cpu list the server is pinned to (taskset)
+        default: "0,1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgres://instant:instant@localhost:5432/instant
+
+jobs:
+  loadtest:
+    name: ${{ (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[loadtest-full]')) && 'full' || 'smoke' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: instant
+          POSTGRES_PASSWORD: instant
+          POSTGRES_DB: instant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U instant"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+          cache-on-failure: true
+      - name: Apply migrations
+        run: ./scripts/apply-migrations.sh
+
+      - name: Build release server + harness
+        run: cargo build --release -p instant-server -p instant-loadtest
+
+      - name: Sizing
+        id: sizing
+        env:
+          FULL: ${{ contains(github.event.head_commit.message, '[loadtest-full]') }}
+          IN_CLIENTS: ${{ inputs.clients || '5000' }}
+          IN_QUERIES: ${{ inputs.queries || '3' }}
+          IN_WRITERS: ${{ inputs.writers || '16' }}
+          IN_INFLIGHT: ${{ inputs.inflight || '1' }}
+          IN_DURATION: ${{ inputs.duration || '60' }}
+          IN_APPS: ${{ inputs.apps || '4' }}
+          IN_CPUS: ${{ inputs.cpus || '0,1' }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$FULL" = "true" ]; then
+            echo "clients=$IN_CLIENTS" >> "$GITHUB_OUTPUT"
+            echo "queries=$IN_QUERIES" >> "$GITHUB_OUTPUT"
+            echo "writers=$IN_WRITERS" >> "$GITHUB_OUTPUT"
+            echo "inflight=$IN_INFLIGHT" >> "$GITHUB_OUTPUT"
+            echo "duration=$IN_DURATION" >> "$GITHUB_OUTPUT"
+            echo "apps=$IN_APPS" >> "$GITHUB_OUTPUT"
+            echo "cpus=$IN_CPUS" >> "$GITHUB_OUTPUT"
+            echo "extra=" >> "$GITHUB_OUTPUT"
+          else
+            echo "clients=300" >> "$GITHUB_OUTPUT"
+            echo "queries=3" >> "$GITHUB_OUTPUT"
+            echo "writers=4" >> "$GITHUB_OUTPUT"
+            echo "inflight=1" >> "$GITHUB_OUTPUT"
+            echo "duration=10" >> "$GITHUB_OUTPUT"
+            echo "apps=2" >> "$GITHUB_OUTPUT"
+            echo "cpus=0,1" >> "$GITHUB_OUTPUT"
+            echo "extra=--smoke --max-p99-ms 5000" >> "$GITHUB_OUTPUT"
+          fi
+          nproc; free -m
+
+      - name: Boot server (pinned to ${{ steps.sizing.outputs.cpus }})
+        run: |
+          ulimit -n 65536
+          # Rate limits off: the harness deliberately exceeds the per-app
+          # free-tier buckets (issue #1) to find the real ceiling.
+          INSTANT_RATE_LIMITS=off PORT=8888 BASE_URL=http://localhost:8888 RUST_LOG=warn \
+            taskset -c "${{ steps.sizing.outputs.cpus }}" ./target/release/instant-server > /tmp/server.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8888/health >/dev/null && exit 0
+            sleep 1
+          done
+          echo "server failed to boot"; cat /tmp/server.log; exit 1
+
+      - name: Provision apps
+        run: |
+          ids=""
+          for i in $(seq 1 ${{ steps.sizing.outputs.apps }}); do
+            id=$(./scripts/create-app.sh "loadtest app $i" | grep '^app_id=' | cut -d= -f2)
+            ids="${ids:+$ids,}$id"
+          done
+          echo "APP_IDS=$ids" >> "$GITHUB_ENV"
+
+      - name: Run harness
+        run: |
+          set -o pipefail
+          ulimit -n 65536
+          ./target/release/instant-loadtest \
+            --apps "$APP_IDS" \
+            --clients ${{ steps.sizing.outputs.clients }} \
+            --queries ${{ steps.sizing.outputs.queries }} \
+            --writers ${{ steps.sizing.outputs.writers }} \
+            --inflight ${{ steps.sizing.outputs.inflight }} \
+            --duration ${{ steps.sizing.outputs.duration }} \
+            --out loadtest-results.json \
+            ${{ steps.sizing.outputs.extra }} | tee /tmp/loadtest.out
+          {
+            echo "server: \`$(git rev-parse --short HEAD)\`, pinned to cpus ${{ steps.sizing.outputs.cpus }} of $(nproc)"
+            echo
+            sed -n '/^### loadtest/,/^$/p' /tmp/loadtest.out
+            echo
+            echo '```'
+            grep -E '^(PASS|FAIL) ' /tmp/loadtest.out || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Server metrics snapshot
+        if: always()
+        run: curl -sf http://localhost:8888/metrics > loadtest-metrics.txt || echo "no /metrics endpoint" > loadtest-metrics.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: loadtest-${{ (github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[loadtest-full]')) && 'full' || 'smoke' }}-${{ github.sha }}
+          path: |
+            loadtest-results.json
+            loadtest-metrics.txt
+          if-no-files-found: ignore
+
+      - name: Server logs
+        if: failure()
+        run: cat /tmp/server.log || true

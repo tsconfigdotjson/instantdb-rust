@@ -7,6 +7,7 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+libc = "0.2"
 instant-core = { path = "../instant-core" }
 tokio.workspace = true
 axum.workspace = true
@@ -29,6 +30,13 @@ url.workspace = true
 urlencoding.workspace = true
 futures.workspace = true
 dashmap.workspace = true
+# Faster allocator for the fan-out hot paths (issue #11); opt out with
+# `--no-default-features` on platforms without a C toolchain.
+mimalloc = { version = "0.1", optional = true }
+
+[features]
+default = ["mimalloc"]
+mimalloc = ["dep:mimalloc"]
 
 [dev-dependencies]
 tokio-tungstenite = "0.24"

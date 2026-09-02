@@ -1651,7 +1651,7 @@ async fn transact_perms_check_impl(
         .get("dangerously-commit-tx")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let mut attrs = service::load_attrs(state, ctx.app_id).await?;
+    let mut attrs = (*service::load_attrs(state, ctx.app_id).await?).clone();
     let tx_steps = translate_steps(&attrs, steps, throw_missing)?;
     let parsed = instant_core::tx::parse_tx_steps(&tx_steps)?;
 
@@ -1683,7 +1683,7 @@ async fn transact_perms_check_impl(
     let committed = commit && all_ok;
     if committed {
         dbtx.commit().await.map_err(InstantError::from)?;
-        service::notify_tx(state, ctx.app_id, report.tx_id).await;
+        service::notify_tx(state, ctx.app_id, report.tx_id, report.attrs_changed).await;
     } else {
         dbtx.rollback().await.map_err(InstantError::from)?;
     }
