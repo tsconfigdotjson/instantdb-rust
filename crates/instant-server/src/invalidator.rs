@@ -98,9 +98,16 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                 ) else {
                     continue;
                 };
+                let delta = payload.get("delta").cloned();
                 let state = state.clone();
                 tokio::spawn(async move {
-                    crate::presence::broadcast_room_refresh(&state, app_id, &room_id).await;
+                    crate::presence::broadcast_room_refresh(
+                        &state,
+                        app_id,
+                        &room_id,
+                        delta.as_ref(),
+                    )
+                    .await;
                 });
             }
             "instant_broadcast" => {
@@ -308,6 +315,7 @@ struct SessionPlan {
 }
 
 /// Refresh every local session of an app for a batch of transactions.
+#[tracing::instrument(level = "debug", skip_all, fields(app_id = %app_id, txs = tx_ids.len()))]
 pub async fn refresh_batch(
     state: &Arc<AppState>,
     app_id: Uuid,

@@ -250,6 +250,48 @@ pub struct ResolvedTriple {
     pub value: Value,
 }
 
+/// Parallel columns for a multi-row triple insert (UNNEST binding).
+struct InsertCols {
+    entity_ids: Vec<Uuid>,
+    attr_ids: Vec<Uuid>,
+    values: Vec<String>,
+    ea: Vec<bool>,
+    eav: Vec<bool>,
+    av: Vec<bool>,
+    ave: Vec<bool>,
+    vae: Vec<bool>,
+    cdt: Vec<Option<String>>,
+}
+
+impl InsertCols {
+    fn with_capacity(n: usize) -> InsertCols {
+        InsertCols {
+            entity_ids: Vec::with_capacity(n),
+            attr_ids: Vec::with_capacity(n),
+            values: Vec::with_capacity(n),
+            ea: Vec::with_capacity(n),
+            eav: Vec::with_capacity(n),
+            av: Vec::with_capacity(n),
+            ave: Vec::with_capacity(n),
+            vae: Vec::with_capacity(n),
+            cdt: Vec::with_capacity(n),
+        }
+    }
+    fn push(&mut self, t: &ResolvedTriple) {
+        let flags = t.attr.flags();
+        self.entity_ids.push(t.entity_id);
+        self.attr_ids.push(t.attr.id);
+        self.values.push(t.value.to_string());
+        self.ea.push(flags.ea);
+        self.eav.push(flags.eav);
+        self.av.push(flags.av);
+        self.ave.push(flags.ave);
+        self.vae.push(flags.vae);
+        self.cdt
+            .push(t.attr.checked_data_type.map(|c| c.as_str().to_string()));
+    }
+}
+
 /// Insert a batch of add-triple writes. Returns the set of entity ids that were
 /// newly created (their id triple inserted fresh).
 pub async fn insert_triples(
@@ -276,63 +318,85 @@ pub async fn insert_triples(
         }
     }
 
-    for key in &ea_order {
-        let t = ea_last[key];
-        let flags = t.attr.flags();
-        let value_text = t.value.to_string();
-        let row = sqlx::query(
+    // One multi-row statement per group (UNNEST over parallel arrays): a
+    // 300-triple seed is two round trips instead of 300, and the
+    // change-capture trigger fires once per statement instead of per row.
+    if !ea_order.is_empty() {
+        let mut cols = InsertCols::with_capacity(ea_order.len());
+        for key in &ea_order {
+            cols.push(ea_last[key]);
+        }
+        let rows = sqlx::query(
             r#"
             INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
                                  ea, eav, av, ave, vae, checked_data_type)
-            VALUES ($1, $2, $3, $4::jsonb, md5(($4::jsonb)::text),
-                    $5, $6, $7, $8, $9, $10::checked_data_type)
+            SELECT $1, e, a, v::jsonb, md5((v::jsonb)::text),
+                   ea, eav, av, ave, vae, cdt::checked_data_type
+            FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::bool[], $6::bool[],
+                        $7::bool[], $8::bool[], $9::bool[], $10::text[])
+                 AS t(e, a, v, ea, eav, av, ave, vae, cdt)
             ON CONFLICT (app_id, entity_id, attr_id) WHERE ea
             DO UPDATE SET value = excluded.value, value_md5 = excluded.value_md5,
                           checked_data_type = excluded.checked_data_type
-            RETURNING (xmax = 0) AS inserted
+            RETURNING entity_id, attr_id, (xmax = 0) AS inserted
             "#,
         )
         .bind(app_id)
-        .bind(t.entity_id)
-        .bind(t.attr.id)
-        .bind(&value_text)
-        .bind(flags.ea)
-        .bind(flags.eav)
-        .bind(flags.av)
-        .bind(flags.ave)
-        .bind(flags.vae)
-        .bind(t.attr.checked_data_type.map(|c| c.as_str()))
-        .fetch_one(&mut *conn)
+        .bind(&cols.entity_ids)
+        .bind(&cols.attr_ids)
+        .bind(&cols.values)
+        .bind(&cols.ea)
+        .bind(&cols.eav)
+        .bind(&cols.av)
+        .bind(&cols.ave)
+        .bind(&cols.vae)
+        .bind(&cols.cdt)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| translate_unique_violation(e, attrs))?;
-        let inserted: bool = row.get("inserted");
-        if inserted && t.attr.label == "id" {
-            created.insert(t.entity_id);
+        for row in rows {
+            let inserted: bool = row.get("inserted");
+            if !inserted {
+                continue;
+            }
+            let (eid, aid): (Uuid, Uuid) = (row.get("entity_id"), row.get("attr_id"));
+            if attrs.get(&aid).is_some_and(|a| a.label == "id") {
+                created.insert(eid);
+            }
         }
     }
 
-    for t in non_ea {
-        let flags = t.attr.flags();
-        let value_text = t.value.to_string();
+    if !non_ea.is_empty() {
+        // dedupe exact repeats so one statement never proposes a row twice
+        let mut seen: HashSet<(Uuid, Uuid, String)> = HashSet::new();
+        let mut cols = InsertCols::with_capacity(non_ea.len());
+        for t in non_ea {
+            if seen.insert((t.entity_id, t.attr.id, t.value.to_string())) {
+                cols.push(t);
+            }
+        }
         sqlx::query(
             r#"
             INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
                                  ea, eav, av, ave, vae, checked_data_type)
-            VALUES ($1, $2, $3, $4::jsonb, md5(($4::jsonb)::text),
-                    $5, $6, $7, $8, $9, $10::checked_data_type)
+            SELECT $1, e, a, v::jsonb, md5((v::jsonb)::text),
+                   ea, eav, av, ave, vae, cdt::checked_data_type
+            FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::bool[], $6::bool[],
+                        $7::bool[], $8::bool[], $9::bool[], $10::text[])
+                 AS t(e, a, v, ea, eav, av, ave, vae, cdt)
             ON CONFLICT (app_id, entity_id, attr_id, value_md5) DO NOTHING
             "#,
         )
         .bind(app_id)
-        .bind(t.entity_id)
-        .bind(t.attr.id)
-        .bind(&value_text)
-        .bind(flags.ea)
-        .bind(flags.eav)
-        .bind(flags.av)
-        .bind(flags.ave)
-        .bind(flags.vae)
-        .bind(t.attr.checked_data_type.map(|c| c.as_str()))
+        .bind(&cols.entity_ids)
+        .bind(&cols.attr_ids)
+        .bind(&cols.values)
+        .bind(&cols.ea)
+        .bind(&cols.eav)
+        .bind(&cols.av)
+        .bind(&cols.ave)
+        .bind(&cols.vae)
+        .bind(&cols.cdt)
         .execute(&mut *conn)
         .await
         .map_err(|e| translate_unique_violation(e, attrs))?;
@@ -349,35 +413,47 @@ pub async fn backfill_indexed_nulls(
     attrs: &AttrMap,
     new_entities: &[(Uuid, String)],
 ) -> Result<()> {
+    let mut cols = InsertCols::with_capacity(new_entities.len());
     for (eid, etype) in new_entities {
         for attr in attrs.attrs_of_etype(etype) {
             if attr.value_type != ValueType::Blob || !attr.is_indexed || attr.label == "id" {
                 continue;
             }
-            let flags = attr.flags();
-            sqlx::query(
-                r#"
-                INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
-                                     ea, eav, av, ave, vae, checked_data_type)
-                VALUES ($1, $2, $3, 'null'::jsonb, $4, $5, $6, $7, $8, $9, $10::checked_data_type)
-                ON CONFLICT (app_id, entity_id, attr_id) WHERE ea DO NOTHING
-                "#,
-            )
-            .bind(app_id)
-            .bind(eid)
-            .bind(attr.id)
-            .bind(JSON_NULL_MD5)
-            .bind(flags.ea)
-            .bind(flags.eav)
-            .bind(flags.av)
-            .bind(flags.ave)
-            .bind(flags.vae)
-            .bind(attr.checked_data_type.map(|c| c.as_str()))
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| translate_unique_violation(e, attrs))?;
+            cols.push(&ResolvedTriple {
+                entity_id: *eid,
+                attr: attr.clone(),
+                value: Value::Null,
+            });
         }
     }
+    if cols.entity_ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
+                             ea, eav, av, ave, vae, checked_data_type)
+        SELECT $1, e, a, 'null'::jsonb, $11, ea, eav, av, ave, vae, cdt::checked_data_type
+        FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::bool[], $6::bool[],
+                    $7::bool[], $8::bool[], $9::bool[], $10::text[])
+             AS t(e, a, v, ea, eav, av, ave, vae, cdt)
+        ON CONFLICT (app_id, entity_id, attr_id) WHERE ea DO NOTHING
+        "#,
+    )
+    .bind(app_id)
+    .bind(&cols.entity_ids)
+    .bind(&cols.attr_ids)
+    .bind(&cols.values)
+    .bind(&cols.ea)
+    .bind(&cols.eav)
+    .bind(&cols.av)
+    .bind(&cols.ave)
+    .bind(&cols.vae)
+    .bind(&cols.cdt)
+    .bind(JSON_NULL_MD5)
+    .execute(&mut *conn)
+    .await
+    .map_err(|e| translate_unique_violation(e, attrs))?;
     Ok(())
 }
 

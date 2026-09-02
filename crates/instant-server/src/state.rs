@@ -195,6 +195,27 @@ pub fn new_trace_id() -> String {
     id.simple().to_string()
 }
 
+/// Cached add-query result. Reconnect storms register the same handful of
+/// queries from thousands of sessions within seconds; sessions sharing an
+/// (app, query, auth) at the same tx watermark share one computation.
+pub struct QueryCacheEntry {
+    /// the instaql-result, serialized once
+    pub ws_json: Arc<Box<serde_json::value::RawValue>>,
+    pub hash: u64,
+    pub topics: Arc<QueryTopics>,
+    /// app tx watermark (max tx id) read before the query ran
+    pub tx_id: i64,
+    pub attr_gen: u64,
+    pub created: std::time::Instant,
+}
+
+/// (app id, canonical query, admin?, user id)
+pub type QueryCacheKey = (Uuid, String, bool, Option<Uuid>);
+
+/// Entries older than this are never served (bounds the staleness of results
+/// computed under permission rules that changed without a transaction).
+pub const QUERY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Cached attr catalog for one app (service::load_attrs).
 pub struct AttrCacheEntry {
     pub attrs: Arc<AttrMap>,
@@ -213,8 +234,11 @@ pub struct AppState {
     pub room_sessions: DashMap<(Uuid, String), HashSet<Uuid>>,
     /// oauth discovery/JWKS cache
     pub oauth_cache: DashMap<String, (Value, std::time::Instant)>,
-    /// last presence snapshot sent per (app, room) — for patch-presence diffs
-    pub room_snapshots: DashMap<(Uuid, String), Value>,
+    /// last presence snapshot per (app, room) and when it was last read in
+    /// full from Postgres — deltas from NOTIFY payloads are applied on top
+    pub room_snapshots: DashMap<(Uuid, String), (Value, std::time::Instant)>,
+    /// add-query result cache (QueryCacheEntry)
+    pub query_cache: DashMap<QueryCacheKey, QueryCacheEntry>,
     /// live stream subscribers on this node: (app, stream) -> (session, subscribe event id)
     pub stream_subs: DashMap<(Uuid, Uuid), HashSet<(Uuid, String)>>,
     /// per-app token buckets (issue #1)
@@ -240,6 +264,7 @@ impl AppState {
             room_sessions: DashMap::new(),
             oauth_cache: DashMap::new(),
             room_snapshots: DashMap::new(),
+            query_cache: DashMap::new(),
             stream_subs: DashMap::new(),
             limiters: crate::rate_limit::Limiters::from_env(),
             attr_cache: DashMap::new(),

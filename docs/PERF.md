@@ -66,7 +66,7 @@ end-to-end from the writer's send to each subscriber's refresh-ok.
 | 1 000 clients, before | 9.8 | 301 / 772 | 568 / 1 162 / 1 404 | 100% | 440 MB | 2.3 peak | 3.7 peak |
 | 1 000 clients, after | 15.3 | 22 / 85 | 42 / 90 / 159 | 100% | 72 MB | 0.32 avg / 0.63 peak | idle |
 | 5 000 clients, before | 2.1 | 2 605 / 6 881 | 3 908 / 10 365 / 12 741 | 100% | 1 158 MB | 2.7 peak | 2.7 peak |
-| 5 000 clients, after | 7.7 | 38 / 286 | 153 / 629 / 893 | 100% | 244 MB | 0.36 avg / 1.2 peak | idle |
+| 5 000 clients, after | 7.7 | 35 / 329 | 129 / 636 / 999 | 100% | 277 MB | 0.32 avg / 0.9 peak | idle |
 | 2 × 5 000 clients (two nodes), after | 2.1 | 88 / 644 | 475 / 1 529 / 2 170 | 100% | 231 + 232 MB | 0.37 avg (both) / 0.7 peak | 1.4 peak |
 
 The writers are closed-loop with a 0.5 s (1 000 clients) / 1 s (5 000) / 4 s
@@ -96,12 +96,31 @@ target with a realistic per-tx audience.
 | run | tx/s | tx p50 / p99 ms | fan-out p50 / p99 ms | delivered | server CPU | Postgres CPU |
 |---|---|---|---|---|---|---|
 | before (remote) | 246 | 508 / 775 | 621 / 1 021 | 100% | 2.3 peak | 3.2 peak |
-| after (remote) | 993 | 97 / 472 | 120 / 511 | 100% | 1.3 avg / 1.5 peak | 3.3 peak |
-| after (loopback) | 1 175 | 76 / 452 | 94 / 485 | 100% | 1.8 avg | 3.7 peak |
+| after (remote) | 922 | 106 / 474 | 132 / 498 | 100% | 1.2 avg / 1.3 peak | 2.7 peak |
+| after (loopback) | 1 362 | 73 / 336 | 90 / 369 | 100% | 1.5 avg | 3.6 peak |
 
-Postgres is the bottleneck at ~1.2k tx/s (3.7 cores for the per-tx
-statements), which is the shape the issue asks for: the sync tier is cheap,
-scale the database.
+Postgres is the bottleneck at ~1.4k tx/s (3.6 cores), which is the shape
+the issue asks for: the sync tier is cheap, scale the database. The remote
+figure is bound by the writers' round trip (128 in flight over a 15 ms
+link), not by the server. Batching the inserts and moving change capture to
+a statement-level trigger took the loopback ceiling from 1 175 to 1 362 tx/s;
+what remains per transaction is index maintenance on `triples` (five
+partial indexes) and WAL.
+
+### Reconnect storm — 5 000 clients × 3 queries, connect concurrency 500
+
+A node restart makes every client reconnect and re-register its queries at
+once. With the add-query result cache, sessions registering the same
+(app, query, auth) at the same tx watermark share one computation:
+
+| | connect+init rate | add-query p50 / p99 ms | queries computed |
+|---|---|---|---|
+| before the cache (loopback) | 1 291/s | 41 / 144 | 15 000 |
+| after (loopback) | 2 409/s | 44 / 112 | 69 |
+| after (remote, concurrency 200) | 806/s | 31 / 81 | 69 |
+
+The remaining per-connection cost is the init handshake and the tx-watermark
+read; the storm no longer touches the query engine.
 
 ### Reading the numbers
 
@@ -134,16 +153,29 @@ scale the database.
 | **Bounded concurrency + backpressure** | recomputations per batch are capped (`INSTANT_REFRESH_CONCURRENCY`) so one busy app can't drain the pool; a session that stops reading is disconnected at `INSTANT_MAX_QUEUED_MESSAGES` instead of growing an unbounded queue |
 | **Pre-serialized fan-out** (`invalidator::RefreshOkWire`) | each shared result is serialized once and spliced into every subscriber's `refresh-ok` as raw bytes; the transport writer batches raw frames without re-parsing. Halves fan-out CPU |
 | **Small socket buffers** (`ws::handler`) | tungstenite's 128 KiB read buffer per connection was ~75% of per-session memory; 8 KiB read / unbuffered write (frames are flushed as sent) brings a session to ~48 KB |
+| **Batched transact SQL** (`triple::insert_triples`) | one multi-row `INSERT … SELECT FROM UNNEST` per cardinality group instead of a statement per triple; the tx row and its `set_config` tag are one round trip |
+| **Statement-level change capture** (`service::ensure_server_tables`) | the `rust_tx_changes` trigger fires once per statement with transition tables instead of once per row in plpgsql, so a 300-triple seed logs its changes in one `INSERT … SELECT` |
+| **Add-query result cache** (`state::QueryCacheEntry`) | sessions registering the same (app, query, auth) at the same tx watermark within 5 s share one computation and one serialized result — a node restart with 10k clients is a few hundred queries instead of 30k |
+| **Presence deltas** (`presence::apply_delta`) | the room NOTIFY carries the change (peer set/leave); nodes with a fresh cached snapshot apply it instead of re-reading the room from Postgres (full read at most once a minute per room, or when the cache is cold) |
+| **fd limit / keepalive** (`main::raise_fd_limit`) | the soft open-file limit is raised to the hard limit at boot (1024 would cap a node at ~1k sessions); keepalive pings every 15 s instead of 5 s |
 | **Release profile / allocator** | fat LTO, `codegen-units = 1`, mimalloc |
 | **`/metrics`** | the harness (and any Prometheus) reads counters instead of scraping logs |
 
 ## Not done yet / next
 
-- **Batched SQL in transact**: triple inserts, lookup resolution and mode
-  checks are still one statement each; multi-row `UNNEST` inserts would cut
-  the per-tx round trips (issue #11 list item).
-- **Presence read amplification**: every presence change still re-reads the
-  room from Postgres per node.
+- **Lookup resolution and mode checks in transact** are still one statement
+  per lookup / per (entity, etype); deletes and cascades are per row.
+- **Websocket compression**: refresh-ok payloads are verbose JSON and the
+  network is the first wall for large fan-outs, but tungstenite (via axum)
+  has no permessage-deflate, so compression needs a different websocket
+  crate or a TLS-terminating proxy that speaks it end to end.
+- **Flamegraphs**: not produced (macOS needs root for dtrace); `/metrics`
+  histograms and the `debug`-level tracing spans on `run_transact`,
+  `run_query_full` and `refresh_batch` are the profiling surface today.
+- **NOTIFY is the cluster-wide ceiling**: every transaction is one
+  notification that every node receives, through one Postgres queue. Fine
+  to a few thousand tx/s per cluster; beyond that, shard apps across
+  Postgres instances rather than adding sync nodes.
 - **Refined topics** (legacy `instaql_topic.clj` CEL programs) and per-value
   narrowing for numbers/dates (only strings/booleans narrow on `v` today).
 - **Per-session frame assembly**: the result bytes are shared, but the

@@ -106,6 +106,8 @@ pub struct Metrics {
     // caches
     pub attr_cache_hits_total: Counter,
     pub attr_cache_misses_total: Counter,
+    pub query_cache_hits_total: Counter,
+    pub query_cache_misses_total: Counter,
 }
 
 pub static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::default);
@@ -332,6 +334,24 @@ pub fn render(state: &AppState) -> String {
         "instant_attr_cache_misses_total",
         "attr catalog loads that hit Postgres",
         m.attr_cache_misses_total.get(),
+    );
+    counter(
+        &mut out,
+        "instant_query_cache_hits_total",
+        "add-query results served from the shared result cache",
+        m.query_cache_hits_total.get(),
+    );
+    counter(
+        &mut out,
+        "instant_query_cache_misses_total",
+        "add-query results computed",
+        m.query_cache_misses_total.get(),
+    );
+    gauge(
+        &mut out,
+        "instant_query_cache_entries",
+        "entries in the add-query result cache",
+        state.query_cache.len(),
     );
 
     gauge(

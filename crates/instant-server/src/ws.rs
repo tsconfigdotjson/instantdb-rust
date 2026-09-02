@@ -13,7 +13,12 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::service::{self, PermsCtx};
-use crate::state::{value_hash, AppState, Outgoing, QueryEntry, Session, SessionUser};
+use crate::state::{
+    value_hash, AppState, Outgoing, QueryCacheEntry, QueryCacheKey, QueryEntry, Session,
+    SessionUser, QUERY_CACHE_TTL,
+};
+use serde::Serialize;
+use serde_json::value::RawValue;
 
 pub async fn handler(
     ws: WebSocketUpgrade,
@@ -40,7 +45,9 @@ async fn session_loop(socket: WebSocket, state: Arc<AppState>) {
     // queued-up messages are coalesced into one array frame like legacy does.
     let writer_session = session.clone();
     let writer = tokio::spawn(async move {
-        let mut ping = tokio::time::interval(std::time::Duration::from_secs(5));
+        // 15s keeps NAT/proxy idle timeouts (typically >= 60s) happy at a
+        // third of the per-session wakeups of the previous 5s
+        let mut ping = tokio::time::interval(std::time::Duration::from_secs(15));
         loop {
             tokio::select! {
                 msg = rx.recv() => {
@@ -333,37 +340,106 @@ async fn handle_add_query(
         }
     }
     let started = std::time::Instant::now();
-    let attrs = service::load_attrs(state, app_id).await?;
-    let outcome = service::run_query_full(state, app_id, &attrs, &perms, &q, None).await?;
-    let ws_result = outcome.result.to_ws_result();
+    // Watermark first, so a cached result is never older than the tx id the
+    // client is told it reflects.
     let processed_tx_id = service::max_tx_id(state, app_id).await?;
+    let cacheable =
+        perms.user_map.is_none() && perms.rule_params.is_none() && q.get("$$ruleParams").is_none();
+    let cache_key: QueryCacheKey = (app_id, key.clone(), perms.admin, perms.user_id);
+    let attr_gen = service::attr_generation(state, app_id);
+    let cached = if cacheable {
+        state.query_cache.get(&cache_key).and_then(|e| {
+            (e.tx_id == processed_tx_id
+                && e.attr_gen == attr_gen
+                && e.created.elapsed() < QUERY_CACHE_TTL)
+                .then(|| (e.ws_json.clone(), e.hash, e.topics.clone()))
+        })
+    } else {
+        None
+    };
+    let (ws_json, hash, topics) = match cached {
+        Some(hit) => {
+            crate::metrics::METRICS.query_cache_hits_total.inc();
+            hit
+        }
+        None => {
+            crate::metrics::METRICS.query_cache_misses_total.inc();
+            let attrs = service::load_attrs(state, app_id).await?;
+            let outcome = service::run_query_full(state, app_id, &attrs, &perms, &q, None).await?;
+            let ws_result = outcome.result.to_ws_result();
+            let hash = value_hash(&ws_result);
+            let ws_json = Arc::new(
+                RawValue::from_string(ws_result.to_string())
+                    .expect("serde_json output is valid JSON"),
+            );
+            let topics = Arc::new(outcome.topics);
+            if cacheable {
+                state.query_cache.insert(
+                    cache_key,
+                    QueryCacheEntry {
+                        ws_json: ws_json.clone(),
+                        hash,
+                        topics: topics.clone(),
+                        tx_id: processed_tx_id,
+                        attr_gen,
+                        created: std::time::Instant::now(),
+                    },
+                );
+            }
+            (ws_json, hash, topics)
+        }
+    };
     {
         let mut st = session.state.lock().await;
         st.queries.insert(
             key,
             QueryEntry {
                 q: q.clone(),
-                result_hash: value_hash(&ws_result),
-                topics: Some(Arc::new(outcome.topics)),
+                result_hash: hash,
+                topics: Some(topics),
             },
         );
     }
     crate::metrics::METRICS
         .add_query_seconds
         .observe_since(started);
-    session.send(json!({
-        "op": "add-query-ok",
-        "q": q,
-        "result": ws_result,
-        // legacy add-query-ok superset (session.clj:264-270): result-meta is
-        // only populated for the tree return-type (admin SSE), null on the
-        // ws join-rows path; processed-isn is the WAL watermark.
-        "result-meta": Value::Null,
-        "processed-tx-id": processed_tx_id,
-        "processed-isn": service::current_isn(state).await,
-        "client-event-id": msg.get("client-event-id"),
-    }));
+    // legacy add-query-ok superset (session.clj:264-270): result-meta is
+    // only populated for the tree return-type (admin SSE), null on the
+    // ws join-rows path; processed-isn is the WAL watermark.
+    let reply = AddQueryOkWire {
+        op: "add-query-ok",
+        q: &q,
+        result: &ws_json,
+        result_meta: (),
+        processed_tx_id,
+        processed_isn: service::current_isn(state).await,
+        client_event_id: msg.get("client-event-id"),
+        trace_id: crate::state::new_trace_id(),
+    };
+    match serde_json::to_string(&reply) {
+        Ok(frame) => session.send_raw(frame),
+        Err(e) => tracing::error!("add-query-ok serialization failed: {e}"),
+    }
     Ok(())
+}
+
+/// add-query-ok on the wire; the (possibly shared) result is spliced in as
+/// raw bytes.
+#[derive(Serialize)]
+struct AddQueryOkWire<'a> {
+    op: &'static str,
+    q: &'a Value,
+    result: &'a RawValue,
+    #[serde(rename = "result-meta")]
+    result_meta: (),
+    #[serde(rename = "processed-tx-id")]
+    processed_tx_id: i64,
+    #[serde(rename = "processed-isn")]
+    processed_isn: Value,
+    #[serde(rename = "client-event-id")]
+    client_event_id: Option<&'a Value>,
+    #[serde(rename = "trace-id")]
+    trace_id: String,
 }
 
 async fn handle_remove_query(session: &Arc<Session>, msg: &Value) -> HandlerResult {

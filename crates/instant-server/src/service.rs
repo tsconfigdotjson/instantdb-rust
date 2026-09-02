@@ -70,7 +70,7 @@ pub async fn load_attrs(state: &AppState, app_id: Uuid) -> Result<Arc<AttrMap>> 
     Ok(attrs)
 }
 
-fn attr_generation(state: &AppState, app_id: Uuid) -> u64 {
+pub fn attr_generation(state: &AppState, app_id: Uuid) -> u64 {
     state.attr_gen.get(&app_id).map(|g| *g).unwrap_or(0)
 }
 
@@ -136,6 +136,7 @@ pub struct QueryOutcome {
 /// Runs a query and derives its invalidation topics (instant_core::topics).
 /// `rules` lets a refresh batch load the app's rules once instead of once
 /// per query; None loads them here for non-admin contexts.
+#[tracing::instrument(level = "debug", skip_all, fields(app_id = %app_id))]
 pub async fn run_query_full(
     state: &AppState,
     app_id: Uuid,
@@ -250,6 +251,7 @@ fn inject_file_urls(
 }
 
 /// Runs tx-steps for an app: perms checks (unless admin), commit, notify.
+#[tracing::instrument(level = "debug", skip_all, fields(app_id = %app_id))]
 pub async fn run_transact(
     state: &Arc<AppState>,
     app_id: Uuid,
@@ -479,14 +481,25 @@ pub async fn ensure_server_tables(pool: &sqlx::PgPool) -> Result<()> {
           END IF;
           IF TG_OP = 'INSERT' THEN
             INSERT INTO rust_tx_changes (tx_id, app_id, entity_id, attr_id, value, created_at, action)
-            VALUES (txid_setting::bigint, NEW.app_id, NEW.entity_id, NEW.attr_id, NEW.value, NEW.created_at, 'added');
+            SELECT txid_setting::bigint, n.app_id, n.entity_id, n.attr_id, n.value, n.created_at, 'added'
+            FROM new_rows n;
           ELSIF TG_OP = 'DELETE' THEN
             INSERT INTO rust_tx_changes (tx_id, app_id, entity_id, attr_id, value, created_at, action)
-            VALUES (txid_setting::bigint, OLD.app_id, OLD.entity_id, OLD.attr_id, OLD.value, OLD.created_at, 'removed');
-          ELSIF TG_OP = 'UPDATE' AND NEW.value IS DISTINCT FROM OLD.value THEN
+            SELECT txid_setting::bigint, o.app_id, o.entity_id, o.attr_id, o.value, o.created_at, 'removed'
+            FROM old_rows o;
+          ELSIF TG_OP = 'UPDATE' THEN
+            -- values only change on cardinality-one rows (unique per e/a), which
+            -- is how old and new rows pair up; flag-only updates log nothing
             INSERT INTO rust_tx_changes (tx_id, app_id, entity_id, attr_id, value, created_at, action)
-            VALUES (txid_setting::bigint, OLD.app_id, OLD.entity_id, OLD.attr_id, OLD.value, OLD.created_at, 'removed'),
-                   (txid_setting::bigint, NEW.app_id, NEW.entity_id, NEW.attr_id, NEW.value, NEW.created_at, 'added');
+            SELECT txid_setting::bigint, o.app_id, o.entity_id, o.attr_id, o.value, o.created_at, 'removed'
+            FROM old_rows o
+            JOIN new_rows n ON n.app_id = o.app_id AND n.entity_id = o.entity_id AND n.attr_id = o.attr_id
+            WHERE n.ea AND n.value IS DISTINCT FROM o.value
+            UNION ALL
+            SELECT txid_setting::bigint, n.app_id, n.entity_id, n.attr_id, n.value, n.created_at, 'added'
+            FROM old_rows o
+            JOIN new_rows n ON n.app_id = o.app_id AND n.entity_id = o.entity_id AND n.attr_id = o.attr_id
+            WHERE n.ea AND n.value IS DISTINCT FROM o.value;
           END IF;
           RETURN NULL;
         END $fn$ LANGUAGE plpgsql
@@ -499,13 +512,30 @@ pub async fn ensure_server_tables(pool: &sqlx::PgPool) -> Result<()> {
         .execute(pool)
         .await
         .map_err(InstantError::from)?;
-    sqlx::query(
-        "CREATE TRIGGER rust_capture_trigger
-         AFTER INSERT OR UPDATE OR DELETE ON triples
-         FOR EACH ROW EXECUTE FUNCTION rust_capture_triple_change()",
-    )
-    .execute(pool)
-    .await
-    .map_err(InstantError::from)?;
+    // Statement-level triggers with transition tables: one plpgsql call and
+    // one INSERT ... SELECT per statement instead of per row. Postgres needs
+    // a trigger per event to name the transition tables.
+    for (name, event, tables) in [
+        ("rust_capture_ins", "INSERT", "NEW TABLE AS new_rows"),
+        (
+            "rust_capture_upd",
+            "UPDATE",
+            "OLD TABLE AS old_rows NEW TABLE AS new_rows",
+        ),
+        ("rust_capture_del", "DELETE", "OLD TABLE AS old_rows"),
+    ] {
+        sqlx::query(&format!("DROP TRIGGER IF EXISTS {name} ON triples"))
+            .execute(pool)
+            .await
+            .map_err(InstantError::from)?;
+        sqlx::query(&format!(
+            "CREATE TRIGGER {name} AFTER {event} ON triples
+             REFERENCING {tables}
+             FOR EACH STATEMENT EXECUTE FUNCTION rust_capture_triple_change()"
+        ))
+        .execute(pool)
+        .await
+        .map_err(InstantError::from)?;
+    }
     Ok(())
 }

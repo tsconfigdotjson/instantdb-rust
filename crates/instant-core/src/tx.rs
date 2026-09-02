@@ -231,16 +231,16 @@ pub async fn transact(
     opts: &TxOptions,
 ) -> Result<TxReport> {
     // First write: the transactions row (tx-id + WAL ordering anchor).
-    let row = sqlx::query("INSERT INTO transactions (app_id) VALUES ($1) RETURNING id")
-        .bind(app_id)
-        .fetch_one(&mut *conn)
-        .await?;
+    // ...and tag the triple writes of this tx for the change-capture trigger
+    // (sync tables, topics) in the same round trip.
+    let row = sqlx::query(
+        "WITH t AS (INSERT INTO transactions (app_id) VALUES ($1) RETURNING id)
+         SELECT id, set_config('instant.rust_tx_id', id::text, true) AS tag FROM t",
+    )
+    .bind(app_id)
+    .fetch_one(&mut *conn)
+    .await?;
     let tx_id: i64 = row.get("id");
-    // tags triple writes in this tx for the change-capture trigger (sync tables)
-    sqlx::query("SELECT set_config('instant.rust_tx_id', $1, true)")
-        .bind(tx_id.to_string())
-        .execute(&mut *conn)
-        .await?;
 
     // Guard system-catalog triple writes unless explicitly allowed.
     if !opts.allow_system_catalog_writes {
