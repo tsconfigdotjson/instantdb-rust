@@ -548,6 +548,65 @@ async function runAgainst(name) {
   raw("23-errors", errs);
   record("23-errors", errs);
 
+  // 24 admin transact ref lookups (issue #10): `lookup("owner.id", <uuid>)`
+  // names the unique forward link `<etype>.owner` and matches on the linked
+  // entity's id (admin/model.clj extract-lookup); a missing one is
+  // auto-created as a unique cardinality-one link (add-attrs-for-ref-lookup)
+  const adminCall = (method, p, body, extra = {}) =>
+    call(base, method, p, { body, headers: { "app-id": appId, ...extra } });
+  const lookup = (attr, value) => `lookup__${attr}__${JSON.stringify(value)}`;
+  const txView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort() } : errView(res));
+  const queryView = (res) => {
+    if (res.status !== 200) return errView(res);
+    const rows = (res.body.docs ?? []).map((d) => norm(d)).sort((a, c) => (canon(a) < canon(c) ? -1 : 1));
+    return { status: 200, docs: rows };
+  };
+  const ids24 = { owner1: mk(), owner2: mk(), doc1: mk() };
+  const r24 = {};
+  // a plain (non-unique, cardinality-many) link and an owner to look up
+  r24.seed = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["update", "owners", ids24.owner1, { name: "ann" }],
+    ["update", "owners", ids24.owner2, { name: "bo" }],
+    ["update", "docs", ids24.doc1, { title: "d1" }],
+    ["link", "docs", ids24.doc1, { owner: ids24.owner1 }],
+  ] }));
+  // ref lookup on a fresh label: auto-creates docs.primaryOwner (ref/one/unique) and upserts
+  r24.createByRefLookup = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["update", "docs", lookup("primaryOwner.id", ids24.owner1), { title: "d2" }],
+  ] }));
+  r24.updateByRefLookup = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["update", "docs", lookup("primaryOwner.id", ids24.owner1), { title: "d2-renamed" }],
+    ["merge", "docs", lookup("primaryOwner.id", ids24.owner1), { meta: { k: 1 } }],
+  ] }));
+  // link + delete through the same lookup
+  r24.linkByRefLookup = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["link", "docs", lookup("primaryOwner.id", ids24.owner1), { owner: ids24.owner2 }],
+  ] }));
+  r24.query = queryView(await adminCall("POST", "/admin/query", { query: { docs: { primaryOwner: {}, owner: {} } } }));
+  // error matrix
+  r24.notUnique = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["update", "docs", lookup("owner.id", ids24.owner1), { title: "x" }],
+  ] }));
+  r24.badPath = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["update", "docs", lookup("primaryOwner.name", ids24.owner1), { title: "x" }],
+  ] }));
+  r24.tooDeep = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["update", "docs", lookup("primaryOwner.id.id", ids24.owner1), { title: "x" }],
+  ] }));
+  r24.missingStrict = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["update", "docs", lookup("editor.id", ids24.owner1), { title: "x" }],
+  ], "throw-on-missing-attrs?": true }));
+  r24.deleteByRefLookup = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["delete", "docs", lookup("primaryOwner.id", ids24.owner1)],
+  ] }));
+  r24.queryAfterDelete = queryView(await adminCall("POST", "/admin/query", { query: { docs: { primaryOwner: {} } } }));
+  const pulled = await call(base, "GET", `/dash/apps/${appId}/schema/pull`);
+  r24.primaryOwnerAttr = pulled.status === 200
+    ? attrView(pulled.body.attrs.find((a) => a["forward-identity"][1] === "docs" && a["forward-identity"][2] === "primaryOwner") ?? {})
+    : errView(pulled);
+  raw("24-admin-ref-lookups", r24);
+  record("24-admin-ref-lookups", r24);
+
   return out;
 }
 

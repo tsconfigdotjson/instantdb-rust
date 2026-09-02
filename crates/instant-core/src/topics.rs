@@ -88,7 +88,12 @@ pub struct TxChange {
 #[derive(Debug, Clone, Default)]
 pub struct TxTopics {
     by_attr: HashMap<Uuid, Vec<(Uuid, String)>>,
-    /// true when the tx changed the attr catalog (or its changes are unknown):
+    /// attrs whose catalog rows changed: legacy topics-for-attr-upsert /
+    /// -delete (reactive/topics.clj:151-172) make that a `[_ #{attr} _]`
+    /// topic, so every query mentioning the attr matches regardless of its
+    /// e / v parts.
+    attr_wildcards: HashSet<Uuid>,
+    /// true when the tx is a schema change (or its changes are unknown):
     /// every query matches.
     pub catch_all: bool,
 }
@@ -97,6 +102,7 @@ impl TxTopics {
     pub fn catch_all() -> Self {
         TxTopics {
             by_attr: HashMap::new(),
+            attr_wildcards: HashSet::new(),
             catch_all: true,
         }
     }
@@ -108,12 +114,18 @@ impl TxTopics {
         }
         TxTopics {
             by_attr,
+            attr_wildcards: HashSet::new(),
             catch_all: false,
         }
     }
 
+    pub fn with_attr_wildcards(mut self, attrs: impl IntoIterator<Item = Uuid>) -> Self {
+        self.attr_wildcards.extend(attrs);
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
-        !self.catch_all && self.by_attr.is_empty()
+        !self.catch_all && self.by_attr.is_empty() && self.attr_wildcards.is_empty()
     }
 
     /// Does any change in this tx set match any topic of the query?
@@ -123,6 +135,9 @@ impl TxTopics {
         }
         for t in &q.topics {
             for a in &t.a {
+                if self.attr_wildcards.contains(a) {
+                    return true;
+                }
                 let Some(rows) = self.by_attr.get(a) else {
                     continue;
                 };
@@ -346,6 +361,8 @@ mod tests {
             indexing: false,
             checking_data_type: false,
             setting_unique: false,
+            inferred_types: None,
+            metadata: None,
         }
     }
 
@@ -436,6 +453,33 @@ mod tests {
         // empty tx never matches; catch-all tx always does
         assert!(!tx(&[]).matches(&qt));
         assert!(TxTopics::catch_all().matches(&qt));
+    }
+
+    #[test]
+    fn changed_attr_row_matches_any_query_mentioning_the_attr() {
+        // legacy topics-for-attr-upsert: an attrs-row change (flag flip,
+        // inferred types) is a `[_ #{attr} _]` topic
+        let fx = fixture();
+        let e1 = Uuid::new_v4();
+        let e2 = Uuid::new_v4();
+        let forms = parse_query(&json!({"todos": {"$": {"where": {"title": "a"}}}})).unwrap();
+        let qt = query_topics(
+            &fx.attrs,
+            &forms,
+            &result(vec![("todos", vec![node(e1, "todos")])]),
+        );
+        // the triple alone misses (wrong value), the attr wildcard hits
+        assert!(!tx(&[(e2, fx.todos_title, json!("b"))]).matches(&qt));
+        assert!(tx(&[(e2, fx.todos_title, json!("b"))])
+            .with_attr_wildcards([fx.todos_title])
+            .matches(&qt));
+        // an attr the query never mentions does not
+        let only_attr = TxTopics::default().with_attr_wildcards([fx.users_name]);
+        assert!(!only_attr.is_empty());
+        assert!(!only_attr.matches(&qt));
+        assert!(TxTopics::default()
+            .with_attr_wildcards([fx.todos_id])
+            .matches(&qt));
     }
 
     #[test]

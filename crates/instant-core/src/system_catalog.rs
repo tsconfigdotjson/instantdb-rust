@@ -347,6 +347,12 @@ pub fn all_attrs() -> Vec<Attr> {
             checked_data_type: d.checked,
             on_delete_cascade: d.on_delete_cascade,
             on_delete_reverse_cascade: d.on_delete_reverse_cascade,
+            inferred_types: Some(if d.label == "meta" {
+                crate::attr::INFERRED_JSON
+            } else {
+                crate::attr::INFERRED_STRING
+            }),
+            metadata: None,
             is_system: true,
             indexing: false,
             checking_data_type: false,
@@ -417,6 +423,29 @@ pub async fn ensure_system_catalog(pool: &sqlx::PgPool) -> Result<()> {
     for attr in all_attrs() {
         crate::attr::insert(&mut *tx, SYSTEM_CATALOG_APP_ID, &attr).await?;
     }
+    // Legacy seeds inferred types on the system catalog (system_catalog_migration.clj:79-104):
+    // `meta` attrs are json, everything else string. Migration 92's trigger
+    // blocks system-catalog attr updates unless this setting is on. The
+    // setting is session-scoped and reset to 'false' afterwards: a
+    // transaction-local set_config leaves an empty-string placeholder on the
+    // pooled connection, which the trigger's `::boolean` cast then chokes on
+    // for every later attrs UPDATE.
+    sqlx::query("SELECT set_config('instant.allow_system_catalog_app_attr_update', 'true', false)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE attrs
+            SET inferred_types = (CASE WHEN label = 'meta' THEN 8 ELSE 2 END)::bit(32)
+          WHERE app_id = $1 AND inferred_types IS NULL",
+    )
+    .bind(SYSTEM_CATALOG_APP_ID)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "SELECT set_config('instant.allow_system_catalog_app_attr_update', 'false', false)",
+    )
+    .execute(&mut *tx)
+    .await?;
     tx.commit()
         .await
         .map_err(crate::error::InstantError::from)?;

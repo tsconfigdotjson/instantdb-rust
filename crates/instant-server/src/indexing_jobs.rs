@@ -949,7 +949,21 @@ async fn update_attr(
     let q = if let Some(cdt) = cdt { q.bind(cdt) } else { q };
     q.execute(&mut *dbtx).await?;
     dbtx.commit().await?;
-    service::notify_tx(state, job.app_id, tx_id, true).await;
+    // an attr flag flip evicts attr caches and, like legacy's attrs-row
+    // topic, refreshes the sessions whose queries mention the attr; it is
+    // not a schema change (only attr inserts / deletes and ident changes
+    // refresh every session)
+    service::notify_tx(
+        state,
+        job.app_id,
+        &service::TxNotice {
+            tx_id,
+            attrs_changed: true,
+            schema_changed: false,
+            changed_attrs: vec![job.attr_id],
+        },
+    )
+    .await;
     Ok(())
 }
 

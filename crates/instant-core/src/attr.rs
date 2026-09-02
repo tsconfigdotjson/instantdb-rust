@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde_json::{json, Map, Value};
-use sqlx::{PgExecutor, Row};
+use sqlx::{PgConnection, PgExecutor, Row};
 use uuid::Uuid;
 
 use crate::error::{InstantError, Result};
@@ -118,6 +118,52 @@ pub struct Attr {
     pub indexing: bool,
     pub checking_data_type: bool,
     pub setting_unique: bool,
+    /// `attrs.inferred_types` bitset (legacy attr.clj `types`: number=1,
+    /// string=2, boolean=4, json=8); None until a value was ever written.
+    pub inferred_types: Option<u32>,
+    /// `attrs.metadata` (jsonb); on the wire whenever the column is non-null
+    /// (legacy row->attr) — e.g. `{}` after a soft-delete/restore round trip.
+    pub metadata: Option<Value>,
+}
+
+/// Bit for each inferred type, in legacy's `types` vector order
+/// (attr.clj:22-33).
+pub const INFERRED_NUMBER: u32 = 1;
+pub const INFERRED_STRING: u32 = 2;
+pub const INFERRED_BOOLEAN: u32 = 4;
+pub const INFERRED_JSON: u32 = 8;
+
+/// Legacy `inferred-value-type` (attr.clj:41-46): nil contributes nothing,
+/// uuids and strings are strings, everything non-scalar is json.
+pub fn inferred_type_bit(v: &Value) -> Option<u32> {
+    match v {
+        Value::Null => None,
+        Value::String(_) => Some(INFERRED_STRING),
+        Value::Number(_) => Some(INFERRED_NUMBER),
+        Value::Bool(_) => Some(INFERRED_BOOLEAN),
+        Value::Array(_) | Value::Object(_) => Some(INFERRED_JSON),
+    }
+}
+
+/// Wire form of the bitset: legacy renders the Clojure keyword set, whose
+/// iteration order is number, string, json, boolean (observed live against
+/// the legacy server — hash order, not declaration order).
+pub fn inferred_types_wire(bits: Option<u32>) -> Value {
+    match bits {
+        None => Value::Null,
+        Some(b) => Value::Array(
+            [
+                (INFERRED_NUMBER, "number"),
+                (INFERRED_STRING, "string"),
+                (INFERRED_JSON, "json"),
+                (INFERRED_BOOLEAN, "boolean"),
+            ]
+            .into_iter()
+            .filter(|(bit, _)| b & bit != 0)
+            .map(|(_, name)| json!(name))
+            .collect(),
+        ),
+    }
 }
 
 impl Attr {
@@ -139,7 +185,10 @@ impl Attr {
         m.insert("unique?".into(), json!(self.is_unique));
         m.insert("index?".into(), json!(self.is_indexed));
         m.insert("required?".into(), json!(self.is_required));
-        m.insert("inferred-types".into(), Value::Null);
+        m.insert(
+            "inferred-types".into(),
+            inferred_types_wire(self.inferred_types),
+        );
         m.insert(
             "catalog".into(),
             json!(if self.is_system { "system" } else { "user" }),
@@ -162,6 +211,9 @@ impl Attr {
         }
         if self.setting_unique {
             m.insert("setting-unique?".into(), json!(true));
+        }
+        if let Some(md) = &self.metadata {
+            m.insert("metadata".into(), md.clone());
         }
         Value::Object(m)
     }
@@ -271,6 +323,8 @@ impl Attr {
             indexing: false,
             checking_data_type: false,
             setting_unique: false,
+            inferred_types: None,
+            metadata: None,
         })
     }
 
@@ -328,6 +382,10 @@ impl AttrMap {
         self.by_id.get(id)
     }
 
+    pub fn get_mut(&mut self, id: &Uuid) -> Option<&mut Attr> {
+        self.by_id.get_mut(id)
+    }
+
     pub fn by_fwd_name(&self, etype: &str, label: &str) -> Option<&Attr> {
         self.by_fwd
             .get(&(etype.to_string(), label.to_string()))
@@ -374,6 +432,22 @@ impl AttrMap {
     }
 }
 
+const ATTR_COLUMNS: &str = r#"
+SELECT a.id, a.app_id, a.value_type, a.cardinality, a.is_unique, a.is_indexed,
+       coalesce(a.is_required, false) AS is_required,
+       a.forward_ident, a.reverse_ident,
+       a.etype, a.label, a.reverse_etype, a.reverse_label,
+       a.checked_data_type::text AS checked_data_type,
+       (a.on_delete = 'cascade') AS on_delete_cascade,
+       (a.on_delete_reverse = 'cascade') AS on_delete_reverse_cascade,
+       coalesce(a.indexing, false) AS indexing,
+       coalesce(a.checking_data_type, false) AS checking_data_type,
+       coalesce(a.setting_unique, false) AS setting_unique,
+       a.inferred_types::int4 AS inferred_types,
+       a.metadata
+FROM attrs a
+"#;
+
 const ATTR_SELECT: &str = r#"
 SELECT a.id, a.app_id, a.value_type, a.cardinality, a.is_unique, a.is_indexed,
        coalesce(a.is_required, false) AS is_required,
@@ -384,7 +458,9 @@ SELECT a.id, a.app_id, a.value_type, a.cardinality, a.is_unique, a.is_indexed,
        (a.on_delete_reverse = 'cascade') AS on_delete_reverse_cascade,
        coalesce(a.indexing, false) AS indexing,
        coalesce(a.checking_data_type, false) AS checking_data_type,
-       coalesce(a.setting_unique, false) AS setting_unique
+       coalesce(a.setting_unique, false) AS setting_unique,
+       a.inferred_types::int4 AS inferred_types,
+       a.metadata
 FROM attrs a
 WHERE a.deletion_marked_at IS NULL AND a.app_id = ANY($1)
 "#;
@@ -418,7 +494,66 @@ fn row_to_attr(row: &sqlx::postgres::PgRow) -> Result<Attr> {
         indexing: row.get("indexing"),
         checking_data_type: row.get("checking_data_type"),
         setting_unique: row.get("setting_unique"),
+        inferred_types: row
+            .get::<Option<i32>, _>("inferred_types")
+            .map(|b| b as u32),
+        metadata: row.get::<Option<Value>, _>("metadata"),
     })
+}
+
+/// Legacy `insert-attr-inferred-types-cte` (triple.clj:120-153): OR the
+/// value types written by this tx into each attr's bitset. Skips nulls, bits
+/// already present in the in-memory catalog, and system-catalog attrs; the
+/// `IS DISTINCT FROM` guard makes the steady state a zero-row update.
+/// Returns the ids of the attr rows that actually changed (callers treat
+/// that as an attrs change so caches and clients pick up the new catalog).
+pub async fn record_inferred_types(
+    conn: &mut PgConnection,
+    app_id: Uuid,
+    attrs: &mut AttrMap,
+    values: impl IntoIterator<Item = (Uuid, u32)>,
+) -> Result<Vec<Uuid>> {
+    let mut pending: HashMap<Uuid, u32> = HashMap::new();
+    for (attr_id, bit) in values {
+        let Some(attr) = attrs.get(&attr_id) else {
+            continue;
+        };
+        if attr.is_system || attr.inferred_types.unwrap_or(0) & bit != 0 {
+            continue;
+        }
+        *pending.entry(attr_id).or_insert(0) |= bit;
+    }
+    if pending.is_empty() {
+        return Ok(vec![]);
+    }
+    let (ids, bits): (Vec<Uuid>, Vec<i32>) = pending.iter().map(|(id, b)| (*id, *b as i32)).unzip();
+    let rows = sqlx::query(
+        r#"
+        UPDATE attrs
+           SET inferred_types = coalesce(attrs.inferred_types, 0::bit(32)) | u.typ::bit(32)
+          FROM unnest($2::uuid[], $3::int4[]) AS u(id, typ)
+         WHERE attrs.id = u.id
+           AND attrs.app_id = $1
+           AND attrs.inferred_types IS DISTINCT FROM
+               (coalesce(attrs.inferred_types, 0::bit(32)) | u.typ::bit(32))
+        RETURNING attrs.id, attrs.inferred_types::int4 AS inferred_types
+        "#,
+    )
+    .bind(app_id)
+    .bind(&ids)
+    .bind(&bits)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut changed = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let id: Uuid = row.get("id");
+        let bits: i32 = row.get("inferred_types");
+        if let Some(a) = attrs.get_mut(&id) {
+            a.inferred_types = Some(bits as u32);
+        }
+        changed.push(id);
+    }
+    Ok(changed)
 }
 
 /// Load an app's attrs plus the system catalog attrs.
@@ -432,6 +567,70 @@ pub async fn get_by_app_id<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid) -> Resu
         map.insert(row_to_attr(row)?);
     }
     Ok(map)
+}
+
+/// Load specific (live) attrs by id.
+pub async fn get_by_ids<'e, E: PgExecutor<'e>>(
+    exec: E,
+    app_id: Uuid,
+    ids: &[Uuid],
+) -> Result<Vec<Attr>> {
+    let sql = format!(
+        "{ATTR_COLUMNS} WHERE a.deletion_marked_at IS NULL AND a.app_id = $1 AND a.id = ANY($2)"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(app_id)
+        .bind(ids)
+        .fetch_all(exec)
+        .await?;
+    rows.iter().map(row_to_attr).collect()
+}
+
+/// Legacy `restore-multi!` (attr.clj:657-726): un-brand the `{id}_deleted$`
+/// prefix from etype/label (and the reverse names), clear
+/// `deletion_marked_at` and the `soft_delete_snapshot`, and leave the attr
+/// un-indexed and not required so existing triples stay valid. Only rows
+/// that are currently soft-deleted match. Returns the restored attrs.
+pub async fn restore(conn: &mut PgConnection, app_id: Uuid, ids: &[Uuid]) -> Result<Vec<Attr>> {
+    let rows = sqlx::query(
+        r#"
+        WITH restored_attrs AS (
+          UPDATE attrs
+             SET deletion_marked_at = NULL,
+                 is_indexed = false,
+                 is_required = false,
+                 metadata = metadata - 'soft_delete_snapshot',
+                 etype = substring(etype from position('$' in etype) + 1),
+                 label = substring(label from position('$' in etype) + 1),
+                 reverse_etype = CASE WHEN reverse_etype IS NOT NULL
+                                      THEN substring(reverse_etype from position('$' in etype) + 1)
+                                      ELSE NULL END,
+                 reverse_label = CASE WHEN reverse_label IS NOT NULL
+                                      THEN substring(reverse_label from position('$' in etype) + 1)
+                                      ELSE NULL END
+           WHERE app_id = $1 AND id = ANY($2) AND deletion_marked_at IS NOT NULL
+          RETURNING *
+        ), restored_forward_idents AS (
+          UPDATE idents fw SET etype = a.etype, label = a.label
+            FROM restored_attrs a
+           WHERE fw.app_id = $1 AND fw.id = a.forward_ident
+        ), restored_rev_idents AS (
+          UPDATE idents rv SET etype = a.reverse_etype, label = a.reverse_label
+            FROM restored_attrs a
+           WHERE rv.app_id = $1 AND rv.id = a.reverse_ident
+        )
+        SELECT id FROM restored_attrs
+        "#,
+    )
+    .bind(app_id)
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let restored: Vec<Uuid> = rows.iter().map(|r| r.get("id")).collect();
+    if restored.is_empty() {
+        return Ok(vec![]);
+    }
+    get_by_ids(&mut *conn, app_id, &restored).await
 }
 
 /// Insert one attr (attrs row + ident rows). Idempotent for identical re-inserts.
@@ -602,28 +801,61 @@ pub async fn update<'e, E: PgExecutor<'e>>(
 }
 
 /// Soft-delete an attr: mark deletion, brand names to free them, snapshot state.
+/// Legacy `soft-delete-multi!` (attr.clj:728-824): brand etype/label (and
+/// the reverse names) with `{id}_deleted$`, drop index/required, and merge a
+/// `soft_delete_snapshot` ({is_indexed, is_required, id_attr_id}) into
+/// metadata — the dashboard's "recently deleted" view groups deleted attrs
+/// by `id_attr_id`. Triples are left in place; `restore` reverses this.
 pub async fn soft_delete<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid, attr: &Attr) -> Result<()> {
-    let brand = format!("{}_deleted$", attr.id);
     sqlx::query(
         r#"
-        WITH ident_up AS (
-          UPDATE idents SET etype = $3 || etype, label = $3 || label
-          WHERE app_id = $1 AND attr_id = $2
+        WITH target_attrs AS (
+          SELECT app_id, id, etype FROM attrs
+           WHERE app_id = $1 AND id = $2 AND deletion_marked_at IS NULL
+        ), snaps AS (
+          SELECT t.app_id AS target_app_id, t.id AS target_attr_id, id_attr.id AS id_attr_id
+            FROM target_attrs t
+            LEFT JOIN LATERAL (
+              SELECT id FROM attrs id_attr
+               WHERE (id_attr.app_id = t.app_id OR id_attr.app_id = $3)
+                 AND id_attr.etype = t.etype AND id_attr.label = 'id'
+               LIMIT 1
+            ) id_attr ON true
+        ), soft_deleted_attrs AS (
+          UPDATE attrs a
+             SET deletion_marked_at = now(),
+                 is_indexed = false,
+                 is_required = false,
+                 etype = id::text || '_deleted$' || etype,
+                 label = id::text || '_deleted$' || label,
+                 metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
+                   'soft_delete_snapshot', jsonb_build_object(
+                     'is_indexed', is_indexed,
+                     'is_required', is_required,
+                     'id_attr_id', s.id_attr_id)),
+                 reverse_etype = CASE WHEN reverse_etype IS NOT NULL
+                                      THEN id::text || '_deleted$' || reverse_etype ELSE NULL END,
+                 reverse_label = CASE WHEN reverse_label IS NOT NULL
+                                      THEN id::text || '_deleted$' || reverse_label ELSE NULL END
+            FROM snaps s
+           WHERE a.app_id = s.target_app_id AND a.id = s.target_attr_id
+             AND a.deletion_marked_at IS NULL
+          RETURNING a.*
+        ), changed_forward_idents AS (
+          UPDATE idents fw SET etype = a.etype, label = a.label
+            FROM soft_deleted_attrs a
+           WHERE fw.app_id = $1 AND fw.id = a.forward_ident
+        ), changed_rev_idents AS (
+          UPDATE idents rv SET etype = a.reverse_etype, label = a.reverse_label
+            FROM soft_deleted_attrs a
+           WHERE rv.app_id = $1 AND rv.id = a.reverse_ident
         )
-        UPDATE attrs SET deletion_marked_at = now(), is_indexed = false, is_required = false,
-               etype = $3 || etype, label = $3 || label,
-               reverse_etype = CASE WHEN reverse_etype IS NULL THEN NULL ELSE $3 || reverse_etype END,
-               reverse_label = CASE WHEN reverse_label IS NULL THEN NULL ELSE $3 || reverse_label END,
-               metadata = jsonb_build_object('soft_delete_snapshot',
-                 jsonb_build_object('etype', etype, 'label', label,
-                                    'reverse_etype', reverse_etype, 'reverse_label', reverse_label,
-                                    'is_indexed', is_indexed, 'is_required', is_required))
-        WHERE app_id = $1 AND id = $2
+        SELECT count(*) FROM soft_deleted_attrs
         "#,
     )
     .bind(app_id)
     .bind(attr.id)
-    .bind(&brand)
+    .bind(system_catalog::SYSTEM_CATALOG_APP_ID)
     .execute(exec)
     .await?;
     Ok(())

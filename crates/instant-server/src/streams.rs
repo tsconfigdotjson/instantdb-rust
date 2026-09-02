@@ -74,10 +74,8 @@ async fn check_stream_perm(
     let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
     let rules = instant_core::perms::Rules::load(&mut conn, app_id).await?;
     let program = rules.program("$streams", action);
-    let auth_ctx = instant_core::perms::AuthCtx {
-        user_id,
-        user_map: None,
-    };
+    let request = instant_core::perms::RequestCtx::default().with_pool(state.pool.clone());
+    let env = instant_core::perms::EvalEnv::new(app_id, &rules, &request);
     let attrs = service::load_attrs(state, app_id).await?;
     let auth_val = if let Some(uid) = user_id {
         instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$users", uid)
@@ -87,14 +85,15 @@ async fn check_stream_perm(
     } else {
         Value::Null
     };
-    let _ = auth_ctx;
     let ok = instant_core::perms::eval_program(
         &program,
         &json!({}),
         None,
         &auth_val,
         rule_params.unwrap_or(&json!({})),
-    )?;
+        &env,
+    )
+    .await?;
     if !ok {
         return Err(InstantError::permission_denied(
             json!(["$streams", action]),

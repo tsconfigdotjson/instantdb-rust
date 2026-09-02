@@ -99,6 +99,11 @@ pub struct SessionState {
     pub sync_subs: HashMap<Uuid, SyncSub>,
     /// stream ids this session is the writer for
     pub writing_streams: HashSet<Uuid>,
+    /// `request.ip` / `request.origin` from the upgrade request (legacy
+    /// socket-ip / socket-origin, reactive/store.clj:497-508); every op on
+    /// the socket, refreshes included, evaluates rules with these
+    pub ip: Option<String>,
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -222,7 +227,17 @@ pub struct QueryCacheEntry {
 }
 
 /// (app id, canonical query, admin?, user id)
-pub type QueryCacheKey = (Uuid, String, bool, Option<Uuid>);
+/// (app, query, admin?, user, request.ip, request.origin): rules may read
+/// `request.ip` / `request.origin`, so results are only shared between
+/// sessions with the same request facts.
+pub type QueryCacheKey = (
+    Uuid,
+    String,
+    bool,
+    Option<Uuid>,
+    Option<String>,
+    Option<String>,
+);
 
 /// Entries older than this are never served (bounds the staleness of results
 /// computed under permission rules that changed without a transaction).
@@ -262,6 +277,9 @@ pub struct AppState {
     pub attr_gen: DashMap<Uuid, u64>,
     /// per-app pending refresh work (invalidator::RefreshQueue)
     pub refresh_queues: DashMap<Uuid, Arc<crate::invalidator::RefreshQueue>>,
+    /// per-app `apps.status` cache for the read gate, refreshed by the
+    /// `instant_app_status` NOTIFY (and a TTL as the safety net)
+    pub app_status_cache: DashMap<Uuid, (String, std::time::Instant)>,
 }
 
 impl AppState {
@@ -282,6 +300,7 @@ impl AppState {
             attr_cache: DashMap::new(),
             attr_gen: DashMap::new(),
             refresh_queues: DashMap::new(),
+            app_status_cache: DashMap::new(),
         })
     }
 

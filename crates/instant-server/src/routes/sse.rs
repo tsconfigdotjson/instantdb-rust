@@ -15,14 +15,20 @@ use uuid::Uuid;
 
 use crate::state::{AppState, Outgoing, Session};
 
-pub async fn stream(State(state): State<Arc<AppState>>) -> Response {
+pub async fn stream(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     let session_id = Uuid::new_v4();
     let sse_token = Uuid::new_v4();
     let (tx, rx) = mpsc::unbounded_channel::<Outgoing>();
     let session = state.new_session(session_id, tx);
     {
+        let request = crate::ws::request_ctx_from_headers(&headers);
         let mut st = session.state.lock().await;
         st.sse_token = Some(sse_token);
+        st.ip = request.ip;
+        st.origin = request.origin;
     }
 
     session.send(json!({

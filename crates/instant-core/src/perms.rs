@@ -132,7 +132,11 @@ impl Rules {
         if etype == "$users" {
             let expr = match action {
                 "create" => "true",
-                "view" | "update" => "auth.id == data.id",
+                // rule.clj:198-210: upgraded guests keep access to their
+                // guest rows through the linkedPrimaryUser link
+                "view" | "update" => {
+                    "auth.id == data.id || (data.linkedPrimaryUser != null && auth.id == data.linkedPrimaryUser)"
+                }
                 _ => "false",
             };
             return Program {
@@ -181,6 +185,95 @@ pub struct AuthCtx {
     pub user_id: Option<Uuid>,
     /// $users entity map (id, email, ...)
     pub user_map: Option<Value>,
+    /// per-request facts for the `request` / `rateLimit` bindings
+    pub request: RequestCtx,
+}
+
+// ---------------------------------------------------------------------------
+// Request context (legacy `*request-info*`, util/request.clj)
+
+/// Per-request facts bound as `request.ip` / `request.origin`, plus the pool
+/// that backs `rateLimit` bucket state.
+#[derive(Debug, Clone, Default)]
+pub struct RequestCtx {
+    pub ip: Option<String>,
+    pub origin: Option<String>,
+    /// Bucket state lives in `rust_rate_limit_buckets` and is consumed on a
+    /// pool connection, so tokens spent by a transaction that later rolls
+    /// back stay spent (legacy buckets are in-memory and never roll back).
+    /// None skips consumption (unit tests).
+    pub pool: Option<sqlx::PgPool>,
+}
+
+impl RequestCtx {
+    /// Legacy util/http.clj:84-118 and reactive/store.clj:497-508: `origin` is
+    /// the Origin header; `ip` is the SECOND-TO-LAST `x-forwarded-for` hop
+    /// (the last one is the load balancer's), so a single-hop header yields
+    /// no ip at all.
+    pub fn from_headers(origin: Option<&str>, x_forwarded_for: Option<&str>) -> Self {
+        let ip = x_forwarded_for.and_then(|h| {
+            let parts: Vec<&str> = h.split(',').collect();
+            (parts.len() >= 2).then(|| parts[parts.len() - 2].trim().to_string())
+        });
+        RequestCtx {
+            ip,
+            origin: origin.map(|s| s.to_string()),
+            pool: None,
+        }
+    }
+
+    pub fn with_pool(mut self, pool: sqlx::PgPool) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+}
+
+/// Everything one rule evaluation needs beyond its data bindings.
+pub struct EvalEnv<'a> {
+    pub app_id: Uuid,
+    /// the rules document, for `$rateLimits` bucket configs
+    pub rules: &'a Rules,
+    pub request: &'a RequestCtx,
+    /// `request.modifiedFields`: labels written to the checked entity by this
+    /// tx (create/update checks only; empty everywhere else)
+    pub modified_fields: Vec<String>,
+}
+
+impl<'a> EvalEnv<'a> {
+    pub fn new(app_id: Uuid, rules: &'a Rules, request: &'a RequestCtx) -> Self {
+        EvalEnv {
+            app_id,
+            rules,
+            request,
+            modified_fields: vec![],
+        }
+    }
+
+    pub fn with_modified_fields(mut self, fields: Vec<String>) -> Self {
+        self.modified_fields = fields;
+        self
+    }
+}
+
+/// Legacy `get-modified-fields-for-eid` (permissioned_transaction.clj:262-279):
+/// the forward labels of every add-triple / deep-merge-triple step aimed at
+/// `eid` anywhere in the tx, in step order, distinct, without `id`;
+/// retractions contribute nothing and forward link labels are included.
+pub fn modified_fields_for(writes: &[(Uuid, Uuid)], attrs: &AttrMap, eid: Uuid) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for (e, attr_id) in writes {
+        if *e != eid {
+            continue;
+        }
+        let Some(attr) = attrs.get(attr_id) else {
+            continue;
+        };
+        if attr.label == "id" || out.contains(&attr.label) {
+            continue;
+        }
+        out.push(attr.label.clone());
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -441,31 +534,305 @@ fn null_safe_augment(v: &mut Value, keys: &HashSet<String>) {
 }
 
 /// Evaluate one program with the given bindings. `data`/`auth` objects carry
-/// prefetched ref results under "_refs".
-pub fn eval_program(
+/// prefetched ref results under "_refs". Consumes any `rateLimit` tokens the
+/// rule charged (see [`eval_program_pure`]).
+pub async fn eval_program(
     program: &Program,
     data: &Value,
     new_data: Option<&Value>,
     auth: &Value,
     rule_params: &Value,
+    env: &EvalEnv<'_>,
 ) -> Result<bool> {
-    eval_program_full(program, data, new_data, auth, rule_params, None)
+    eval_program_full(program, data, new_data, auth, rule_params, None, env).await
 }
 
 /// eval_program with the link-check `linkedData` binding.
-pub fn eval_program_full(
+pub async fn eval_program_full(
     program: &Program,
     data: &Value,
     new_data: Option<&Value>,
     auth: &Value,
     rule_params: &Value,
     linked_data: Option<&Value>,
+    env: &EvalEnv<'_>,
 ) -> Result<bool> {
+    let (ok, calls) =
+        eval_program_pure(program, data, new_data, auth, rule_params, linked_data, env)?;
+    // Legacy consumes at the `limit()` call and throws on exhaustion; here
+    // the calls are charged right after the (synchronous) evaluation, which
+    // is observably the same: a call only happens when CEL reached it, the
+    // charge happens whether or not the rule then passed, and exhaustion
+    // wins over the rule's own verdict. Legacy does exactly this on its
+    // rule-wheres path (instaql.clj check-rate-limits-for-rule-wheres).
+    consume_rate_limits(env, &calls).await?;
+    Ok(ok)
+}
+
+/// A `rateLimit.<name>.limit(key[, tokens])` call recorded during evaluation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateLimitCall {
+    pub bucket: String,
+    pub key: Value,
+    pub tokens: i64,
+}
+
+/// Fields of legacy's `request` proto struct (db/proto.clj:7-44).
+pub const REQUEST_FIELDS: [&str; 4] = ["modifiedFields", "time", "ip", "origin"];
+
+fn walk_expr(expr: &cel::IdedExpr, f: &mut dyn FnMut(&cel::IdedExpr)) {
+    use cel::common::ast::{EntryExpr, Expr};
+    f(expr);
+    match &expr.expr {
+        Expr::Unspecified | Expr::Ident(_) | Expr::Literal(_) => {}
+        Expr::Call(c) => {
+            if let Some(t) = &c.target {
+                walk_expr(t, f);
+            }
+            for a in &c.args {
+                walk_expr(a, f);
+            }
+        }
+        Expr::Comprehension(c) => {
+            for e in [
+                &c.iter_range,
+                &c.accu_init,
+                &c.loop_cond,
+                &c.loop_step,
+                &c.result,
+            ] {
+                walk_expr(e, f);
+            }
+        }
+        Expr::List(l) => {
+            for e in &l.elements {
+                walk_expr(e, f);
+            }
+        }
+        Expr::Map(m) => {
+            for e in &m.entries {
+                if let EntryExpr::MapEntry(me) = &e.expr {
+                    walk_expr(&me.key, f);
+                    walk_expr(&me.value, f);
+                }
+            }
+        }
+        Expr::Select(s) => walk_expr(&s.operand, f),
+        Expr::Struct(st) => {
+            for e in &st.entries {
+                match &e.expr {
+                    EntryExpr::StructField(fl) => walk_expr(&fl.value, f),
+                    EntryExpr::MapEntry(me) => {
+                        walk_expr(&me.key, f);
+                        walk_expr(&me.value, f);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn is_ident(expr: &cel::IdedExpr, name: &str) -> bool {
+    matches!(&expr.expr, cel::common::ast::Expr::Ident(i) if i == name)
+}
+
+/// `request` is a typed proto struct in legacy, so selecting an unknown
+/// field fails at compile time ("undefined field 'x'", cel_test.clj:70-99).
+pub fn undefined_request_field(expr: &cel::IdedExpr) -> Option<String> {
+    let mut found = None;
+    walk_expr(expr, &mut |e| {
+        if let cel::common::ast::Expr::Select(s) = &e.expr {
+            if is_ident(&s.operand, "request") && !REQUEST_FIELDS.contains(&s.field.as_str()) {
+                found.get_or_insert(s.field.clone());
+            }
+        }
+    });
+    found
+}
+
+/// Names used as `rateLimit.<name>` / `rateLimit['<name>']` in an expression
+/// (legacy cel.clj:1850-1872 rate-limit-validator).
+pub fn rate_limit_names(expr: &cel::IdedExpr) -> Vec<String> {
+    use cel::common::ast::{Expr, LiteralValue};
+    let mut out = vec![];
+    walk_expr(expr, &mut |e| match &e.expr {
+        Expr::Select(s) if is_ident(&s.operand, "rateLimit") => out.push(s.field.clone()),
+        Expr::Call(c)
+            if c.func_name == "_[_]" && c.args.len() == 2 && is_ident(&c.args[0], "rateLimit") =>
+        {
+            if let Expr::Literal(LiteralValue::String(s)) = &c.args[1].expr {
+                out.push(s.inner().to_string());
+            }
+        }
+        _ => {}
+    });
+    out
+}
+
+/// Proto semantics for `has(request.<field>)`: an unset singular field is
+/// "absent" for `has()` but still reads as its default (`""`). A plain CEL
+/// map can't do both, so `has(request.x)` tests are folded to literals before
+/// evaluation and the map always carries the defaults.
+fn fold_request_has(expr: &mut cel::IdedExpr, present: &dyn Fn(&str) -> bool) {
+    use cel::common::ast::{EntryExpr, Expr, LiteralValue};
+    if let Expr::Select(s) = &expr.expr {
+        if s.test && is_ident(&s.operand, "request") {
+            let v = present(&s.field);
+            expr.expr = Expr::Literal(LiteralValue::Boolean(cel::common::types::CelBool::from(v)));
+            return;
+        }
+    }
+    match &mut expr.expr {
+        Expr::Unspecified | Expr::Ident(_) | Expr::Literal(_) => {}
+        Expr::Call(c) => {
+            if let Some(t) = &mut c.target {
+                fold_request_has(t, present);
+            }
+            for a in &mut c.args {
+                fold_request_has(a, present);
+            }
+        }
+        Expr::Comprehension(c) => {
+            fold_request_has(&mut c.iter_range, present);
+            fold_request_has(&mut c.accu_init, present);
+            fold_request_has(&mut c.loop_cond, present);
+            fold_request_has(&mut c.loop_step, present);
+            fold_request_has(&mut c.result, present);
+        }
+        Expr::List(l) => {
+            for e in &mut l.elements {
+                fold_request_has(e, present);
+            }
+        }
+        Expr::Map(m) => {
+            for e in &mut m.entries {
+                if let EntryExpr::MapEntry(me) = &mut e.expr {
+                    fold_request_has(&mut me.key, present);
+                    fold_request_has(&mut me.value, present);
+                }
+            }
+        }
+        Expr::Select(s) => fold_request_has(&mut s.operand, present),
+        Expr::Struct(st) => {
+            for e in &mut st.entries {
+                match &mut e.expr {
+                    EntryExpr::StructField(fl) => fold_request_has(&mut fl.value, present),
+                    EntryExpr::MapEntry(me) => {
+                        fold_request_has(&mut me.key, present);
+                        fold_request_has(&mut me.value, present);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn cel_key(s: &str) -> cel::objects::Key {
+    cel::objects::Key::String(std::sync::Arc::new(s.to_string()))
+}
+
+fn cel_map(entries: Vec<(&str, cel::Value)>) -> cel::Value {
+    let mut m: HashMap<cel::objects::Key, cel::Value> = HashMap::new();
+    for (k, v) in entries {
+        m.insert(cel_key(k), v);
+    }
+    cel::Value::Map(cel::objects::Map {
+        map: std::sync::Arc::new(m),
+    })
+}
+
+/// The `request` binding (proto.clj create-request-proto): `time` is a CEL
+/// timestamp taken now, per evaluation; unset ip/origin read as `""`.
+fn request_binding(env: &EvalEnv<'_>) -> cel::Value {
+    let fields: Vec<cel::Value> = env
+        .modified_fields
+        .iter()
+        .map(|f| cel::Value::String(std::sync::Arc::new(f.clone())))
+        .collect();
+    cel_map(vec![
+        (
+            "modifiedFields",
+            cel::Value::List(std::sync::Arc::new(fields)),
+        ),
+        (
+            "time",
+            cel::Value::Timestamp(chrono::Utc::now().fixed_offset()),
+        ),
+        (
+            "ip",
+            cel::Value::String(std::sync::Arc::new(
+                env.request.ip.clone().unwrap_or_default(),
+            )),
+        ),
+        (
+            "origin",
+            cel::Value::String(std::sync::Arc::new(
+                env.request.origin.clone().unwrap_or_default(),
+            )),
+        ),
+    ])
+}
+
+const RATE_LIMIT_MARKER: &str = "__instantRateLimitBucket";
+
+/// The `rateLimit` binding (cel.clj create-rate-limit-obj): one bucket object
+/// per `$rateLimits` entry, exposing `.limit(key)` / `.limit(key, tokens)`.
+fn rate_limit_binding(env: &EvalEnv<'_>) -> cel::Value {
+    let mut entries: Vec<(&str, cel::Value)> = vec![];
+    if let Some(Value::Object(limits)) = env.rules.code.get("$rateLimits") {
+        for name in limits.keys() {
+            entries.push((
+                name.as_str(),
+                cel_map(vec![(
+                    RATE_LIMIT_MARKER,
+                    cel::Value::String(std::sync::Arc::new(name.clone())),
+                )]),
+            ));
+        }
+    }
+    cel_map(entries)
+}
+
+fn cel_to_json(v: &cel::Value) -> Value {
+    match v {
+        cel::Value::Null => Value::Null,
+        cel::Value::Bool(b) => json!(b),
+        cel::Value::Int(i) => json!(i),
+        cel::Value::UInt(u) => json!(u),
+        cel::Value::Float(f) => json!(f),
+        cel::Value::String(s) => json!(s.as_str()),
+        cel::Value::Bytes(b) => json!(b.as_ref()),
+        cel::Value::List(l) => Value::Array(l.iter().map(cel_to_json).collect()),
+        cel::Value::Map(m) => {
+            let mut out = Map::new();
+            for (k, v) in m.map.iter() {
+                out.insert(format!("{k:?}"), cel_to_json(v));
+            }
+            Value::Object(out)
+        }
+        cel::Value::Timestamp(t) => json!(t.to_rfc3339()),
+        other => json!(format!("{other:?}")),
+    }
+}
+
+/// Synchronous evaluation: returns the verdict plus the `rateLimit` calls the
+/// rule made (to be charged by the caller). Unbound / erroring expressions
+/// deny, like any CEL error; an unknown `request` field is a validation
+/// error like legacy's compile-time check.
+pub fn eval_program_pure(
+    program: &Program,
+    data: &Value,
+    new_data: Option<&Value>,
+    auth: &Value,
+    rule_params: &Value,
+    linked_data: Option<&Value>,
+    env: &EvalEnv<'_>,
+) -> Result<(bool, Vec<RateLimitCall>)> {
     if program.is_true() {
-        return Ok(true);
+        return Ok((true, vec![]));
     }
     if program.is_false() && program.binds.is_empty() {
-        return Ok(false);
+        return Ok((false, vec![]));
     }
     let compiled = cel::Program::compile(&program.expr).map_err(|e| {
         InstantError::permission_denied(json!([]), format!("Invalid permission rule: {e}"))
@@ -475,6 +842,17 @@ pub fn eval_program_full(
         .iter()
         .map(|(name, expr)| (name.clone(), cel::Program::compile(expr).ok()))
         .collect();
+    for p in std::iter::once(&compiled).chain(compiled_binds.iter().filter_map(|(_, p)| p.as_ref()))
+    {
+        if let Some(field) = undefined_request_field(p.expression()) {
+            let message = format!("undefined field '{field}'");
+            return Err(InstantError::validation_failed(
+                "permission",
+                message.clone(),
+                json!([{"message": message}]),
+            ));
+        }
+    }
 
     // legacy CelMap null-safety: pre-insert every statically-mentioned key
     let mut static_keys = HashSet::new();
@@ -503,6 +881,7 @@ pub fn eval_program_full(
         null_safe_augment(ld, &static_keys);
     }
 
+    let calls: std::sync::Arc<std::sync::Mutex<Vec<RateLimitCall>>> = Default::default();
     let mut ctx = cel::Context::default();
     ctx.add_function(
         "ref",
@@ -521,6 +900,59 @@ pub fn eval_program_full(
             Ok(cel::Value::List(std::sync::Arc::new(vec![])))
         },
     );
+    {
+        let calls = calls.clone();
+        ctx.add_function(
+            "limit",
+            move |cel::extractors::This(this): cel::extractors::This<cel::Value>,
+                  cel::extractors::Arguments(args): cel::extractors::Arguments|
+                  -> std::result::Result<cel::Value, cel::ExecutionError> {
+                let bucket = match &this {
+                    cel::Value::Map(m) => match m.map.get(&cel_key(RATE_LIMIT_MARKER)) {
+                        Some(cel::Value::String(s)) => s.to_string(),
+                        _ => {
+                            return Err(cel::ExecutionError::function_error(
+                                "limit",
+                                "no matching overload for 'limit'",
+                            ))
+                        }
+                    },
+                    _ => {
+                        return Err(cel::ExecutionError::function_error(
+                            "limit",
+                            "no matching overload for 'limit'",
+                        ))
+                    }
+                };
+                let key = args.first().map(cel_to_json).unwrap_or(Value::Null);
+                // legacy fails to evaluate `limit(null)` (an anonymous
+                // `auth.id` key); a CEL error here denies like any other
+                if key.is_null() {
+                    return Err(cel::ExecutionError::function_error(
+                        "limit",
+                        "rate limit key must not be null",
+                    ));
+                }
+                let tokens = match args.get(1) {
+                    None => 1,
+                    Some(cel::Value::Int(i)) => *i,
+                    Some(cel::Value::UInt(u)) => *u as i64,
+                    Some(_) => {
+                        return Err(cel::ExecutionError::function_error(
+                            "limit",
+                            "no matching overload for 'limit'",
+                        ))
+                    }
+                };
+                calls.lock().unwrap().push(RateLimitCall {
+                    bucket,
+                    key,
+                    tokens,
+                });
+                Ok(cel::Value::Bool(true))
+            },
+        );
+    }
     ctx.add_variable_from_value("data", json_to_cel(&data));
     ctx.add_variable_from_value("auth", json_to_cel(&auth));
     ctx.add_variable_from_value("ruleParams", json_to_cel(&rule_params));
@@ -531,26 +963,40 @@ pub fn eval_program_full(
     if let Some(ld) = &linked_data {
         ctx.add_variable_from_value("linkedData", json_to_cel(ld));
     }
+    ctx.add_variable_from_value("request", request_binding(env));
+    ctx.add_variable_from_value("rateLimit", rate_limit_binding(env));
+
+    let present = |field: &str| match field {
+        "ip" => env.request.ip.is_some(),
+        "origin" => env.request.origin.is_some(),
+        // repeated / always-set fields
+        _ => true,
+    };
+    let fold = |p: &cel::Program| {
+        let mut e = p.expression().clone();
+        fold_request_has(&mut e, &present);
+        e
+    };
 
     // binds: evaluate in order, retrying to tolerate forward references
-    let mut pending: Vec<(String, cel::Program)> = vec![];
+    let mut pending: Vec<(String, cel::IdedExpr)> = vec![];
     let mut unresolved: Vec<String> = vec![];
-    for (name, p) in compiled_binds {
+    for (name, p) in &compiled_binds {
         match p {
-            Some(p) => pending.push((name, p)),
-            None => unresolved.push(name),
+            Some(p) => pending.push((name.clone(), fold(p))),
+            None => unresolved.push(name.clone()),
         }
     }
     let mut rounds = 0;
     while !pending.is_empty() && rounds < 5 {
         rounds += 1;
         let mut next = vec![];
-        for (name, p) in pending {
-            match p.execute(&ctx) {
+        for (name, e) in pending {
+            match cel::Value::resolve(&e, &ctx) {
                 Ok(v) => {
                     ctx.add_variable_from_value(name.as_str(), v);
                 }
-                Err(_) => next.push((name, p)),
+                Err(_) => next.push((name, e)),
             }
         }
         pending = next;
@@ -561,22 +1007,231 @@ pub fn eval_program_full(
         ctx.add_variable_from_value(name.as_str(), cel::Value::Null);
     }
 
-    match compiled.execute(&ctx) {
-        Ok(cel::Value::Bool(b)) => Ok(b),
-        Ok(_) => Ok(false),
-        Err(_) => Ok(false),
+    let main = fold(&compiled);
+    let verdict = match cel::Value::resolve(&main, &ctx) {
+        Ok(cel::Value::Bool(b)) => b,
+        Ok(_) => false,
+        Err(_) => false,
+    };
+    let calls = std::mem::take(&mut *calls.lock().unwrap());
+    Ok((verdict, calls))
+}
+
+// ---------------------------------------------------------------------------
+// Rate-limit buckets (legacy rate_limit.clj: bucket4j token buckets keyed by
+// app + bucket name + config + caller key). State is a row per bandwidth in
+// `rust_rate_limit_buckets`, so every node sees the same bucket.
+
+/// One bandwidth of a `$rateLimits` config (rate_limit.clj:224-275).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Bandwidth {
+    pub capacity: i64,
+    pub refill_amount: i64,
+    pub period_secs: f64,
+    /// `greedy` refills continuously; `interval` adds `refill_amount` once per
+    /// whole period
+    pub greedy: bool,
+}
+
+/// Parse a validated `$rateLimits` entry (defaults: period "1 hour", greedy,
+/// amount = capacity). Invalid configs (which rule validation rejects at
+/// save time) yield no bandwidths, i.e. an unlimited bucket.
+pub fn parse_rate_limit_config(config: &Value) -> Vec<Bandwidth> {
+    let Some(limits) = config.get("limits").and_then(|l| l.as_array()) else {
+        return vec![];
+    };
+    let mut out = vec![];
+    for limit in limits {
+        let Some(capacity) = pos_int(limit.get("capacity")) else {
+            continue;
+        };
+        let refill = limit.get("refill").cloned().unwrap_or(json!({}));
+        let amount = pos_int(refill.get("amount")).unwrap_or(capacity);
+        let greedy = refill.get("type").and_then(|t| t.as_str()) != Some("interval");
+        let period_secs = refill
+            .get("period")
+            .and_then(|p| p.as_str())
+            .and_then(parse_interval_secs)
+            .unwrap_or(3600.0);
+        out.push(Bandwidth {
+            capacity,
+            refill_amount: amount,
+            period_secs,
+            greedy,
+        });
     }
+    out
+}
+
+/// Legacy `user-key-hash`: the bucket identity covers the config, so editing
+/// a limit in the rules starts fresh buckets.
+fn bucket_key(app_id: Uuid, name: &str, config: &Value, key: &Value) -> Uuid {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"user");
+    h.update(app_id.as_bytes());
+    h.update(name.as_bytes());
+    h.update(config.to_string().as_bytes());
+    h.update(key.to_string().as_bytes());
+    let digest = h.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+/// Legacy `throw-permission-rate-limited!` (util/exception.clj:495-500).
+pub fn rate_limited_error(retry_at: chrono::DateTime<chrono::Utc>, remaining: i64) -> InstantError {
+    let now = chrono::Utc::now();
+    let retry_after = ((retry_at - now).num_milliseconds() as f64 / 1000.0)
+        .ceil()
+        .max(0.0) as i64;
+    InstantError::new(
+        "rate-limited",
+        429,
+        "Your request exceeded the rate limit.",
+        Some(json!({
+            "retry-at": retry_at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            "retry-after": retry_after,
+            "remaining-tokens": remaining,
+        })),
+    )
+}
+
+/// Charge the recorded `limit()` calls. Buckets start full; consumption is
+/// all-or-nothing across a config's bandwidths, and on exhaustion nothing is
+/// taken and the request fails with `rate-limited` (retry-at from the
+/// slowest bandwidth, remaining-tokens from the emptiest — bucket4j's probe).
+pub async fn consume_rate_limits(env: &EvalEnv<'_>, calls: &[RateLimitCall]) -> Result<()> {
+    if calls.is_empty() {
+        return Ok(());
+    }
+    let Some(pool) = &env.request.pool else {
+        return Ok(());
+    };
+    // coalesce repeated calls on the same bucket+key
+    let mut merged: Vec<(String, Value, i64)> = vec![];
+    for c in calls {
+        match merged
+            .iter_mut()
+            .find(|(b, k, _)| *b == c.bucket && *k == c.key)
+        {
+            Some(m) => m.2 += c.tokens,
+            None => merged.push((c.bucket.clone(), c.key.clone(), c.tokens)),
+        }
+    }
+    let configs = env
+        .rules
+        .code
+        .get("$rateLimits")
+        .cloned()
+        .unwrap_or(json!({}));
+    for (bucket, key, tokens) in merged {
+        let Some(config) = configs.get(&bucket) else {
+            continue;
+        };
+        let bandwidths = parse_rate_limit_config(config);
+        if bandwidths.is_empty() {
+            continue;
+        }
+        let bkey = bucket_key(env.app_id, &bucket, config, &key);
+        let mut tx = pool.begin().await?;
+        consume_bucket(&mut tx, bkey, &bandwidths, tokens).await?;
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
+async fn consume_bucket(
+    conn: &mut PgConnection,
+    key: Uuid,
+    bandwidths: &[Bandwidth],
+    tokens: i64,
+) -> Result<()> {
+    let now = chrono::Utc::now();
+    let rows = sqlx::query(
+        "SELECT idx, tokens, refilled_at FROM rust_rate_limit_buckets WHERE key = $1 FOR UPDATE",
+    )
+    .bind(key)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut states: Vec<(f64, chrono::DateTime<chrono::Utc>)> = bandwidths
+        .iter()
+        .map(|b| (b.capacity as f64, now))
+        .collect();
+    for row in &rows {
+        let idx: i32 = row.get("idx");
+        if let Some(s) = states.get_mut(idx as usize) {
+            *s = (row.get("tokens"), row.get("refilled_at"));
+        }
+    }
+    // refill
+    for (b, (tok, refilled_at)) in bandwidths.iter().zip(states.iter_mut()) {
+        let elapsed = (now - *refilled_at).num_milliseconds().max(0) as f64 / 1000.0;
+        if b.greedy {
+            *tok = (*tok + elapsed * b.refill_amount as f64 / b.period_secs).min(b.capacity as f64);
+            *refilled_at = now;
+        } else {
+            let periods = (elapsed / b.period_secs).floor();
+            if periods >= 1.0 {
+                *tok = (*tok + periods * b.refill_amount as f64).min(b.capacity as f64);
+                *refilled_at +=
+                    chrono::Duration::milliseconds((periods * b.period_secs * 1000.0) as i64);
+            }
+        }
+    }
+    let need = tokens as f64;
+    let short = states.iter().any(|(tok, _)| *tok < need);
+    if short {
+        let mut wait_secs = 0.0f64;
+        let mut remaining = i64::MAX;
+        for (b, (tok, refilled_at)) in bandwidths.iter().zip(states.iter()) {
+            remaining = remaining.min(tok.floor() as i64);
+            if *tok >= need {
+                continue;
+            }
+            let deficit = need - *tok;
+            let w = if b.greedy {
+                deficit * b.period_secs / b.refill_amount as f64
+            } else {
+                let periods = (deficit / b.refill_amount as f64).ceil();
+                let next = *refilled_at
+                    + chrono::Duration::milliseconds((periods * b.period_secs * 1000.0) as i64);
+                (next - now).num_milliseconds().max(0) as f64 / 1000.0
+            };
+            wait_secs = wait_secs.max(w);
+        }
+        let retry_at = now + chrono::Duration::milliseconds((wait_secs * 1000.0).ceil() as i64);
+        return Err(rate_limited_error(retry_at, remaining.max(0)));
+    }
+    for (idx, (tok, refilled_at)) in states.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO rust_rate_limit_buckets (key, idx, tokens, refilled_at, updated_at)
+             VALUES ($1, $2, $3, $4, now())
+             ON CONFLICT (key, idx) DO UPDATE
+               SET tokens = EXCLUDED.tokens, refilled_at = EXCLUDED.refilled_at, updated_at = now()",
+        )
+        .bind(key)
+        .bind(idx as i32)
+        .bind(*tok - need)
+        .bind(*refilled_at)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Entity maps
 
 /// Build an entity map {label: value} for rule eval; includes id and defaults
-/// all blob labels of the etype to null.
+/// every cardinality-one label of the etype to null. Legacy's `data` map is
+/// built from `ea-ids-for-etype` (attr.clj:954-958), which keeps every
+/// cardinality-one attr — forward links included, as the linked id string —
+/// and drops cardinality-many ones.
 pub fn base_entity_map(attrs: &AttrMap, etype: &str, eid: Uuid) -> Map<String, Value> {
     let mut m = Map::new();
     for a in attrs.attrs_of_etype(etype) {
-        if a.value_type == ValueType::Blob {
+        if a.cardinality == Cardinality::One {
             m.insert(a.label.clone(), Value::Null);
         }
     }
@@ -608,7 +1263,7 @@ pub async fn fetch_entity_map(
     for row in rows {
         let attr_id: Uuid = row.get("attr_id");
         if let Some(a) = attrs.get(&attr_id) {
-            if a.value_type == ValueType::Blob && a.cardinality == Cardinality::One {
+            if a.cardinality == Cardinality::One {
                 m.insert(a.label.clone(), row.get("value"));
             }
         }
@@ -720,7 +1375,7 @@ impl<'a> PermsFilter<'a> {
                 let mut data = base_entity_map(attrs, &node.etype, node.eid);
                 for t in &node.triples {
                     if let Some(a) = attrs.get(&t.a) {
-                        if a.value_type == ValueType::Blob {
+                        if a.cardinality == Cardinality::One {
                             data.insert(a.label.clone(), t.v.clone());
                         }
                     }
@@ -739,13 +1394,16 @@ impl<'a> PermsFilter<'a> {
                 .await?;
                 let auth_val =
                     build_auth_value(conn, app_id, attrs, self.auth, &[&program]).await?;
+                let env = EvalEnv::new(app_id, self.rules, &self.auth.request);
                 eval_program(
                     &program,
                     &Value::Object(data),
                     None,
                     &auth_val,
                     &self.rule_params,
-                )?
+                    &env,
+                )
+                .await?
             };
             if !ok {
                 return Ok(false);
@@ -755,7 +1413,7 @@ impl<'a> PermsFilter<'a> {
                 let mut data = base_entity_map(attrs, &node.etype, node.eid);
                 for t in &node.triples {
                     if let Some(a) = attrs.get(&t.a) {
-                        if a.value_type == ValueType::Blob {
+                        if a.cardinality == Cardinality::One {
                             data.insert(a.label.clone(), t.v.clone());
                         }
                     }
@@ -772,13 +1430,16 @@ impl<'a> PermsFilter<'a> {
                                 let auth_val =
                                     build_auth_value(conn, app_id, attrs, self.auth, &[&program])
                                         .await?;
+                                let env = EvalEnv::new(app_id, self.rules, &self.auth.request);
                                 eval_program(
                                     &program,
                                     &data_val,
                                     None,
                                     &auth_val,
                                     &self.rule_params,
-                                )?
+                                    &env,
+                                )
+                                .await?
                             }
                         },
                     };
@@ -1039,8 +1700,56 @@ pub async fn permissioned_transact_checked(
         }
     }
 
+    // attr-scope checks (permissioned_transaction.clj:338-352): update /
+    // delete / restore-attr carry `{:result admin?}`, and this path is only
+    // taken for non-admins, so they always fail
+    let mut check_results: Vec<Value> = vec![];
+    for step in &steps {
+        let action = match step {
+            TxStep::UpdateAttr(_) => "update",
+            TxStep::DeleteAttr(_) => "delete",
+            TxStep::RestoreAttr(_) => "restore",
+            _ => continue,
+        };
+        check_results.push(json!({
+            "scope": "attr",
+            "etype": "attrs",
+            "action": action,
+            "check-result": false,
+            "check-pass?": false,
+            "program": {"result": false},
+        }));
+        if fail_fast {
+            return Err(InstantError::permission_denied(
+                json!(["attrs", "attr"]),
+                "Permission denied: not perms-pass?",
+            ));
+        }
+    }
+
+    // request.modifiedFields inputs: (eid ref, attr) of every add / deep-merge
+    // step; lookup eids resolve after the tx ran
+    let write_refs: Vec<(EidRef, Uuid)> = steps
+        .iter()
+        .filter_map(|s| match s {
+            TxStep::AddTriple { eid, attr_id, .. }
+            | TxStep::DeepMergeTriple { eid, attr_id, .. } => Some((eid.clone(), *attr_id)),
+            _ => None,
+        })
+        .collect();
+
     // ---- execute ----
     let report = tx::transact(conn, app_id, attrs, steps, &TxOptions::default()).await?;
+    let writes: Vec<(Uuid, Uuid)> = write_refs
+        .into_iter()
+        .filter_map(|(eid, attr_id)| match eid {
+            EidRef::Id(id) => Some((id, attr_id)),
+            EidRef::Lookup(a, v) => report
+                .resolved_lookups
+                .get(&(a, v))
+                .map(|id| (*id, attr_id)),
+        })
+        .collect();
 
     // ---- collect checks ----
     let mut checks: Vec<Check> = vec![];
@@ -1095,7 +1804,6 @@ pub async fn permissioned_transact_checked(
     }
 
     // ---- evaluate ----
-    let mut check_results: Vec<Value> = vec![];
     for check in checks {
         let (action, etype, eid, data, new_data) = match &check {
             Check::Create { etype, eid } => {
@@ -1164,6 +1872,7 @@ pub async fn permissioned_transact_checked(
                         rp.insert(k.clone(), v.clone());
                     }
                 }
+                let env = EvalEnv::new(app_id, rules, &auth.request);
                 let ok = eval_program_full(
                     program,
                     &data,
@@ -1171,7 +1880,9 @@ pub async fn permissioned_transact_checked(
                     &auth_val,
                     &Value::Object(rp),
                     Some(&linked),
-                )?;
+                    &env,
+                )
+                .await?;
                 check_results.push(json!({
                     "scope": "object",
                     "etype": etype,
@@ -1231,13 +1942,22 @@ pub async fn permissioned_transact_checked(
                 rp.insert(k.clone(), v.clone());
             }
         }
+        // legacy passes modified-fields only to create / update checks
+        let modified_fields = if matches!(action, "create" | "update") {
+            modified_fields_for(&writes, attrs, eid)
+        } else {
+            vec![]
+        };
+        let env = EvalEnv::new(app_id, rules, &auth.request).with_modified_fields(modified_fields);
         let ok = eval_program(
             &program,
             &data,
             new_data.as_ref(),
             &auth_val,
             &Value::Object(rp),
-        )?;
+            &env,
+        )
+        .await?;
         check_results.push(json!({
             "scope": "object",
             "etype": etype,
@@ -1272,7 +1992,12 @@ mod tests {
             expr: expr.to_string(),
             binds: vec![],
         };
-        eval_program(&program, &data, None, &auth, &rule_params).unwrap()
+        let rules = Rules { code: json!({}) };
+        let request = RequestCtx::default();
+        let env = EvalEnv::new(Uuid::nil(), &rules, &request);
+        eval_program_pure(&program, &data, None, &auth, &rule_params, None, &env)
+            .unwrap()
+            .0
     }
 
     #[test]
@@ -1361,23 +2086,32 @@ mod tests {
                 "data.creatorTypo == auth.id".to_string(),
             )],
         };
-        let ok = eval_program(
+        let rules = Rules { code: json!({}) };
+        let request = RequestCtx::default();
+        let env = EvalEnv::new(Uuid::nil(), &rules, &request);
+        let ok = eval_program_pure(
             &program,
             &json!({"id": "1"}),
             None,
             &json!({"id": "u1"}),
             &json!({}),
+            None,
+            &env,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert!(!ok);
-        let ok = eval_program(
+        let ok = eval_program_pure(
             &program,
             &json!({"id": "1"}),
             None,
             &Value::Null,
             &json!({}),
+            None,
+            &env,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         // both sides null -> equal -> allow, as on hosted Instant
         assert!(ok);
     }
@@ -1505,6 +2239,23 @@ fn expr_validation_errors(rules: &Value, etype: &str, path: &[&str]) -> Vec<Valu
         Ok(p) => p,
         Err(e) => return err(cel_error_message(&e)),
     };
+    // legacy type-checks `request` as a proto struct (cel_test.clj:70-99)
+    if let Some(field) = undefined_request_field(compiled.expression()) {
+        return err(format!("undefined field '{field}'"));
+    }
+    // legacy rate-limit-validator (cel.clj:1850-1872)
+    let rate_limit_keys: HashSet<String> = rules
+        .get("$rateLimits")
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    for name in rate_limit_names(compiled.expression()) {
+        if !rate_limit_keys.contains(&name) {
+            return err(format!(
+                "`{name}` is not a valid rate limit config. It should be defined in the `$rateLimits` key."
+            ));
+        }
+    }
     // Walk the binds the expression references (and the binds those
     // reference), compiling each; cycles are an error like legacy sort-binds.
     let mut queue: Vec<(String, Vec<String>)> = vec![];
