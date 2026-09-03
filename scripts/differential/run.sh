@@ -49,6 +49,12 @@ DASH_TOKEN2=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$DASH_APP2" "$DASH_TOKEN2"
 node dash.mjs "$DASH_APP" "$DASH_TOKEN" "$DASH_APP2" "$DASH_TOKEN2"
 
+echo "== storage routes =="
+STORAGE_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+STORAGE_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+./provision.sh "$STORAGE_APP" "$STORAGE_TOKEN"
+node storage.mjs "$STORAGE_APP" "$STORAGE_TOKEN"
+
 echo "== fuzz layer =="
 for SEED in ${FUZZ_SEEDS:-42 99}; do
   FUZZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")

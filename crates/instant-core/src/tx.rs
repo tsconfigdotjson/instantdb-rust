@@ -57,6 +57,52 @@ pub enum TxStep {
 }
 
 impl TxStep {
+    /// The step in legacy's `vectorize-tx-step` form (transaction.clj:106-124),
+    /// which is what validation errors echo as their `input`.
+    pub fn vectorize(&self) -> Value {
+        let eid = |e: &EidRef| match e {
+            EidRef::Id(id) => json!(id),
+            EidRef::Lookup(attr, v) => json!([
+                attr,
+                serde_json::from_str::<Value>(&v.0).unwrap_or(Value::Null)
+            ]),
+        };
+        let mode_opts = |m: &WriteMode| match m {
+            WriteMode::Create => json!({"mode": "create"}),
+            WriteMode::Update => json!({"mode": "update"}),
+            WriteMode::Upsert => Value::Null,
+        };
+        match self {
+            TxStep::AddAttr(a) => json!(["add-attr", a.to_wire()]),
+            TxStep::UpdateAttr(v) => json!(["update-attr", v]),
+            TxStep::DeleteAttr(id) => json!(["delete-attr", id]),
+            TxStep::RestoreAttr(id) => json!(["restore-attr", id]),
+            TxStep::AddTriple {
+                eid: e,
+                attr_id,
+                value,
+                mode,
+            } => json!(["add-triple", eid(e), attr_id, value, mode_opts(mode)]),
+            TxStep::DeepMergeTriple {
+                eid: e,
+                attr_id,
+                value,
+                mode,
+            } => json!(["deep-merge-triple", eid(e), attr_id, value, mode_opts(mode)]),
+            TxStep::RetractTriple {
+                eid: e,
+                attr_id,
+                value,
+            } => json!(["retract-triple", eid(e), attr_id, value, Value::Null]),
+            TxStep::DeleteEntity { eid: e, etype } => json!(["delete-entity", eid(e), etype]),
+            TxStep::RuleParams {
+                eid: e,
+                etype,
+                params,
+            } => json!(["rule-params", eid(e), etype, params]),
+        }
+    }
+
     fn group_key(&self) -> &'static str {
         match self {
             TxStep::AddAttr(_) => "add-attr",
@@ -236,6 +282,21 @@ pub struct TxOptions {
     pub admin: bool,
 }
 
+/// legacy `throw-tx-step-validation-err!` (permissioned_transaction.clj:38-42):
+/// the offending step, vectorized, rides in `hint.input`.
+fn tx_step_validation_err(step: &TxStep, message: String) -> InstantError {
+    InstantError::new(
+        "validation-failed",
+        400,
+        format!("Validation failed for tx-step: {message}"),
+        Some(json!({
+            "data-type": "tx-step",
+            "input": step.vectorize(),
+            "errors": [{"message": message}],
+        })),
+    )
+}
+
 /// Execute tx-steps inside the given open DB transaction. The caller commits.
 /// `attrs` must be the app's current attr map; it is updated in place with
 /// attr-level changes.
@@ -279,11 +340,7 @@ pub async fn transact(
                             "{}.{} is a system column. You aren't allowed to change this directly.",
                             attr.etype, attr.label
                         );
-                        return Err(InstantError::validation_failed(
-                            "tx-step",
-                            message.clone(),
-                            json!([{"message": message}]),
-                        ));
+                        return Err(tx_step_validation_err(step, message));
                     }
                 }
             }
@@ -297,11 +354,7 @@ pub async fn transact(
                     let message = format!(
                         "{etype} is a system entity. You aren't allowed to delete this directly."
                     );
-                    return Err(InstantError::validation_failed(
-                        "tx-step",
-                        message.clone(),
-                        json!([{"message": message}]),
-                    ));
+                    return Err(tx_step_validation_err(step, message));
                 }
             }
         }

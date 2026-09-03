@@ -555,8 +555,6 @@ pub async fn refresh_batch(
                 let result = match out {
                     Ok(out) => {
                         let (wire, result_meta, hash) = crate::ws::format_query_result(
-                            &state,
-                            app_id,
                             &out.result,
                             &attrs,
                             &job.q,
