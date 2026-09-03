@@ -6,6 +6,7 @@ mod metrics;
 mod presence;
 mod rate_limit;
 mod routes;
+mod s3;
 mod service;
 mod state;
 mod storage;
@@ -97,6 +98,8 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("SERVER_SECRET is very short; use a long random value in production");
     }
 
+    storage::init_from_env().map_err(|e| anyhow::anyhow!("storage backend: {e}"))?;
+
     let state = AppState::new(cfg.clone(), pool);
 
     tokio::spawn(invalidator::run(state.clone()));
@@ -107,6 +110,10 @@ async fn main() -> anyhow::Result<()> {
     let storage_uploads = Router::new()
         .route("/admin/storage/upload", put(routes::admin::storage_upload))
         .route("/storage/upload", put(routes::admin::client_storage_upload))
+        .route(
+            "/storage/{upload_id}/consume-upload-url",
+            put(routes::admin::consume_upload_url),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(STORAGE_BODY_LIMIT));
 
     let app = Router::new()
@@ -244,7 +251,23 @@ async fn main() -> anyhow::Result<()> {
         // storage (non-upload)
         .route(
             "/admin/storage/files",
-            delete(routes::admin::storage_delete),
+            delete(routes::admin::storage_delete).get(routes::admin::storage_list),
+        )
+        .route(
+            "/admin/storage/files/delete",
+            post(routes::admin::storage_delete_many),
+        )
+        .route(
+            "/admin/storage/signed-upload-url",
+            post(routes::admin::admin_signed_upload_url),
+        )
+        .route(
+            "/admin/storage/signed-download-url",
+            get(routes::admin::admin_signed_download_url),
+        )
+        .route(
+            "/storage/signed-upload-url",
+            post(routes::admin::client_signed_upload_url),
         )
         .route("/storage/serve/{app_id}/{location_id}", get(storage::serve))
         .route(

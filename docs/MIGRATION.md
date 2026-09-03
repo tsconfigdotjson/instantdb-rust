@@ -71,10 +71,21 @@ permissions, auth sessions, and data are all preserved.
 ## 5. Storage blobs
 
 `$files` rows migrate with the triples; the blobs themselves live in S3 under
-`<app-id>/<hash-bin>/<location-id>` on the hosted service. Copy each object to
-`$STORAGE_DIR/<app-id>/<location-id>` (the bin subdirectory is dropped in the
-local-disk layout), or implement an S3 adapter in
-`crates/instant-server/src/storage.rs` and point it at a synced bucket.
+`<app-id>/<hash-bin>/<location-id>` on the hosted service. The `s3` storage
+backend uses that exact layout (including the Java `hashCode`-derived bin),
+so the zero-copy path is to point it at a bucket holding the same objects:
+
+```bash
+STORAGE_BACKEND=s3 S3_BUCKET=<bucket> AWS_REGION=<region> \
+AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… ./instant-server
+```
+
+(`S3_ENDPOINT` for R2/MinIO; see the env table in the README.) Existing
+`$files.url` values are re-presigned by this server the same way the hosted
+service did, so clients keep working unchanged. Alternatively copy each
+object to `$STORAGE_DIR/<app-id>/<location-id>` for the `disk` backend (the
+bin subdirectory is dropped in the local-disk layout), or leave
+`STORAGE_BACKEND=postgres` and re-upload.
 
 ## 6. OAuth
 

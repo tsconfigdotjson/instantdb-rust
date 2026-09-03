@@ -354,8 +354,6 @@ async fn session_ctx(
 /// The hash covers the join-rows form in both cases, so result-changed
 /// detection does not depend on the shape a session asked for.
 pub(crate) fn format_query_result(
-    state: &AppState,
-    app_id: Uuid,
     result: &instant_core::instaql::QueryResult,
     attrs: &instant_core::attr::AttrMap,
     q: &Value,
@@ -365,7 +363,7 @@ pub(crate) fn format_query_result(
     let ws_result = result.to_ws_result();
     let hash = value_hash(&ws_result);
     if tree {
-        let obj = crate::routes::admin::object_tree(state, app_id, result, attrs, q, inference);
+        let obj = crate::routes::admin::object_tree(result, attrs, q, inference);
         (obj, crate::routes::admin::object_meta(result), hash)
     } else {
         (ws_result, Value::Null, hash)
@@ -438,7 +436,7 @@ async fn handle_add_query(
             let attrs = service::load_attrs(state, app_id).await?;
             let outcome = service::run_query_full(state, app_id, &attrs, &perms, &q, None).await?;
             let (wire, meta, hash) =
-                format_query_result(state, app_id, &outcome.result, &attrs, &q, tree, inference);
+                format_query_result(&outcome.result, &attrs, &q, tree, inference);
             result_meta = meta;
             let ws_json = Arc::new(
                 RawValue::from_string(wire.to_string()).expect("serde_json output is valid JSON"),

@@ -246,8 +246,6 @@ fn entity_created_at(node: &EntityNode, attrs: &AttrMap) -> i64 {
 }
 
 fn node_to_object(
-    state: &AppState,
-    app_id: Uuid,
     node: &EntityNode,
     attrs: &AttrMap,
     forms: Option<&[instaql::Form]>,
@@ -261,7 +259,9 @@ fn node_to_object(
     if attrs.id_attr_of(&node.etype).is_some() {
         m.insert("id".into(), json!(node.eid));
     }
-    let mut location_id: Option<String> = None;
+    // `$files` rows arrive with their synthetic `url` triple already in
+    // place (service::inject_file_urls), and like legacy keep `location-id`
+    // unless a fields projection dropped it.
     for t in &node.triples {
         let Some(attr) = attrs.get(&t.a) else {
             continue;
@@ -272,21 +272,9 @@ fn node_to_object(
         if attr.label == "id" {
             continue;
         }
-        if node.etype == "$files" && attr.label == "location-id" {
-            location_id = t.v.as_str().map(|s| s.to_string());
-            continue;
-        }
         // legacy triples->map keeps every triple, nulls included (indexed
         // attrs backfill a null triple, so `score: null` is on the wire)
         m.insert(attr.label.clone(), t.v.clone());
-    }
-    if node.etype == "$files" {
-        if let Some(loc) = &location_id {
-            m.insert(
-                "url".into(),
-                json!(crate::storage::download_url(state, app_id, loc)),
-            );
-        }
     }
     for child in &node.children {
         let child_form = forms.and_then(|fs| fs.iter().find(|f| f.k == child.k));
@@ -312,8 +300,6 @@ fn node_to_object(
             .iter()
             .map(|(e, _)| {
                 node_to_object(
-                    state,
-                    app_id,
                     e,
                     attrs,
                     child_form.map(|f| f.children.as_slice()),
@@ -396,14 +382,7 @@ fn cmp_json(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-pub fn object_tree(
-    state: &AppState,
-    app_id: Uuid,
-    result: &QueryResult,
-    attrs: &AttrMap,
-    q: &Value,
-    inference: bool,
-) -> Value {
+pub fn object_tree(result: &QueryResult, attrs: &AttrMap, q: &Value, inference: bool) -> Value {
     let forms = instaql::parse_query(q).unwrap_or_default();
     let mut out = Map::new();
     for form in &result.forms {
@@ -417,16 +396,7 @@ pub fn object_tree(
         let vals: Vec<Value> = form
             .entities
             .iter()
-            .map(|e| {
-                node_to_object(
-                    state,
-                    app_id,
-                    e,
-                    attrs,
-                    f.map(|f| f.children.as_slice()),
-                    inference,
-                )
-            })
+            .map(|e| node_to_object(e, attrs, f.map(|f| f.children.as_slice()), inference))
             .collect();
         out.insert(form.k.clone(), Value::Array(vals));
     }
@@ -511,9 +481,7 @@ async fn query_impl(
     service::assert_read_allowed(state, ctx.app_id).await?;
     let attrs = service::load_attrs(state, ctx.app_id).await?;
     let result = service::run_query(state, ctx.app_id, &attrs, &ctx.perms, q).await?;
-    Ok(object_tree(
-        state, ctx.app_id, &result, &attrs, q, inference,
-    ))
+    Ok(object_tree(&result, &attrs, q, inference))
 }
 
 // ---------------------------------------------------------------------------
@@ -1181,32 +1149,98 @@ async fn storage_upload_impl(
     body: Bytes,
 ) -> Result<Value> {
     let ctx = authed(state, headers, params).await?;
+    // legacy upload-put (admin/routes.clj:628-643): path header, storage
+    // perms skipped for the admin token, `create` rule for impersonation
     let path = headers
         .get("path")
         .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: path"))?;
-    let content_type = headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty() && *s != "null" && *s != "undefined")
-        .map(|s| s.to_string());
-    let content_disposition = headers
-        .get("content-disposition")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .ok_or_else(|| {
+            // legacy get-param! params ["path"] (admin/routes.clj:631)
+            InstantError::new(
+                "param-missing",
+                400,
+                "Missing parameter: [\"path\"]",
+                Some(json!({"in": ["path"]})),
+            )
+        })?;
+    if !ctx.perms.admin {
+        check_files_perm(state, ctx.app_id, &ctx.perms, "create", &path).await?;
+    }
+    let meta = blob_meta_from_headers(headers)?;
+    store_file(state, ctx.app_id, &path, &body, &meta).await
+}
 
+/// Upload metadata the way legacy coerces it (`coerce-content-type` drops
+/// blank / "null" / "undefined"; blank disposition is dropped) and S3 fills
+/// in its defaults, which then land on the `$files` row.
+pub(crate) fn blob_meta_from_headers(headers: &HeaderMap) -> Result<crate::storage::BlobMeta> {
+    let raw = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+    let non_blank = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let content_type = non_blank(raw("content-type"))
+        .filter(|s| s != "null" && s != "undefined")
+        .unwrap_or_else(|| crate::storage::DEFAULT_CONTENT_TYPE.to_string());
+    // get-optional-param! with coerce-non-blank-str: a present-but-blank
+    // header is malformed rather than ignored
+    let disposition_raw = raw("content-disposition");
+    let content_disposition = match non_blank(disposition_raw.clone()) {
+        Some(s) => s,
+        None if disposition_raw.is_some() => {
+            return Err(InstantError::new(
+                "param-malformed",
+                400,
+                "Malformed parameter: [\"content-disposition\"]",
+                Some(json!({"in": ["content-disposition"], "original-input": disposition_raw})),
+            ))
+        }
+        None => crate::storage::DEFAULT_CONTENT_DISPOSITION.to_string(),
+    };
+    Ok(crate::storage::BlobMeta {
+        content_type,
+        content_disposition,
+    })
+}
+
+/// Store a blob and upsert its `$files` row by path (legacy
+/// `storage-coordinator/upload-file!` + `app-file-model/create!`: id, size,
+/// content-type, content-disposition, location-id, key-version). Replacing a
+/// path gives it a fresh location-id; the old blob is removed.
+pub(crate) async fn store_file(
+    state: &AppState,
+    app_id: Uuid,
+    path: &str,
+    body: &[u8],
+    meta: &crate::storage::BlobMeta,
+) -> Result<Value> {
     let location_id = Uuid::new_v4().to_string();
-    let size = crate::storage::put_blob(state, ctx.app_id, &location_id, &body).await?;
+    let size = crate::storage::put_blob(state, app_id, &location_id, body, meta).await?;
 
-    // upsert $files row by path lookup (replacing a path orphans its old blob)
     let path_attr = sc::attr_id("$files", "path");
-    let old_location = file_location_by_path(state, ctx.app_id, &path).await;
+    let old_location = file_location_by_path(state, app_id, path).await;
     let lookup = json!([path_attr, path]);
-    let mut steps = vec![
+    let steps = vec![
         json!(["add-triple", lookup, sc::attr_id("$files", "id"), lookup]),
         json!(["add-triple", lookup, sc::attr_id("$files", "path"), path]),
         json!(["add-triple", lookup, sc::attr_id("$files", "size"), size]),
+        json!([
+            "add-triple",
+            lookup,
+            sc::attr_id("$files", "content-type"),
+            meta.content_type
+        ]),
+        json!([
+            "add-triple",
+            lookup,
+            sc::attr_id("$files", "content-disposition"),
+            meta.content_disposition
+        ]),
         json!([
             "add-triple",
             lookup,
@@ -1220,23 +1254,7 @@ async fn storage_upload_impl(
             1
         ]),
     ];
-    if let Some(ct) = &content_type {
-        steps.push(json!([
-            "add-triple",
-            lookup,
-            sc::attr_id("$files", "content-type"),
-            ct
-        ]));
-    }
-    if let Some(cd) = &content_disposition {
-        steps.push(json!([
-            "add-triple",
-            lookup,
-            sc::attr_id("$files", "content-disposition"),
-            cd
-        ]));
-    }
-    service::run_system_transact(state, ctx.app_id, &Value::Array(steps)).await?;
+    service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
 
     // fetch the file entity id
     use sqlx::Row;
@@ -1244,15 +1262,15 @@ async fn storage_upload_impl(
         "SELECT entity_id FROM triples
          WHERE app_id = $1 AND attr_id = $2 AND av AND value = to_jsonb($3::text) LIMIT 1",
     )
-    .bind(ctx.app_id)
+    .bind(app_id)
     .bind(path_attr)
-    .bind(&path)
+    .bind(path)
     .fetch_one(&state.pool)
     .await
     .map_err(InstantError::from)?;
     let file_id: Uuid = row.get("entity_id");
     if let Some(old) = old_location {
-        crate::storage::delete_blob(state, ctx.app_id, &old).await;
+        crate::storage::delete_blob(state, app_id, &old).await;
     }
     Ok(json!({"data": {"id": file_id, "location-id": location_id, "size": size}}))
 }
@@ -1291,38 +1309,332 @@ async fn storage_delete_impl(
     params: &HashMap<String, String>,
 ) -> Result<Value> {
     let ctx = authed(state, headers, params).await?;
-    let filename = params
-        .get("filename")
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: filename"))?;
+    let filename = admin_filename_param(params)?;
+    if !ctx.perms.admin {
+        check_files_perm(state, ctx.app_id, &ctx.perms, "delete", filename).await?;
+    }
+    let id = delete_file_by_path(state, ctx.app_id, filename).await?;
+    Ok(json!({"data": {"id": id}}))
+}
+
+/// Delete the `$files` row at `path` and its blob; the deleted id, or None
+/// when nothing was there (legacy `app-file-model/delete-by-path!`).
+pub(crate) async fn delete_file_by_path(
+    state: &AppState,
+    app_id: Uuid,
+    path: &str,
+) -> Result<Option<Uuid>> {
     use sqlx::Row;
     let path_attr = sc::attr_id("$files", "path");
     let row = sqlx::query(
         "SELECT entity_id FROM triples
          WHERE app_id = $1 AND attr_id = $2 AND av AND value = to_jsonb($3::text) LIMIT 1",
     )
-    .bind(ctx.app_id)
+    .bind(app_id)
     .bind(path_attr)
-    .bind(filename)
+    .bind(path)
     .fetch_optional(&state.pool)
     .await
     .map_err(InstantError::from)?;
-    match row {
-        Some(row) => {
-            let id: Uuid = row.get("entity_id");
-            let old = file_location_by_path(state, ctx.app_id, filename).await;
-            service::run_system_transact(
-                state,
-                ctx.app_id,
-                &json!([["delete-entity", id, "$files"]]),
-            )
-            .await?;
-            if let Some(old) = old {
-                crate::storage::delete_blob(state, ctx.app_id, &old).await;
-            }
-            Ok(json!({"data": {"id": id}}))
-        }
-        None => Ok(json!({"data": {"id": null}})),
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let id: Uuid = row.get("entity_id");
+    let old = file_location_by_path(state, app_id, path).await;
+    service::run_system_transact(state, app_id, &json!([["delete-entity", id, "$files"]])).await?;
+    if let Some(old) = old {
+        crate::storage::delete_blob(state, app_id, &old).await;
     }
+    Ok(Some(id))
+}
+
+/// `POST /admin/storage/files/delete` — `db.storage.deleteMany` (legacy
+/// files-delete, admin/routes.clj:654-661): `{filenames: [...]}` →
+/// `{data: {ids: [...]}}` with only the ids that existed.
+pub async fn storage_delete_many(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    json_or_err(storage_delete_many_impl(&state, &headers, &params, &body).await)
+}
+
+async fn storage_delete_many_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+    body: &Value,
+) -> Result<Value> {
+    let ctx = authed(state, headers, params).await?;
+    let filenames: Vec<String> = match body.get("filenames") {
+        None | Some(Value::Null) => {
+            return Err(InstantError::new(
+                "param-missing",
+                400,
+                "Missing parameter: [\"body\" \"filenames\"]",
+                Some(json!({"in": ["body", "filenames"]})),
+            ))
+        }
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        Some(v) => {
+            return Err(InstantError::new(
+                "param-malformed",
+                400,
+                "Malformed parameter: [\"body\" \"filenames\"]",
+                Some(json!({"in": ["body", "filenames"], "original-input": v})),
+            ))
+        }
+    };
+    if !ctx.perms.admin {
+        for path in &filenames {
+            check_files_perm(state, ctx.app_id, &ctx.perms, "delete", path).await?;
+        }
+    }
+    let mut ids = vec![];
+    for path in &filenames {
+        if let Some(id) = delete_file_by_path(state, ctx.app_id, path).await? {
+            ids.push(id);
+        }
+    }
+    Ok(json!({"data": {"ids": ids}}))
+}
+
+/// `GET /admin/storage/files` — the deprecated `db.storage.list` (legacy
+/// files-get, admin/routes.clj:719-737): the `$files` query in the old
+/// StorageFile shape whose `key` is the S3 object key.
+pub async fn storage_list(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    json_or_err(storage_list_impl(&state, &headers, &params).await)
+}
+
+async fn storage_list_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> Result<Value> {
+    let ctx = authed(state, headers, params).await?;
+    service::assert_read_allowed(state, ctx.app_id).await?;
+    let attrs = service::load_attrs(state, ctx.app_id).await?;
+    let q = json!({"$files": {}});
+    let result = service::run_query(state, ctx.app_id, &attrs, &ctx.perms, &q).await?;
+    let tree = object_tree(&result, &attrs, &q, false);
+    let files = tree
+        .get("$files")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let data: Vec<Value> = files
+        .iter()
+        .map(|f| {
+            let loc = f
+                .get("location-id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            json!({
+                "key": crate::storage::object_key(ctx.app_id, loc),
+                "name": f.get("path").cloned().unwrap_or(Value::Null),
+                "size": f.get("size").cloned().unwrap_or(Value::Null),
+                "etag": null,
+                "last_modified": null,
+            })
+        })
+        .collect();
+    Ok(json!({"data": data}))
+}
+
+/// `GET /admin/storage/signed-download-url?filename=` — deprecated
+/// `db.storage.getDownloadUrl` (admin/routes.clj:710-716): perms skipped,
+/// unknown path → `{data: null}`.
+pub async fn admin_signed_download_url(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    json_or_err(admin_signed_download_url_impl(&state, &headers, &params).await)
+}
+
+async fn admin_signed_download_url_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> Result<Value> {
+    let ctx = authed(state, headers, params).await?;
+    let filename = admin_filename_param(params)?;
+    let url = file_location_by_path(state, ctx.app_id, filename)
+        .await
+        .map(|loc| crate::storage::download_url(state, ctx.app_id, &loc));
+    Ok(json!({"data": url}))
+}
+
+/// Deprecated upload-URL flow (`db.storage.upload` / core `upload`): the
+/// server hands out a single-use `<origin>/storage/<id>/consume-upload-url`
+/// backed by the legacy `app_upload_urls` table (5-minute expiry).
+async fn create_upload_url(state: &AppState, app_id: Uuid, path: &str) -> Result<String> {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO app_upload_urls (id, app_id, path) VALUES ($1, $2, $3)")
+        .bind(id)
+        .bind(app_id)
+        .bind(path)
+        .execute(&state.pool)
+        .await
+        .map_err(InstantError::from)?;
+    Ok(format!(
+        "{}/storage/{}/consume-upload-url",
+        state.cfg.base_url, id
+    ))
+}
+
+/// `POST /admin/storage/signed-upload-url` (admin/routes.clj:702-708).
+pub async fn admin_signed_upload_url(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    json_or_err(admin_signed_upload_url_impl(&state, &headers, &params, &body).await)
+}
+
+async fn admin_signed_upload_url_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+    body: &Value,
+) -> Result<Value> {
+    let ctx = authed(state, headers, params).await?;
+    let filename = body
+        .get("filename")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            InstantError::new(
+                "param-missing",
+                400,
+                "Missing parameter: [\"body\" \"filename\"]",
+                Some(json!({"in": ["body", "filename"]})),
+            )
+        })?;
+    let url = create_upload_url(state, ctx.app_id, filename).await?;
+    Ok(json!({"data": url}))
+}
+
+/// `POST /storage/signed-upload-url` (storage/routes.clj:46-52): app id and
+/// path come from the JSON body, the user from the bearer refresh token,
+/// and the `create` rule applies.
+pub async fn client_signed_upload_url(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    json_or_err(client_signed_upload_url_impl(&state, &headers, &params, &body).await)
+}
+
+async fn client_signed_upload_url_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+    body: &Value,
+) -> Result<Value> {
+    let mut merged = params.clone();
+    if let Some(a) = body
+        .get("app-id")
+        .or_else(|| body.get("app_id"))
+        .and_then(|v| v.as_str())
+    {
+        merged.insert("app_id".into(), a.to_string());
+    }
+    let (app_id, perms) = client_storage_ctx(state, headers, &merged).await?;
+    state
+        .limiters
+        .storage_upload
+        .check(app_id, 1.0)
+        .map_err(crate::rate_limit::rate_limited_err)?;
+    let path = body
+        .get("path")
+        .or_else(|| body.get("filename"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| client_param_missing("path", "filename"))?;
+    check_files_perm(state, app_id, &perms, "create", path).await?;
+    let url = create_upload_url(state, app_id, path).await?;
+    Ok(json!({"data": url}))
+}
+
+/// `PUT /storage/:upload-id/consume-upload-url` (storage/routes.clj:54-62):
+/// consumes the single-use row, rejects expired ones, then uploads with
+/// perms skipped (they were checked when the URL was issued).
+pub async fn consume_upload_url(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(upload_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    json_or_err(consume_upload_url_impl(&state, &upload_id, &headers, body).await)
+}
+
+async fn consume_upload_url_impl(
+    state: &AppState,
+    upload_id: &str,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<Value> {
+    let upload_id = Uuid::parse_str(upload_id).map_err(|_| {
+        InstantError::new(
+            "param-malformed",
+            400,
+            "Malformed parameter: [\"params\" \"upload-id\"]",
+            Some(json!({"in": ["params", "upload-id"], "original-input": upload_id})),
+        )
+    })?;
+    use sqlx::Row;
+    let row = sqlx::query(
+        "DELETE FROM app_upload_urls WHERE id = $1
+         RETURNING app_id, path, (expired_at < now()) AS expired",
+    )
+    .bind(upload_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(InstantError::from)?;
+    let (app_id, path) = match row {
+        Some(r) if !r.get::<bool, _>("expired") => {
+            (r.get::<Uuid, _>("app_id"), r.get::<String, _>("path"))
+        }
+        _ => {
+            // legacy throw-validation-err! with a bare string (coordinator.clj:125-129)
+            return Err(InstantError::new(
+                "validation-failed",
+                400,
+                "Validation failed for app-upload-url",
+                Some(json!({
+                    "data-type": "app-upload-url",
+                    "input": upload_id,
+                    "errors": "The upload URL is expired or invalid.",
+                })),
+            ));
+        }
+    };
+    // only the content type travels with a presigned-style PUT
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(crate::storage::DEFAULT_CONTENT_TYPE)
+        .to_string();
+    let meta = crate::storage::BlobMeta {
+        content_type,
+        content_disposition: crate::storage::DEFAULT_CONTENT_DISPOSITION.to_string(),
+    };
+    store_file(state, app_id, &path, &body, &meta).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1452,7 +1764,7 @@ async fn client_storage_ctx(
         .map(|s| s.to_string())
         .or_else(|| params.get("app_id").cloned())
         .and_then(|s| Uuid::parse_str(&s).ok())
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: app-id"))?;
+        .ok_or_else(|| client_param_missing("app-id", "app_id"))?;
     let bearer = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -1504,12 +1816,42 @@ async fn check_files_perm(
     let ok = instant_core::perms::eval_program(&program, &data, None, &auth_val, &json!({}), &env)
         .await?;
     if !ok {
-        return Err(InstantError::permission_denied(
-            json!(["$files", action]),
-            "Permission denied: not perms-pass?",
+        // legacy assert-permitted! :has-storage-permission? (coordinator.clj:20-38)
+        return Err(InstantError::new(
+            "permission-denied",
+            400,
+            "Permission denied: not has-storage-permission?",
+            Some(json!({"input": ["$files", action], "expected": "has-storage-permission?"})),
         ));
     }
     Ok(())
+}
+
+/// legacy `req->app-file!` names its params as `["path"]` (else `filename`)
+/// and `["app-id"]` (else `app_id`) — storage/routes.clj:14-27.
+fn client_param_missing(name: &str, alt: &str) -> InstantError {
+    InstantError::new(
+        "param-missing",
+        400,
+        format!("Missing parameter: [\"{name}\"]"),
+        Some(json!({"in": [name], "possible-ins": [[alt]]})),
+    )
+}
+
+/// legacy `get-param! req [:params :filename]` on the admin storage routes.
+fn admin_filename_param(params: &HashMap<String, String>) -> Result<&str> {
+    params
+        .get("filename")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            InstantError::new(
+                "param-missing",
+                400,
+                "Missing parameter: [\"params\" \"filename\"]",
+                Some(json!({"in": ["params", "filename"]})),
+            )
+        })
 }
 
 pub async fn client_storage_upload(
@@ -1533,78 +1875,18 @@ async fn client_storage_upload_impl(
         .storage_upload
         .check(app_id, 1.0)
         .map_err(crate::rate_limit::rate_limited_err)?;
+    // legacy req->app-file! reads `path` or `filename` (storage/routes.clj:14-27)
     let path = headers
         .get("path")
         .or_else(|| headers.get("filename"))
         .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: path"))?;
+        .ok_or_else(|| client_param_missing("path", "filename"))?;
     check_files_perm(state, app_id, &perms, "create", &path).await?;
-    // reuse the admin upload path (system transact under the hood)
-    let content_type = headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty() && *s != "null" && *s != "undefined")
-        .map(|s| s.to_string());
-    let content_disposition = headers
-        .get("content-disposition")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    let location_id = Uuid::new_v4().to_string();
-    let size = crate::storage::put_blob(state, app_id, &location_id, &body).await?;
-    let path_attr = sc::attr_id("$files", "path");
-    let old_location = file_location_by_path(state, app_id, &path).await;
-    let lookup = json!([path_attr, path]);
-    let mut steps = vec![
-        json!(["add-triple", lookup, sc::attr_id("$files", "id"), lookup]),
-        json!(["add-triple", lookup, sc::attr_id("$files", "path"), path]),
-        json!(["add-triple", lookup, sc::attr_id("$files", "size"), size]),
-        json!([
-            "add-triple",
-            lookup,
-            sc::attr_id("$files", "location-id"),
-            location_id
-        ]),
-        json!([
-            "add-triple",
-            lookup,
-            sc::attr_id("$files", "key-version"),
-            1
-        ]),
-    ];
-    if let Some(ct) = &content_type {
-        steps.push(json!([
-            "add-triple",
-            lookup,
-            sc::attr_id("$files", "content-type"),
-            ct
-        ]));
-    }
-    if let Some(cd) = &content_disposition {
-        steps.push(json!([
-            "add-triple",
-            lookup,
-            sc::attr_id("$files", "content-disposition"),
-            cd
-        ]));
-    }
-    service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
-    use sqlx::Row;
-    let row = sqlx::query(
-        "SELECT entity_id FROM triples
-         WHERE app_id = $1 AND attr_id = $2 AND av AND value = to_jsonb($3::text) LIMIT 1",
-    )
-    .bind(app_id)
-    .bind(path_attr)
-    .bind(&path)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(InstantError::from)?;
-    let file_id: Uuid = row.get("entity_id");
-    if let Some(old) = old_location {
-        crate::storage::delete_blob(state, app_id, &old).await;
-    }
-    Ok(json!({"data": {"id": file_id, "location-id": location_id, "size": size}}))
+    let meta = blob_meta_from_headers(headers)?;
+    store_file(state, app_id, &path, &body, &meta).await
 }
 
 pub async fn client_storage_delete(
@@ -1628,7 +1910,7 @@ async fn client_storage_delete_impl(
         .map_err(crate::rate_limit::rate_limited_err)?;
     let filename = params
         .get("filename")
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: filename"))?;
+        .ok_or_else(|| client_param_missing("path", "filename"))?;
     check_files_perm(state, app_id, &perms, "delete", filename).await?;
     use sqlx::Row;
     let path_attr = sc::attr_id("$files", "path");
@@ -1678,7 +1960,7 @@ async fn client_signed_download_url_impl(
         .map_err(crate::rate_limit::rate_limited_err)?;
     let filename = params
         .get("filename")
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: filename"))?;
+        .ok_or_else(|| client_param_missing("path", "filename"))?;
     check_files_perm(state, app_id, &perms, "view", filename).await?;
     use sqlx::Row;
     let path_attr = sc::attr_id("$files", "path");
@@ -1809,7 +2091,7 @@ async fn query_perms_check_impl(
 
     // the actual filtered result
     let result = service::run_query(state, ctx.app_id, &attrs, &ctx.perms, q).await?;
-    let tree = object_tree(state, ctx.app_id, &result, &attrs, q, inference);
+    let tree = object_tree(&result, &attrs, q, inference);
     Ok(json!({
         "check-results": check_results,
         "result": tree,

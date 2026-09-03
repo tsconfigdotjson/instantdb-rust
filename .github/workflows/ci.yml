@@ -147,11 +147,64 @@ jobs:
       - name: "e2e: multinode storage"
         run: node scripts/multinode-storage-test.mjs "$APP_ID" "$ADMIN_TOKEN"
 
+      # S3 storage backend (issue #9): a MinIO binary stands in for
+      # S3/R2; two presigning nodes + one proxying node run beside the
+      # postgres-backed pair above.
+      - name: Boot MinIO
+        run: |
+          curl -sSfL -o /tmp/minio https://dl.min.io/server/minio/release/linux-amd64/minio
+          chmod +x /tmp/minio
+          mkdir -p /tmp/minio-data
+          MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
+            /tmp/minio server /tmp/minio-data --address ":9000" > /tmp/minio.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:9000/minio/health/live >/dev/null && break
+            sleep 1
+          done
+          curl -sSfL -o /tmp/mc https://dl.min.io/client/mc/release/linux-amd64/mc
+          chmod +x /tmp/mc
+          /tmp/mc alias set local http://localhost:9000 minioadmin minioadmin
+          /tmp/mc mb --ignore-existing local/instant-rust-bucket
+      - name: Boot S3-backed nodes
+        env:
+          STORAGE_BACKEND: s3
+          S3_BUCKET: instant-rust-bucket
+          S3_ENDPOINT: http://localhost:9000
+          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+        run: |
+          PORT=8898 BASE_URL=http://localhost:8898 ./target/debug/instant-server > /tmp/server-s3-1.log 2>&1 &
+          PORT=8899 BASE_URL=http://localhost:8899 ./target/debug/instant-server > /tmp/server-s3-2.log 2>&1 &
+          S3_PRESIGN=0 PORT=8897 BASE_URL=http://localhost:8897 ./target/debug/instant-server > /tmp/server-s3-proxy.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8898/health >/dev/null && curl -sf http://localhost:8899/health >/dev/null && curl -sf http://localhost:8897/health >/dev/null; then
+              echo "s3 nodes healthy"; exit 0
+            fi
+            sleep 1
+          done
+          echo "s3 nodes failed to boot"; cat /tmp/server-s3-1.log /tmp/server-s3-proxy.log; exit 1
+      - name: "e2e: s3 storage backend"
+        env:
+          NODE1_URL: http://localhost:8898
+          NODE2_URL: http://localhost:8899
+          PROXY_NODE_URL: http://localhost:8897
+        run: |
+          ./scripts/create-app.sh "s3 app" | tee /tmp/s3-app.txt
+          S3_APP=$(grep '^app_id=' /tmp/s3-app.txt | cut -d= -f2)
+          S3_TOKEN=$(grep '^admin_token=' /tmp/s3-app.txt | cut -d= -f2)
+          node scripts/s3-storage-test.mjs "$S3_APP" "$S3_TOKEN"
+          node scripts/multinode-storage-test.mjs "$S3_APP" "$S3_TOKEN"
+
       - name: Server logs
         if: failure()
         run: |
           echo "=== node 1 (:8888) ==="; cat /tmp/server1.log || true
           echo "=== node 2 (:8889) ==="; cat /tmp/server2.log || true
+          echo "=== s3 node 1 (:8898) ==="; cat /tmp/server-s3-1.log || true
+          echo "=== s3 node 2 (:8899) ==="; cat /tmp/server-s3-2.log || true
+          echo "=== s3 proxy node (:8897) ==="; cat /tmp/server-s3-proxy.log || true
+          echo "=== minio ==="; cat /tmp/minio.log || true
 
   differential:
     name: differential vs legacy server

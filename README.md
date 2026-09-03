@@ -35,9 +35,13 @@ Built as a migration path for apps on the sunsetting hosted Instant service.
 - **Admin API**: `@instantdb/admin`-compatible (`/admin/query` object trees,
   `/admin/transact` with the admin steps grammar, `refresh_tokens`, users,
   magic codes, impersonation headers, presence, storage).
-- **Storage**: `$files` namespace with HMAC-signed download URLs. Blobs live
-  in Postgres by default so every node can serve every file; a local-disk
-  backend is available and an S3 adapter can slot in beside them.
+- **Storage**: `$files` namespace with the full admin + client route set
+  (`uploadFile`, `delete`/`deleteMany`, the deprecated signed-upload-url /
+  signed-download-url / list flows). Blobs live in Postgres by default so
+  every node can serve every file; a local-disk backend and an
+  S3-compatible backend (AWS S3, Cloudflare R2, MinIO) are built in. The S3
+  backend uses the legacy server's exact bucket layout, so an existing bucket
+  is served as-is, and hands out presigned URLs exactly like legacy.
 - **The legacy database schema**: the exact Postgres schema from the original
   server (its migrations replay cleanly onto stock Postgres 16/17/18), so
   existing exported data drops straight in. System-catalog attr UUIDs are
@@ -83,8 +87,15 @@ works exactly as with the hosted service. A complete example lives in
 | `PORT` | `8888` | |
 | `BASE_URL` | `http://localhost:$PORT` | public URL (oauth redirects, file URLs) |
 | `SERVER_SECRET` | generated & persisted | signs storage download URLs; auto-generated on first boot and stored in Postgres when unset — set explicitly to control rotation |
-| `STORAGE_BACKEND` | `postgres` | blob store: `postgres` (multi-node correct) or `disk` |
+| `STORAGE_BACKEND` | `postgres` | blob store: `postgres` (multi-node correct), `disk`, or `s3` (any S3-compatible store) |
 | `STORAGE_DIR` | `./storage-data` | blob directory for the `disk` backend |
+| `S3_BUCKET` | — | bucket for `STORAGE_BACKEND=s3` (required in that mode) |
+| `AWS_REGION` | `us-east-1` | bucket region (`AWS_DEFAULT_REGION` / `S3_REGION` also read) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | — | static keys (+ `AWS_SESSION_TOKEN`); when unset, ECS/EKS container credentials or EC2 IMDSv2 are used and refreshed in the background |
+| `S3_ENDPOINT` | — | custom endpoint for MinIO / R2 / etc.; setting it selects path-style addressing (`S3_FORCE_PATH_STYLE=0|1` overrides) |
+| `S3_PUBLIC_ENDPOINT` | `S3_ENDPOINT` | endpoint written into presigned URLs (what browsers can reach) |
+| `S3_PRESIGN` | `1` | `$files.url` is a 7-day presigned GET like legacy; `0` proxies downloads through `/storage/serve` instead (private buckets, temporary credentials) |
+| `S3_PRESIGN_ACCESS_KEY_ID` / `S3_PRESIGN_SECRET_ACCESS_KEY` | — | optional long-lived keys used only for presigning (temporary role credentials cap a presigned URL's life at the credential's) |
 | `EMAIL_PROVIDER` | `log` | magic-code email delivery: `log` (print code to server log) or `cloudflare` ([Email Service](https://developers.cloudflare.com/email-service/) REST API) |
 | `CLOUDFLARE_ACCOUNT_ID` | — | required for `EMAIL_PROVIDER=cloudflare` |
 | `CLOUDFLARE_API_TOKEN` | — | API token with Email Sending permission |

@@ -31,6 +31,10 @@ services:
 
   minio:
     image: minio/minio:latest
+    # host-mapped so the harness can fetch legacy's presigned URLs and the
+    # rust server can run STORAGE_BACKEND=s3 against the same store
+    ports:
+      - "9000:9000"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -50,6 +54,7 @@ services:
       /bin/sh -c "
       /usr/bin/mc alias set local http://minio:9000 minioadmin minioadmin;
       /usr/bin/mc mb --ignore-existing local/instant-bucket;
+      /usr/bin/mc mb --ignore-existing local/instant-rust-bucket;
       exit"
 
   legacy-server:

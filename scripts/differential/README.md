@@ -15,8 +15,11 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
 
 ## Pieces
 
-- `docker-compose.yml` — legacy postgres (host :8890), minio, and the legacy
-  server (host :8891) from `ghcr.io/instantdb`.
+- `docker-compose.yml` — legacy postgres (host :8890), minio (host :9000,
+  buckets `instant-bucket` for legacy and `instant-rust-bucket` so the rust
+  server can run `STORAGE_BACKEND=s3 S3_ENDPOINT=http://localhost:9000`
+  against the same store), and the legacy server (host :8891) from
+  `ghcr.io/instantdb`.
 - `provision.sh` — creates the same app id + admin token in both servers'
   databases (both run the same legacy schema).
 - `replay.mjs` — 24-step scenario across init, schemaless transacts, queries
@@ -60,6 +63,21 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `member-missing` against a live session). Responses are folded to
   what the CLI reads (server-chosen ids, timestamps and CEL diagnostics
   normalized) and must match. `node dash.mjs <app> <token> [<app2> <token2>]`.
+- `storage.mjs` — the storage surface (issue #9): every `db.storage.*`
+  admin route and browser `StorageAPI` route (uploads with / without
+  metadata headers, the `create`/`delete`/`view` rules for refresh-token
+  and impersonated callers, single and bulk deletes, the deprecated
+  signed-upload-url / consume / signed-download-url / list flows), `$files`
+  over `/admin/query` (fields projections, where, order) and over the socket
+  (admin + rule-filtered), path replacement, and `$files` writes through
+  transact (system-column guards with legacy's vectorized `input`). Every
+  download URL is fetched and compared by what a browser receives (status,
+  bytes, content-type, content-disposition, cache-control). When the rust
+  server runs `STORAGE_BACKEND=s3` the presigned URL shape (key layout,
+  SigV4 params, day-bucketed date, 7-day expiry, `response-cache-control`)
+  is compared with legacy's too; on the other backends rust proxies through
+  `/storage/serve` and only the fetched content is compared.
+  `node storage.mjs <app> <token>`.
 - `fuzz.mjs` — seeded random tx-steps + queries replayed on both servers;
   asserts per-server invariants (monotonic tx-ids) and cross-server equality
   of every query result. `node fuzz.mjs <app> <app> <token> [seed] [rounds]`.

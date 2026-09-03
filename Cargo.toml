@@ -40,6 +40,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-feature
 jsonwebtoken = "9"
 base64 = "0.22"
 sha2 = "0.10"
+hmac = "0.12"
 futures = "0.3"
 dashmap = "6"
 cel = "0.14"

@@ -253,8 +253,10 @@ fn rules_reference_other_entities(rules: &Rules) -> bool {
     !rules.code.is_null() && rules.code.to_string().contains(".ref(")
 }
 
-/// $files entities get a synthetic `url` triple; `location-id` triples are
-/// hidden unless explicitly requested via $.fields (legacy transform-$files-result).
+/// $files entities get a synthetic `url` triple (legacy
+/// transform-$files-result, instaql.clj:1073-1081): `url` is added unless a
+/// `fields` projection leaves it out, and the stored `location-id` triple is
+/// kept unless `fields` is present and does not name it.
 fn inject_file_urls(
     state: &AppState,
     app_id: Uuid,
@@ -264,21 +266,28 @@ fn inject_file_urls(
 ) {
     let loc_attr = instant_core::system_catalog::attr_id("$files", "location-id");
     let url_attr = instant_core::system_catalog::attr_id("$files", "url");
-    let _ = q;
+    let forms = instaql::parse_query(q).unwrap_or_default();
     fn walk(
         node: &mut instant_core::instaql::EntityNode,
+        form: Option<&instaql::Form>,
         state: &AppState,
         app_id: Uuid,
         loc_attr: Uuid,
         url_attr: Uuid,
     ) {
         if node.etype == "$files" {
+            let fields = form.and_then(|f| f.opts.fields.as_ref());
+            let wants = |label: &str| {
+                fields
+                    .map(|fs| fs.iter().any(|f| f == label))
+                    .unwrap_or(true)
+            };
             let loc = node
                 .triples
                 .iter()
                 .find(|t| t.a == loc_attr)
                 .and_then(|t| t.v.as_str().map(|s| s.to_string()));
-            if let Some(loc) = loc {
+            if let (Some(loc), true) = (loc, wants("url")) {
                 let t0 = node.triples.first().map(|t| t.t).unwrap_or(0);
                 let url = crate::storage::download_url(state, app_id, &loc);
                 node.triples.push(instant_core::instaql::TripleOut {
@@ -288,18 +297,22 @@ fn inject_file_urls(
                     t: t0,
                 });
             }
-            node.triples.retain(|t| t.a != loc_attr);
+            if !wants("location-id") {
+                node.triples.retain(|t| t.a != loc_attr);
+            }
         }
         for c in &mut node.children {
+            let child_form = form.and_then(|f| f.children.iter().find(|cf| cf.k == c.k));
             for e in &mut c.entities {
-                walk(e, state, app_id, loc_attr, url_attr);
+                walk(e, child_form, state, app_id, loc_attr, url_attr);
             }
         }
     }
     let _ = attrs;
     for form in &mut result.forms {
+        let parsed = forms.iter().find(|f| f.k == form.k);
         for e in &mut form.entities {
-            walk(e, state, app_id, loc_attr, url_attr);
+            walk(e, parsed, state, app_id, loc_attr, url_attr);
         }
     }
 }

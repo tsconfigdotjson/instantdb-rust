@@ -296,6 +296,14 @@ pub async fn handle_append_stream(
         }),
     )
     .await;
+    if done {
+        // S3 backend: move the finished stream from the postgres spool to
+        // the bucket (no-op elsewhere). Best effort — the spool stays
+        // readable if it fails.
+        if let Err(e) = crate::storage::finalize_blob(state, app_id, &stream_key(stream_id)).await {
+            tracing::warn!("stream {stream_id} finalize: {e}");
+        }
+    }
     Ok(())
 }
 
