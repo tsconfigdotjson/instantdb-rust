@@ -348,17 +348,44 @@ async fn resolve_ref_path(
     path: &str,
 ) -> Result<Value> {
     let segs: Vec<&str> = path.split('.').collect();
-    let mut current: Vec<Uuid> = vec![eid];
+    // legacy build-query (cel.clj:88-117) anchors the walk on the root
+    // entity's `id` triple and reads a terminal `id` as a triple too, so an
+    // entity that only exists through a link (no id triple) is invisible to
+    // `ref` in both positions
+    async fn with_id_triple(
+        conn: &mut PgConnection,
+        app_id: Uuid,
+        attrs: &AttrMap,
+        etype: &str,
+        ids: &[Uuid],
+    ) -> Result<Vec<Uuid>> {
+        let Some(id_attr) = attrs.id_attr_of(etype) else {
+            return Ok(vec![]);
+        };
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = sqlx::query(
+            "SELECT entity_id FROM triples
+             WHERE app_id = $1 AND attr_id = $2 AND entity_id = ANY($3)",
+        )
+        .bind(app_id)
+        .bind(id_attr.id)
+        .bind(ids)
+        .fetch_all(&mut *conn)
+        .await?;
+        let found: HashSet<Uuid> = rows.iter().map(|r| r.get::<Uuid, _>("entity_id")).collect();
+        Ok(ids.iter().copied().filter(|i| found.contains(i)).collect())
+    }
+    let mut current: Vec<Uuid> = with_id_triple(conn, app_id, attrs, etype, &[eid]).await?;
     let mut current_etype = etype.to_string();
     for (i, seg) in segs.iter().enumerate() {
         let is_last = i == segs.len() - 1;
         if is_last {
             // terminal: blob attr (or id) -> collect values
             if *seg == "id" {
-                return Ok(json!(current
-                    .iter()
-                    .map(|u| u.to_string())
-                    .collect::<Vec<_>>()));
+                let ids = with_id_triple(conn, app_id, attrs, &current_etype, &current).await?;
+                return Ok(json!(ids.iter().map(|u| u.to_string()).collect::<Vec<_>>()));
             }
             if let Some(attr) = attrs.by_fwd_name(&current_etype, seg) {
                 if attr.value_type == ValueType::Blob {

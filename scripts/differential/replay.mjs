@@ -1355,6 +1355,9 @@ function buildScenario() {
         await setRules({ tasks: { allow: { ...rules.tasks.allow, view: "dta.title == 'x'" } } });
         await expectErr(env.conns.AUTH, { op: "add-query", q: { tasks: {} } });
         await setRules(rules);
+        // `data.ref` only sees entities with an id triple (cel.clj:88-117
+        // build-query anchors on it), so give the link-created task one
+        await okTx(env.conns.ADMIN, { op: "transact", "tx-steps": [["add-triple", ids.k1, ids.tasksId, ids.k1]] });
         // update rule on projects reads data.ref pre-tx: p1 has a task, p2 none
         await okTx(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.p1, ids.projectsName, "main"]] });
         await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.p2, ids.projectsName, "side!"]] });
@@ -1511,6 +1514,9 @@ async function runAgainst(serverName) {
       for (const [name, conn] of Object.entries(env.conns)) {
         const brief = conn.frames.slice(-3).map((f) => ({ ...f, attrs: f.attrs ? `<${f.attrs.length} attrs>` : undefined }));
         console.error(`  last frames on ${name}:`, JSON.stringify(brief)?.slice(0, 1500));
+        // the newest frame in full: it is usually the error that stalled the step
+        const last = brief[brief.length - 1];
+        if (last) console.error(`  newest frame on ${name}:`, JSON.stringify(last)?.slice(0, 6000));
       }
       throw e;
     }
