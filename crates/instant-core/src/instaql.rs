@@ -1395,7 +1395,7 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
     }
     qb.push(" FROM triples idt ");
     if !by_created {
-        qb.push("LEFT JOIN triples ord ON ord.app_id = ");
+        qb.push("JOIN triples ord ON ord.app_id = ");
         qb.push_bind(ctx.app_id);
         qb.push(" AND ord.entity_id = idt.entity_id AND ord.attr_id = ");
         qb.push_bind(order_attr.id);
@@ -1674,7 +1674,7 @@ async fn cursor_row_exists(
     };
     let mut qb = QueryBuilder::new("SELECT 1 AS x FROM triples idt ");
     if !by_created {
-        qb.push("LEFT JOIN triples ord ON ord.app_id = ");
+        qb.push("JOIN triples ord ON ord.app_id = ");
         qb.push_bind(ctx.app_id);
         qb.push(" AND ord.entity_id = idt.entity_id AND ord.attr_id = ");
         qb.push_bind(order_attr.id);
