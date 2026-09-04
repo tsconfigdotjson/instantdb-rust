@@ -1188,51 +1188,54 @@ function buildScenario() {
           msg(conn, m);
           await conn.waitFor((x) => x.op === "transact-ok" && conn.frames.filter((f) => f.op === "transact-ok").length > before);
         };
+        // one field rule per extension clause on a dummy attr (k01, k02, ...):
+        // field rules are evaluated per entity on both servers (legacy's
+        // rule-where rewriter only touches view rules), and the surviving
+        // fields in the query result pin down every clause separately.
+        // c1: title "ok one", score 5, when "2020-01-01"
+        const clauses = [
+          "data.title.trim().lowerAscii().startsWith('ok')",
+          "data.title.charAt(0) == 'o'",
+          "data.title.substring(0, 2) == 'ok'",
+          "data.title.substring(1) == 'k one'",
+          "data.title.indexOf('o') == 0 && data.title.indexOf('o', 1) == 3",
+          "data.title.lastIndexOf('o') == 3 && data.title.lastIndexOf('o', 2) == 0",
+          "data.title.replace('o', '0').split(' ').size() == 2",
+          "data.title.replace('o', '0', 1) == '0k one'",
+          "data.title.upperAscii() == 'OK ONE'",
+          "['a', 'b'].join('-') == 'a-b' && ['a', 'b'].join() == 'ab'",
+          "math.greatest(data.score, 1) == data.score && math.least(data.score, 1) == 1",
+          "math.greatest([1, data.score, 2]) == data.score && math.least([1, data.score, 2]) == 1",
+          "math.abs(-1) == 1 && math.sign(-3) == -1",
+          "math.floor(2.5) == 2.0 && math.ceil(2.5) == 3.0",
+          "math.round(2.5) == 3.0",
+          "math.trunc(-2.5) == -2.0",
+          "math.isNaN(0.0 / 0.0)",
+          "math.isFinite(1.0) && !math.isInf(1.0)",
+          "math.bitAnd(6, 3) == 2 && math.bitOr(6, 3) == 7 && math.bitXor(6, 3) == 5",
+          "math.bitShiftLeft(1, 3) == 8 && math.bitShiftRight(8, 3) == 1",
+          "timestamp(data.when) < request.time",
+          "timestamp(data.when).getTime() == 1577836800000",
+          "timestamp(1577836800000).getFullYear() == 2020",
+          "timestamp(1577836800000) == timestamp(data.when)",
+          "timestamp('2020-01-01T00:00:00Z').getTime() == timestamp(data.when).getTime()",
+          "request.time.getTime() > timestamp(data.when).getTime()",
+          "timestamp('01/02/2020').getDate() == 2",
+          "timestamp('2020-01-01T10:20:30Z').getHours() == 10",
+        ];
+        const kLabel = (i) => `k${String(i + 1).padStart(2, "0")}`;
+        const fields = Object.fromEntries(clauses.map((c, i) => [kLabel(i), c]));
         const rules = {
           cel: {
             bind: ["emailOk", "auth.email != null && auth.email.upperAscii().lowerAscii().endsWith('@example.com') && auth.email.indexOf('@') > 0"],
             allow: {
-              view: "emailOk && data.title.trim().lowerAscii().startsWith('ok')",
-              // every extension function, evaluated per entity on the
-              // created row (legacy rewrites view rules into where clauses,
-              // so the breadth lives on the create rule)
-              create: [
-                "emailOk",
-                "newData.title.lowerAscii() == newData.title",
-                "newData.title.charAt(0) == 'o'",
-                "newData.title.substring(0, 2) == 'ok'",
-                "newData.title.substring(3) == 'three'",
-                "newData.title.indexOf('t') == 3",
-                "newData.title.lastIndexOf('e') > newData.title.indexOf('e')",
-                "newData.title.replace('o', '0').split(' ').size() == 2",
-                "newData.title.replace('e', '3', 1) == 'ok thr3e'",
-                "newData.title.upperAscii() == 'OK THREE'",
-                "['a', 'b'].join('-') == 'a-b'",
-                "['a', 'b'].join() == 'ab'",
-                "math.greatest(newData.score, 0) == newData.score",
-                "math.least(newData.score, 0) == 0",
-                "math.greatest([0, newData.score, 1]) == newData.score",
-                "math.abs(-1) == 1",
-                "math.floor(2.5) == 2.0",
-                "math.ceil(2.5) == 3.0",
-                "math.round(2.5) == 3.0",
-                "math.trunc(-2.5) == -2.0",
-                "math.sign(-3) == -1",
-                "math.isNaN(0.0 / 0.0)",
-                "math.isFinite(1.0) && !math.isInf(1.0)",
-                "math.bitAnd(6, 3) == 2 && math.bitOr(6, 3) == 7 && math.bitXor(6, 3) == 5 && math.bitShiftLeft(1, 3) == 8 && math.bitShiftRight(8, 3) == 1",
-                "timestamp(newData.when) < request.time",
-                "timestamp(newData.when).getTime() == 1577836800000",
-                "timestamp(1577836800000).getFullYear() == 2020",
-                "timestamp(1577836800000) == timestamp(newData.when)",
-                "timestamp('2020-01-01T00:00:00Z').getTime() == timestamp(newData.when).getTime()",
-                "request.time.getTime() > timestamp(newData.when).getTime()",
-                "timestamp('01/02/2020').getDate() == 2",
-              ].join(" && "),
+              view: "emailOk && data.title != null",
+              create: "emailOk && newData.title.lowerAscii() == newData.title",
               // an unknown function is a compile-time undeclared reference
               update: "data.title.frobnicate() == 'x'",
               delete: "auth.email.trim() == 'nobody@example.com'",
             },
+            fields,
           },
         };
         psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(rules)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
@@ -1241,15 +1244,18 @@ function buildScenario() {
           "add-attr",
           { id, "forward-identity": [id, "cel", label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true },
         ];
+        const kAttrIds = clauses.map(() => mk());
         await okTx(env.conns.ADMIN, {
           op: "transact",
           "tx-steps": [
             celAttr(ids.celId, "id"), celAttr(ids.celTitle, "title"), celAttr(ids.celScore, "score"), celAttr(ids.celWhen, "when"),
+            ...kAttrIds.map((id, i) => celAttr(id, kLabel(i))),
             ["add-triple", ids.c1, ids.celId, ids.c1], ["add-triple", ids.c1, ids.celTitle, "ok one"], ["add-triple", ids.c1, ids.celScore, 5], ["add-triple", ids.c1, ids.celWhen, "2020-01-01"],
-            ["add-triple", ids.c2, ids.celId, ids.c2], ["add-triple", ids.c2, ids.celTitle, "nope"], ["add-triple", ids.c2, ids.celScore, 5], ["add-triple", ids.c2, ids.celWhen, "2020-01-01"],
+            ...kAttrIds.map((id) => ["add-triple", ids.c1, id, true]),
+            ["add-triple", ids.c2, ids.celId, ids.c2], ["add-triple", ids.c2, ids.celScore, 5], ["add-triple", ids.c2, ids.celWhen, "2020-01-01"],
           ],
         });
-        // only c1 passes the view rule for the authed user; anonymous sees nothing
+        // every k field survives for c1 when every clause holds; c2 has no title
         msg(env.conns.AUTH, { op: "add-query", q: { cel: {} } });
         await env.conns.AUTH.waitFor((m) => m.op === "add-query-ok" && m.q?.cel);
         msg(env.conns.A, { op: "add-query", q: { cel: {} } });
@@ -1263,8 +1269,6 @@ function buildScenario() {
       },
     },
     {
-      // view + field rules evaluate on the whole entity even when the query
-      // projects `fields` (instaql.clj:1956-2007 preload-entity-maps)
       name: "30-view-fields-projection",
       run: async (env) => {
         const rules = {
