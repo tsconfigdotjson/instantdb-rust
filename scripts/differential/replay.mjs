@@ -16,6 +16,9 @@ import { fileURLToPath } from "node:url";
 import {
   connect,
   connectSse,
+  httpConn,
+  projectResult,
+  projectAttrs,
   settle,
   foldFrames,
   newState,
@@ -70,6 +73,12 @@ function buildScenario() {
     limitedId: mk(), limitedTitle: mk(), l1: mk(), l2: mk(), l3: mk(),
     // admin SSE transports (issue #8, steps 23-24)
     sseTodo: mk(), sseSecret: mk(), sseTodo2: mk(),
+    // audit follow-ups (steps 25-28)
+    dupTitleAttr: mk(), reqAttr: mk(), laterReqAttr: mk(), ownersHandle: mk(),
+    articlesId: mk(), remarksId: mk(), remarksArticle: mk(), a1: mk(), r1: mk(),
+    gatedId: mk(), gatedTitle: mk(), g1: mk(), g2: mk(), g3: mk(), fakeUser: mk(),
+    // stream ids must be v4-shaped uuids on both servers
+    stream2Token: "00000000-0000-4000-8000-00000000a5ee",
   };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // rules written straight to Postgres: legacy evicts its rule cache off the
@@ -120,6 +129,7 @@ function buildScenario() {
             attr(ids.todosScore, "todos", "score", { unique: true, fwd: ids.todosScore }),
             attr(ids.ownersId, "owners", "id", { unique: true, fwd: ids.ownersId }),
             attr(ids.ownersName, "owners", "name", { fwd: ids.ownersName }),
+            attr(ids.ownersHandle, "owners", "handle", { unique: true, fwd: ids.ownersHandle }),
             [
               "add-attr",
               {
@@ -842,6 +852,319 @@ function buildScenario() {
         await env.conns.SSEG.waitFor((m) => m.op === "stream-flushed" && m.done === true, 20000);
       },
     },
+
+    {
+      // lookup / attr / query validation the audit found unenforced:
+      // value-position lookups never create (triple.clj:885-899), lookup
+      // namespaces must match (transaction.clj:532-556,
+      // permissioned_transaction.clj:124-140), a second attr under an
+      // existing name is record-not-unique (exception.clj:227-240),
+      // required attrs can't land on populated namespaces
+      // (attr.clj:334-350, :533-580), typed where values are validated even
+      // on unindexed attrs (attr_pat.clj:228-295), `$not` on a link needs a
+      // uuid (attr_pat.clj:410-419), only the first operator of an args map
+      // applies (instaql.clj:669-675), `order: {}` is a no-op and a form on
+      // missing attrs carries no page-info (instaql.clj:313-315, :1171-1172)
+      name: "25-lookup-attr-query-validation",
+      run: async (env) => {
+        const okTx = async (conn, m) => {
+          const before = conn.frames.filter((f) => f.op === "transact-ok").length;
+          msg(conn, m);
+          await conn.waitFor((x) => x.op === "transact-ok" && conn.frames.filter((f) => f.op === "transact-ok").length > before);
+        };
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        const okQuery = async (conn, q) => {
+          msg(conn, { op: "add-query", q });
+          await conn.waitFor((m) => m.op === "add-query-ok" && JSON.stringify(m.q) === JSON.stringify(q));
+          msg(conn, { op: "remove-query", q });
+          await conn.waitFor((m) => m.op === "remove-query-ok" && JSON.stringify(m.q) === JSON.stringify(q));
+        };
+        // value-position lookup on a missing owner (unique attr): no phantom entity
+        await expectErr(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [["add-triple", ids.e1, ids.ownerRef, [ids.ownersHandle, "nobody"]]],
+        });
+        // lookup namespace validation is legacy's non-admin pre-processing
+        // (permissioned_transaction.clj:683-687): eid lookup on todos.score
+        // writing an owners attr, and a value lookup outside the link's
+        // reverse namespace; the admin path falls through to the lookup miss
+        await expectErr(env.conns.A, {
+          op: "transact",
+          "tx-steps": [["add-triple", [ids.todosScore, 7], ids.ownersName, "x"]],
+        });
+        await expectErr(env.conns.A, {
+          op: "transact",
+          "tx-steps": [["add-triple", ids.e1, ids.ownerRef, [ids.todosScore, 7]]],
+        });
+        await expectErr(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [["add-triple", ids.e1, ids.ownerRef, [ids.todosScore, 7]]],
+        });
+        // a second attr under todos.title
+        await expectErr(env.conns.A, {
+          op: "transact",
+          "tx-steps": [attr(ids.dupTitleAttr, "todos", "title", { fwd: ids.dupTitleAttr })],
+        });
+        // required attr on a namespace that already has entities
+        await expectErr(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [[
+            "add-attr",
+            { id: ids.reqAttr, "forward-identity": [ids.reqAttr, "todos", "mustHave"], "value-type": "blob", cardinality: "one", "unique?": false, "index?": false, "required?": true, isUnsynced: true },
+          ]],
+        });
+        // flipping an existing attr to required when entities lack it
+        await okTx(env.conns.ADMIN, { op: "transact", "tx-steps": [attr(ids.laterReqAttr, "todos", "laterRequired", { fwd: ids.laterReqAttr })] });
+        await expectErr(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [["update-attr", { id: ids.laterReqAttr, "required?": true }]],
+        });
+        // typed where values: wrong types are 400s, incl. on the unindexed flag
+        await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { name: { $gt: 5 } } } } } });
+        await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { score: "2" } } } } });
+        await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { name: 5 } } } } });
+        // equality refuses relative keywords; comparison parses them (rows are all in 2024, so the result is stable)
+        await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { when: "now" } } } } });
+        await okQuery(env.conns.A, { typed: { $: { where: { when: { $gt: "now" } } } } });
+        await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { when: { $gt: "not-a-date" } } } } } });
+        await expectErr(env.conns.A, { op: "add-query", q: { todos: { $: { where: { owner: { $not: "nope" } } } } } });
+        await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { name: { $like: 5 } } } } } });
+        // deleting a link target re-validates required links on its referrers
+        // (transaction.clj:617-623 feeds the deleted reverse rows to validate-required!)
+        await okTx(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [
+            attr(ids.articlesId, "articles", "id", { unique: true, fwd: ids.articlesId }),
+            attr(ids.remarksId, "remarks", "id", { unique: true, fwd: ids.remarksId }),
+            ["add-attr", { id: ids.remarksArticle, "forward-identity": [ids.remarksArticle, "remarks", "article"], "reverse-identity": [mk(), "articles", "remarks"], "value-type": "ref", cardinality: "one", "unique?": false, "index?": false, "required?": true, isUnsynced: true }],
+            ["add-triple", ids.a1, ids.articlesId, ids.a1],
+            ["add-triple", ids.r1, ids.remarksId, ids.r1],
+            ["add-triple", ids.r1, ids.remarksArticle, ids.a1],
+          ],
+        });
+        await expectErr(env.conns.ADMIN, { op: "transact", "tx-steps": [["delete-entity", ids.a1, "articles"]] });
+        await okTx(env.conns.ADMIN, { op: "transact", "tx-steps": [["delete-entity", ids.r1, "remarks"], ["delete-entity", ids.a1, "articles"]] });
+        // a row that predates the indexed-null backfill (datalog.clj:2946-2959
+        // synthesizes a null for it): drop t5's score triple on both servers
+        psql(env.db, `DELETE FROM triples WHERE app_id = '${env.appId}' AND attr_id = '${ids.typedScore}' AND entity_id = '${ids.t5}'`);
+        // a write on `typed` makes both servers recompute the registered
+        // typed queries (the direct delete notifies neither invalidator)
+        await okTx(env.conns.A, { op: "transact", "tx-steps": [["add-triple", ids.t4, ids.typedFlag, false]] });
+        await okQuery(env.conns.A, { typed: { $: { order: { score: "asc" } } } });
+        await okQuery(env.conns.A, { typed: { $: { order: { score: "asc" }, limit: 3 } } });
+        await okQuery(env.conns.A, { typed: { $: { order: { score: "desc" }, limit: 3 } } });
+        // first operator wins; empty order is a no-op; missing attrs carry no page-info
+        await okQuery(env.conns.A, { typed: { $: { where: { score: { $gt: 0, $lt: 3 } } } } });
+        await okQuery(env.conns.A, { typed: { $: { order: {} } } });
+        await okQuery(env.conns.A, { nothing: { $: { limit: 2 } } });
+        await okQuery(env.conns.A, { typed: { $: { where: { missingAttr: "x" }, limit: 2 } } });
+      },
+    },
+    {
+      // protocol edge cases: pre-init ops (session.clj:198-202), `init`
+      // param shapes (session.clj:154-172, exception.clj:410-428), unknown
+      // ops (session.clj:1017-1024), `q: null` (session.clj:243-246),
+      // `remove-query` always acks, a missing `tx-steps` (transaction.clj:128-134),
+      // a missing `room-id` (session.clj:638-641), re-joining a room keeps
+      // the presence data (hazelcast.clj:123-134), and stream append /
+      // reconnect-token / unsubscribe validation (session.clj:767-769,
+      // :832-843, :958-970; app_stream.clj:444-457)
+      name: "26-protocol-edges",
+      run: async (env) => {
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        env.conns.COLD = connect(env.url, env.appId, `${env.serverName}:COLD`);
+        await env.conns.COLD.open;
+        await expectErr(env.conns.COLD, { op: "add-query", q: { todos: {} } });
+        await expectErr(env.conns.COLD, { op: "remove-query", q: { todos: {} } });
+        await expectErr(env.conns.COLD, { op: "transact", "tx-steps": [] });
+        await expectErr(env.conns.COLD, { op: "init", versions: { "@instantdb/core": "v0.21.0" } });
+        await expectErr(env.conns.COLD, { op: "init", "app-id": "not-a-uuid", versions: { "@instantdb/core": "v0.21.0" } });
+        await expectErr(env.conns.COLD, { op: "init", "app-id": env.appId, "__admin-token": "00000000-0000-4000-8000-00000000bad0", versions: { "@instantdb/core": "v0.21.0" } });
+        await expectErr(env.conns.A, { op: "no-such-op", anything: 1 });
+        await expectErr(env.conns.A, { op: "add-query", q: null });
+        await expectErr(env.conns.A, { op: "transact" });
+        await expectErr(env.conns.A, { op: "join-room" });
+        msg(env.conns.A, { op: "remove-query", q: { never: { registered: {} } } });
+        await env.conns.A.waitFor((m) => m.op === "remove-query-ok" && m.q?.never);
+        msg(env.conns.A, { op: "remove-query" });
+        await env.conns.A.waitFor((m) => m.op === "remove-query-ok" && m.q === null);
+        // re-join keeps the presence data a peer already saw
+        msg(env.conns.A, { op: "join-room", "room-type": "diff", "room-id": "rejoin", data: { who: "A" } });
+        await env.conns.A.waitFor((m) => m.op === "join-room-ok" && m["room-id"] === "rejoin");
+        msg(env.conns.B, { op: "join-room", "room-type": "diff", "room-id": "rejoin", data: { who: "B" } });
+        await env.conns.B.waitFor((m) => m.op === "join-room-ok" && m["room-id"] === "rejoin");
+        msg(env.conns.B, { op: "set-presence", "room-id": "rejoin", data: { who: "B", x: 1 } });
+        await env.conns.A.waitFor((m) => (m.op === "refresh-presence" || m.op === "patch-presence") && m["room-id"] === "rejoin" && JSON.stringify(m).includes('"x"'));
+        msg(env.conns.B, { op: "join-room", "room-type": "diff", "room-id": "rejoin" });
+        await env.conns.B.waitFor((m) => m.op === "join-room-ok" && m["room-id"] === "rejoin" && env.conns.B.frames.filter((f) => f.op === "join-room-ok" && f["room-id"] === "rejoin").length >= 2);
+        // streams
+        await expectErr(env.conns.A, { op: "start-stream", "client-id": "diff-stream-2" });
+        msg(env.conns.A, { op: "start-stream", "client-id": "diff-stream-2", "reconnect-token": ids.stream2Token });
+        const started = await env.conns.A.waitFor((m) => m.op === "start-stream-ok" && m["client-id"] === "diff-stream-2");
+        const sid = started["stream-id"];
+        await expectErr(env.conns.A, { op: "append-stream", "stream-id": sid, chunks: ["x"], offset: 5, done: false });
+        await expectErr(env.conns.A, { op: "append-stream", "stream-id": sid, offset: 0, done: false });
+        await expectErr(env.conns.A, { op: "append-stream", "stream-id": sid, chunks: ["x"], done: false });
+        msg(env.conns.A, { op: "append-stream", "stream-id": sid, chunks: ["fin"], offset: 0, done: true });
+        await env.conns.A.waitFor((m) => m.op === "stream-flushed" && m.done === true && m["stream-id"] === sid, 20000);
+        await expectErr(env.conns.A, { op: "append-stream", "stream-id": sid, chunks: ["more"], offset: 3, done: false });
+        await expectErr(env.conns.B, { op: "unsubscribe-stream", "subscribe-event-id": "never-subscribed" });
+      },
+    },
+    {
+      // rule evaluation semantics: `$default.bind` + object-form binds
+      // (rule.clj:100-111, :139-142), Clojure truthiness of a non-boolean
+      // result (exception.clj:291-297), evaluation errors as
+      // permission-evaluation-failed (exception.clj:299-323), non-admins
+      // can't create $users rows (permissioned_transaction.clj:589-596),
+      // and `$users.allow.create` gates signups over HTTP (app_user.clj:51-85,
+      // magic_code_auth.clj:277-288, runtime/routes.clj:131-139)
+      name: "27-rule-evaluation",
+      run: async (env) => {
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        const rules = {
+          $default: { bind: { isAuthUser: "auth.email == 'authuser@example.com'" } },
+          gated: {
+            bind: ["hasTitle", "data.title != null"],
+            allow: { view: "isAuthUser && hasTitle", create: "isAuthUser", update: "data.title", delete: "data.title.foo" },
+          },
+          $users: { allow: { create: "data.email != null && data.email.endsWith('@allowed.example')" } },
+        };
+        psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(rules)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
+        await sleep(RULES_SETTLE_MS);
+        const gatedAttr = (id, label) => [
+          "add-attr",
+          { id, "forward-identity": [id, "gated", label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true },
+        ];
+        const okTx = async (conn, m) => {
+          const before = conn.frames.filter((f) => f.op === "transact-ok").length;
+          msg(conn, m);
+          await conn.waitFor((x) => x.op === "transact-ok" && conn.frames.filter((f) => f.op === "transact-ok").length > before);
+        };
+        await okTx(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [gatedAttr(ids.gatedId, "id"), gatedAttr(ids.gatedTitle, "title"), ["add-triple", ids.g1, ids.gatedId, ids.g1], ["add-triple", ids.g1, ids.gatedTitle, "seeded"]],
+        });
+        // the $default bind resolves for the etype rule; anon sees nothing
+        msg(env.conns.AUTH, { op: "add-query", q: { gated: {} } });
+        await env.conns.AUTH.waitFor((m) => m.op === "add-query-ok" && m.q?.gated);
+        msg(env.conns.A, { op: "add-query", q: { gated: {} } });
+        await env.conns.A.waitFor((m) => m.op === "add-query-ok" && m.q?.gated);
+        await okTx(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.g2, ids.gatedId, ids.g2], ["add-triple", ids.g2, ids.gatedTitle, "mine"]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["add-triple", ids.g3, ids.gatedId, ids.g3], ["add-triple", ids.g3, ids.gatedTitle, "not mine"]] });
+        // a string result is truthy; a broken rule is an evaluation error
+        await okTx(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.g2, ids.gatedTitle, "renamed"]] });
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["delete-entity", ids.g2, "gated"]] });
+        // non-admins can't mint $users rows
+        const usersId = env.conns.AUTH.frames.find((f) => f.op === "init-ok").attrs.find((a) => a["forward-identity"][1] === "$users" && a["forward-identity"][2] === "id").id;
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.fakeUser, usersId, ids.fakeUser]] });
+        // signups over HTTP go through $users.allow.create
+        env.conns.HTTP = env.conns.HTTP ?? httpConn(`${env.serverName}:HTTP`);
+        const hdr = { "content-type": "application/json", "app-id": env.appId, authorization: `Bearer ${adminToken}` };
+        const post = async (p, body, headers = hdr) => {
+          const res = await fetch(`${env.url}${p}`, { method: "POST", headers, body: JSON.stringify(body) });
+          return { status: res.status, body: await res.json().catch(() => null) };
+        };
+        const view = (name, r, pick = []) => ({
+          name,
+          status: r.status,
+          type: r.body?.type ?? null,
+          message: r.body?.message ?? null,
+          ...Object.fromEntries(pick.map((k) => [k, r.body?.[k] ?? null])),
+        });
+        env.conns.HTTP.record(view("guestSignupDenied", await post("/runtime/auth/sign_in_guest", { "app-id": env.appId })));
+        const denied = "denied-diff@example.com";
+        const code = (await post("/admin/magic_code", { email: denied })).body?.code;
+        env.conns.HTTP.record(view("magicSignupDenied", await post("/runtime/auth/verify_magic_code", { "app-id": env.appId, email: denied, code })));
+        // the failed check must not burn the code: the same code verifies once the rule allows it
+        psql(env.db, `UPDATE rules SET code = code - '$users' WHERE app_id = '${env.appId}'`);
+        await sleep(RULES_SETTLE_MS);
+        env.conns.HTTP.record(view("magicSignupAfterRuleRemoved", await post("/runtime/auth/verify_magic_code", { "app-id": env.appId, email: denied, code }), ["created"]));
+        env.conns.HTTP.record(view("guestSignupAllowed", await post("/runtime/auth/sign_in_guest", { "app-id": env.appId })));
+      },
+    },
+    {
+      // admin HTTP gates and shapes: impersonation headers only stand in for
+      // the admin token on the get-perms! routes (admin/routes.clj:59-110,
+      // :396-772), the perms-check routes need both (:220-221, :325-326),
+      // /admin/users misses are 200 nulls (:490-499), unknown routes and
+      // wrong methods are a JSON 404 (core.clj:189-190), and
+      // /runtime/framework/query serves SSR clients (runtime/routes.clj:728-743)
+      name: "28-admin-http-gates",
+      run: async (env) => {
+        env.conns.HTTP = env.conns.HTTP ?? httpConn(`${env.serverName}:HTTP`);
+        const call = async (method, p, { headers = {}, body } = {}) => {
+          const res = await fetch(`${env.url}${p}`, {
+            method,
+            headers: { "content-type": "application/json", "app-id": env.appId, ...headers },
+            body: body === undefined ? undefined : JSON.stringify(body),
+          });
+          const raw = await res.text();
+          let parsed = null;
+          try { parsed = JSON.parse(raw); } catch {}
+          return { status: res.status, body: parsed, raw };
+        };
+        const view = (name, r, extra = {}) => ({
+          name,
+          status: r.status,
+          type: r.body?.type ?? null,
+          message: r.body?.message ?? null,
+          // non-JSON bodies are kept verbatim (key always present so the
+          // per-op key sets match)
+          raw: r.body ? null : String(r.raw ?? "").slice(0, 200),
+          ...extra,
+        });
+        const auth = { authorization: `Bearer ${adminToken}` };
+        const guest = { "as-guest": "true" };
+        const asToken = { "as-token": env.scratch.refreshToken };
+        const rec = (f) => env.conns.HTTP.record(f);
+        // token-only routes with impersonation headers and no token
+        rec(view("refreshTokensAsGuest", await call("POST", "/admin/refresh_tokens", { headers: guest, body: { email: "authuser@example.com" } })));
+        rec(view("magicCodeAsToken", await call("POST", "/admin/magic_code", { headers: asToken, body: { email: "authuser@example.com" } })));
+        rec(view("usersGetAsGuest", await call("GET", "/admin/users?email=authuser@example.com", { headers: guest })));
+        rec(view("usersDeleteAsGuest", await call("DELETE", "/admin/users?email=authuser@example.com", { headers: guest })));
+        rec(view("signOutAsGuest", await call("POST", "/admin/sign_out", { headers: guest, body: { email: "authuser@example.com" } })));
+        rec(view("signInGuestAsGuest", await call("POST", "/admin/sign_in_guest", { headers: guest, body: {} })));
+        rec(view("presenceAsGuest", await call("GET", "/admin/rooms/presence?room-type=diff&room-id=rejoin", { headers: guest })));
+        rec(view("signedUploadUrlAsGuest", await call("POST", "/admin/storage/signed-upload-url", { headers: guest, body: { filename: "x.txt" } })));
+        rec(view("signedDownloadUrlAsGuest", await call("GET", "/admin/storage/signed-download-url?filename=x.txt", { headers: guest })));
+        rec(view("queryPermsCheckAsGuest", await call("POST", "/admin/query_perms_check", { headers: guest, body: { query: { todos: {} } } })));
+        rec(view("transactPermsCheckAsToken", await call("POST", "/admin/transact_perms_check", { headers: asToken, body: { steps: [["update", "todos", ids.e1, { title: "x" }]] } })));
+        // with the token the perms-check routes accept impersonation
+        const qpc = await call("POST", "/admin/query_perms_check", { headers: { ...auth, ...guest }, body: { query: { todos: {} } } });
+        rec(view("queryPermsCheckAdminAsGuest", qpc, { checks: Array.isArray(qpc.body?.["check-results"]) }));
+        const tpc = await call("POST", "/admin/transact_perms_check", { headers: { ...auth, ...asToken }, body: { steps: [["update", "todos", ids.e1, { title: "x" }]] } });
+        rec(view("transactPermsCheckAdminAsToken", tpc, { keys: Object.keys(tpc.body ?? {}).sort() }));
+        // impersonation still works where legacy allows it
+        const qAs = await call("POST", "/admin/query", { headers: guest, body: { query: { todos: {} } } });
+        rec(view("queryAsGuest", qAs, { keys: Object.keys(qAs.body ?? {}).sort() }));
+        // misses are 200 nulls
+        const miss = await call("GET", "/admin/users?email=nobody-here@example.com", { headers: auth });
+        rec(view("usersGetMiss", miss, { user: miss.body?.user ?? "<absent>" }));
+        const missDel = await call("DELETE", "/admin/users?email=nobody-here@example.com", { headers: auth });
+        rec(view("usersDeleteMiss", missDel, { deleted: missDel.body?.deleted ?? "<absent>" }));
+        // routing fallbacks: compared on their own pseudo-connection because
+        // the self-hosted legacy image answers these with a 200 non-JSON body
+        // (allowed-divergences.json)
+        env.conns.HTTP_ROUTING = env.conns.HTTP_ROUTING ?? httpConn(`${env.serverName}:HTTP_ROUTING`);
+        env.conns.HTTP_ROUTING.record(view("unknownRoute", await call("GET", "/admin/no-such-route", { headers: auth })));
+        env.conns.HTTP_ROUTING.record(view("wrongMethod", await call("GET", "/admin/query", { headers: auth })));
+        // SSR framework query: anonymous and with a refresh token
+        const fq = await call("POST", "/runtime/framework/query", { body: { query: { secrets: {} } } });
+        rec(view("frameworkQueryAnon", fq, { result: projectResult(fq.body?.result), attrCount: fq.body?.attrs ? Object.keys(projectAttrs(fq.body.attrs)).length : null }));
+        const fqAuth = await call("POST", "/runtime/framework/query", { headers: { authorization: `Bearer ${env.scratch.refreshToken}` }, body: { query: { secrets: {} } } });
+        rec(view("frameworkQueryAuthed", fqAuth, { result: projectResult(fqAuth.body?.result) }));
+      },
+    },
   ];
   return steps;
 }
@@ -978,6 +1301,12 @@ for (const d of diffs) {
     console.log(`  first differing sub-path: ${fd.p}`);
     console.log("  legacy:", JSON.stringify(fd.a)?.slice(0, 1200));
     console.log("  rust:  ", JSON.stringify(fd.b)?.slice(0, 1200));
+    if (!d.allowed && d.path.startsWith("step:")) {
+      // the folded frames are sorted, so one differing frame shifts every
+      // index after it; print both sides whole for the CI log
+      console.log("  legacy (whole):", JSON.stringify(d.legacy)?.slice(0, 20000));
+      console.log("  rust   (whole):", JSON.stringify(d.rust)?.slice(0, 20000));
+    }
   } else {
     console.log("  legacy:", JSON.stringify(d.legacy)?.slice(0, 1200));
     console.log("  rust:  ", JSON.stringify(d.rust)?.slice(0, 1200));

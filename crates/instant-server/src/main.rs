@@ -143,6 +143,11 @@ async fn main() -> anyhow::Result<()> {
             post(routes::runtime::sign_in_guest),
         )
         .route("/runtime/signout", post(routes::runtime::signout))
+        // @instantdb/core FrameworkClient (SSR): runtime/routes.clj:728-743
+        .route(
+            "/runtime/framework/query",
+            post(routes::runtime::framework_query),
+        )
         // oauth
         .route("/runtime/oauth/start", get(routes::oauth::start))
         .route(
@@ -179,7 +184,10 @@ async fn main() -> anyhow::Result<()> {
             get(routes::admin::get_user).delete(routes::admin::delete_user),
         )
         .route("/admin/magic_code", post(routes::admin::magic_code))
-        .route("/admin/send_magic_code", post(routes::admin::magic_code))
+        .route(
+            "/admin/send_magic_code",
+            post(routes::admin::admin_send_magic_code),
+        )
         .route(
             "/admin/verify_magic_code",
             post(routes::admin::admin_verify_magic_code),
@@ -289,6 +297,10 @@ async fn main() -> anyhow::Result<()> {
         // unnecessary exposure. The oauth __session cookie is SameSite=Lax
         // and only read on top-level navigations, which CORS doesn't govern.
         .layer(CorsLayer::permissive())
+        // legacy core.clj:189-190: unmatched paths (and, since compojure
+        // falls through, wrong methods) answer a JSON 404 the CLI can parse
+        .fallback(route_not_found)
+        .method_not_allowed_fallback(route_not_found)
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", cfg.port);
@@ -296,6 +308,15 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn route_not_found() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        axum::Json(serde_json::json!({"message": "Oops! We couldn't match this route."})),
+    )
+        .into_response()
 }
 
 /// Raise the open-file soft limit to the hard limit: every websocket session

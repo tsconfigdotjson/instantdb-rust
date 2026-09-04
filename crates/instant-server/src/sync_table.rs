@@ -72,9 +72,7 @@ pub async fn handle_start_sync(
 ) -> std::result::Result<(), InstantError> {
     let (app_id, admin, user_id) = {
         let st = session.state.lock().await;
-        let app_id = st
-            .app_id
-            .ok_or_else(|| InstantError::param_malformed("session not initialized"))?;
+        let app_id = st.app_id.ok_or_else(crate::ws::not_initialized)?;
         (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
     let q = msg
@@ -209,11 +207,7 @@ pub async fn handle_resync_table(
 ) -> std::result::Result<(), InstantError> {
     let (app_id, _) = {
         let st = session.state.lock().await;
-        (
-            st.app_id
-                .ok_or_else(|| InstantError::param_malformed("session not initialized"))?,
-            (),
-        )
+        (st.app_id.ok_or_else(crate::ws::not_initialized)?, ())
     };
     let sub_id = msg
         .get("subscription-id")
@@ -297,13 +291,17 @@ pub async fn handle_remove_sync(
         .get("keep-subscription")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    {
+    let (app_id, owned) = {
         let mut st = session.state.lock().await;
-        st.sync_subs.remove(&sub_id);
-    }
-    if !keep {
-        let _ = sqlx::query("DELETE FROM sync_subs WHERE id = $1")
+        let app_id = st.app_id.ok_or_else(crate::ws::not_initialized)?;
+        (app_id, st.sync_subs.remove(&sub_id).is_some())
+    };
+    // legacy deletes only `{:id ... :app-id app-id}` and only for a sub this
+    // session holds; a foreign id is a silent no-op
+    if !keep && owned {
+        let _ = sqlx::query("DELETE FROM sync_subs WHERE id = $1 AND app_id = $2")
             .bind(sub_id)
+            .bind(app_id)
             .execute(&state.pool)
             .await;
     }

@@ -22,7 +22,7 @@ pub async fn join_room(
         INSERT INTO rust_presence (app_id, room_id, session_id, user_json, data, node_id)
         VALUES ($1, $2, $3, $4, coalesce($5, '{}'::jsonb), $6)
         ON CONFLICT (app_id, room_id, session_id)
-        DO UPDATE SET data = coalesce($5, rust_presence.data), updated_at = now()
+        DO UPDATE SET data = rust_presence.data, updated_at = now()
         RETURNING user_json, data
         "#,
     )

@@ -153,6 +153,46 @@ async fn session_loop(
     writer.abort();
 }
 
+/// `INSTANT_HANDLE_RECEIVE_TIMEOUT_MS`, default legacy's 5000.
+fn handle_receive_timeout_ms() -> u64 {
+    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MS.get_or_init(|| {
+        std::env::var("INSTANT_HANDLE_RECEIVE_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(5000)
+    })
+}
+
+/// Legacy `ex/get-param!` error shapes (util/exception.clj:410-428).
+fn param_missing_at(path: &[&str]) -> InstantError {
+    InstantError::new(
+        "param-missing",
+        400,
+        format!("Missing parameter: {}", json!(path)),
+        Some(json!({"in": path})),
+    )
+}
+fn param_malformed_at(path: &[&str], input: &Value) -> InstantError {
+    InstantError::new(
+        "param-malformed",
+        400,
+        format!("Malformed parameter: {}", json!(path)),
+        Some(json!({"in": path, "original-input": input})),
+    )
+}
+/// `ex/get-param! event [key] coercer` for a non-blank string.
+fn required_str<'a>(msg: &'a Value, key: &str) -> Result<&'a str, InstantError> {
+    match msg.get(key) {
+        None | Some(Value::Null) => Err(param_missing_at(&[key])),
+        Some(v) => v
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| param_malformed_at(&[key], v)),
+    }
+}
+
 /// Error frame matching legacy handle-error! key-for-key (session.clj:589-616):
 /// status/client-event-id/original-event/type/message/hint are always present,
 /// null when unknown.
@@ -197,26 +237,50 @@ pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>
             return;
         }
     }
-    let result = match op {
-        "init" => handle_init(state, session, &msg).await,
-        "add-query" => handle_add_query(state, session, &msg).await,
-        "remove-query" => handle_remove_query(session, &msg).await,
-        "transact" => handle_transact(state, session, &msg).await,
-        "join-room" => handle_join_room(state, session, &msg).await,
-        "leave-room" => handle_leave_room(state, session, &msg).await,
-        "set-presence" => handle_set_presence(state, session, &msg).await,
-        "client-broadcast" => handle_client_broadcast(state, session, &msg).await,
-        "start-sync" => crate::sync_table::handle_start_sync(state, session, &msg).await,
-        "resync-table" => crate::sync_table::handle_resync_table(state, session, &msg).await,
-        "remove-sync" => crate::sync_table::handle_remove_sync(state, session, &msg).await,
-        "start-stream" => crate::streams::handle_start_stream(state, session, &msg).await,
-        "append-stream" => crate::streams::handle_append_stream(state, session, &msg).await,
-        "subscribe-stream" => crate::streams::handle_subscribe_stream(state, session, &msg).await,
-        "unsubscribe-stream" => {
-            crate::streams::handle_unsubscribe_stream(state, session, &msg).await
+    let handler = async {
+        match op {
+            "init" => handle_init(state, session, &msg).await,
+            "add-query" => handle_add_query(state, session, &msg).await,
+            "remove-query" => handle_remove_query(session, &msg).await,
+            "transact" => handle_transact(state, session, &msg).await,
+            "join-room" => handle_join_room(state, session, &msg).await,
+            "leave-room" => handle_leave_room(state, session, &msg).await,
+            "set-presence" => handle_set_presence(state, session, &msg).await,
+            "client-broadcast" => handle_client_broadcast(state, session, &msg).await,
+            "start-sync" => crate::sync_table::handle_start_sync(state, session, &msg).await,
+            "resync-table" => crate::sync_table::handle_resync_table(state, session, &msg).await,
+            "remove-sync" => crate::sync_table::handle_remove_sync(state, session, &msg).await,
+            "start-stream" => crate::streams::handle_start_stream(state, session, &msg).await,
+            "append-stream" => crate::streams::handle_append_stream(state, session, &msg).await,
+            "subscribe-stream" => {
+                crate::streams::handle_subscribe_stream(state, session, &msg).await
+            }
+            "unsubscribe-stream" => {
+                crate::streams::handle_unsubscribe_stream(state, session, &msg).await
+            }
+            // legacy: `{type: param-malformed, message: "Invalid op", hint: {op}}`
+            _ => Err(InstantError::new(
+                "param-malformed",
+                400,
+                "Invalid op",
+                Some(json!({"op": op})),
+            )),
         }
-        _ => Ok(()), // unknown ops ignored (client tolerates)
     };
+    // legacy handle-receive-timeout-ms (session.clj:58): a handler that
+    // overruns is cancelled and the client gets `operation-timed-out`
+    // (util/exception.clj:462-465) instead of waiting forever
+    let timeout_ms = handle_receive_timeout_ms();
+    let result =
+        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), handler).await {
+            Ok(r) => r,
+            Err(_) => Err(InstantError::new(
+                "operation-timed-out",
+                500,
+                "Operation timed out: handle-receive",
+                Some(json!({"timeout-ms": timeout_ms})),
+            )),
+        };
     if let Err(e) = result {
         session.send(err_msg(&msg, &e));
     }
@@ -264,11 +328,13 @@ async fn handle_init(state: &Arc<AppState>, session: &Arc<Session>, msg: &Value)
             ));
         }
     }
-    let app_id = msg
-        .get("app-id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| InstantError::param_missing("missing app-id"))?;
+    let app_id = match msg.get("app-id") {
+        None | Some(Value::Null) => return Err(param_missing_at(&["app-id"])),
+        Some(v) => v
+            .as_str()
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or_else(|| param_malformed_at(&["app-id"], v))?,
+    };
     let app = service::get_app(state, app_id).await?;
 
     let mut user: Option<SessionUser> = None;
@@ -281,16 +347,21 @@ async fn handle_init(state: &Arc<AppState>, session: &Arc<Session>, msg: &Value)
                 });
             }
             None => {
+                // legacy app-user-model/get-by-refresh-token! (exception.clj:130-135)
                 return Err(InstantError::record_not_found(
                     "app-user",
-                    "Could not find user for refresh token.",
+                    "Record not found: app-user",
                 ));
             }
         }
     }
     let mut admin = false;
     if let Some(token) = msg.get("__admin-token").and_then(|v| v.as_str()) {
+        // legacy app-admin-token-model/fetch! asserts the record (session.clj:167-170)
         admin = crate::auth::check_admin_token(state, app_id, token).await?;
+        if !admin {
+            return Err(crate::routes::admin::admin_token_not_found(app_id, token));
+        }
     }
 
     let attrs = service::load_attrs(state, app_id).await?;
@@ -328,13 +399,20 @@ async fn handle_init(state: &Arc<AppState>, session: &Arc<Session>, msg: &Value)
     Ok(())
 }
 
+/// Legacy `get-auth!` (session.clj:198-202).
+pub(crate) fn not_initialized() -> InstantError {
+    InstantError::validation_failed(
+        "init",
+        "`init` has not run for this session.",
+        json!([{"message": "`init` has not run for this session."}]),
+    )
+}
+
 async fn session_ctx(
     session: &Arc<Session>,
 ) -> std::result::Result<(Uuid, PermsCtx), InstantError> {
     let st = session.state.lock().await;
-    let app_id = st
-        .app_id
-        .ok_or_else(|| InstantError::param_malformed("session not initialized"))?;
+    let app_id = st.app_id.ok_or_else(not_initialized)?;
     Ok((
         app_id,
         PermsCtx {
@@ -376,10 +454,16 @@ async fn handle_add_query(
     msg: &Value,
 ) -> HandlerResult {
     let (app_id, perms) = session_ctx(session).await?;
-    let q = msg
-        .get("q")
-        .cloned()
-        .ok_or_else(|| InstantError::param_missing("missing q"))?;
+    let q = match msg.get("q") {
+        None | Some(Value::Null) => {
+            return Err(InstantError::validation_failed(
+                "add-query",
+                "Query can not be null.",
+                json!([{"message": "Query can not be null."}]),
+            ))
+        }
+        Some(q) => q.clone(),
+    };
     // legacy `(keyword (or return-type "join-rows"))`: only `tree` is
     // special, anything else renders join-rows (session.clj:249, query.clj:139-144)
     let tree = msg.get("return-type").and_then(|v| v.as_str()) == Some("tree");
@@ -513,16 +597,18 @@ struct AddQueryOkWire<'a> {
 }
 
 async fn handle_remove_query(session: &Arc<Session>, msg: &Value) -> HandlerResult {
-    if let Some(q) = msg.get("q") {
+    session_ctx(session).await?;
+    let q = msg.get("q").cloned().unwrap_or(Value::Null);
+    if !q.is_null() {
         let key = q.to_string();
         let mut st = session.state.lock().await;
         st.queries.remove(&key);
-        session.send(json!({
-            "op": "remove-query-ok",
-            "q": q,
-            "client-event-id": msg.get("client-event-id"),
-        }));
     }
+    session.send(json!({
+        "op": "remove-query-ok",
+        "q": q,
+        "client-event-id": msg.get("client-event-id"),
+    }));
     Ok(())
 }
 
@@ -532,9 +618,14 @@ async fn handle_transact(
     msg: &Value,
 ) -> HandlerResult {
     let (app_id, perms) = session_ctx(session).await?;
-    let steps = msg
-        .get("tx-steps")
-        .ok_or_else(|| InstantError::param_missing("missing tx-steps"))?;
+    let steps = msg.get("tx-steps").ok_or_else(|| {
+        InstantError::new(
+            "validation-failed",
+            400,
+            "Validation failed for tx-steps",
+            Some(json!({"data-type": "tx-steps", "errors": [{"expected": "coll?", "in": []}]})),
+        )
+    })?;
     let report = service::run_transact(state, app_id, &perms, steps).await?;
     session.send(json!({
         "op": "transact-ok",
@@ -553,10 +644,7 @@ async fn handle_join_room(
     msg: &Value,
 ) -> HandlerResult {
     let (app_id, _) = session_ctx(session).await?;
-    let room_id = msg
-        .get("room-id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| InstantError::param_missing("missing room-id"))?;
+    let room_id = required_str(msg, "room-id")?;
     let user = {
         let st = session.state.lock().await;
         st.user.as_ref().map(|u| json!({"id": u.id}))
@@ -595,10 +683,7 @@ async fn handle_leave_room(
     msg: &Value,
 ) -> HandlerResult {
     let (app_id, _) = session_ctx(session).await?;
-    let room_id = msg
-        .get("room-id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| InstantError::param_missing("missing room-id"))?;
+    let room_id = required_str(msg, "room-id")?;
     crate::presence::leave_room(state, app_id, room_id, session.id).await?;
     {
         let mut st = session.state.lock().await;
@@ -618,10 +703,7 @@ async fn handle_set_presence(
     msg: &Value,
 ) -> HandlerResult {
     let (app_id, _) = session_ctx(session).await?;
-    let room_id = msg
-        .get("room-id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| InstantError::param_missing("missing room-id"))?;
+    let room_id = required_str(msg, "room-id")?;
     assert_in_room(session, room_id).await?;
     let data = msg.get("data").cloned().unwrap_or(json!({}));
     crate::presence::set_presence(state, app_id, room_id, session.id, data).await?;
@@ -655,10 +737,7 @@ async fn handle_client_broadcast(
     msg: &Value,
 ) -> HandlerResult {
     let (app_id, _) = session_ctx(session).await?;
-    let room_id = msg
-        .get("room-id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| InstantError::param_missing("missing room-id"))?;
+    let room_id = required_str(msg, "room-id")?;
     assert_in_room(session, room_id).await?;
     let user = {
         let st = session.state.lock().await;

@@ -13,6 +13,24 @@ use uuid::Uuid;
 use crate::service;
 use crate::state::{AppState, Session};
 
+/// Legacy `ex/get-param!` error shapes (util/exception.clj:410-428).
+fn param_missing_at(path: &[&str]) -> InstantError {
+    InstantError::new(
+        "param-missing",
+        400,
+        format!("Missing parameter: {}", json!(path)),
+        Some(json!({"in": path})),
+    )
+}
+fn param_malformed_at(path: &[&str], input: &Value) -> InstantError {
+    InstantError::new(
+        "param-malformed",
+        400,
+        format!("Malformed parameter: {}", json!(path)),
+        Some(json!({"in": path, "original-input": input})),
+    )
+}
+
 /// blob key for a stream's bytes (prefix keeps it apart from $files blobs)
 fn stream_key(stream_id: Uuid) -> String {
     format!("stream-{stream_id}")
@@ -63,6 +81,7 @@ async fn check_stream_perm(
     session: &Arc<Session>,
     action: &str,
     rule_params: Option<&Value>,
+    stream: Option<Uuid>,
 ) -> Result<()> {
     let (admin, user_id) = {
         let st = session.state.lock().await;
@@ -85,9 +104,20 @@ async fn check_stream_perm(
     } else {
         Value::Null
     };
+    // the rule's `data` is the $streams row when there is one (legacy binds
+    // the fetched stream for view checks, session.clj:897-908)
+    let data = match stream {
+        Some(sid) => {
+            instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$streams", sid)
+                .await?
+                .map(Value::Object)
+                .unwrap_or_else(|| json!({}))
+        }
+        None => json!({}),
+    };
     let ok = instant_core::perms::eval_program(
         &program,
-        &json!({}),
+        &data,
         None,
         &auth_val,
         rule_params.unwrap_or(&json!({})),
@@ -110,22 +140,54 @@ pub async fn handle_start_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id
-            .ok_or_else(|| InstantError::param_malformed("session not initialized"))?
+        st.app_id.ok_or_else(crate::ws::not_initialized)?
     };
     let client_id = msg
         .get("client-id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| InstantError::param_missing("missing client-id"))?;
-    let reconnect_token = msg.get("reconnect-token").and_then(|v| v.as_str());
-    check_stream_perm(state, app_id, session, "create", msg.get("rule-params")).await?;
+    // legacy `ex/get-param! event [:reconnect-token] uuid-util/coerce`
+    // (session.clj:767-769): the token is required, so every stream has a
+    // hashed token and resuming under an existing client-id always proves
+    // knowledge of it. Optional here would let a second session take over
+    // a token-less stream by replaying its client-id.
+    let reconnect_token = match msg.get("reconnect-token") {
+        None | Some(Value::Null) => {
+            return Err(InstantError::new(
+                "param-missing",
+                400,
+                "Missing parameter: [\"reconnect-token\"]",
+                Some(json!({"in": ["reconnect-token"]})),
+            ))
+        }
+        Some(v) => match v.as_str().and_then(|s| Uuid::parse_str(s).ok()) {
+            Some(u) => u.to_string(),
+            None => {
+                return Err(InstantError::new(
+                    "param-malformed",
+                    400,
+                    "Malformed parameter: [\"reconnect-token\"]",
+                    Some(json!({"in": ["reconnect-token"], "original-input": v})),
+                ))
+            }
+        },
+    };
+    check_stream_perm(
+        state,
+        app_id,
+        session,
+        "create",
+        msg.get("rule-params"),
+        None,
+    )
+    .await?;
 
     let existing = stream_by_client_id(state, app_id, client_id).await?;
     let (stream_id, offset) = match existing {
         Some(sid) => {
             // resume: reconnect token must match (legacy session.clj:776-786)
             let stored = stream_field(state, app_id, sid, "hashedReconnectToken").await;
-            let supplied_hash = reconnect_token.map(crate::auth::hash_string);
+            let supplied_hash = Some(crate::auth::hash_string(&reconnect_token));
             if stored.as_ref().and_then(|v| v.as_str()) != supplied_hash.as_deref() {
                 let m = "A stream with that clientId already exists. Reconnect token is invalid.";
                 return Err(InstantError::validation_failed(
@@ -170,14 +232,12 @@ pub async fn handle_start_stream(
                 json!(["add-triple", sid, sc::attr_id("$streams", "size"), 0]),
                 json!(["add-triple", sid, sc::attr_id("$streams", "done"), false]),
             ];
-            if let Some(t) = reconnect_token {
-                steps.push(json!([
-                    "add-triple",
-                    sid,
-                    sc::attr_id("$streams", "hashedReconnectToken"),
-                    crate::auth::hash_string(t)
-                ]));
-            }
+            steps.push(json!([
+                "add-triple",
+                sid,
+                sc::attr_id("$streams", "hashedReconnectToken"),
+                crate::auth::hash_string(&reconnect_token)
+            ]));
             service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
             (sid, 0)
         }
@@ -204,8 +264,7 @@ pub async fn handle_append_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id
-            .ok_or_else(|| InstantError::param_malformed("session not initialized"))?
+        st.app_id.ok_or_else(crate::ws::not_initialized)?
     };
     let stream_id = msg
         .get("stream-id")
@@ -222,25 +281,54 @@ pub async fn handle_append_stream(
             ));
         }
     }
-    let chunks: Vec<String> = msg
-        .get("chunks")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
+    // legacy `ex/get-param!` on chunks (a vector of strings) and offset
+    let chunks: Vec<String> = match msg.get("chunks") {
+        None | Some(Value::Null) => return Err(param_missing_at(&["chunks"])),
+        Some(v) => match v.as_array() {
+            Some(a) if a.iter().all(|c| c.is_string()) => a
+                .iter()
                 .filter_map(|c| c.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let offset = msg.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
+                .collect(),
+            _ => return Err(param_malformed_at(&["chunks"], v)),
+        },
+    };
+    let offset = match msg.get("offset") {
+        None | Some(Value::Null) => return Err(param_missing_at(&["offset"])),
+        Some(v) => v
+            .as_i64()
+            .filter(|n| *n >= 0)
+            .ok_or_else(|| param_malformed_at(&["offset"], v))?,
+    };
     let done = msg.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
     let abort_reason = msg.get("abort-reason").and_then(|v| v.as_str());
 
+    // legacy app-stream-model/append (app_stream.clj:444-457)
+    if stream_field(state, app_id, stream_id, "done")
+        .await
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(InstantError::validation_failed(
+            "append-stream",
+            "Stream is completed.",
+            json!([{"message": "Stream is completed."}]),
+        ));
+    }
     let content = chunks.concat();
     let bytes = content.as_bytes();
     let prev_size = crate::storage::blob_size(state, app_id, &stream_key(stream_id)).await;
+    if prev_size != offset {
+        return Err(InstantError::validation_failed(
+            "append-stream",
+            "Invalid offset for stream.",
+            json!([{"message": "Invalid offset for stream.", "expected-offset": offset, "offset": prev_size}]),
+        ));
+    }
     let new_size =
         crate::storage::append_blob(state, app_id, &stream_key(stream_id), offset, bytes).await?;
-    let new_bytes_len = (new_size - prev_size).max(0) as usize;
+    // two writers racing on one stream can make prev_size stale; never
+    // slice past what this append actually carried
+    let new_bytes_len = ((new_size - prev_size).max(0) as usize).min(bytes.len());
     let new_bytes = if new_bytes_len == 0 {
         &[] as &[u8]
     } else {
@@ -314,8 +402,7 @@ pub async fn handle_subscribe_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id
-            .ok_or_else(|| InstantError::param_malformed("session not initialized"))?
+        st.app_id.ok_or_else(crate::ws::not_initialized)?
     };
     // legacy validates params before perms (session.clj:889-896 missing ids,
     // :928-931 missing stream)
@@ -336,7 +423,6 @@ pub async fn handle_subscribe_stream(
             json!([{"message": m}]),
         ));
     }
-    check_stream_perm(state, app_id, session, "view", msg.get("rule-params")).await?;
     let stream_id = match msg.get("stream-id").and_then(|v| v.as_str()) {
         Some(s) => {
             Uuid::parse_str(s).map_err(|_| InstantError::param_malformed("malformed stream-id"))?
@@ -352,6 +438,15 @@ pub async fn handle_subscribe_stream(
     if stream_field(state, app_id, stream_id, "id").await.is_none() {
         return Err(missing_stream());
     }
+    check_stream_perm(
+        state,
+        app_id,
+        session,
+        "view",
+        msg.get("rule-params"),
+        Some(stream_id),
+    )
+    .await?;
     let subscribe_event_id = msg
         .get("client-event-id")
         .and_then(|v| v.as_str())
@@ -427,10 +522,20 @@ pub async fn handle_unsubscribe_stream(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    let mut removed = false;
     state.stream_subs.iter_mut().for_each(|mut e| {
+        let before = e.value().len();
         e.value_mut()
             .retain(|(sid, ev)| !(*sid == session.id && *ev == target));
+        removed |= e.value().len() != before;
     });
+    if !removed {
+        return Err(InstantError::validation_failed(
+            "unsubscribe-stream",
+            "Stream subscription is missing.",
+            json!([{"message": "Stream subscription is missing."}]),
+        ));
+    }
     Ok(())
 }
 

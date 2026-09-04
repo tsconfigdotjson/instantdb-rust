@@ -5,9 +5,30 @@ import http from "node:http";
 import crypto from "node:crypto";
 
 const appId = process.argv[2];
-if (!appId) throw new Error("usage: node oauth-test.mjs <app-id>");
+const adminToken = process.argv[3]; // optional: enables the linkedPrimaryUser check
+if (!appId) throw new Error("usage: node oauth-test.mjs <app-id> [<admin-token>]");
 const SERVER = "http://localhost:8888";
 const PROVIDER_PORT = 9377;
+
+// RSA keypair for the signed id_token path (/runtime/oauth/id_token verifies
+// signatures against the provider's JWKS; the code-exchange path only decodes)
+const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+const jwk = { ...publicKey.export({ format: "jwk" }), kid: "k1", use: "sig", alg: "RS256" };
+const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+const signJwt = (claims, alg = "RS256") => {
+  const input = `${b64({ alg, typ: "JWT", kid: "k1" })}.${b64(claims)}`;
+  const sig = crypto.sign("sha256", Buffer.from(input), privateKey).toString("base64url");
+  return `${input}.${sig}`;
+};
+const claimsFor = (sub, email) => ({
+  iss: `http://localhost:${PROVIDER_PORT}`,
+  sub,
+  email,
+  email_verified: true,
+  aud: "mock-client-id",
+  iat: Math.floor(Date.now() / 1000),
+  exp: Math.floor(Date.now() / 1000) + 3600,
+});
 
 const assert = (cond, msg) => {
   if (!cond) throw new Error("ASSERT FAILED: " + msg);
@@ -26,8 +47,12 @@ const provider = http.createServer((req, res) => {
         authorization_endpoint: `http://localhost:${PROVIDER_PORT}/authorize`,
         token_endpoint: `http://localhost:${PROVIDER_PORT}/token`,
         jwks_uri: `http://localhost:${PROVIDER_PORT}/jwks`,
+        id_token_signing_alg_values_supported: ["RS256"],
       }),
     );
+  } else if (url.pathname === "/jwks") {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ keys: [jwk] }));
   } else if (url.pathname === "/token") {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -120,6 +145,78 @@ const token2 = await fetch(`${SERVER}/runtime/oauth/token`, {
 }).then((r) => r.json());
 assert(token2.created === false, "second login reuses user");
 assert(token2.user.id === tokenBody.user.id, "same user id");
+
+// --- Origin must be an authorized redirect origin on the token exchange ---
+const freshCode = async () => {
+  const s = await fetch(startUrl, { redirect: "manual" });
+  const st = new URL(s.headers.get("location")).searchParams.get("state");
+  const ck = s.headers.get("set-cookie").split(";")[0];
+  const cb = await fetch(`${SERVER}/runtime/oauth/callback?state=${st}&code=${issued.code}`, { redirect: "manual", headers: { cookie: ck } });
+  return new URL(cb.headers.get("location")).searchParams.get("code");
+};
+const exchange = (code, headers = {}, extra = {}) =>
+  fetch(`${SERVER}/runtime/oauth/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify({ app_id: appId, code, ...extra }),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+const evil = await exchange(await freshCode(), { origin: "https://evil.example" });
+assert(evil.status === 400 && evil.body.type === "validation-failed", "token exchange from an unauthorized Origin is refused");
+assert(evil.body.message === "Validation failed for origin: Unauthorized origin.", "legacy origin message");
+const good = await exchange(await freshCode(), { origin: "http://localhost:5173" });
+assert(good.status === 200 && good.body.user.id === tokenBody.user.id, "token exchange from the authorized Origin works");
+
+// --- redirect_uri must be an authorized origin (no implicit localhost) ---
+const badStart = await fetch(
+  `${SERVER}/runtime/oauth/start?app_id=${appId}&client_name=mock&redirect_uri=${encodeURIComponent("http://localhost:9999/app")}`,
+  { redirect: "manual" },
+);
+assert(badStart.status === 400, "an unlisted redirect_uri is refused, localhost included");
+
+// --- id_token sign-in: signature verified against the JWKS, alg gated by discovery ---
+const idTokenCall = (body, headers = {}) =>
+  fetch(`${SERVER}/runtime/oauth/id_token`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify({ app_id: appId, client_name: "mock", ...body }),
+  }).then(async (r) => ({ status: r.status, body: await r.json() }));
+const es = await idTokenCall({ id_token: signJwt(claimsFor("mock-sub-42", "oauth-user@example.com"), "ES256") });
+assert(es.status === 400 && es.body.type === "oauth-error", "an algorithm the discovery document doesn't list is refused");
+assert(es.body.error === "The id_token used an unsupported algorithm.", "unsupported-alg message");
+const forged = signJwt(claimsFor("mock-sub-42", "oauth-user@example.com")).replace(/\.[^.]+$/, ".AAAA");
+const bad = await idTokenCall({ id_token: forged });
+assert(bad.status === 400 && bad.body.type === "oauth-error", "a bad signature is refused");
+const evilOrigin = await idTokenCall({ id_token: signJwt(claimsFor("mock-sub-42", "oauth-user@example.com")) }, { origin: "https://evil.example" });
+assert(evilOrigin.status === 400 && evilOrigin.body.type === "validation-failed", "id_token sign-in from an unauthorized Origin is refused");
+const signed = await idTokenCall({ id_token: signJwt(claimsFor("mock-sub-42", "oauth-user@example.com")) }, { origin: "http://localhost:5173" });
+assert(signed.status === 200 && signed.body.user.id === tokenBody.user.id, "a signed id_token signs the linked user in");
+
+// --- guests upgrade through OAuth: a fresh email keeps the guest id ---
+const signInGuest = () =>
+  fetch(`${SERVER}/runtime/auth/sign_in_guest`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ "app-id": appId }),
+  }).then((r) => r.json());
+const guest = (await signInGuest()).user;
+const up = await idTokenCall({ id_token: signJwt(claimsFor("sub-guest-1", "guest-oauth@example.com")), refresh_token: guest.refresh_token });
+assert(up.status === 200 && up.body.user.id === guest.id && up.body.created === true, "guest upgraded in place for a new email");
+// ...and an existing account gets the guest linked to it
+const guest2 = (await signInGuest()).user;
+const linked = await exchange(await freshCode(), {}, { refresh_token: guest2.refresh_token });
+assert(linked.status === 200 && linked.body.user.id === tokenBody.user.id, "guest signing into an existing account gets that account");
+if (adminToken) {
+  const users = await fetch(`${SERVER}/admin/query`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "app-id": appId, authorization: `Bearer ${adminToken}` },
+    // linkedPrimaryUser is a link ($users.linkedPrimaryUser -> $users), so it
+    // renders as a child form in the object tree
+    body: JSON.stringify({ query: { $users: { $: { where: { id: guest2.id } }, linkedPrimaryUser: {} } } }),
+  }).then((r) => r.json());
+  const primary = users.$users?.[0]?.linkedPrimaryUser;
+  const primaryId = Array.isArray(primary) ? primary[0]?.id : primary?.id;
+  assert(primaryId === tokenBody.user.id, "guest row points at the primary user (linkedPrimaryUser)");
+}
 
 // --- verify the refresh token works on the runtime endpoint ---
 const verify = await fetch(`${SERVER}/runtime/auth/verify_refresh_token`, {

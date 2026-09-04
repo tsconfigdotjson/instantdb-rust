@@ -743,7 +743,7 @@ await expectError(
 // ops before init
 const cold = connect("COLD");
 await cold.open;
-await expectError(cold, { op: "add-query", q: { x: {} } }, { type: "param-malformed" }, "add-query before init");
+await expectError(cold, { op: "add-query", q: { x: {} } }, { type: "validation-failed", message: "Validation failed for init: `init` has not run for this session." }, "add-query before init");
 cold.close();
 
 // --- add-query routes (errors route to subscribers via original-event.q)

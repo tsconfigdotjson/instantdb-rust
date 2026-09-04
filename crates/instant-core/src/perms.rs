@@ -50,27 +50,23 @@ impl Rules {
                 Value::Bool(b) => b.to_string(),
                 _ => continue,
             };
-            let mut binds = vec![];
-            if let Some(Value::Array(b)) = ns.get("bind") {
-                let mut i = 0;
-                while i + 1 < b.len() {
-                    if let (Some(name), Some(expr)) = (b[i].as_str(), b[i + 1].as_str()) {
-                        binds.push((name.to_string(), expr.to_string()));
-                    }
-                    i += 2;
-                }
-            }
-            return Some((expr_str, binds));
+            // legacy `with-binds` (rule.clj:139-142): every rule sees
+            // `$default.bind` followed by the *requested* etype's binds,
+            // whichever namespace the allow expression came from
+            return Some((expr_str, self.binds_of(etype)));
         }
         None
     }
 
+    /// `$default.bind` ++ `<etype>.bind`, each in array (`[k v k v]`) or
+    /// object (`{k: v}`) form (rule.clj:100-111 `normalize-bind`).
     fn binds_of(&self, etype: &str) -> Vec<(String, String)> {
         let mut binds = vec![];
-        if let Some(Value::Array(b)) = self.code.get(etype).and_then(|ns| ns.get("bind")) {
+        for ns in ["$default", etype] {
+            let flat = normalize_bind(self.code.get(ns).and_then(|n| n.get("bind")));
             let mut i = 0;
-            while i + 1 < b.len() {
-                if let (Some(name), Some(expr)) = (b[i].as_str(), b[i + 1].as_str()) {
+            while i + 1 < flat.len() {
+                if let (Some(name), Some(expr)) = (flat[i].as_str(), flat[i + 1].as_str()) {
                     binds.push((name.to_string(), expr.to_string()));
                 }
                 i += 2;
@@ -92,6 +88,7 @@ impl Rules {
                     _ => continue,
                 };
                 return Some(Program {
+                    rule: None,
                     expr,
                     binds: self.binds_of(etype),
                 });
@@ -109,6 +106,7 @@ impl Rules {
             _ => return None,
         };
         Some(Program {
+            rule: None,
             expr,
             binds: self.binds_of(etype),
         })
@@ -126,7 +124,11 @@ impl Rules {
     /// Effective program for etype+action: falls back to system defaults.
     pub fn program(&self, etype: &str, action: &str) -> Program {
         if let Some((expr, binds)) = self.rule_source(etype, action) {
-            return Program { expr, binds };
+            return Program {
+                expr,
+                binds,
+                rule: Some((etype.to_string(), action.to_string())),
+            };
         }
         // System defaults
         if etype == "$users" {
@@ -142,17 +144,20 @@ impl Rules {
             return Program {
                 expr: expr.to_string(),
                 binds: vec![],
+                rule: Some((etype.to_string(), action.to_string())),
             };
         }
         if etype.starts_with('$') {
             return Program {
                 expr: "false".to_string(),
                 binds: vec![],
+                rule: Some((etype.to_string(), action.to_string())),
             };
         }
         Program {
             expr: "true".to_string(),
             binds: vec![],
+            rule: Some((etype.to_string(), action.to_string())),
         }
     }
 }
@@ -161,6 +166,9 @@ impl Rules {
 pub struct Program {
     pub expr: String,
     pub binds: Vec<(String, String)>,
+    /// `[etype action]` for legacy's `permission-evaluation-failed` hint;
+    /// None for ad-hoc programs.
+    pub rule: Option<(String, String)>,
 }
 
 impl Program {
@@ -567,6 +575,27 @@ pub async fn eval_program_full(
     // rule-wheres path (instaql.clj check-rate-limits-for-rule-wheres).
     consume_rate_limits(env, &calls).await?;
     Ok(ok)
+}
+
+/// Legacy `throw-permission-evaluation-failed!` (util/exception.clj:299-323)
+/// for an app admin session (`show-cel-errors?`): the CEL message is echoed.
+pub fn permission_evaluation_failed(program: &Program, cause: &str) -> InstantError {
+    let (etype, action) = program
+        .rule
+        .clone()
+        .unwrap_or_else(|| ("?".to_string(), "?".to_string()));
+    let message = format!(
+        "Could not evaluate permission rule for `{etype}.{action}`. {cause}. Debug this in the sandbox and then update your permission rules."
+    );
+    InstantError::new(
+        "permission-evaluation-failed",
+        400,
+        message.clone(),
+        Some(json!({
+            "rule": [etype, action],
+            "error": {"type": "evaluation-error", "message": message, "hint": cause},
+        })),
+    )
 }
 
 /// A `rateLimit.<name>.limit(key[, tokens])` call recorded during evaluation.
@@ -1008,10 +1037,21 @@ pub fn eval_program_pure(
     }
 
     let main = fold(&compiled);
+    // legacy `assert-permitted!` (util/exception.clj:291-297) tests the CEL
+    // result with Clojure truthiness: only false/null deny. An evaluation
+    // error is `permission-evaluation-failed` (exception.clj:299-323), not a
+    // silent deny, so a typo in a rule surfaces instead of hiding data.
     let verdict = match cel::Value::resolve(&main, &ctx) {
         Ok(cel::Value::Bool(b)) => b,
-        Ok(_) => false,
-        Err(_) => false,
+        Ok(cel::Value::Null) => false,
+        Ok(_) => true,
+        Err(e) => {
+            // legacy shows the CEL message only with `show-cel-errors?`
+            // (plain admin HTTP calls, which never evaluate rules); every
+            // session that reaches here sees "You may have a typo"
+            tracing::debug!(rule = ?program.rule, error = %e, "permission rule evaluation failed");
+            return Err(permission_evaluation_failed(program, "You may have a typo"));
+        }
     };
     let calls = std::mem::take(&mut *calls.lock().unwrap());
     Ok((verdict, calls))
@@ -1991,6 +2031,7 @@ mod tests {
         let program = Program {
             expr: expr.to_string(),
             binds: vec![],
+            rule: None,
         };
         let rules = Rules { code: json!({}) };
         let request = RequestCtx::default();
@@ -2057,13 +2098,27 @@ mod tests {
             Value::Null,
             json!({})
         ));
-        // chained access through a null value still denies (legacy errors too)
-        assert!(!eval(
-            "data.missing.b == null",
-            json!({}),
-            Value::Null,
-            json!({})
-        ));
+        // chained access through a null value is an evaluation error, like
+        // legacy's permission-evaluation-failed (never a silent deny)
+        let program = Program {
+            expr: "data.missing.b == null".to_string(),
+            binds: vec![],
+            rule: Some(("t".to_string(), "view".to_string())),
+        };
+        let rules = Rules { code: json!({}) };
+        let request = RequestCtx::default();
+        let env = EvalEnv::new(Uuid::nil(), &rules, &request);
+        let err = eval_program_pure(
+            &program,
+            &json!({}),
+            None,
+            &Value::Null,
+            &json!({}),
+            None,
+            &env,
+        )
+        .unwrap_err();
+        assert_eq!(err.error_type, "permission-evaluation-failed");
     }
 
     #[test]
@@ -2085,6 +2140,7 @@ mod tests {
                 "isOwner".to_string(),
                 "data.creatorTypo == auth.id".to_string(),
             )],
+            rule: None,
         };
         let rules = Rules { code: json!({}) };
         let request = RequestCtx::default();

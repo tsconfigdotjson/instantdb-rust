@@ -17,7 +17,7 @@
   {
     "path": "^dash:23-errors/badAttr$",
     "reason": "An add-attr step whose attr map is garbage (`{id: \"x\"}`) reaches the legacy SQL layer and surfaces as a 500 `sql-exception`; this server rejects it as a 400 `validation-failed` on parse. The CLI never sends such a step (its steps come from @instantdb/platform convertTxSteps) and only prints `message` on failure either way.",
-    "citation": "LEGACY/client/packages/cli/src/lib/http.ts:67-101 (error body \u2192 message); LEGACY/client/packages/platform/src/migrations.ts:230-252"
+    "citation": "LEGACY/client/packages/cli/src/lib/http.ts:67-101 (error body → message); LEGACY/client/packages/platform/src/migrations.ts:230-252"
   },
   {
     "path": "^dash:24-admin-ref-lookups/queryAfterDelete$",
@@ -27,5 +27,10 @@
   {
     "path": "^storage:07-admin-deprecated-routes/list$",
     "reason": "Legacy's deprecated GET /admin/storage/files (db.storage.list) 500s on the self-hosted image (files-get re-dispatches the GET request into query-post with no JSON body, admin/routes.clj:719-737); this server returns the documented StorageFile list (key = S3 object key, name, size, etag/last_modified null). The SDK method is deprecated in favor of querying $files."
+  },
+  {
+    "path": "^step:28-admin-http-gates/HTTP_ROUTING$",
+    "reason": "Unmatched /admin paths and wrong methods: the self-hosted legacy image answers with HTTP 200 and a non-JSON body (observed in the differential replay; its core.clj not-found handler with the JSON `Oops! We couldn't match this route.` body is not what the image serves). This server returns that JSON 404, which is what the CLI's error path parses.",
+    "citation": "LEGACY/server/src/instant/core.clj:189-190; LEGACY/client/packages/cli/src/lib/http.ts:71-90 (JSON error body -> message, else generic failure text)"
   }
 ]

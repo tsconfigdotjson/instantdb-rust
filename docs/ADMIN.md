@@ -61,6 +61,18 @@ Exact header names (`admin/routes.clj:78-111`; SDK side `admin/src/index.ts:202-
 
 Precedence: `as-token` > `as-email` > `as-guest` > admin.
 
+Only the routes that call `get-perms!` honor these headers: `/admin/query`,
+`/admin/transact`, `/admin/sse`, `/admin/sse/push`, `/admin/subscribe-query`,
+`PUT /admin/storage/upload`, `DELETE /admin/storage/files` and
+`POST /admin/storage/files/delete`. Every other `/admin/*` route calls
+`req->app-id-authed!` directly (`admin/routes.clj:396-772`): the bearer admin
+token is required and the `as-*` headers are ignored. The two perms-check
+routes require the admin token *and then* honor the headers
+(`routes.clj:220-221`, `:325-326`). The Rust server mirrors this split
+(`authed` / `authed_admin` / `authed_admin_then_impersonating` in
+`routes/admin.rs`); an app id alone must never mint refresh tokens, read magic
+codes or delete users.
+
 The SDK also always sends `content-type: application/json`, plus
 `Instant-Admin-Version` and `Instant-Core-Version` (e.g. `v0.21.x`) on every request
 (`index.ts:299-316`). The server only logs these (`util/http.clj:92-115`); don't require
@@ -668,7 +680,8 @@ CLI by `scripts/cli-test.mjs`.
    `hint` with the casings above (kebab-case keys, `?`-suffixed booleans).
 2. `app-id` header + `app_id` query param must both be accepted; header wins.
 3. Admin-token auth failures are **400 record-not-found**, not 401/403.
-4. `as-token` / `as-guest` must work **without** any admin token.
+4. `as-token` / `as-guest` must work **without** any admin token on the
+   `get-perms!` routes listed in §1.3, and must be ignored everywhere else.
 5. `/admin/query` responses: plain object tree, string keys, arrays unless
    `inference?`+singular link; entities always include `id`; `$files` rows get `url`.
 6. `/admin/transact` must accept the full steps grammar of `admin/model.clj`

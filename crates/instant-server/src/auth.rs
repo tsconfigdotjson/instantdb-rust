@@ -194,6 +194,79 @@ pub async fn sign_out(
     Ok(())
 }
 
+/// `$users.type` of a user, when set.
+pub async fn user_type(state: &AppState, app_id: Uuid, user_id: Uuid) -> Result<Option<String>> {
+    let row = sqlx::query(
+        "SELECT value FROM triples WHERE app_id = $1 AND entity_id = $2 AND attr_id = $3 LIMIT 1",
+    )
+    .bind(app_id)
+    .bind(user_id)
+    .bind(sc::attr_id("$users", "type"))
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(InstantError::from)?;
+    Ok(row.and_then(|r| r.get::<Value, _>("value").as_str().map(|s| s.to_string())))
+}
+
+/// A guest user for a refresh token, if the token belongs to one
+/// (legacy runtime/routes.clj:99-104 `(when (= "guest" (:type user)) user)`).
+pub async fn guest_by_refresh_token(
+    state: &AppState,
+    app_id: Uuid,
+    token: &str,
+) -> Result<Option<AppUser>> {
+    let Some(user) = user_by_refresh_token(state, app_id, token).await? else {
+        return Ok(None);
+    };
+    Ok((user_type(state, app_id, user.id).await?.as_deref() == Some("guest")).then_some(user))
+}
+
+/// Legacy `assert-signup!` / `assert-create-permission!` (model/app_user.clj:51-85):
+/// when the app defines `$users.allow.create` (that exact path — no
+/// `$default` fallback), a new user must pass it. `data`, `newData` and
+/// `auth` are all the prospective user `{id, email}`.
+pub async fn assert_signup(
+    state: &AppState,
+    app_id: Uuid,
+    user_id: Uuid,
+    email: Option<&str>,
+) -> Result<()> {
+    let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
+    let rules = instant_core::perms::Rules::load(&mut conn, app_id).await?;
+    let defined = rules
+        .code
+        .get("$users")
+        .and_then(|ns| ns.get("allow"))
+        .and_then(|a| a.get("create"))
+        .is_some();
+    if !defined {
+        return Ok(());
+    }
+    let program = rules.program("$users", "create");
+    let mut user_data = json!({"id": user_id});
+    if let Some(email) = email {
+        user_data["email"] = json!(email);
+    }
+    let request = instant_core::perms::RequestCtx::default().with_pool(state.pool.clone());
+    let env = instant_core::perms::EvalEnv::new(app_id, &rules, &request);
+    let ok = instant_core::perms::eval_program(
+        &program,
+        &user_data,
+        Some(&user_data),
+        &user_data,
+        &json!({}),
+        &env,
+    )
+    .await?;
+    if !ok {
+        return Err(InstantError::permission_denied(
+            json!(["$users", "create"]),
+            "Permission denied: not perms-pass?",
+        ));
+    }
+    Ok(())
+}
+
 /// Verify an admin token for an app.
 pub async fn check_admin_token(state: &AppState, app_id: Uuid, token: &str) -> Result<bool> {
     let Ok(token) = Uuid::parse_str(token) else {

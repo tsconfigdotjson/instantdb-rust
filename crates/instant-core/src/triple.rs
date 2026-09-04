@@ -84,6 +84,10 @@ pub struct LookupResolver {
     pub resolved: HashMap<(Uuid, CanonicalValue), Uuid>,
     /// entities created by lookup upserts in this tx
     pub created: HashSet<Uuid>,
+    /// legacy validates lookup namespaces only on the non-admin path
+    /// (permissioned_transaction.clj:683-687); admins fall through to the
+    /// plain "does not exist" lookup miss
+    pub validate_namespaces: bool,
 }
 
 impl Default for LookupResolver {
@@ -97,6 +101,7 @@ impl LookupResolver {
         LookupResolver {
             resolved: HashMap::new(),
             created: HashSet::new(),
+            validate_namespaces: false,
         }
     }
 
@@ -783,7 +788,10 @@ pub async fn validate_required(
                         "Missing required attribute `{}/{}`: {}",
                         etype, attr.label, eid
                     ),
-                    Some(json!({"data-type": "triples", "records": [eid]})),
+                    // legacy hint (triple.clj:227-235): the failing rows, no data-type
+                    Some(
+                        json!({"records": [{"entity_id": eid, "etype": etype, "label": attr.label}]}),
+                    ),
                 ));
             }
         }

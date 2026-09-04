@@ -106,8 +106,10 @@ jobs:
           cargo build -p instant-server
           PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/server1.log 2>&1 &
           PORT=8889 BASE_URL=http://localhost:8889 ./target/debug/instant-server > /tmp/server2.log 2>&1 &
+          # a node whose ws handlers always overrun (security-test.mjs timeout section)
+          INSTANT_HANDLE_RECEIVE_TIMEOUT_MS=1 PORT=8887 BASE_URL=http://localhost:8887 ./target/debug/instant-server > /tmp/server-timeout.log 2>&1 &
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:8888/health >/dev/null && curl -sf http://localhost:8889/health >/dev/null; then
+            if curl -sf http://localhost:8888/health >/dev/null && curl -sf http://localhost:8889/health >/dev/null && curl -sf http://localhost:8887/health >/dev/null; then
               echo "both nodes healthy"; exit 0
             fi
             sleep 1
@@ -120,7 +122,7 @@ jobs:
           APP_ID=$(grep '^app_id=' /tmp/app.txt | cut -d= -f2)
           ./scripts/create-oauth-client.sh "$APP_ID" mock mock-provider \
             mock-client-id mock-secret \
-            "http://localhost:9377/.well-known/openid-configuration" > /dev/null
+            "http://localhost:9377/.well-known/openid-configuration" localhost:5173 > /dev/null
           echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
           echo "ADMIN_TOKEN=$(grep '^admin_token=' /tmp/app.txt | cut -d= -f2)" >> "$GITHUB_ENV"
 
@@ -139,7 +141,9 @@ jobs:
       - name: "e2e: streams"
         run: node scripts/streams-test.mjs "$APP_ID"
       - name: "e2e: oauth (mock OIDC)"
-        run: node scripts/oauth-test.mjs "$APP_ID"
+        run: node scripts/oauth-test.mjs "$APP_ID" "$ADMIN_TOKEN"
+      - name: "e2e: security"
+        run: TIMEOUT_NODE_URL=http://localhost:8887 node scripts/security-test.mjs "$APP_ID" "$ADMIN_TOKEN"
       - name: "e2e: admin SDK"
         run: node scripts/admin-sdk-test.mjs "$APP_ID" "$ADMIN_TOKEN"
       - name: "e2e: multinode ws"
@@ -201,6 +205,7 @@ jobs:
         run: |
           echo "=== node 1 (:8888) ==="; cat /tmp/server1.log || true
           echo "=== node 2 (:8889) ==="; cat /tmp/server2.log || true
+          echo "=== timeout node (:8887) ==="; cat /tmp/server-timeout.log || true
           echo "=== s3 node 1 (:8898) ==="; cat /tmp/server-s3-1.log || true
           echo "=== s3 node 2 (:8899) ==="; cat /tmp/server-s3-2.log || true
           echo "=== s3 proxy node (:8897) ==="; cat /tmp/server-s3-proxy.log || true
