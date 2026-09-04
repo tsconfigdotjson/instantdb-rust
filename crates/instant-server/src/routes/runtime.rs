@@ -451,7 +451,7 @@ async fn framework_query_impl(
     service::assert_read_allowed(state, app_id).await?;
     let attrs = service::load_attrs(state, app_id).await?;
     let request = crate::ws::request_ctx_from_headers(headers);
-    let perms = instant_core::perms::PermsCtx {
+    let perms = service::PermsCtx {
         admin: false,
         user_id,
         user_map: None,

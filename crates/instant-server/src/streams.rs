@@ -232,14 +232,12 @@ pub async fn handle_start_stream(
                 json!(["add-triple", sid, sc::attr_id("$streams", "size"), 0]),
                 json!(["add-triple", sid, sc::attr_id("$streams", "done"), false]),
             ];
-            if let Some(t) = reconnect_token {
-                steps.push(json!([
-                    "add-triple",
-                    sid,
-                    sc::attr_id("$streams", "hashedReconnectToken"),
-                    crate::auth::hash_string(t)
-                ]));
-            }
+            steps.push(json!([
+                "add-triple",
+                sid,
+                sc::attr_id("$streams", "hashedReconnectToken"),
+                crate::auth::hash_string(&reconnect_token)
+            ]));
             service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
             (sid, 0)
         }
