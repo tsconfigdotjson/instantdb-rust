@@ -793,7 +793,7 @@ pub async fn insert<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid, attr: &Attr) -
                 400,
                 format!("`{}` already exists on `{}`", attr.label, attr.etype),
                 Some(json!({
-                    "record-type": "idents",
+                    "record-type": "ident",
                     "etype": attr.etype,
                     "label": attr.label,
                 })),

@@ -431,7 +431,7 @@ pub async fn transact(
                                 400,
                                 format!("`{}` already exists on `{}`", attr.label, attr.etype),
                                 Some(json!({
-                                    "record-type": "idents",
+                                    "record-type": "ident",
                                     "etype": attr.etype,
                                     "label": attr.label,
                                 })),

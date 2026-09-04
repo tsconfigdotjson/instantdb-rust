@@ -1093,7 +1093,7 @@ function buildScenario() {
           status: r.status,
           type: r.body?.type ?? null,
           message: r.body?.message ?? null,
-          ...(r.status >= 400 && !r.body ? { raw: String(r.raw ?? "").slice(0, 200) } : {}),
+          ...(!r.body ? { raw: String(r.raw ?? "").slice(0, 200) } : {}),
           ...extra,
         });
         const auth = { authorization: `Bearer ${adminToken}` };
@@ -1125,9 +1125,12 @@ function buildScenario() {
         rec(view("usersGetMiss", miss, { user: miss.body?.user ?? "<absent>" }));
         const missDel = await call("DELETE", "/admin/users?email=nobody-here@example.com", { headers: auth });
         rec(view("usersDeleteMiss", missDel, { deleted: missDel.body?.deleted ?? "<absent>" }));
-        // routing fallbacks
-        rec(view("unknownRoute", await call("GET", "/admin/no-such-route", { headers: auth })));
-        rec(view("wrongMethod", await call("GET", "/admin/query", { headers: auth })));
+        // routing fallbacks: compared on their own pseudo-connection because
+        // the self-hosted legacy image answers these with a 200 non-JSON body
+        // (allowed-divergences.json)
+        env.conns.HTTP_ROUTING = env.conns.HTTP_ROUTING ?? httpConn(`${env.serverName}:HTTP_ROUTING`);
+        env.conns.HTTP_ROUTING.record(view("unknownRoute", await call("GET", "/admin/no-such-route", { headers: auth })));
+        env.conns.HTTP_ROUTING.record(view("wrongMethod", await call("GET", "/admin/query", { headers: auth })));
         // SSR framework query: anonymous and with a refresh token
         const fq = await call("POST", "/runtime/framework/query", { body: { query: { secrets: {} } } });
         rec(view("frameworkQueryAnon", fq, { result: projectResult(fq.body?.result), attrCount: fq.body?.attrs ? Object.keys(projectAttrs(fq.body.attrs)).length : null }));
