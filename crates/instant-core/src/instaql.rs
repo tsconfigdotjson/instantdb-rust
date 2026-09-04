@@ -30,7 +30,7 @@ pub enum WhereOp {
     Not(Value),
     IsNull(bool),
     Cmp(&'static str, Value), // $gt $gte $lt $lte
-    Like(String, bool),       // pattern, case-insensitive?
+    Like(Value, bool), // pattern (validated at the leaf, where the attr is known), case-insensitive?
     EntityIdStartsWith(String),
 }
 
@@ -437,17 +437,7 @@ fn parse_where_value(v: &Value) -> Result<Vec<WhereOp>> {
                     "$gte" => WhereOp::Cmp(">=", val.clone()),
                     "$lt" => WhereOp::Cmp("<", val.clone()),
                     "$lte" => WhereOp::Cmp("<=", val.clone()),
-                    "$like" | "$ilike" => WhereOp::Like(
-                        val.as_str()
-                            .ok_or_else(|| {
-                                verr(format!(
-                                    "The {} value must be a string, but the query got the value `{}` of type `{}`.",
-                                    k, val, json_type_name(val)
-                                ))
-                            })?
-                            .to_string(),
-                        k == "$ilike",
-                    ),
+                    "$like" | "$ilike" => WhereOp::Like(val.clone(), k == "$ilike"),
                     other => return Err(verr(format!("Unsupported where operator `{other}`."))),
                 };
                 ops.push(op);
@@ -1009,13 +999,24 @@ impl<'a> SqlCtx<'a> {
                         t.as_str()
                     )));
                 }
+                // legacy assert-like-is-string! (attr_pat.clj:307-317), after
+                // the attr checks; the message says `$like` for `$ilike` too
+                let pattern = pattern.as_str().ok_or_else(|| {
+                    verr(format!(
+                        "The $like value for `{}.{}` must be a string, but the query got the value `{}` of type `{}`.",
+                        attr.etype,
+                        attr.label,
+                        pattern,
+                        json_type_name(pattern)
+                    ))
+                })?;
                 base(qb, false);
                 qb.push(format!(
                     "triples_extract_string_value({}.value) {} ",
                     alias,
                     if *ci { "ILIKE" } else { "LIKE" }
                 ));
-                qb.push_bind(pattern.clone());
+                qb.push_bind(pattern.to_string());
                 qb.push(format!(
                     " AND {}.checked_data_type = 'string'::checked_data_type)",
                     alias
@@ -1150,7 +1151,7 @@ enum LeafEmit {
     NotRaw(Value),
     IsNull(bool),
     Cmp(&'static str, Value),
-    Like(String, bool),
+    Like(Value, bool),
 }
 
 fn pad_uuid(prefix: &str, fill: char) -> Option<Uuid> {

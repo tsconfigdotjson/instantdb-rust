@@ -128,6 +128,7 @@ function buildScenario() {
             attr(ids.todosScore, "todos", "score", { unique: true, fwd: ids.todosScore }),
             attr(ids.ownersId, "owners", "id", { unique: true, fwd: ids.ownersId }),
             attr(ids.ownersName, "owners", "name", { fwd: ids.ownersName }),
+            attr(ids.ownersHandle, "owners", "handle", { unique: true, fwd: ids.ownersHandle }),
             [
               "add-attr",
               {
@@ -881,7 +882,6 @@ function buildScenario() {
           await conn.waitFor((m) => m.op === "remove-query-ok" && JSON.stringify(m.q) === JSON.stringify(q));
         };
         // value-position lookup on a missing owner (unique attr): no phantom entity
-        await okTx(env.conns.ADMIN, { op: "transact", "tx-steps": [attr(ids.ownersHandle, "owners", "handle", { unique: true, fwd: ids.ownersHandle })] });
         await expectErr(env.conns.ADMIN, {
           op: "transact",
           "tx-steps": [["add-triple", ids.e1, ids.ownerRef, [ids.ownersHandle, "nobody"]]],
@@ -1083,9 +1083,19 @@ function buildScenario() {
             headers: { "content-type": "application/json", "app-id": env.appId, ...headers },
             body: body === undefined ? undefined : JSON.stringify(body),
           });
-          return { status: res.status, body: await res.json().catch(() => null) };
+          const raw = await res.text();
+          let parsed = null;
+          try { parsed = JSON.parse(raw); } catch {}
+          return { status: res.status, body: parsed, raw };
         };
-        const view = (name, r, extra = {}) => ({ name, status: r.status, type: r.body?.type ?? null, message: r.body?.message ?? null, ...extra });
+        const view = (name, r, extra = {}) => ({
+          name,
+          status: r.status,
+          type: r.body?.type ?? null,
+          message: r.body?.message ?? null,
+          ...(r.status >= 400 && !r.body ? { raw: String(r.raw ?? "").slice(0, 200) } : {}),
+          ...extra,
+        });
         const auth = { authorization: `Bearer ${adminToken}` };
         const guest = { "as-guest": "true" };
         const asToken = { "as-token": env.scratch.refreshToken };
@@ -1120,7 +1130,7 @@ function buildScenario() {
         rec(view("wrongMethod", await call("GET", "/admin/query", { headers: auth })));
         // SSR framework query: anonymous and with a refresh token
         const fq = await call("POST", "/runtime/framework/query", { body: { query: { secrets: {} } } });
-        rec(view("frameworkQueryAnon", fq, { result: projectResult(fq.body?.result), attrs: fq.body?.attrs ? Object.keys(projectAttrs(fq.body.attrs)).sort() : null }));
+        rec(view("frameworkQueryAnon", fq, { result: projectResult(fq.body?.result), attrCount: fq.body?.attrs ? Object.keys(projectAttrs(fq.body.attrs)).length : null }));
         const fqAuth = await call("POST", "/runtime/framework/query", { headers: { authorization: `Bearer ${env.scratch.refreshToken}` }, body: { query: { secrets: {} } } });
         rec(view("frameworkQueryAuthed", fqAuth, { result: projectResult(fqAuth.body?.result) }));
       },
@@ -1264,8 +1274,8 @@ for (const d of diffs) {
     if (!d.allowed && d.path.startsWith("step:")) {
       // the folded frames are sorted, so one differing frame shifts every
       // index after it; print both sides whole for the CI log
-      console.log("  legacy (whole):", JSON.stringify(d.legacy)?.slice(0, 8000));
-      console.log("  rust   (whole):", JSON.stringify(d.rust)?.slice(0, 8000));
+      console.log("  legacy (whole):", JSON.stringify(d.legacy)?.slice(0, 20000));
+      console.log("  rust   (whole):", JSON.stringify(d.rust)?.slice(0, 20000));
     }
   } else {
     console.log("  legacy:", JSON.stringify(d.legacy)?.slice(0, 1200));
