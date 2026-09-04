@@ -1585,6 +1585,7 @@ impl<'a> PermsFilter<'a> {
 // ---------------------------------------------------------------------------
 // Permissioned transact
 
+#[allow(clippy::large_enum_variant)]
 enum Check {
     Create {
         etype: String,

@@ -823,7 +823,7 @@ pub async fn orgs_post(
             "INSERT INTO orgs (id, title) VALUES ($1, $2) RETURNING id, title, created_at, updated_at",
         )
         .bind(org_id)
-        .bind(&title)
+        .bind(title)
         .fetch_one(&mut *dbtx)
         .await?;
         sqlx::query("INSERT INTO org_members (id, org_id, user_id, role) VALUES ($1, $2, $3, 'owner')")
@@ -971,7 +971,7 @@ async fn system_entities(
           ORDER BY created_at, entity_id",
     )
     .bind(app_id)
-    .bind(&attr_ids)
+    .bind(attr_ids)
     .fetch_all(&state.pool)
     .await?;
     let mut order: Vec<Uuid> = vec![];
@@ -1497,8 +1497,8 @@ pub async fn origins_post(
         )
         .bind(id)
         .bind(app.id)
-        .bind(&service_name)
-        .bind(&strings)
+        .bind(service_name)
+        .bind(strings)
         .fetch_one(&state.pool)
         .await
         .map_err(|e| match &e {
@@ -1688,10 +1688,10 @@ pub async fn email_template_post(
         .bind(Uuid::new_v4())
         .bind(app.id)
         .bind(sender_id)
-        .bind(&email_type)
-        .bind(&subject)
-        .bind(&sender_name)
-        .bind(&template_body)
+        .bind(email_type)
+        .bind(subject)
+        .bind(sender_name)
+        .bind(template_body)
         .fetch_one(&state.pool)
         .await?;
         Ok(json!({"id": row.get::<Uuid, _>("id")}))

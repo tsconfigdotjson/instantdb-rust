@@ -1102,7 +1102,7 @@ async fn validate_modes(
         )
         .bind(app_id)
         .bind(ids)
-        .bind(&attr_ids)
+        .bind(attr_ids)
         .fetch_all(&mut *conn)
         .await?;
         for r in rows {
@@ -1177,10 +1177,8 @@ async fn validate_modes(
     }
     let missing_updates: Vec<(&TxStep, String)> = moded
         .iter()
-        .filter(|(_, _, _, mode)| *mode == WriteMode::Update)
-        .filter_map(|(s, eid, etype, _)| {
-            exists(eid, etype).is_none().then(|| (*s, shown(eid, None)))
-        })
+        .filter(|(_, eid, etype, mode)| *mode == WriteMode::Update && exists(eid, etype).is_none())
+        .map(|(s, eid, _, _)| (*s, shown(eid, None)))
         .collect();
     if !missing_updates.is_empty() {
         return Err(err(missing_updates, "Updating entities that don't exist: "));
