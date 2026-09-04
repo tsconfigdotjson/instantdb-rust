@@ -5,7 +5,8 @@
 //!   `lowerAscii`, `upperAscii`, `replace`, `split`, `substring`, `trim`,
 //!   `join`, `reverse`, `strings.quote`;
 //! - cel-java `CelExtensions/math`: `math.greatest`, `math.least`, `math.abs`,
-//!   `math.sign`, `math.ceil`, `math.floor`, `math.round`, `math.trunc`,
+//!   `math.sign`, `math.ceil`, `math.floor`, `math.round` (half to even, like
+//!   cel-java), `math.trunc`,
 //!   `math.sqrt`, `math.isInf`, `math.isNaN`, `math.isFinite`, `math.bitAnd`,
 //!   `math.bitOr`, `math.bitXor`, `math.bitNot`, `math.bitShiftLeft`,
 //!   `math.bitShiftRight`;
@@ -579,8 +580,9 @@ pub fn register(ctx: &mut cel::Context) {
     }
     ctx.add_function("math.round", |Arguments(args): Arguments| -> R {
         match args.as_slice() {
-            // half away from zero, like Java's Math.round on the sign-adjusted value
-            [Value::Float(x)] => Ok(Value::Float(x.round())),
+            // cel-java's MathExtension rounds half to even (Math.rint):
+            // math.round(2.5) == 2.0, verified against the legacy server
+            [Value::Float(x)] => Ok(Value::Float(x.round_ties_even())),
             _ => Err(no_overload("math.round")),
         }
     });
@@ -771,6 +773,8 @@ mod tests {
         assert_eq!(eval("math.ceil(1.2)"), Value::Float(2.0));
         assert_eq!(eval("math.floor(1.8)"), Value::Float(1.0));
         assert_eq!(eval("math.round(1.5)"), Value::Float(2.0));
+        assert_eq!(eval("math.round(2.5)"), Value::Float(2.0));
+        assert_eq!(eval("math.round(-2.5)"), Value::Float(-2.0));
         assert_eq!(eval("math.trunc(-1.8)"), Value::Float(-1.0));
         assert_eq!(eval("math.sqrt(16.0)"), Value::Float(4.0));
         assert_eq!(eval("math.isNaN(0.0 / 0.0)"), Value::Bool(true));

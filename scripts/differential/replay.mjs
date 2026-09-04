@@ -1216,7 +1216,7 @@ function buildScenario() {
           "math.sign(-3) == -1",
           "math.floor(2.5) == 2.0",
           "math.ceil(2.5) == 3.0",
-          "math.round(2.5) == 3.0",
+          "math.round(2.5) == 2.0 && math.round(3.5) == 4.0",
           "math.trunc(-2.5) == -2.0",
           "math.isNaN(0.0 / 0.0)",
           "math.isFinite(1.0) && !math.isInf(1.0)",
