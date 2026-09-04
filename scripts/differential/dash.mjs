@@ -661,9 +661,12 @@ async function runAgainst(name) {
     r26.meAdminToken = errView(await call(base, "GET", "/dash/me"));
     r26.meNoAuth = errView(await call(base, "GET", "/dash/me", { token: null }));
     const dash = await call(base, "GET", "/dash", { token: userToken });
-    const appView = (a) => norm({ id: a.id, title: a.title, user_app_role: a.user_app_role, admin_token: a.admin_token, status: a.status, effective_status: a.effective_status, org: a.org, rules: a.rules, keys: Object.keys(a).sort() });
+    // the app rows: what the CLI reads plus the members / rules shape; key
+    // sets are not compared because the legacy image runs migrations newer
+    // than the vendored source (extra apps columns)
+    const appView = (a) => norm({ id: a.id, title: a.title, user_app_role: a.user_app_role, admin_token: a.admin_token, status: a.status, effective_status: a.effective_status, org: a.org, rules: a.rules, members: a.members, invites: a.invites, creator_id: a.creator_id, org_id: a.org_id, deletion_marked_at: a.deletion_marked_at });
     r26.dash = dash.status === 200
-      ? { status: 200, keys: Object.keys(dash.body).sort(), user: norm(dash.body.user), apps: (dash.body.apps ?? []).map(appView).sort((a, c) => (canon(a) < canon(c) ? -1 : 1)) }
+      ? { status: 200, user: norm(dash.body.user), apps: (dash.body.apps ?? []).map(appView).sort((a, c) => (canon(a) < canon(c) ? -1 : 1)) }
       : errView(dash);
     raw("26-me-and-dash", r26);
     record("26-me-and-dash", r26);
@@ -673,7 +676,7 @@ async function runAgainst(name) {
     const newApp = mk();
     const newToken = mk();
     const created = await call(base, "POST", "/dash/apps", { token: userToken, body: { id: newApp, title: "cli app", admin_token: newToken } });
-    r27.create = created.status === 200 ? { status: 200, keys: Object.keys(created.body).sort(), appKeys: Object.keys(created.body.app ?? {}).sort(), app: norm({ id: created.body.app?.id, title: created.body.app?.title, "admin-token": created.body.app?.["admin-token"], status: created.body.app?.status }) } : errView(created);
+    r27.create = created.status === 200 ? { status: 200, keys: Object.keys(created.body).sort(), app: norm({ id: created.body.app?.id, title: created.body.app?.title, "admin-token": created.body.app?.["admin-token"], status: created.body.app?.status, creator_id: created.body.app?.creator_id, org_id: created.body.app?.org_id }) } : errView(created);
     r27.createMissingTitle = errView(await call(base, "POST", "/dash/apps", { token: userToken, body: { id: mk(), admin_token: mk() } }));
     r27.createBlankTitle = errView(await call(base, "POST", "/dash/apps", { token: userToken, body: { id: mk(), title: "  ", admin_token: mk() } }));
     r27.createBadId = errView(await call(base, "POST", "/dash/apps", { token: userToken, body: { id: "nope", title: "x", admin_token: mk() } }));
@@ -685,7 +688,7 @@ async function runAgainst(name) {
     r27.pullAfterCreate = pullView(await call(base, "GET", `/dash/apps/${withRules}/schema/pull`, { token: userToken }));
     r27.permsAfterCreate = plainView(await call(base, "GET", `/dash/apps/${withRules}/perms/pull`, { token: userToken }));
     const got = await call(base, "GET", `/dash/apps/${newApp}`, { token: newToken });
-    r27.getWithAdminToken = got.status === 200 ? { status: 200, keys: Object.keys(got.body.app).sort(), app: norm({ id: got.body.app.id, title: got.body.app.title, status: got.body.app.status, creator_id: got.body.app.creator_id }) } : errView(got);
+    r27.getWithAdminToken = got.status === 200 ? { status: 200, keys: Object.keys(got.body).sort(), app: norm({ id: got.body.app.id, title: got.body.app.title, status: got.body.app.status, creator_id: got.body.app.creator_id }) } : errView(got);
     const gotUser = await call(base, "GET", `/dash/apps/${newApp}`, { token: userToken });
     r27.getWithUserToken = gotUser.status === 200 ? { status: 200, title: gotUser.body.app.title } : errView(gotUser);
     r27.getWrongAdminToken = errView(await call(base, "GET", `/dash/apps/${newApp}`));
@@ -819,7 +822,7 @@ async function runAgainst(name) {
     r32.claimRegularApp = errView(await call(base, "POST", `/dash/apps/${appId}/claim`, { token: userToken, body: { token: adminToken } }));
     r32.claimNoAuth = errView(await call(base, "POST", `/dash/apps/${appId}/claim`, { token: null, body: { token: adminToken } }));
     const eph = await call(base, "POST", "/dash/apps/ephemeral", { token: null, body: { title: "ephemeral cli app" } });
-    r32.ephemeralCreate = eph.status === 200 ? { status: 200, keys: Object.keys(eph.body).sort(), appKeys: Object.keys(eph.body.app ?? {}).sort(), hasAdminToken: typeof eph.body.app?.["admin-token"] === "string", expiresLater: eph.body.expires_ms > Date.now() } : errView(eph);
+    r32.ephemeralCreate = eph.status === 200 ? { status: 200, keys: Object.keys(eph.body).sort(), hasAdminToken: typeof eph.body.app?.["admin-token"] === "string", expiresLater: eph.body.expires_ms > Date.now() } : errView(eph);
     const ephId = eph.body?.app?.id;
     const ephGet = await call(base, "GET", `/dash/apps/ephemeral/${ephId}`, { token: null });
     r32.ephemeralGet = ephGet.status === 200 ? { status: 200, keys: Object.keys(ephGet.body).sort(), title: ephGet.body.app?.title } : errView(ephGet);

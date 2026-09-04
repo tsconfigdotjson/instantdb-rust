@@ -104,16 +104,36 @@ pub(crate) struct DashUser {
     pub id: Uuid,
     pub email: String,
     pub created_at: Option<chrono::NaiveDateTime>,
+    pub google_sub: Option<String>,
 }
 
 impl DashUser {
+    /// The `instant_users` row as legacy returns it.
     pub(crate) fn to_json(&self) -> Value {
         json!({
             "id": self.id,
             "email": self.email,
             "created_at": self.created_at.map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+            "google_sub": self.google_sub,
         })
     }
+}
+
+/// Legacy `app-model/get-by-id!`: `assert-record!` on the app with its
+/// lookup args in the hint.
+pub(crate) async fn app_or_not_found(state: &AppState, app_id: Uuid) -> Result<AppRow> {
+    service::get_app(state, app_id).await.map_err(|e| {
+        if e.error_type == "record-not-found" {
+            InstantError::new(
+                "record-not-found",
+                400,
+                "Record not found: app",
+                Some(json!({"args": [{"id": app_id}], "record-type": "app"})),
+            )
+        } else {
+            e
+        }
+    })
 }
 
 /// The bearer token of a `/dash` request as a uuid (legacy
@@ -137,7 +157,7 @@ fn bearer_uuid(headers: &HeaderMap) -> Result<Uuid> {
 
 async fn user_by_refresh_token(state: &AppState, token: Uuid) -> Result<Option<DashUser>> {
     let row = sqlx::query(
-        "SELECT u.id, u.email, u.created_at FROM instant_user_refresh_tokens t
+        "SELECT u.id, u.email, u.created_at, u.google_sub FROM instant_user_refresh_tokens t
            JOIN instant_users u ON u.id = t.user_id
           WHERE t.id = $1",
     )
@@ -148,6 +168,7 @@ async fn user_by_refresh_token(state: &AppState, token: Uuid) -> Result<Option<D
         id: r.get("id"),
         email: r.get("email"),
         created_at: r.try_get("created_at").ok(),
+        google_sub: r.try_get("google_sub").ok(),
     }))
 }
 
@@ -197,7 +218,7 @@ pub(crate) async fn dash_authed_with_role(
                 Some(json!({"reason": "admin-token-mismatch"})),
             ));
         }
-        return service::get_app(state, admin_app).await;
+        return app_or_not_found(state, admin_app).await;
     }
 
     // dashboard user refresh token (creator or member of the app / its org)
@@ -205,7 +226,7 @@ pub(crate) async fn dash_authed_with_role(
     let Some(user) = user_by_refresh_token(state, token).await? else {
         return Err(unauthorized());
     };
-    let app = service::get_app(state, app_id).await?;
+    let app = app_or_not_found(state, app_id).await?;
     let role: Option<String> = sqlx::query(
         "SELECT CASE WHEN a.creator_id = $2 THEN 'owner'
                      ELSE coalesce(m.member_role, om.role) END AS role

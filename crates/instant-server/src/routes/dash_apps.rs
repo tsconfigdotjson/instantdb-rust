@@ -728,9 +728,13 @@ pub async fn claim_post(
                 .await?
                 .is_some();
         if !ok {
+            // app-admin-token-model/fetch! carries an extra hint message
             return Err(record_not_found(
                 "app-admin-token",
-                json!({"args": [{"app-id": app_id, "token": token}]}),
+                json!({
+                    "args": [{"app-id": app_id, "token": token}],
+                    "message": "This admin token may be expired or invalid. Or you may have provided an incorrect app ID.",
+                }),
             ));
         }
         sqlx::query("UPDATE apps SET creator_id = $1 WHERE id = $2")
@@ -945,7 +949,29 @@ pub async fn org_delete(
         sqlx::query("DELETE FROM orgs WHERE id = $1")
             .bind(org_id)
             .execute(&state.pool)
-            .await?;
+            .await
+            .map_err(|e| match &e {
+                // legacy translate-and-throw-psql-exception! (util/exception.clj:633-649)
+                sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
+                    let constraint = db.constraint().unwrap_or_default().to_string();
+                    let message = if constraint == "apps_org_id_fkey" {
+                        "The org can't be deleted while it still has apps.".to_string()
+                    } else {
+                        "Foreign Key Invalid: foreign-key-violation".to_string()
+                    };
+                    InstantError::new(
+                        "record-foreign-key-invalid",
+                        400,
+                        message,
+                        Some(json!({
+                            "table": db.table(),
+                            "condition": "foreign-key-violation",
+                            "constraint": constraint,
+                        })),
+                    )
+                }
+                _ => InstantError::from(e),
+            })?;
         Ok(json!({"ok": true}))
     }
     .await;
@@ -1386,7 +1412,9 @@ pub async fn clients_delete(
         let id = path_uuid(&id, "id")?;
         let client = system_entity(&state, app.id, "$oauthClients", id)
             .await?
-            .ok_or_else(|| record_not_found("app-oauth-client", json!({"app-id": app.id, "id": id})))?;
+            .ok_or_else(|| {
+                record_not_found("app-oauth-client", json!({"args": [{"id": id, "app-id": app.id}]}))
+            })?;
         service::run_system_transact(
             &state,
             app.id,
@@ -1538,7 +1566,7 @@ pub async fn origins_delete(
         .ok_or_else(|| {
             record_not_found(
                 "app-authorized-redirect-origin",
-                json!({"id": id, "app-id": app.id}),
+                json!({"args": [{"id": id, "app-id": app.id}]}),
             )
         })?;
         Ok(json!({"origin": origin_view(&row)}))
