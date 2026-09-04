@@ -982,7 +982,7 @@ async fn resolve_add_batch(
             match value_lookup(&value) {
                 Some((a, v)) => {
                     // legacy validate-value-lookup-etypes (transaction.clj:532-556)
-                    validate_value_lookup_etype(attrs, attr, a)?;
+                    validate_value_lookup_etype(attrs, &attr, a)?;
                     // a value-position lookup only resolves against existing
                     // entities (plus eid-position lookups earlier in this tx);
                     // legacy's `lookups` CTE raises `missing-lookup-value`

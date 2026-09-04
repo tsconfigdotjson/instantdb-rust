@@ -140,8 +140,7 @@ pub async fn handle_start_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id
-            .ok_or_else(crate::ws::not_initialized)?
+        st.app_id.ok_or_else(crate::ws::not_initialized)?
     };
     let client_id = msg
         .get("client-id")
@@ -173,7 +172,15 @@ pub async fn handle_start_stream(
             }
         },
     };
-    check_stream_perm(state, app_id, session, "create", msg.get("rule-params"), None).await?;
+    check_stream_perm(
+        state,
+        app_id,
+        session,
+        "create",
+        msg.get("rule-params"),
+        None,
+    )
+    .await?;
 
     let existing = stream_by_client_id(state, app_id, client_id).await?;
     let (stream_id, offset) = match existing {
@@ -259,8 +266,7 @@ pub async fn handle_append_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id
-            .ok_or_else(crate::ws::not_initialized)?
+        st.app_id.ok_or_else(crate::ws::not_initialized)?
     };
     let stream_id = msg
         .get("stream-id")
@@ -398,8 +404,7 @@ pub async fn handle_subscribe_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id
-            .ok_or_else(crate::ws::not_initialized)?
+        st.app_id.ok_or_else(crate::ws::not_initialized)?
     };
     // legacy validates params before perms (session.clj:889-896 missing ids,
     // :928-931 missing stream)
@@ -435,8 +440,15 @@ pub async fn handle_subscribe_stream(
     if stream_field(state, app_id, stream_id, "id").await.is_none() {
         return Err(missing_stream());
     }
-    check_stream_perm(state, app_id, session, "view", msg.get("rule-params"), Some(stream_id))
-        .await?;
+    check_stream_perm(
+        state,
+        app_id,
+        session,
+        "view",
+        msg.get("rule-params"),
+        Some(stream_id),
+    )
+    .await?;
     let subscribe_event_id = msg
         .get("client-event-id")
         .and_then(|v| v.as_str())

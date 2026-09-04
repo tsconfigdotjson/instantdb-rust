@@ -205,11 +205,7 @@ pub async fn user_type(state: &AppState, app_id: Uuid, user_id: Uuid) -> Result<
     .fetch_optional(&state.pool)
     .await
     .map_err(InstantError::from)?;
-    Ok(row.and_then(|r| {
-        r.get::<Value, _>("value")
-            .as_str()
-            .map(|s| s.to_string())
-    }))
+    Ok(row.and_then(|r| r.get::<Value, _>("value").as_str().map(|s| s.to_string())))
 }
 
 /// A guest user for a refresh token, if the token belongs to one

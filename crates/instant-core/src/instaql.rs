@@ -1210,7 +1210,7 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
                 page_info: None,
                 // legacy: no aggregate key for an unknown namespace
                 aggregate: None,
-            })
+            });
         }
     };
 

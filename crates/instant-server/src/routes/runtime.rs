@@ -297,7 +297,10 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
     // legacy checks `$users.allow.create` before consuming the code so a
     // failed check doesn't burn it (magic_code_auth.clj:277-288); the id a
     // new user would get is the guest's when upgrading
-    let prospective_id = guest_user.as_ref().map(|g| g.id).unwrap_or_else(Uuid::new_v4);
+    let prospective_id = guest_user
+        .as_ref()
+        .map(|g| g.id)
+        .unwrap_or_else(Uuid::new_v4);
     if !admin && auth::user_by_email(state, app_id, &email).await?.is_none() {
         auth::assert_signup(state, app_id, prospective_id, Some(&email)).await?;
     }

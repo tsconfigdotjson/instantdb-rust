@@ -72,9 +72,7 @@ pub async fn handle_start_sync(
 ) -> std::result::Result<(), InstantError> {
     let (app_id, admin, user_id) = {
         let st = session.state.lock().await;
-        let app_id = st
-            .app_id
-            .ok_or_else(crate::ws::not_initialized)?;
+        let app_id = st.app_id.ok_or_else(crate::ws::not_initialized)?;
         (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
     let q = msg
@@ -209,11 +207,7 @@ pub async fn handle_resync_table(
 ) -> std::result::Result<(), InstantError> {
     let (app_id, _) = {
         let st = session.state.lock().await;
-        (
-            st.app_id
-                .ok_or_else(crate::ws::not_initialized)?,
-            (),
-        )
+        (st.app_id.ok_or_else(crate::ws::not_initialized)?, ())
     };
     let sub_id = msg
         .get("subscription-id")

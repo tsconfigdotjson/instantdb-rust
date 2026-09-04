@@ -1746,17 +1746,14 @@ async fn admin_send_magic_code_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
-    let email = body
-        .get("email")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            InstantError::new(
-                "param-missing",
-                400,
-                "Missing parameter: [\"body\" \"email\"]",
-                Some(json!({"in": ["body", "email"]})),
-            )
-        })?;
+    let email = body.get("email").and_then(|v| v.as_str()).ok_or_else(|| {
+        InstantError::new(
+            "param-missing",
+            400,
+            "Missing parameter: [\"body\" \"email\"]",
+            Some(json!({"in": ["body", "email"]})),
+        )
+    })?;
     let email = crate::routes::runtime::coerce_email_pub(email)?;
     state
         .limiters

@@ -443,8 +443,8 @@ pub async fn delete_blob(state: &AppState, app_id: Uuid, location_id: &str) {
 /// browser caches can reuse URLs).
 fn sign(secret: &str, app_id: Uuid, location_id: &str, day: i64) -> String {
     use hmac::{Hmac, Mac};
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("hmac accepts any key length");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac accepts any key length");
     mac.update(app_id.as_bytes());
     mac.update(location_id.as_bytes());
     mac.update(&day.to_be_bytes());
@@ -457,7 +457,11 @@ fn sign(secret: &str, app_id: Uuid, location_id: &str, day: i64) -> String {
 
 /// Constant-time equality for the URL signature.
 fn sig_eq(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.len() == b.len()
+        && a.bytes()
+            .zip(b.bytes())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
 }
 
 /// Start of the current UTC day: legacy `bucketed-signing-instant`.

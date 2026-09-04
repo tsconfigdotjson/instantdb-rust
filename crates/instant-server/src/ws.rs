@@ -271,17 +271,16 @@ pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>
     // overruns is cancelled and the client gets `operation-timed-out`
     // (util/exception.clj:462-465) instead of waiting forever
     let timeout_ms = handle_receive_timeout_ms();
-    let result = match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), handler)
-        .await
-    {
-        Ok(r) => r,
-        Err(_) => Err(InstantError::new(
-            "operation-timed-out",
-            500,
-            "Operation timed out: handle-receive",
-            Some(json!({"timeout-ms": timeout_ms})),
-        )),
-    };
+    let result =
+        match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), handler).await {
+            Ok(r) => r,
+            Err(_) => Err(InstantError::new(
+                "operation-timed-out",
+                500,
+                "Operation timed out: handle-receive",
+                Some(json!({"timeout-ms": timeout_ms})),
+            )),
+        };
     if let Err(e) = result {
         session.send(err_msg(&msg, &e));
     }
