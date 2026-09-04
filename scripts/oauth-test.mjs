@@ -209,9 +209,13 @@ if (adminToken) {
   const users = await fetch(`${SERVER}/admin/query`, {
     method: "POST",
     headers: { "content-type": "application/json", "app-id": appId, authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ query: { $users: { $: { where: { id: guest2.id } } } } }),
+    // linkedPrimaryUser is a link ($users.linkedPrimaryUser -> $users), so it
+    // renders as a child form in the object tree
+    body: JSON.stringify({ query: { $users: { $: { where: { id: guest2.id } }, linkedPrimaryUser: {} } } }),
   }).then((r) => r.json());
-  assert(users.$users?.[0]?.linkedPrimaryUser === tokenBody.user.id, "guest row points at the primary user (linkedPrimaryUser)");
+  const primary = users.$users?.[0]?.linkedPrimaryUser;
+  const primaryId = Array.isArray(primary) ? primary[0]?.id : primary?.id;
+  assert(primaryId === tokenBody.user.id, "guest row points at the primary user (linkedPrimaryUser)");
 }
 
 // --- verify the refresh token works on the runtime endpoint ---
