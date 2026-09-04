@@ -1188,44 +1188,54 @@ function buildScenario() {
           msg(conn, m);
           await conn.waitFor((x) => x.op === "transact-ok" && conn.frames.filter((f) => f.op === "transact-ok").length > before);
         };
-        // one field rule per extension clause on a dummy attr (k01, k02, ...):
-        // field rules are evaluated per entity on both servers (legacy's
-        // rule-where rewriter only touches view rules), and the surviving
-        // fields in the query result pin down every clause separately.
-        // c1: title "ok one", score 5, when "2020-01-01"
+        // one probe namespace per extension clause (p01, p02, ...): each
+        // clause is that namespace's create rule, so AUTH's create of a row
+        // {title "ok one", score 5, when "2020-01-01"} yields an independent
+        // transact-ok / permission-denied / evaluation-error verdict on both
+        // servers (a single combined rule would hide which clause differs,
+        // and legacy evaluates all of a query's field programs in one batch)
         const clauses = [
-          "data.title.trim().lowerAscii().startsWith('ok')",
-          "data.title.charAt(0) == 'o'",
-          "data.title.substring(0, 2) == 'ok'",
-          "data.title.substring(1) == 'k one'",
-          "data.title.indexOf('o') == 0 && data.title.indexOf('o', 1) == 3",
-          "data.title.lastIndexOf('o') == 3 && data.title.lastIndexOf('o', 2) == 0",
-          "data.title.replace('o', '0').split(' ').size() == 2",
-          "data.title.replace('o', '0', 1) == '0k one'",
-          "data.title.upperAscii() == 'OK ONE'",
-          "['a', 'b'].join('-') == 'a-b' && ['a', 'b'].join() == 'ab'",
-          "math.greatest(data.score, 1) == data.score && math.least(data.score, 1) == 1",
-          "math.greatest([1, data.score, 2]) == data.score && math.least([1, data.score, 2]) == 1",
-          "math.abs(-1) == 1 && math.sign(-3) == -1",
-          "math.floor(2.5) == 2.0 && math.ceil(2.5) == 3.0",
+          "newData.title.trim().lowerAscii().startsWith('ok')",
+          "newData.title.charAt(0) == 'o'",
+          "newData.title.substring(0, 2) == 'ok'",
+          "newData.title.substring(1) == 'k one'",
+          "newData.title.indexOf('o') == 0",
+          "newData.title.indexOf('o', 1) == 3",
+          "newData.title.lastIndexOf('o') == 3",
+          "newData.title.lastIndexOf('o', 2) == 0",
+          "newData.title.replace('o', '0').split(' ').size() == 2",
+          "newData.title.replace('o', '0', 1) == '0k one'",
+          "newData.title.upperAscii() == 'OK ONE'",
+          "['a', 'b'].join('-') == 'a-b'",
+          "['a', 'b'].join() == 'ab'",
+          "math.greatest(newData.score, 1) == newData.score",
+          "math.least(newData.score, 1) == 1",
+          "math.greatest([1, newData.score, 2]) == newData.score",
+          "math.least([1, newData.score, 2]) == 1",
+          "math.abs(-1) == 1",
+          "math.sign(-3) == -1",
+          "math.floor(2.5) == 2.0",
+          "math.ceil(2.5) == 3.0",
           "math.round(2.5) == 3.0",
           "math.trunc(-2.5) == -2.0",
           "math.isNaN(0.0 / 0.0)",
           "math.isFinite(1.0) && !math.isInf(1.0)",
           "math.bitAnd(6, 3) == 2 && math.bitOr(6, 3) == 7 && math.bitXor(6, 3) == 5",
           "math.bitShiftLeft(1, 3) == 8 && math.bitShiftRight(8, 3) == 1",
-          "timestamp(data.when) < request.time",
-          "timestamp(data.when).getTime() == 1577836800000",
+          "timestamp(newData.when) < request.time",
+          "timestamp(newData.when).getTime() == 1577836800000",
           "timestamp(1577836800000).getFullYear() == 2020",
-          "timestamp(1577836800000) == timestamp(data.when)",
-          "timestamp('2020-01-01T00:00:00Z').getTime() == timestamp(data.when).getTime()",
-          "request.time.getTime() > timestamp(data.when).getTime()",
+          "timestamp(1577836800000) == timestamp(newData.when)",
+          "timestamp('2020-01-01T00:00:00Z').getTime() == timestamp(newData.when).getTime()",
+          "request.time.getTime() > timestamp(newData.when).getTime()",
           "timestamp('01/02/2020').getDate() == 2",
           "timestamp('2020-01-01T10:20:30Z').getHours() == 10",
+          "size(newData.title) == 6 && newData.title.contains('k o')",
         ];
-        const kLabel = (i) => `k${String(i + 1).padStart(2, "0")}`;
-        const fields = Object.fromEntries(clauses.map((c, i) => [kLabel(i), c]));
+        const pName = (i) => `p${String(i + 1).padStart(2, "0")}`;
+        const probeRules = Object.fromEntries(clauses.map((c, i) => [pName(i), { allow: { create: c } }]));
         const rules = {
+          ...probeRules,
           cel: {
             bind: ["emailOk", "auth.email != null && auth.email.upperAscii().lowerAscii().endsWith('@example.com') && auth.email.indexOf('@') > 0"],
             allow: {
@@ -1235,27 +1245,37 @@ function buildScenario() {
               update: "data.title.frobnicate() == 'x'",
               delete: "auth.email.trim() == 'nobody@example.com'",
             },
-            fields,
           },
         };
         psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(rules)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
         await sleep(RULES_SETTLE_MS);
-        const celAttr = (id, label) => [
+        const blobAttr = (id, etype, label) => [
           "add-attr",
-          { id, "forward-identity": [id, "cel", label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true },
+          { id, "forward-identity": [id, etype, label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true },
         ];
-        const kAttrIds = clauses.map(() => mk());
+        const celAttr = (id, label) => blobAttr(id, "cel", label);
+        const probes = clauses.map((_, i) => ({ etype: pName(i), id: mk(), title: mk(), score: mk(), when: mk(), e: mk() }));
         await okTx(env.conns.ADMIN, {
           op: "transact",
           "tx-steps": [
             celAttr(ids.celId, "id"), celAttr(ids.celTitle, "title"), celAttr(ids.celScore, "score"), celAttr(ids.celWhen, "when"),
-            ...kAttrIds.map((id, i) => celAttr(id, kLabel(i))),
+            ...probes.flatMap((p) => [blobAttr(p.id, p.etype, "id"), blobAttr(p.title, p.etype, "title"), blobAttr(p.score, p.etype, "score"), blobAttr(p.when, p.etype, "when")]),
             ["add-triple", ids.c1, ids.celId, ids.c1], ["add-triple", ids.c1, ids.celTitle, "ok one"], ["add-triple", ids.c1, ids.celScore, 5], ["add-triple", ids.c1, ids.celWhen, "2020-01-01"],
-            ...kAttrIds.map((id) => ["add-triple", ids.c1, id, true]),
             ["add-triple", ids.c2, ids.celId, ids.c2], ["add-triple", ids.c2, ids.celScore, 5], ["add-triple", ids.c2, ids.celWhen, "2020-01-01"],
           ],
         });
-        // every k field survives for c1 when every clause holds; c2 has no title
+        // one verdict per clause
+        const settleTx = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => (x.op === "transact-ok" || x.op === "error") && x["client-event-id"] === ceid);
+        };
+        for (const p of probes) {
+          await settleTx(env.conns.AUTH, {
+            op: "transact",
+            "tx-steps": [["add-triple", p.e, p.id, p.e], ["add-triple", p.e, p.title, "ok one"], ["add-triple", p.e, p.score, 5], ["add-triple", p.e, p.when, "2020-01-01"]],
+          });
+        }
+        // the view rule with its bind: c1 visible to the authed user, c2 has no title, anon sees nothing
         msg(env.conns.AUTH, { op: "add-query", q: { cel: {} } });
         await env.conns.AUTH.waitFor((m) => m.op === "add-query-ok" && m.q?.cel);
         msg(env.conns.A, { op: "add-query", q: { cel: {} } });
