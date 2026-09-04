@@ -616,9 +616,7 @@ pub async fn refresh_batch(
         // skip-attrs gets the refresh-ok even with nothing recomputed, so its
         // attrs are current (session.clj:503-533)
         let attrs_only = schema_changed && !plan.skip_attrs;
-        if computations.is_empty()
-            && !(plan.skip_attrs && attrs_changed_for_session)
-            && !attrs_only
+        if computations.is_empty() && !(plan.skip_attrs && attrs_changed_for_session) && !attrs_only
         {
             continue;
         }
