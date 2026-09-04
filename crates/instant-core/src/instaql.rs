@@ -1120,7 +1120,10 @@ impl<'a> SqlCtx<'a> {
                     .as_str()
                     .and_then(|s| Uuid::parse_str(s).ok())
                     .ok_or_else(|| {
-                        verr(format!("Expected {} to be a uuid, got {}", attr.label, v))
+                        verr(format!(
+                            "Expected {} to be a uuid, got {{\"$not\":{}}}",
+                            attr.label, v
+                        ))
                     })?;
                 base(qb, false);
                 qb.push(" AND ");

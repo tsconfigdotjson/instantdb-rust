@@ -611,7 +611,15 @@ pub async fn refresh_batch(
             updates.push((key.clone(), changed.then_some(r.hash), r.topics.clone()));
         }
         let attrs_changed_for_session = plan.prev_attrs_hash != Some(attrs_hash);
-        if computations.is_empty() && !(plan.skip_attrs && attrs_changed_for_session) {
+        // legacy refreshes every session on a schema change
+        // (schema-changes-require-refreshing-sessions?) and a session without
+        // skip-attrs gets the refresh-ok even with nothing recomputed, so its
+        // attrs are current (session.clj:503-533)
+        let attrs_only = schema_changed && !plan.skip_attrs;
+        if computations.is_empty()
+            && !(plan.skip_attrs && attrs_changed_for_session)
+            && !attrs_only
+        {
             continue;
         }
         let frame = {
@@ -648,7 +656,7 @@ pub async fn refresh_batch(
                     instaql_topic: false,
                 });
             }
-            if wire.is_empty() && !(plan.skip_attrs && attrs_changed_for_session) {
+            if wire.is_empty() && !(plan.skip_attrs && attrs_changed_for_session) && !attrs_only {
                 continue;
             }
             let msg = RefreshOkWire {

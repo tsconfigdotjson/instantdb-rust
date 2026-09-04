@@ -74,7 +74,7 @@ function buildScenario() {
     // admin SSE transports (issue #8, steps 23-24)
     sseTodo: mk(), sseSecret: mk(), sseTodo2: mk(),
     // audit follow-ups (steps 25-28)
-    dupTitleAttr: mk(), reqAttr: mk(), laterReqAttr: mk(), phantomOwner: mk(),
+    dupTitleAttr: mk(), reqAttr: mk(), laterReqAttr: mk(), ownersHandle: mk(),
     gatedId: mk(), gatedTitle: mk(), g1: mk(), g2: mk(), g3: mk(), fakeUser: mk(),
     // stream ids must be v4-shaped uuids on both servers
     stream2Token: "00000000-0000-4000-8000-00000000a5ee",
@@ -865,14 +865,14 @@ function buildScenario() {
       // missing attrs carries no page-info (instaql.clj:313-315, :1171-1172)
       name: "25-lookup-attr-query-validation",
       run: async (env) => {
-        const expectErr = async (conn, m) => {
-          const ceid = msg(conn, m);
-          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
-        };
         const okTx = async (conn, m) => {
           const before = conn.frames.filter((f) => f.op === "transact-ok").length;
           msg(conn, m);
           await conn.waitFor((x) => x.op === "transact-ok" && conn.frames.filter((f) => f.op === "transact-ok").length > before);
+        };
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
         };
         const okQuery = async (conn, q) => {
           msg(conn, { op: "add-query", q });
@@ -880,17 +880,24 @@ function buildScenario() {
           msg(conn, { op: "remove-query", q });
           await conn.waitFor((m) => m.op === "remove-query-ok" && JSON.stringify(m.q) === JSON.stringify(q));
         };
-        // value-position lookup on a missing owner: no phantom entity
+        // value-position lookup on a missing owner (unique attr): no phantom entity
+        await okTx(env.conns.ADMIN, { op: "transact", "tx-steps": [attr(ids.ownersHandle, "owners", "handle", { unique: true, fwd: ids.ownersHandle })] });
         await expectErr(env.conns.ADMIN, {
           op: "transact",
-          "tx-steps": [["add-triple", ids.e1, ids.ownerRef, [ids.ownersId, ids.phantomOwner]]],
+          "tx-steps": [["add-triple", ids.e1, ids.ownerRef, [ids.ownersHandle, "nobody"]]],
         });
-        // eid lookup on todos.score writing an owners attr: namespace mismatch
+        // lookup namespace validation is legacy's non-admin pre-processing
+        // (permissioned_transaction.clj:683-687): eid lookup on todos.score
+        // writing an owners attr, and a value lookup outside the link's
+        // reverse namespace; the admin path falls through to the lookup miss
         await expectErr(env.conns.A, {
           op: "transact",
           "tx-steps": [["add-triple", [ids.todosScore, 7], ids.ownersName, "x"]],
         });
-        // value lookup whose attr is not in the link's reverse namespace
+        await expectErr(env.conns.A, {
+          op: "transact",
+          "tx-steps": [["add-triple", ids.e1, ids.ownerRef, [ids.todosScore, 7]]],
+        });
         await expectErr(env.conns.ADMIN, {
           op: "transact",
           "tx-steps": [["add-triple", ids.e1, ids.ownerRef, [ids.todosScore, 7]]],
@@ -1254,6 +1261,12 @@ for (const d of diffs) {
     console.log(`  first differing sub-path: ${fd.p}`);
     console.log("  legacy:", JSON.stringify(fd.a)?.slice(0, 1200));
     console.log("  rust:  ", JSON.stringify(fd.b)?.slice(0, 1200));
+    if (!d.allowed && d.path.startsWith("step:")) {
+      // the folded frames are sorted, so one differing frame shifts every
+      // index after it; print both sides whole for the CI log
+      console.log("  legacy (whole):", JSON.stringify(d.legacy)?.slice(0, 8000));
+      console.log("  rust   (whole):", JSON.stringify(d.rust)?.slice(0, 8000));
+    }
   } else {
     console.log("  legacy:", JSON.stringify(d.legacy)?.slice(0, 1200));
     console.log("  rust:  ", JSON.stringify(d.rust)?.slice(0, 1200));

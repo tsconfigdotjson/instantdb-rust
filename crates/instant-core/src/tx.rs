@@ -397,6 +397,7 @@ pub async fn transact(
     }
 
     let mut resolver = LookupResolver::new();
+    resolver.validate_namespaces = !opts.admin;
     let mut required_updates: Vec<Uuid> = vec![];
     let mut report = TxReport {
         tx_id,
@@ -781,8 +782,10 @@ async fn resolve_eid(
         EidRef::Id(id) => Ok(*id),
         EidRef::Lookup(attr_id, value) => {
             let lookup_attr_etype = attrs.get(attr_id).map(|a| a.etype.clone());
-            // legacy validate-lookup-etypes (permissioned_transaction.clj:124-140)
+            // legacy validate-lookup-etypes (permissioned_transaction.clj:124-140),
+            // non-admin only (:686)
             match &lookup_attr_etype {
+                _ if !resolver.validate_namespaces => {}
                 None => {
                     let m = "Invalid lookup. Could not determine namespace from lookup attribute.";
                     return Err(InstantError::validation_failed(
@@ -981,8 +984,11 @@ async fn resolve_add_batch(
         let value = if attr.value_type == crate::attr::ValueType::Ref || attr.label == "id" {
             match value_lookup(&value) {
                 Some((a, v)) => {
-                    // legacy validate-value-lookup-etypes (transaction.clj:532-556)
-                    validate_value_lookup_etype(attrs, &attr, a)?;
+                    // legacy validate-value-lookup-etypes (transaction.clj:532-556),
+                    // non-admin only (permissioned_transaction.clj:687)
+                    if resolver.validate_namespaces {
+                        validate_value_lookup_etype(attrs, &attr, a)?;
+                    }
                     // a value-position lookup only resolves against existing
                     // entities (plus eid-position lookups earlier in this tx);
                     // legacy's `lookups` CTE raises `missing-lookup-value`
