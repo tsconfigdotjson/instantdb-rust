@@ -111,6 +111,8 @@ pub struct SessionState {
 
 #[derive(Debug, Clone)]
 pub struct SyncSub {
+    /// the synced namespace (kept for logging; pushes use `attr_ids`)
+    #[allow(dead_code)]
     pub etype: String,
     pub last_tx: i64,
     /// the etype's cardinality-one attrs when the subscription started (or

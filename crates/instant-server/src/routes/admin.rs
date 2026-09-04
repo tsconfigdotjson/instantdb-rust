@@ -1194,8 +1194,6 @@ async fn presence_impl(
     let _room_type = get_param("room-type")?;
     let room_id = get_param("room-id")?;
     let mut snapshot = crate::presence::room_snapshot(state, ctx.app_id, &room_id).await?;
-    let attrs = service::load_attrs(state, ctx.app_id).await?;
-    let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
     let mut users: HashMap<Uuid, Value> = HashMap::new();
     if let Some(sessions) = snapshot.as_object_mut() {
         for sess in sessions.values_mut() {

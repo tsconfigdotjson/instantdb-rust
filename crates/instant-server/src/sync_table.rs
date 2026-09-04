@@ -368,9 +368,6 @@ pub async fn push_updates(state: &AppState, session: &Arc<Session>, app_id: Uuid
     if subs.is_empty() {
         return;
     }
-    let Ok(attrs) = service::load_attrs(state, app_id).await else {
-        return;
-    };
     for (sub_id, sub) in subs {
         if sub.last_tx >= latest {
             continue;
