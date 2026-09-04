@@ -205,9 +205,10 @@ pub async fn handle_resync_table(
     session: &Arc<Session>,
     msg: &Value,
 ) -> std::result::Result<(), InstantError> {
-    let (app_id, _) = {
+    let (app_id, admin, user_id) = {
         let st = session.state.lock().await;
-        (st.app_id.ok_or_else(crate::ws::not_initialized)?, ())
+        let app_id = st.app_id.ok_or_else(crate::ws::not_initialized)?;
+        (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
     let sub_id = msg
         .get("subscription-id")
@@ -224,16 +225,58 @@ pub async fn handle_resync_table(
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| InstantError::param_missing("missing token"))?;
 
-    let row = sqlx::query("SELECT query, token_hash FROM sync_subs WHERE id = $1 AND app_id = $2")
-        .bind(sub_id)
-        .bind(app_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(InstantError::from)?
-        .ok_or_else(|| InstantError::record_not_found("sync-sub", "Unknown subscription."))?;
+    // legacy get-by-id-with-topics! (model/sync_sub.clj:170-195): the token
+    // hash, the admin-ness and the user of the session must all match the
+    // subscription's
+    let row = sqlx::query(
+        "SELECT query, token_hash, is_admin, user_id FROM sync_subs WHERE id = $1 AND app_id = $2",
+    )
+    .bind(sub_id)
+    .bind(app_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(InstantError::from)?
+    .ok_or_else(|| {
+        InstantError::new(
+            "record-not-found",
+            400,
+            "Record not found: subscription",
+            Some(json!({"subscription-id": sub_id, "record-type": "subscription"})),
+        )
+    })?;
+    let sub_err = |input: Value, message: &str| {
+        InstantError::new(
+            "validation-failed",
+            400,
+            format!("Validation failed for subscription: {message}"),
+            Some(json!({
+                "data-type": "subscription",
+                "input": input,
+                "errors": [{"message": message}],
+            })),
+        )
+    };
     let stored_hash: Option<Vec<u8>> = row.get("token_hash");
     if stored_hash.as_deref() != Some(hash_token(token).as_slice()) {
-        return Err(InstantError::record_not_found("sync-sub", "Invalid token."));
+        return Err(sub_err(json!({"token": token}), "Invalid token."));
+    }
+    let sub_admin: bool = row.try_get("is_admin").unwrap_or(false);
+    if sub_admin != admin {
+        return Err(sub_err(
+            json!({"admin?": admin}),
+            if admin {
+                "Subscription was not created by an admin, but the session is an admin session."
+            } else {
+                "Subscription was created as an admin, but the session is not an admin session."
+            },
+        ));
+    }
+    let sub_user: Option<Uuid> = row.try_get("user_id").unwrap_or(None);
+    if sub_user != user_id {
+        return Err(sub_err(
+            json!({"user-id": user_id}),
+            "Subscription was created by a different user.",
+        ));
     }
     let q: Value = serde_json::from_str(&row.get::<String, _>("query"))
         .map_err(|_| InstantError::internal("corrupt sync sub"))?;

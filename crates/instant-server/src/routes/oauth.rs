@@ -453,21 +453,80 @@ async fn consume_redirect(
     Ok(Some((app_id, ent)))
 }
 
+/// 302 like legacy's `response/found`.
+fn found(url: &str) -> Response {
+    (StatusCode::FOUND, [(header::LOCATION, url.to_string())]).into_response()
+}
+
+fn add_query_params(url: &str, params: &[(&str, &str)]) -> String {
+    let mut out = url.to_string();
+    for (k, v) in params {
+        let sep = if out.contains('?') { '&' } else { '?' };
+        out.push(sep);
+        out.push_str(k);
+        out.push('=');
+        out.push_str(&urlencoding::encode(v));
+    }
+    out
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Legacy `oauth-callback-testing-landing` (runtime/routes.clj:379-432):
+/// `?test-redirect` on the callback renders a page saying the redirect
+/// works, so a developer can check the client's callback URL.
+fn testing_landing() -> Response {
+    let body = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>OAuth Redirect Test</title><style>body { margin: 0; height: 100vh; display: flex; align-items: center; justify-content: center; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f6f6f6; color: #111; } p { font-size: 1.25rem; }</style></head><body><p>Your OAuth redirect looks good!</p></body></html>";
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html")],
+        body.to_string(),
+    )
+        .into_response()
+}
+
+/// Legacy `oauth-callback-landing` (runtime/routes.clj:434-504): a redirect
+/// to a non-http scheme (a native app) can't be a plain 302 without leaving
+/// a dangling tab, so the page opens the app itself and offers a button.
+fn callback_landing(email: Option<&str>, redirect_url: &str) -> Response {
+    let escaped_url = html_escape(redirect_url);
+    let who = email.map(html_escape).unwrap_or_default();
+    let script = "window.open(document.getElementById('redirect-script').getAttribute('data-redirect-uri'), '_self')";
+    let body = format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><meta http-equiv=\"refresh\" content=\"0; url={escaped_url}\"><title>Finish Sign In</title><style>body {{ margin: 0; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f6f6f6; color: #111; }} .button {{ display: inline-block; padding: 0.75rem 1.5rem; border-radius: 0.5rem; background: #111; color: #fff; text-decoration: none; font-weight: 600; }}</style></head><body><p>Logged in as {who}</p><p><a class=\"button\" href=\"{escaped_url}\">Open app</a></p><script type=\"text/javascript\" id=\"redirect-script\" data-redirect-uri=\"{escaped_url}\">{script}</script></body></html>"
+    );
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html")],
+        body,
+    )
+        .into_response()
+}
+
+/// Legacy `oauth-callback*` (runtime/routes.clj:506-601). Every problem up to
+/// and including the OAuth client lookup is a 400 `oauth-error`; only a
+/// failed user-info exchange (or a missing `sub`) redirects back to the app
+/// with `?error=`, because by then the redirect record has been consumed and
+/// verified.
 async fn callback_impl(
     state: &AppState,
     headers: &HeaderMap,
     params: HashMap<String, String>,
 ) -> Response {
+    if params.contains_key("test-redirect") {
+        return testing_landing();
+    }
     match callback_inner(state, headers, params).await {
         Ok(resp) => resp,
-        Err((Some(redirect_url), e)) => {
-            let sep = if redirect_url.contains('?') { '&' } else { '?' };
-            let url = format!(
-                "{redirect_url}{sep}error={}&_instant_oauth_redirect=true",
-                urlencoding::encode(&e.message)
-            );
-            Redirect::temporary(&url).into_response()
-        }
+        Err((Some(redirect_url), e)) => found(&add_query_params(
+            &redirect_url,
+            &[("error", &e.message), ("_instant_oauth_redirect", "true")],
+        )),
         Err((None, e)) => oauth_err_response(&e),
     }
 }
@@ -479,25 +538,20 @@ async fn callback_inner(
     headers: &HeaderMap,
     params: HashMap<String, String>,
 ) -> std::result::Result<Response, CallbackErr> {
+    let bad = |e: InstantError| (None, e);
+    if let Some(err) = params.get("error") {
+        return Err(bad(oauth_err(err.clone())));
+    }
     let state_param = params
         .get("state")
-        .ok_or((None, oauth_err("Missing state param.")))?;
-    if state_param.len() != 72 {
-        return Err((None, oauth_err("Invalid state param.")));
+        .ok_or_else(|| bad(oauth_err("Missing state param in OAuth redirect.")))?;
+    let valid_state = state_param.len() == 72
+        && Uuid::parse_str(&state_param[..36]).is_ok()
+        && Uuid::parse_str(&state_param[36..]).is_ok();
+    if !valid_state {
+        return Err(bad(oauth_err("Invalid state param in OAuth redirect.")));
     }
     let state_uuid_str = &state_param[36..];
-    let (app_id, ent) = consume_redirect(state, state_uuid_str)
-        .await
-        .map_err(|e| (None, e))?
-        .ok_or((None, oauth_err("Could not find oauth request.")))?;
-    let redirect_url = ent.redirect_url.clone();
-    let fail = |e: InstantError| (Some(redirect_url.clone()), e);
-
-    if let Some(err) = params.get("error") {
-        return Err(fail(oauth_err(err.clone())));
-    }
-
-    // cookie check
     let cookie_val = headers
         .get(header::COOKIE)
         .and_then(|c| c.to_str().ok())
@@ -506,32 +560,43 @@ async fn callback_inner(
                 p.strip_prefix("__session=")
                     .map(|v| v.trim_start_matches("instantdb_").to_string())
             })
-        });
-    match (&cookie_val, &ent.cookie_hash) {
-        (Some(c), Some(h)) if &auth::hash_string(c) == h => {}
-        _ => return Err(fail(oauth_err("Cookie validation failed."))),
-    }
-
-    // age <= 10 minutes
+        })
+        .filter(|v| Uuid::parse_str(v).is_ok())
+        .ok_or_else(|| bad(oauth_err("Missing cookie.")))?;
+    let (app_id, ent) = consume_redirect(state, state_uuid_str)
+        .await
+        .map_err(bad)?
+        .ok_or_else(|| bad(oauth_err("Could not find OAuth request.")))?;
+    // expired? (app_oauth_redirect.clj:57-60: more than 10 minutes old)
     let age_ms = chrono::Utc::now().timestamp_millis() - ent.created_at;
     if age_ms > 10 * 60_000 {
-        return Err(fail(oauth_err("The request is expired.")));
+        return Err(bad(oauth_err("The request is expired.")));
     }
-
+    if ent.cookie_hash.as_deref() != Some(auth::hash_string(&cookie_val).as_str()) {
+        return Err(bad(oauth_err("Mismatch in OAuth request cookie.")));
+    }
     let code = params
         .get("code")
-        .ok_or_else(|| fail(oauth_err("Missing code param.")))?;
-
-    // look up the oauth client entity for the token exchange
+        .ok_or_else(|| bad(oauth_err("Missing code param in OAuth redirect.")))?;
     let client_entity = ent
         .client_id_entity
-        .ok_or_else(|| fail(oauth_err("Missing oauth client.")))?;
+        .ok_or_else(|| bad(oauth_err("Missing OAuth client.")))?;
     let client = load_client_by_id(state, app_id, client_entity)
         .await
-        .map_err(&fail)?
-        .ok_or_else(|| fail(oauth_err("Could not find oauth client.")))?;
+        .map_err(bad)?
+        .ok_or_else(|| bad(oauth_err("Missing OAuth client.")))?;
 
+    // from here on failures ride back to the app
+    let redirect_url = ent.redirect_url.clone();
+    let fail = |e: InstantError| (Some(redirect_url.clone()), e);
     let user_info = exchange_code(state, &client, code).await.map_err(&fail)?;
+    if user_info.get("sub").and_then(|v| v.as_str()).is_none() {
+        return Err(fail(oauth_err("Missing sub.")));
+    }
+    let email = user_info
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(|e| e.to_string());
 
     // one-time app-level code
     let app_code = Uuid::new_v4();
@@ -582,9 +647,18 @@ async fn callback_inner(
         .await
         .map_err(fail)?;
 
-    let sep = if redirect_url.contains('?') { '&' } else { '?' };
-    let url = format!("{redirect_url}{sep}code={app_code}&_instant_oauth_redirect=true");
-    Ok(Redirect::temporary(&url).into_response())
+    let target = add_query_params(
+        &redirect_url,
+        &[("code", &app_code.to_string()), ("_instant_oauth_redirect", "true")],
+    );
+    let http_scheme = url::Url::parse(&target)
+        .map(|u| u.scheme().starts_with("http"))
+        .unwrap_or(false);
+    if http_scheme {
+        Ok(found(&target))
+    } else {
+        Ok(callback_landing(email.as_deref(), &target))
+    }
 }
 
 async fn load_client_by_id(
@@ -745,6 +819,77 @@ async fn assert_request_origin(state: &AppState, app_id: Uuid, headers: &HeaderM
     Ok(())
 }
 
+/// Legacy `verify-pkce!` (auth/oauth.clj:364-415) for the `app-oauth-code`
+/// record: a verifier without a challenge (and vice versa) is an error, the
+/// method must be exactly `plain` or `S256`, and an undecodable S256
+/// challenge has its own message.
+fn verify_pkce(
+    challenge: Option<&str>,
+    method: Option<&str>,
+    verifier: Option<&str>,
+) -> Result<()> {
+    let fail = |message: &str| {
+        InstantError::new(
+            "validation-failed",
+            400,
+            format!("Validation failed for app-oauth-code: {message}"),
+            Some(json!({
+                "data-type": "app-oauth-code",
+                "input": {"code_verifier": verifier},
+                "errors": [{"message": message}],
+            })),
+        )
+    };
+    let (challenge, verifier) = match (challenge, verifier) {
+        (None, None) => return Ok(()),
+        (None, Some(_)) => {
+            return Err(fail(
+                "The code_verifier was provided, but no code_challenge was provided.",
+            ))
+        }
+        (Some(_), None) => {
+            return Err(fail(
+                "The code_challenge was provided, but no code_verifier was provided.",
+            ))
+        }
+        (Some(c), Some(v)) => (c, v),
+    };
+    match method {
+        Some("plain") => {
+            if constant_time_eq(challenge.as_bytes(), verifier.as_bytes()) {
+                Ok(())
+            } else {
+                Err(fail("The code_challenge and code_verifier do not match."))
+            }
+        }
+        Some("S256") => {
+            let hashed = {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(verifier.as_bytes());
+                h.finalize().to_vec()
+            };
+            // java.util.Base64 url decoder: padding optional
+            let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(challenge.trim_end_matches('='))
+                .map_err(|_| fail("Invalid code_verifier. Expected a url-safe Base64 string."))?;
+            if constant_time_eq(&decoded, &hashed) {
+                Ok(())
+            } else {
+                Err(fail("The code_challenge and code_verifier do not match."))
+            }
+        }
+        _ => Err(fail("Unknown code challenge method.")),
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 async fn token_impl(
     state: &AppState,
     headers: &HeaderMap,
@@ -832,44 +977,12 @@ async fn token_impl(
     }
     assert_request_origin(state, app_id, headers).await?;
 
-    // PKCE
-    match (
-        &challenge,
+    // PKCE (legacy verify-pkce!, auth/oauth.clj:364-415)
+    verify_pkce(
+        challenge.as_deref(),
+        method.as_deref(),
         body.get("code_verifier").and_then(|v| v.as_str()),
-    ) {
-        (None, _) => {}
-        (Some(_), None) => {
-            return Err(InstantError::validation_failed(
-                "code_verifier",
-                "Missing code_verifier.",
-                json!([]),
-            ))
-        }
-        (Some(challenge), Some(verifier)) => {
-            let ok = match method.as_deref() {
-                Some("S256") => {
-                    let hashed = {
-                        use sha2::{Digest, Sha256};
-                        let mut h = Sha256::new();
-                        h.update(verifier.as_bytes());
-                        h.finalize().to_vec()
-                    };
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD
-                        .decode(challenge.trim_end_matches('='))
-                        .map(|c| c == hashed)
-                        .unwrap_or(false)
-                }
-                _ => challenge == verifier,
-            };
-            if !ok {
-                return Err(InstantError::validation_failed(
-                    "code_verifier",
-                    "The code_verifier does not match the code_challenge.",
-                    json!([]),
-                ));
-            }
-        }
-    }
+    )?;
 
     let client_entity = client_entity.ok_or_else(|| oauth_err("Missing oauth client."))?;
     let client = load_client_by_id(state, app_id, client_entity)
@@ -880,8 +993,15 @@ async fn token_impl(
         Some(t) => auth::guest_by_refresh_token(state, app_id, t).await?,
         None => None,
     };
-    let (user_id, created) =
-        upsert_oauth_link(state, app_id, &client, &user_info, guest.map(|g| g.id)).await?;
+    let (user_id, created) = upsert_oauth_link(
+        state,
+        app_id,
+        &client,
+        &user_info,
+        guest.map(|g| g.id),
+        auth::extra_fields_of(body, "extra_fields"),
+    )
+    .await?;
     let token = auth::mint_refresh_token(state, app_id, user_id).await?;
     let user = user_json(state, app_id, user_id, Some(token)).await?;
     Ok(json!({"user": user, "created": created, "refresh_token": token}))
@@ -1017,8 +1137,15 @@ async fn id_token_impl(state: &AppState, headers: &HeaderMap, body: &Value) -> R
         Some(t) => auth::guest_by_refresh_token(state, app_id, t).await?,
         None => None,
     };
-    let (user_id, created) =
-        upsert_oauth_link(state, app_id, &client, &user_info, guest.map(|g| g.id)).await?;
+    let (user_id, created) = upsert_oauth_link(
+        state,
+        app_id,
+        &client,
+        &user_info,
+        guest.map(|g| g.id),
+        auth::extra_fields_of(body, "extra_fields"),
+    )
+    .await?;
 
     // token reuse: if the supplied refresh_token belongs to the same user
     let mut token: Option<Uuid> = None;
@@ -1111,9 +1238,17 @@ async fn upsert_oauth_link(
     client: &OAuthClient,
     user_info: &Value,
     guest_user_id: Option<Uuid>,
+    extra_fields: Option<&serde_json::Map<String, Value>>,
 ) -> Result<(Uuid, bool)> {
-    let (user_id, created) =
-        upsert_oauth_link_inner(state, app_id, client, user_info, guest_user_id).await?;
+    let (user_id, created) = upsert_oauth_link_inner(
+        state,
+        app_id,
+        client,
+        user_info,
+        guest_user_id,
+        extra_fields,
+    )
+    .await?;
     if let Some(guest) = guest_user_id {
         if guest != user_id {
             let steps = json!([[
@@ -1134,6 +1269,7 @@ async fn upsert_oauth_link_inner(
     client: &OAuthClient,
     user_info: &Value,
     guest_user_id: Option<Uuid>,
+    extra_fields: Option<&serde_json::Map<String, Value>>,
 ) -> Result<(Uuid, bool)> {
     let sub = user_info
         .get("sub")
@@ -1192,7 +1328,7 @@ async fn upsert_oauth_link_inner(
                 created = true;
                 // legacy `(or guest-user-id (random-uuid))` + assert-signup!
                 let uid = guest_user_id.unwrap_or_else(Uuid::new_v4);
-                auth::assert_signup(state, app_id, uid, Some(email)).await?;
+                auth::assert_signup(state, app_id, uid, Some(email), extra_fields, false).await?;
                 let mut steps = vec![
                     json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
                     json!(["add-triple", uid, sc::attr_id("$users", "email"), email]),
@@ -1206,6 +1342,8 @@ async fn upsert_oauth_link_inner(
                         img
                     ]));
                 }
+                let attrs = service::load_attrs(state, app_id).await?;
+                steps.extend(auth::extra_field_steps(&attrs, uid, extra_fields));
                 service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
                 uid
             }
@@ -1213,12 +1351,14 @@ async fn upsert_oauth_link_inner(
         None => {
             created = true;
             let uid = guest_user_id.unwrap_or_else(Uuid::new_v4);
-            auth::assert_signup(state, app_id, uid, None).await?;
-            let steps = json!([
-                ["add-triple", uid, sc::attr_id("$users", "id"), uid],
-                ["add-triple", uid, sc::attr_id("$users", "type"), "user"]
-            ]);
-            service::run_system_transact(state, app_id, &steps).await?;
+            auth::assert_signup(state, app_id, uid, None, extra_fields, false).await?;
+            let mut steps = vec![
+                json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
+                json!(["add-triple", uid, sc::attr_id("$users", "type"), "user"]),
+            ];
+            let attrs = service::load_attrs(state, app_id).await?;
+            steps.extend(auth::extra_field_steps(&attrs, uid, extra_fields));
+            service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
             uid
         }
     };

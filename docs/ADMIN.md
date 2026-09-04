@@ -637,11 +637,32 @@ Used by the CLI (`cli/src/lib/*.ts`):
 
 ### 6.1 What this server implements
 
-All of the routes above except `/dash/cli/auth/*` are served (`crates/instant-server/src/routes/dash.rs`,
+All of the routes above except `/dash/cli/auth/*` are served (`crates/instant-server/src/routes/dash.rs` and `dash_apps.rs`,
 planning in `crates/instant-core/src/schema.rs`, jobs in `crates/instant-server/src/indexing_jobs.rs`).
 Verified against the live legacy server by `scripts/differential/dash.mjs` and with the real
 CLI by `scripts/cli-test.mjs`.
 
+- **App management, OAuth config, email, orgs (issue #29).** `routes/dash_apps.rs` serves the
+  rest of what `instant-cli app|info|claim|auth|init` calls: `GET /dash` and `GET /dash/me`,
+  `POST /dash/apps` (`{title, id, admin_token, org_id?, schema?, rules?}` → `{app}` with
+  `admin-token`), `GET|DELETE /dash/apps/:id`, `POST /dash/apps/ephemeral` /
+  `GET /dash/apps/ephemeral/:id` (14-day apps owned by the seeded ephemeral creator) and the
+  `claim` routes (dashboard user + the app's admin token), `GET /dash/apps/:id/auth`,
+  `POST .../oauth_service_providers`, `POST|DELETE .../oauth_clients[/:id]` (providers and
+  clients are `$oauthProviders` / `$oauthClients` triples with legacy's key translation; a
+  `discovery_endpoint` is fetched and must carry an `issuer`, GitHub clients need none; secrets
+  are stored as given, like `scripts/create-oauth-client.sh`), `POST|DELETE
+  .../authorized_redirect_origins[/:id]` (per-service param validation), `GET .../email_status`,
+  `POST|DELETE .../email_templates[/:id]` (`{code}` required in subject and body; a
+  `sender-email` is recorded but never verified without Postmark, so the default sender keeps
+  delivering), `GET /dash/default-email-template`, and `POST /dash/orgs`, `GET|DELETE
+  /dash/orgs/:id`. Routes without an app id need a **dashboard refresh token** (a row in
+  `instant_user_refresh_tokens`); per-app routes accept it (with legacy's collaborator / admin /
+  owner least-privilege rules) or the admin token. Shared Instant OAuth credentials and
+  `sender-verification` are hosted-service features and answer `record-not-found`.
+  `POST /dash/apps/:id/indexing-jobs` validates like legacy (unknown job type, attr of another
+  app, `checked-data-type` only for check-data-type), creates a group-less job and answers the
+  client format; a job whose attr flags changed underneath errors with `invalid-attr-state-error`.
 - **Auth.** There is no dashboard, so the CLI authenticates with the **app admin token**:
   `INSTANT_APP_ADMIN_TOKEN=<token> INSTANT_APP_ID=<id> INSTANT_CLI_API_URI=<server> instant-cli push`
   (or `--token`). The legacy `admin-token-mismatch` error (400 `validation-failed`,

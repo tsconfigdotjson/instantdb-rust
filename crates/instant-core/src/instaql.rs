@@ -664,6 +664,24 @@ impl<'a> SqlCtx<'a> {
                     if i > 0 {
                         qb.push(" OR ");
                     }
+                    // legacy combine-or-where-conds (instaql.clj:204-230):
+                    // inside an `or`, `{$isNull: true}` on an indexed attr
+                    // folds into `{in [nil]}`, i.e. matches the entity's
+                    // null triple rather than "no non-null triple"
+                    let folded;
+                    let c = match c {
+                        WhereCond::Cond {
+                            path,
+                            op: WhereOp::IsNull(true),
+                        } if self.final_attr_indexed(etype, path) => {
+                            folded = WhereCond::Cond {
+                                path: path.clone(),
+                                op: WhereOp::In(vec![Value::Null]),
+                            };
+                            &folded
+                        }
+                        other => other,
+                    };
                     match self.push_cond(qb, etype, ent, c, depth) {
                         Ok(Ok(())) => {}
                         other => return other,

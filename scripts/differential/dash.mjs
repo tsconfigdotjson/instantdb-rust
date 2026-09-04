@@ -647,6 +647,192 @@ async function runAgainst(name) {
   raw("25-admin-sse", r25);
   record("25-admin-sse", r25);
 
+  // 26+ the CLI's app / info / claim / auth / email routes (issue #29 item
+  // 6). Routes without an app id take the creator's dashboard refresh
+  // token (DASH_USER_TOKEN, provisioned on both servers); per-app routes
+  // accept it or the admin token.
+  const userToken = process.env.DASH_USER_TOKEN;
+  if (userToken) {
+    const okKeys = (res, pick = (b) => b) => (res.status === 200 ? { status: 200, keys: Object.keys(pick(res.body) ?? {}).sort() } : errView(res));
+    // 26 me + apps list
+    const r26 = {};
+    const me = await call(base, "GET", "/dash/me", { token: userToken });
+    r26.me = me.status === 200 ? { status: 200, keys: Object.keys(me.body.user).sort(), email: me.body.user.email, id: norm(me.body.user.id) } : errView(me);
+    r26.meAdminToken = errView(await call(base, "GET", "/dash/me"));
+    r26.meNoAuth = errView(await call(base, "GET", "/dash/me", { token: null }));
+    const dash = await call(base, "GET", "/dash", { token: userToken });
+    const appView = (a) => norm({ id: a.id, title: a.title, user_app_role: a.user_app_role, admin_token: a.admin_token, status: a.status, effective_status: a.effective_status, org: a.org, rules: a.rules, keys: Object.keys(a).sort() });
+    r26.dash = dash.status === 200
+      ? { status: 200, keys: Object.keys(dash.body).sort(), user: norm(dash.body.user), apps: (dash.body.apps ?? []).map(appView).sort((a, c) => (canon(a) < canon(c) ? -1 : 1)) }
+      : errView(dash);
+    raw("26-me-and-dash", r26);
+    record("26-me-and-dash", r26);
+
+    // 27 create / get / delete an app the way `instant-cli init` does
+    const r27 = {};
+    const newApp = mk();
+    const newToken = mk();
+    const created = await call(base, "POST", "/dash/apps", { token: userToken, body: { id: newApp, title: "cli app", admin_token: newToken } });
+    r27.create = created.status === 200 ? { status: 200, keys: Object.keys(created.body).sort(), appKeys: Object.keys(created.body.app ?? {}).sort(), app: norm({ id: created.body.app?.id, title: created.body.app?.title, "admin-token": created.body.app?.["admin-token"], status: created.body.app?.status }) } : errView(created);
+    r27.createMissingTitle = errView(await call(base, "POST", "/dash/apps", { token: userToken, body: { id: mk(), admin_token: mk() } }));
+    r27.createBlankTitle = errView(await call(base, "POST", "/dash/apps", { token: userToken, body: { id: mk(), title: "  ", admin_token: mk() } }));
+    r27.createBadId = errView(await call(base, "POST", "/dash/apps", { token: userToken, body: { id: "nope", title: "x", admin_token: mk() } }));
+    r27.createWithAdminToken = errView(await call(base, "POST", "/dash/apps", { body: { id: mk(), title: "x", admin_token: mk() } }));
+    r27.createBadRules = errView(await call(base, "POST", "/dash/apps", { token: userToken, body: { id: mk(), title: "x", admin_token: mk(), rules: { code: { posts: { allow: { view: "auth.id ==" } } } } } }));
+    const withRules = mk();
+    const cw = await call(base, "POST", "/dash/apps", { token: userToken, body: { id: withRules, title: "with rules + schema", admin_token: mk(), rules: { code: { posts: { allow: { view: "true" } } } }, schema: { entities: { posts: { title: { valueType: "string", config: { indexed: false, unique: false } } } }, links: {} } } });
+    r27.createWithRulesAndSchema = cw.status === 200 ? { status: 200, keys: Object.keys(cw.body).sort() } : errView(cw);
+    r27.pullAfterCreate = pullView(await call(base, "GET", `/dash/apps/${withRules}/schema/pull`, { token: userToken }));
+    r27.permsAfterCreate = plainView(await call(base, "GET", `/dash/apps/${withRules}/perms/pull`, { token: userToken }));
+    const got = await call(base, "GET", `/dash/apps/${newApp}`, { token: newToken });
+    r27.getWithAdminToken = got.status === 200 ? { status: 200, keys: Object.keys(got.body.app).sort(), app: norm({ id: got.body.app.id, title: got.body.app.title, status: got.body.app.status, creator_id: got.body.app.creator_id }) } : errView(got);
+    const gotUser = await call(base, "GET", `/dash/apps/${newApp}`, { token: userToken });
+    r27.getWithUserToken = gotUser.status === 200 ? { status: 200, title: gotUser.body.app.title } : errView(gotUser);
+    r27.getWrongAdminToken = errView(await call(base, "GET", `/dash/apps/${newApp}`));
+    r27.getUnknown = errView(await call(base, "GET", `/dash/apps/${mk()}`, { token: userToken }));
+    r27.deleteWithAdminToken = errView(await call(base, "DELETE", `/dash/apps/${newApp}`, { token: newToken }));
+    r27.delete = plainView(await call(base, "DELETE", `/dash/apps/${newApp}`, { token: userToken }));
+    r27.getAfterDelete = errView(await call(base, "GET", `/dash/apps/${newApp}`, { token: userToken }));
+    r27.deleteAgain = errView(await call(base, "DELETE", `/dash/apps/${newApp}`, { token: userToken }));
+    const dash2 = await call(base, "GET", "/dash", { token: userToken });
+    r27.listAfter = dash2.status === 200 ? { status: 200, titles: (dash2.body.apps ?? []).map((a) => a.title).sort() } : errView(dash2);
+    raw("27-app-create-get-delete", r27);
+    record("27-app-create-get-delete", r27);
+
+    // 28 orgs (the CLI's app picker lists an org's apps)
+    const r28 = {};
+    const org = await call(base, "POST", "/dash/orgs", { token: userToken, body: { title: "cli org" } });
+    r28.create = org.status === 200 ? { status: 200, keys: Object.keys(org.body).sort(), orgKeys: Object.keys(org.body.org ?? {}).sort(), title: org.body.org?.title } : errView(org);
+    r28.createMissingTitle = errView(await call(base, "POST", "/dash/orgs", { token: userToken, body: {} }));
+    const orgId = org.body?.org?.id;
+    const orgGet = await call(base, "GET", `/dash/orgs/${orgId}`, { token: userToken });
+    r28.get = orgGet.status === 200
+      ? { status: 200, keys: Object.keys(orgGet.body).sort(), org: norm({ id: orgGet.body.org.id, title: orgGet.body.org.title, role: orgGet.body.org.role }), members: (orgGet.body.members ?? []).map((m) => ({ email: m.email, role: m.role })), apps: orgGet.body.apps ?? [] }
+      : errView(orgGet);
+    const orgApp = mk();
+    const oa = await call(base, "POST", "/dash/apps", { token: userToken, body: { id: orgApp, title: "org app", admin_token: mk(), org_id: orgId } });
+    r28.createOrgApp = oa.status === 200 ? { status: 200, app: norm({ id: oa.body.app?.id, org_id: oa.body.app?.org_id, creator_id: oa.body.app?.creator_id }) } : errView(oa);
+    const orgGet2 = await call(base, "GET", `/dash/orgs/${orgId}`, { token: userToken });
+    r28.getWithApp = orgGet2.status === 200 ? { status: 200, apps: (orgGet2.body.apps ?? []).map((a) => norm({ id: a.id, title: a.title, org: a.org, user_app_role: a.user_app_role })) } : errView(orgGet2);
+    r28.getUnknown = errView(await call(base, "GET", `/dash/orgs/${mk()}`, { token: userToken }));
+    r28.getWithAdminToken = errView(await call(base, "GET", `/dash/orgs/${orgId}`));
+    r28.delete = plainView(await call(base, "DELETE", `/dash/orgs/${orgId}`, { token: userToken }));
+    r28.getAfterDelete = errView(await call(base, "GET", `/dash/orgs/${orgId}`, { token: userToken }));
+    raw("28-orgs", r28);
+    record("28-orgs", r28);
+
+    // 29 OAuth configuration: providers, clients (github needs no discovery
+    // endpoint), authorized redirect origins, and the /auth summary
+    const r29 = {};
+    const authView = (res) => {
+      if (res.status !== 200) return errView(res);
+      const b = res.body;
+      return {
+        status: 200,
+        keys: Object.keys(b).sort(),
+        providers: (b.oauth_service_providers ?? []).map((p) => norm({ id: p.id, provider_name: p.provider_name, keys: Object.keys(p).sort() })),
+        clients: (b.oauth_clients ?? []).map((c) => norm({ id: c.id, client_name: c.client_name, client_id: c.client_id, provider_id: c.provider_id, meta: c.meta, discovery_endpoint: c.discovery_endpoint, redirect_to: c.redirect_to, use_shared_credentials: c.use_shared_credentials, keys: Object.keys(c).sort() })),
+        origins: (b.authorized_redirect_origins ?? []).map((o) => norm({ id: o.id, service: o.service, params: o.params, keys: Object.keys(o).sort() })),
+        originsNull: b.authorized_redirect_origins === null,
+      };
+    };
+    r29.authEmpty = authView(await call(base, "GET", `/dash/apps/${appId}/auth`));
+    const prov = await call(base, "POST", `/dash/apps/${appId}/oauth_service_providers`, { body: { provider_name: "github" } });
+    r29.providerCreate = prov.status === 200 ? { status: 200, keys: Object.keys(prov.body.provider ?? {}).sort(), provider_name: prov.body.provider?.provider_name } : errView(prov);
+    r29.providerMissingName = errView(await call(base, "POST", `/dash/apps/${appId}/oauth_service_providers`, { body: {} }));
+    const providerId = prov.body?.provider?.id;
+    const client = await call(base, "POST", `/dash/apps/${appId}/oauth_clients`, { body: { provider_id: providerId, client_name: "gh", client_id: "gh-client", client_secret: "gh-secret", meta: { providerName: "github" } } });
+    r29.clientCreate = client.status === 200 ? { status: 200, keys: Object.keys(client.body.client ?? {}).sort(), client: norm({ client_name: client.body.client?.client_name, client_id: client.body.client?.client_id, provider_id: client.body.client?.provider_id, meta: client.body.client?.meta, discovery_endpoint: client.body.client?.discovery_endpoint, use_shared_credentials: client.body.client?.use_shared_credentials }) } : errView(client);
+    r29.clientUnknownProvider = errView(await call(base, "POST", `/dash/apps/${appId}/oauth_clients`, { body: { provider_id: mk(), client_name: "x", client_id: "a", client_secret: "b" } }));
+    r29.clientMissingName = errView(await call(base, "POST", `/dash/apps/${appId}/oauth_clients`, { body: { provider_id: providerId, client_id: "a" } }));
+    r29.clientBadRedirect = errView(await call(base, "POST", `/dash/apps/${appId}/oauth_clients`, { body: { provider_id: providerId, client_name: "y", client_id: "a", client_secret: "b", redirect_to: "http://example.com/#frag" } }));
+    const clientId = client.body?.client?.id;
+    const upd = await call(base, "POST", `/dash/apps/${appId}/oauth_clients/${clientId}`, { body: { meta: { extra: 1 }, redirect_to: "https://example.com/cb", client_id: "gh-client-2" } });
+    r29.clientUpdate = upd.status === 200 ? { status: 200, keys: Object.keys(upd.body.client ?? {}).sort(), client: norm({ client_id: upd.body.client?.client_id, meta: upd.body.client?.meta, redirect_to: upd.body.client?.redirect_to }) } : errView(upd);
+    r29.clientUpdateBadRedirect = errView(await call(base, "POST", `/dash/apps/${appId}/oauth_clients/${clientId}`, { body: { redirect_to: "https://user:pw@example.com/cb" } }));
+    const origin = await call(base, "POST", `/dash/apps/${appId}/authorized_redirect_origins`, { body: { service: "generic", params: ["example.com"] } });
+    r29.originCreate = origin.status === 200 ? { status: 200, keys: Object.keys(origin.body.origin ?? {}).sort(), origin: norm({ service: origin.body.origin?.service, params: origin.body.origin?.params }) } : errView(origin);
+    r29.originBadArity = errView(await call(base, "POST", `/dash/apps/${appId}/authorized_redirect_origins`, { body: { service: "vercel", params: ["only-one"] } }));
+    r29.originBadService = errView(await call(base, "POST", `/dash/apps/${appId}/authorized_redirect_origins`, { body: { service: "gopher", params: ["x"] } }));
+    r29.originReservedScheme = errView(await call(base, "POST", `/dash/apps/${appId}/authorized_redirect_origins`, { body: { service: "custom-scheme", params: ["https"] } }));
+    r29.originMissingParams = errView(await call(base, "POST", `/dash/apps/${appId}/authorized_redirect_origins`, { body: { service: "generic" } }));
+    r29.auth = authView(await call(base, "GET", `/dash/apps/${appId}/auth`, { token: userToken }));
+    r29.originDelete = okKeys(await call(base, "DELETE", `/dash/apps/${appId}/authorized_redirect_origins/${origin.body?.origin?.id}`), (b) => b.origin);
+    r29.originDeleteUnknown = errView(await call(base, "DELETE", `/dash/apps/${appId}/authorized_redirect_origins/${mk()}`));
+    r29.clientDelete = okKeys(await call(base, "DELETE", `/dash/apps/${appId}/oauth_clients/${clientId}`), (b) => b.client);
+    r29.clientDeleteUnknown = errView(await call(base, "DELETE", `/dash/apps/${appId}/oauth_clients/${clientId}`));
+    r29.authAfter = authView(await call(base, "GET", `/dash/apps/${appId}/auth`));
+    raw("29-oauth-config", r29);
+    record("29-oauth-config", r29);
+
+    // 30 email templates (`instant-cli auth email status|push|reset`)
+    const r30 = {};
+    const statusView = (res) => (res.status === 200 ? { status: 200, info: res.body.info === null ? null : norm({ ...res.body.info, keys: Object.keys(res.body.info).sort() }) } : errView(res));
+    r30.statusEmpty = statusView(await call(base, "GET", `/dash/apps/${appId}/email_status`));
+    r30.pushNoCodeInSubject = errView(await call(base, "POST", `/dash/apps/${appId}/email_templates`, { body: { "email-type": "magic-code", subject: "hi", body: "use {code}" } }));
+    r30.pushNoCodeInBody = errView(await call(base, "POST", `/dash/apps/${appId}/email_templates`, { body: { "email-type": "magic-code", subject: "{code} hi", body: "nope" } }));
+    r30.pushMissingBody = errView(await call(base, "POST", `/dash/apps/${appId}/email_templates`, { body: { "email-type": "magic-code", subject: "{code} hi" } }));
+    const pushed = await call(base, "POST", `/dash/apps/${appId}/email_templates`, { body: { "email-type": "magic-code", subject: "{code} for {app_title}", body: "<p>{code}</p>", "sender-name": "Diff Sender" } });
+    r30.push = pushed.status === 200 ? { status: 200, keys: Object.keys(pushed.body).sort() } : errView(pushed);
+    r30.status = statusView(await call(base, "GET", `/dash/apps/${appId}/email_status`));
+    r30.reset = plainView(await call(base, "DELETE", `/dash/apps/${appId}/email_templates/${pushed.body?.id}`));
+    r30.statusAfterReset = statusView(await call(base, "GET", `/dash/apps/${appId}/email_status`));
+    const def = await call(base, "GET", "/dash/default-email-template", { token: null });
+    r30.defaultTemplate = def.status === 200 ? { status: 200, keys: Object.keys(def.body).sort(), "email-type": def.body["email-type"], subject: def.body.subject, hasCode: String(def.body.body).includes("{code}") } : errView(def);
+    raw("30-email-templates", r30);
+    record("30-email-templates", r30);
+
+    // 31 direct indexing-job creation (POST /dash/apps/:id/indexing-jobs)
+    const r31 = {};
+    const pulled = await call(base, "GET", `/dash/apps/${appId}/schema/pull`);
+    const titleAttr = (pulled.body?.attrs ?? []).find((a) => a["forward-identity"][1] === "posts" && a["forward-identity"][2] === "title");
+    r31.badJobType = errView(await call(base, "POST", `/dash/apps/${appId}/indexing-jobs`, { body: { "attr-id": titleAttr?.id, "job-type": "frobnicate" } }));
+    r31.missingJobType = errView(await call(base, "POST", `/dash/apps/${appId}/indexing-jobs`, { body: { "attr-id": titleAttr?.id } }));
+    r31.missingAttr = errView(await call(base, "POST", `/dash/apps/${appId}/indexing-jobs`, { body: { "job-type": "index" } }));
+    r31.unknownAttr = errView(await call(base, "POST", `/dash/apps/${appId}/indexing-jobs`, { body: { "attr-id": mk(), "job-type": "index" } }));
+    r31.otherAppAttr = otherAppId ? errView(await call(base, "POST", `/dash/apps/${otherAppId}/indexing-jobs`, { token: otherToken, body: { "attr-id": titleAttr?.id, "job-type": "index" } })) : null;
+    r31.checkTypeMissingType = errView(await call(base, "POST", `/dash/apps/${appId}/indexing-jobs`, { body: { "attr-id": titleAttr?.id, "job-type": "check-data-type" } }));
+    const job = await call(base, "POST", `/dash/apps/${appId}/indexing-jobs`, { body: { "attr-id": titleAttr?.id, "job-type": "index", "checked-data-type": "string" } });
+    r31.create = job.status === 200 ? { status: 200, keys: Object.keys(job.body).sort(), job: jobView({ ...job.body.job, job_status: "<status>", job_stage: "<stage>" }) } : errView(job);
+    let last;
+    for (let i = 0; i < 600; i++) {
+      last = await call(base, "GET", `/dash/apps/${appId}/indexing-jobs/${job.body?.job?.id}`);
+      const st = last.body?.job?.job_status;
+      if (st !== "waiting" && st !== "processing") break;
+      await sleep(100);
+    }
+    r31.done = last?.status === 200 ? { status: 200, job: jobView(last.body.job) } : errView(last);
+    const removed = await call(base, "POST", `/dash/apps/${appId}/indexing-jobs`, { body: { "attr-id": titleAttr?.id, "job-type": "remove-index" } });
+    r31.removeCreate = removed.status === 200 ? { status: 200, job: jobView({ ...removed.body.job, job_status: "<status>", job_stage: "<stage>" }) } : errView(removed);
+    for (let i = 0; i < 600; i++) {
+      last = await call(base, "GET", `/dash/apps/${appId}/indexing-jobs/${removed.body?.job?.id}`);
+      const st = last.body?.job?.job_status;
+      if (st !== "waiting" && st !== "processing") break;
+      await sleep(100);
+    }
+    r31.removeDone = last?.status === 200 ? { status: 200, job: jobView(last.body.job) } : errView(last);
+    raw("31-indexing-job-post", r31);
+    record("31-indexing-job-post", r31);
+
+    // 32 ephemeral apps + claim
+    const r32 = {};
+    r32.claimRegularApp = errView(await call(base, "POST", `/dash/apps/${appId}/claim`, { token: userToken, body: { token: adminToken } }));
+    r32.claimNoAuth = errView(await call(base, "POST", `/dash/apps/${appId}/claim`, { token: null, body: { token: adminToken } }));
+    const eph = await call(base, "POST", "/dash/apps/ephemeral", { token: null, body: { title: "ephemeral cli app" } });
+    r32.ephemeralCreate = eph.status === 200 ? { status: 200, keys: Object.keys(eph.body).sort(), appKeys: Object.keys(eph.body.app ?? {}).sort(), hasAdminToken: typeof eph.body.app?.["admin-token"] === "string", expiresLater: eph.body.expires_ms > Date.now() } : errView(eph);
+    const ephId = eph.body?.app?.id;
+    const ephGet = await call(base, "GET", `/dash/apps/ephemeral/${ephId}`, { token: null });
+    r32.ephemeralGet = ephGet.status === 200 ? { status: 200, keys: Object.keys(ephGet.body).sort(), title: ephGet.body.app?.title } : errView(ephGet);
+    r32.ephemeralGetRegular = errView(await call(base, "GET", `/dash/apps/ephemeral/${appId}`, { token: null }));
+    r32.claimWrongToken = errView(await call(base, "POST", `/dash/apps/ephemeral/${ephId}/claim`, { token: userToken, body: { app_id: ephId, token: mk() } }));
+    r32.claim = plainView(await call(base, "POST", `/dash/apps/ephemeral/${ephId}/claim`, { token: userToken, body: { app_id: ephId, token: eph.body?.app?.["admin-token"] } }));
+    const claimed = await call(base, "GET", `/dash/apps/${ephId}`, { token: userToken });
+    r32.getClaimed = claimed.status === 200 ? { status: 200, creatorIsUser: claimed.body.app?.creator_id === me.body?.user?.id, title: claimed.body.app?.title } : errView(claimed);
+    r32.claimAgain = errView(await call(base, "POST", `/dash/apps/${ephId}/claim`, { token: userToken, body: { token: eph.body?.app?.["admin-token"] } }));
+    raw("32-ephemeral-and-claim", r32);
+    record("32-ephemeral-and-claim", r32);
+  }
+
   return out;
 }
 

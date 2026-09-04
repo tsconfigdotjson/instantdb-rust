@@ -42,14 +42,27 @@ pub async fn join_room(
         .insert(session_id);
     let user: Option<Value> = row.get("user_json");
     let data: Value = row.get("data");
-    notify_room(state, app_id, room_id, delta_set(session_id, user, data)).await;
+    notify_room(
+        state,
+        app_id,
+        room_id,
+        delta_set(session_id, state.node_id, user, data),
+    )
+    .await;
     Ok(())
 }
 
 /// NOTIFY delta for a peer joining/updating: nodes with a cached snapshot
 /// apply it instead of re-reading the room.
-fn delta_set(session_id: Uuid, user: Option<Value>, data: Value) -> Value {
-    json!({"set": {"session_id": session_id, "user": user, "data": data}})
+fn delta_set(session_id: Uuid, node_id: Uuid, user: Option<Value>, data: Value) -> Value {
+    json!({"set": {"session_id": session_id, "instance_id": node_id, "user": user, "data": data}})
+}
+
+/// A presence entry as legacy's room map holds it (reactive/ephemeral.clj
+/// :280-286): `peer-id`, the `instance-id` of the node the session lives
+/// on, `user` and `data`.
+fn presence_entry(sid: &str, instance_id: Value, user: Value, data: Value) -> Value {
+    json!({"peer-id": sid, "instance-id": instance_id, "user": user, "data": data})
 }
 
 fn delta_leave(session_id: Uuid) -> Value {
@@ -76,7 +89,12 @@ pub async fn set_presence(
     .await
     .map_err(InstantError::from)?;
     let delta = match row {
-        Some(row) => delta_set(session_id, row.get("user_json"), row.get("data")),
+        Some(row) => delta_set(
+            session_id,
+            state.node_id,
+            row.get("user_json"),
+            row.get("data"),
+        ),
         // not in the room: nothing changed, but keep the refresh semantics
         None => Value::Null,
     };
@@ -144,8 +162,12 @@ fn apply_delta(snapshot: &mut Value, delta: &Value) -> bool {
         };
         m.insert(
             sid.to_string(),
-            json!({"peer-id": sid, "user": set.get("user").cloned().unwrap_or(Value::Null),
-                   "data": set.get("data").cloned().unwrap_or(json!({}))}),
+            presence_entry(
+                sid,
+                set.get("instance_id").cloned().unwrap_or(Value::Null),
+                set.get("user").cloned().unwrap_or(Value::Null),
+                set.get("data").cloned().unwrap_or(json!({})),
+            ),
         );
         return true;
     }
@@ -160,7 +182,7 @@ fn apply_delta(snapshot: &mut Value, delta: &Value) -> bool {
 /// {session-id: {"peer-id": sid, "user": ..., "data": {...}}}
 pub async fn room_snapshot(state: &AppState, app_id: Uuid, room_id: &str) -> Result<Value> {
     let rows = sqlx::query(
-        "SELECT session_id, user_json, data FROM rust_presence
+        "SELECT session_id, user_json, data, node_id FROM rust_presence
          WHERE app_id = $1 AND room_id = $2",
     )
     .bind(app_id)
@@ -173,9 +195,15 @@ pub async fn room_snapshot(state: &AppState, app_id: Uuid, room_id: &str) -> Res
         let sid: Uuid = row.get("session_id");
         let user: Option<Value> = row.get("user_json");
         let data: Value = row.get("data");
+        let node: Option<Uuid> = row.try_get("node_id").ok();
         m.insert(
             sid.to_string(),
-            json!({"peer-id": sid, "user": user, "data": data}),
+            presence_entry(
+                &sid.to_string(),
+                json!(node),
+                user.unwrap_or(Value::Null),
+                data,
+            ),
         );
     }
     Ok(Value::Object(m))

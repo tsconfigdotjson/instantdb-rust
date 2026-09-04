@@ -1,4 +1,5 @@
 pub mod attr;
+pub mod cel_ext;
 pub mod error;
 pub mod instaql;
 pub mod perms;

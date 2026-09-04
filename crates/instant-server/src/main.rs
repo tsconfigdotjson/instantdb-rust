@@ -231,6 +231,69 @@ async fn main() -> anyhow::Result<()> {
             "/dash/apps/{app_id}/indexing-jobs/{job_id}",
             get(routes::dash::indexing_job_get),
         )
+        // app management / OAuth config / email templates / orgs (issue #29)
+        .route("/dash", get(routes::dash_apps::dash_get))
+        .route("/dash/me", get(routes::dash_apps::me_get))
+        .route("/dash/apps", post(routes::dash_apps::apps_post))
+        .route("/dash/apps/ephemeral", post(routes::dash_apps::ephemeral_post))
+        .route(
+            "/dash/apps/ephemeral/{app_id}",
+            get(routes::dash_apps::ephemeral_get),
+        )
+        .route(
+            "/dash/apps/ephemeral/{app_id}/claim",
+            post(routes::dash_apps::claim_post),
+        )
+        .route(
+            "/dash/apps/{app_id}",
+            get(routes::dash_apps::apps_get).delete(routes::dash_apps::apps_delete),
+        )
+        .route(
+            "/dash/apps/{app_id}/claim",
+            post(routes::dash_apps::claim_post),
+        )
+        .route("/dash/apps/{app_id}/auth", get(routes::dash_apps::auth_get))
+        .route(
+            "/dash/apps/{app_id}/oauth_service_providers",
+            post(routes::dash_apps::providers_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/oauth_clients",
+            post(routes::dash_apps::clients_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/oauth_clients/{id}",
+            post(routes::dash_apps::clients_update).delete(routes::dash_apps::clients_delete),
+        )
+        .route(
+            "/dash/apps/{app_id}/authorized_redirect_origins",
+            post(routes::dash_apps::origins_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/authorized_redirect_origins/{id}",
+            delete(routes::dash_apps::origins_delete),
+        )
+        .route(
+            "/dash/apps/{app_id}/email_status",
+            get(routes::dash_apps::email_status),
+        )
+        .route(
+            "/dash/apps/{app_id}/email_templates",
+            post(routes::dash_apps::email_template_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/email_templates/{id}",
+            delete(routes::dash_apps::email_template_delete),
+        )
+        .route(
+            "/dash/default-email-template",
+            get(routes::dash_apps::default_email_template),
+        )
+        .route("/dash/orgs", post(routes::dash_apps::orgs_post))
+        .route(
+            "/dash/orgs/{org_id}",
+            get(routes::dash_apps::org_get).delete(routes::dash_apps::org_delete),
+        )
         .route("/dash/cli/version", get(routes::dash::cli_version))
         .route(
             "/dash/cli/auth/register",

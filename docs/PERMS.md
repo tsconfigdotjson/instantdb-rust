@@ -226,6 +226,17 @@ Consequences the Rust impl must reproduce:
 - Standard `type(x)` works (ints coerced to long specifically so
   `type(data.x)` doesn't NPE, `cel.clj:222-226`).
 
+**This server:** `crates/instant-core/src/cel_ext.rs` registers the strings and
+math extensions plus `getTime()` / `timestamp(int|string)` on every rule
+context; `timestamp(...)` calls are renamed in the AST before evaluation so
+the lenient overloads win over the `cel` crate's strict RFC 3339 one.
+`data.ref` / `linkedData.ref` / `auth.ref` are prefetched per literal path
+(`extract_ref_paths`); for update / delete / link / unlink checks the paths
+are resolved before the transaction's steps run, so those rules see the
+pre-tx graph like legacy's pre-checks (`permissioned_transaction.clj:697-715`).
+`actions` is bound only for `link` checks; `attrs.allow.create` runs post-tx
+for inline `add-attr` steps with the attr map as `data`.
+
 ### CEL features used (for sizing a Rust CEL dependency)
 
 - Standard macros: `has`, `all`, `exists`, `exists_one`, `map`, `filter`

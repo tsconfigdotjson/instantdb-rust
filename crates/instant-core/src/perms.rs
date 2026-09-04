@@ -552,10 +552,13 @@ pub async fn eval_program(
     rule_params: &Value,
     env: &EvalEnv<'_>,
 ) -> Result<bool> {
-    eval_program_full(program, data, new_data, auth, rule_params, None, env).await
+    eval_program_full(program, data, new_data, auth, rule_params, None, None, env).await
 }
 
-/// eval_program with the link-check `linkedData` binding.
+/// eval_program with the link-check `linkedData` / `actions` bindings
+/// (cel.clj:459-497: `link` programs see both, `unlink` programs only
+/// `linkedData`).
+#[allow(clippy::too_many_arguments)]
 pub async fn eval_program_full(
     program: &Program,
     data: &Value,
@@ -563,10 +566,19 @@ pub async fn eval_program_full(
     auth: &Value,
     rule_params: &Value,
     linked_data: Option<&Value>,
+    actions: Option<&Value>,
     env: &EvalEnv<'_>,
 ) -> Result<bool> {
-    let (ok, calls) =
-        eval_program_pure(program, data, new_data, auth, rule_params, linked_data, env)?;
+    let (ok, calls) = eval_program_pure(
+        program,
+        data,
+        new_data,
+        auth,
+        rule_params,
+        linked_data,
+        actions,
+        env,
+    )?;
     // Legacy consumes at the `limit()` call and throws on exhaustion; here
     // the calls are charged right after the (synchronous) evaluation, which
     // is observably the same: a call only happens when CEL reached it, the
@@ -848,6 +860,7 @@ fn cel_to_json(v: &cel::Value) -> Value {
 /// rule made (to be charged by the caller). Unbound / erroring expressions
 /// deny, like any CEL error; an unknown `request` field is a validation
 /// error like legacy's compile-time check.
+#[allow(clippy::too_many_arguments)]
 pub fn eval_program_pure(
     program: &Program,
     data: &Value,
@@ -855,6 +868,7 @@ pub fn eval_program_pure(
     auth: &Value,
     rule_params: &Value,
     linked_data: Option<&Value>,
+    actions: Option<&Value>,
     env: &EvalEnv<'_>,
 ) -> Result<(bool, Vec<RateLimitCall>)> {
     if program.is_true() {
@@ -912,6 +926,9 @@ pub fn eval_program_pure(
 
     let calls: std::sync::Arc<std::sync::Mutex<Vec<RateLimitCall>>> = Default::default();
     let mut ctx = cel::Context::default();
+    // legacy registers cel-java's strings + math extensions and its own
+    // getTime / timestamp overloads (cel.clj:387-414, :439-454, :479-488)
+    crate::cel_ext::register(&mut ctx);
     ctx.add_function(
         "ref",
         |cel::extractors::This(this): cel::extractors::This<cel::Value>,
@@ -992,6 +1009,11 @@ pub fn eval_program_pure(
     if let Some(ld) = &linked_data {
         ctx.add_variable_from_value("linkedData", json_to_cel(ld));
     }
+    // `actions` is bound for link checks only (cel.clj:556-580):
+    // {"data": "create"|"update", "linkedData": "create"|"update"}
+    if let Some(a) = actions {
+        ctx.add_variable_from_value("actions", json_to_cel(a));
+    }
     ctx.add_variable_from_value("request", request_binding(env));
     ctx.add_variable_from_value("rateLimit", rate_limit_binding(env));
 
@@ -1004,6 +1026,7 @@ pub fn eval_program_pure(
     let fold = |p: &cel::Program| {
         let mut e = p.expression().clone();
         fold_request_has(&mut e, &present);
+        crate::cel_ext::rewrite_timestamp_calls(&mut e);
         e
     };
 
@@ -1324,8 +1347,16 @@ async fn attach_refs(
     if paths.is_empty() {
         return Ok(());
     }
-    let mut refs = Map::new();
+    let mut refs = match map.remove("_refs") {
+        Some(Value::Object(existing)) => existing,
+        _ => Map::new(),
+    };
     for p in paths {
+        // a path already snapshotted (pre-tx, for update / delete / link
+        // checks) keeps its snapshot
+        if refs.contains_key(p) {
+            continue;
+        }
         let v = resolve_ref_path(conn, app_id, attrs, etype, eid, p).await?;
         refs.insert(p.clone(), v);
     }
@@ -1334,7 +1365,10 @@ async fn attach_refs(
 }
 
 /// Build the `auth` value (with auth.ref prefetch, paths start with "$user.").
-async fn build_auth_value(
+/// Legacy binds `auth` as an `AuthCelMap` for every rule evaluation
+/// (cel.clj:279-293, :556-580), so `$files` / `$streams` checks and the
+/// debug routes go through here too.
+pub async fn build_auth_value(
     conn: &mut PgConnection,
     app_id: Uuid,
     attrs: &AttrMap,
@@ -1387,11 +1421,32 @@ impl<'a> PermsFilter<'a> {
         attrs: &AttrMap,
         result: &mut QueryResult,
     ) -> Result<()> {
+        self.filter_with_forms(conn, app_id, attrs, result, &[])
+            .await
+    }
+
+    /// Like [`PermsFilter::filter`], with the parsed query the result came
+    /// from. Legacy evaluates `view` and field rules on the whole entity even
+    /// when the query projected `fields` (instaql.clj:1956-2007
+    /// `preload-entity-maps` re-fetches every checked entity in full), so a
+    /// projected node is re-read before its rules run.
+    pub async fn filter_with_forms(
+        &self,
+        conn: &mut PgConnection,
+        app_id: Uuid,
+        attrs: &AttrMap,
+        result: &mut QueryResult,
+        forms: &[crate::instaql::Form],
+    ) -> Result<()> {
         for form in &mut result.forms {
+            let parsed = forms.iter().find(|f| f.k == form.k);
             let mut kept = vec![];
             let entities = std::mem::take(&mut form.entities);
             for mut node in entities {
-                if self.check_view_node(conn, app_id, attrs, &mut node).await? {
+                if self
+                    .check_view_node(conn, app_id, attrs, &mut node, parsed)
+                    .await?
+                {
                     kept.push(node);
                 }
             }
@@ -1406,11 +1461,22 @@ impl<'a> PermsFilter<'a> {
         app_id: Uuid,
         attrs: &'b AttrMap,
         node: &'b mut crate::instaql::EntityNode,
+        form: Option<&'b crate::instaql::Form>,
     ) -> futures::future::BoxFuture<'b, Result<bool>> {
         Box::pin(async move {
+            let projected = form.map(|f| f.opts.fields.is_some()).unwrap_or(false);
             let program = self.rules.program(&node.etype, "view");
-            let ok = if program.is_true() {
-                true
+            let has_field_rules = self.rules.has_field_rules(&node.etype);
+            // the `data` binding: the whole entity (re-fetched when the
+            // query projected it)
+            let entity_map = if program.is_true() && !has_field_rules {
+                None
+            } else if projected {
+                Some(
+                    fetch_entity_map(conn, app_id, attrs, &node.etype, node.eid)
+                        .await?
+                        .unwrap_or_else(|| base_entity_map(attrs, &node.etype, node.eid)),
+                )
             } else {
                 let mut data = base_entity_map(attrs, &node.etype, node.eid);
                 for t in &node.triples {
@@ -1420,6 +1486,12 @@ impl<'a> PermsFilter<'a> {
                         }
                     }
                 }
+                Some(data)
+            };
+            let ok = if program.is_true() {
+                true
+            } else {
+                let mut data = entity_map.clone().unwrap_or_default();
                 let sources: Vec<&str> = program.all_sources();
                 let data_paths = extract_ref_paths(&sources, "data");
                 attach_refs(
@@ -1449,16 +1521,8 @@ impl<'a> PermsFilter<'a> {
                 return Ok(false);
             }
             // field-level rules: drop triples whose field program fails
-            if self.rules.has_field_rules(&node.etype) {
-                let mut data = base_entity_map(attrs, &node.etype, node.eid);
-                for t in &node.triples {
-                    if let Some(a) = attrs.get(&t.a) {
-                        if a.cardinality == Cardinality::One {
-                            data.insert(a.label.clone(), t.v.clone());
-                        }
-                    }
-                }
-                let data_val = Value::Object(data);
+            if has_field_rules {
+                let data_val = Value::Object(entity_map.unwrap_or_default());
                 let mut keep = Vec::with_capacity(node.triples.len());
                 for t in std::mem::take(&mut node.triples) {
                     let label = attrs.get(&t.a).map(|a| a.label.clone());
@@ -1490,11 +1554,15 @@ impl<'a> PermsFilter<'a> {
                 node.triples = keep;
             }
             for child in &mut node.children {
+                let child_form = form.and_then(|f| f.children.iter().find(|cf| cf.k == child.k));
                 let mut kept = vec![];
                 let entities = std::mem::take(&mut child.entities);
                 let mut kept_ids = HashSet::new();
                 for mut n in entities {
-                    if self.check_view_node(conn, app_id, attrs, &mut n).await? {
+                    if self
+                        .check_view_node(conn, app_id, attrs, &mut n, child_form)
+                        .await?
+                    {
                         kept_ids.insert(n.eid);
                         kept.push(n);
                     }
@@ -1541,11 +1609,50 @@ enum Check {
         action: &'static str, // "link" | "unlink"
         etype: String,
         eid: Uuid,
+        /// pre-tx entity map (with its `data.ref` snapshot); None when this
+        /// tx creates the entity
         old: Option<Map<String, Value>>,
         linked_etype: String,
         linked_eid: Uuid,
+        /// pre-tx map of the linked entity (with its `linkedData.ref`
+        /// snapshot); None when this tx creates it
+        linked_old: Option<Map<String, Value>>,
         program: Program,
     },
+}
+
+/// A link step with an explicit rule, noted in the pre-pass and turned into
+/// a [`Check::LinkRule`] once the pre-tx snapshots are complete.
+struct LinkSpec {
+    action: &'static str,
+    etype: String,
+    eid: Uuid,
+    linked_etype: String,
+    linked_eid: Uuid,
+    program: Program,
+}
+
+/// `hint.input` of a failed object check: legacy `run-checks!`
+/// (permissioned_transaction.clj:613-631) asserts with `[etype scope]`, and
+/// the scope of an entity check is always `object`.
+fn object_denied(etype: &str) -> InstantError {
+    InstantError::permission_denied(
+        json!([etype, "object"]),
+        "Permission denied: not perms-pass?",
+    )
+}
+
+/// A binding as the debug routes echo it: the internal `_refs` prefetch is
+/// not part of the wire shape.
+fn binding_value(v: &Value) -> Value {
+    match v {
+        Value::Object(m) => {
+            let mut out = m.clone();
+            out.remove("_refs");
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
 }
 
 /// Run tx-steps with permission checks. Must be called inside an open DB tx;
@@ -1576,6 +1683,13 @@ pub async fn permissioned_transact(
 /// Like permissioned_transact but returns per-check results; with
 /// `fail_fast` false, failing checks are recorded instead of aborting
 /// (used by /admin/transact_perms_check dry runs).
+///
+/// Order follows legacy `transact!` (permissioned_transaction.clj:625-745):
+/// the pre-tx entity maps and every `data.ref` / `linkedData.ref` an update,
+/// delete, link or unlink rule can read are snapshotted before the steps
+/// run, so those checks see the pre-tx link graph; create checks (and the
+/// `attrs` create check for inline add-attr steps) run against the post-tx
+/// state.
 #[allow(clippy::too_many_arguments)]
 pub async fn permissioned_transact_checked(
     conn: &mut PgConnection,
@@ -1592,8 +1706,8 @@ pub async fn permissioned_transact_checked(
     let mut link_targets: Vec<(Uuid, String)> = vec![]; // entities linked-to (view check)
     let mut delete_seeds: Vec<(Uuid, String)> = vec![];
     // explicit link/unlink checks; (eid, etype) pairs whose only touches are
-    // explicitly-ruled ref steps skip the generic update fallback
-    let mut link_checks: Vec<Check> = vec![];
+    // explicitly-ruled ref steps skip the generic create / update fallback
+    let mut link_specs: Vec<LinkSpec> = vec![];
     let mut explicit_ref_touch: HashSet<(Uuid, String)> = HashSet::new();
     let mut other_touch: HashSet<(Uuid, String)> = HashSet::new();
 
@@ -1675,22 +1789,20 @@ pub async fn permissioned_transact_checked(
                                 old_maps.insert(tkey.clone(), m);
                             }
                             if let Some(p) = fwd_prog {
-                                link_checks.push(Check::LinkRule {
+                                link_specs.push(LinkSpec {
                                     action,
                                     etype: attr.etype.clone(),
                                     eid: e,
-                                    old: old_maps.get(&(e, attr.etype.clone())).cloned().flatten(),
                                     linked_etype: retype.clone(),
                                     linked_eid: t,
                                     program: p,
                                 });
                             }
                             if let Some(p) = rev_prog {
-                                link_checks.push(Check::LinkRule {
+                                link_specs.push(LinkSpec {
                                     action,
                                     etype: retype.clone(),
                                     eid: t,
-                                    old: old_maps.get(&(t, retype.clone())).cloned().flatten(),
                                     linked_etype: attr.etype.clone(),
                                     linked_eid: e,
                                     program: p,
@@ -1740,6 +1852,44 @@ pub async fn permissioned_transact_checked(
         }
     }
 
+    // ---- pre-tx ref snapshots (permissioned_transaction.clj:697-715) ----
+    // update / delete / link / unlink checks read `data.ref(...)` (and
+    // `linkedData.ref(...)`) against the graph as it was before the steps
+    // ran; the paths are resolved now and kept on the snapshot maps
+    {
+        let mut wanted: Vec<((Uuid, String), Vec<String>)> = vec![];
+        for key in &other_touch {
+            let program = rules.program(&key.1, "update");
+            let paths = extract_ref_paths(&program.all_sources(), "data");
+            if !paths.is_empty() {
+                wanted.push((key.clone(), paths));
+            }
+        }
+        for (e, et) in &delete_set {
+            let program = rules.program(et, "delete");
+            let paths = extract_ref_paths(&program.all_sources(), "data");
+            if !paths.is_empty() {
+                wanted.push(((*e, et.clone()), paths));
+            }
+        }
+        for spec in &link_specs {
+            let sources = spec.program.all_sources();
+            let data_paths = extract_ref_paths(&sources, "data");
+            if !data_paths.is_empty() {
+                wanted.push(((spec.eid, spec.etype.clone()), data_paths));
+            }
+            let linked_paths = extract_ref_paths(&sources, "linkedData");
+            if !linked_paths.is_empty() {
+                wanted.push(((spec.linked_eid, spec.linked_etype.clone()), linked_paths));
+            }
+        }
+        for (key, paths) in wanted {
+            if let Some(Some(map)) = old_maps.get_mut(&key) {
+                attach_refs(conn, app_id, attrs, &key.1, key.0, &paths, map).await?;
+            }
+        }
+    }
+
     // attr-scope checks (permissioned_transaction.clj:338-352): update /
     // delete / restore-attr carry `{:result admin?}`, and this path is only
     // taken for non-admins, so they always fail
@@ -1777,6 +1927,15 @@ pub async fn permissioned_transact_checked(
             _ => None,
         })
         .collect();
+    // inline add-attr steps: checked post-tx against `attrs.allow.create`
+    // (permissioned_transaction.clj:519-527)
+    let added_attrs: Vec<Value> = steps
+        .iter()
+        .filter_map(|s| match s {
+            TxStep::AddAttr(a) => Some(a.to_wire()),
+            _ => None,
+        })
+        .collect();
 
     // ---- execute ----
     let report = tx::transact(conn, app_id, attrs, steps, &TxOptions::default()).await?;
@@ -1795,6 +1954,12 @@ pub async fn permissioned_transact_checked(
     let mut checks: Vec<Check> = vec![];
     let created: HashSet<(Uuid, String)> = report.created.iter().cloned().collect();
     for (e, et) in &report.created {
+        let key = (*e, et.clone());
+        if explicit_ref_touch.contains(&key) && !other_touch.contains(&key) {
+            // an entity brought into being by a link step alone runs the
+            // link rule (with actions.data == "create"), not the create rule
+            continue;
+        }
         checks.push(Check::Create {
             etype: et.clone(),
             eid: *e,
@@ -1833,7 +1998,26 @@ pub async fn permissioned_transact_checked(
             old,
         });
     }
-    checks.extend(link_checks);
+    for spec in link_specs {
+        let old = old_maps
+            .get(&(spec.eid, spec.etype.clone()))
+            .cloned()
+            .flatten();
+        let linked_old = old_maps
+            .get(&(spec.linked_eid, spec.linked_etype.clone()))
+            .cloned()
+            .flatten();
+        checks.push(Check::LinkRule {
+            action: spec.action,
+            etype: spec.etype,
+            eid: spec.eid,
+            old,
+            linked_etype: spec.linked_etype,
+            linked_eid: spec.linked_eid,
+            linked_old,
+            program: spec.program,
+        });
+    }
     let mut linked_seen = HashSet::new();
     for (e, et) in link_targets {
         let key = (e, et.clone());
@@ -1842,6 +2026,20 @@ pub async fn permissioned_transact_checked(
         }
         checks.push(Check::ViewLinked { etype: et, eid: e });
     }
+
+    // merged rule params for an entity: step-level overrides global
+    let rule_params_for = |eid: Uuid, etype: &str| -> Value {
+        let mut rp = match global_rule_params {
+            Value::Object(m) => m.clone(),
+            _ => Map::new(),
+        };
+        if let Some(Value::Object(step_rp)) = report.rule_params.get(&(eid, etype.to_string())) {
+            for (k, v) in step_rp {
+                rp.insert(k.clone(), v.clone());
+            }
+        }
+        Value::Object(rp)
+    };
 
     // ---- evaluate ----
     for check in checks {
@@ -1884,50 +2082,93 @@ pub async fn permissioned_transact_checked(
                 old,
                 linked_etype,
                 linked_eid,
+                linked_old,
                 program,
             } => {
-                // legacy: check runs only when the entity existed pre-tx
-                let Some(old) = old else { continue };
+                let created_here = old.is_none();
+                if created_here && *action == "unlink" {
+                    // nothing to unlink from an entity that did not exist
+                    continue;
+                }
+                let sources = program.all_sources();
+                let data_paths = extract_ref_paths(&sources, "data");
+                let linked_paths = extract_ref_paths(&sources, "linkedData");
                 let new = fetch_entity_map(conn, app_id, attrs, etype, *eid)
                     .await?
                     .unwrap_or_else(|| base_entity_map(attrs, etype, *eid));
-                let linked = fetch_entity_map(conn, app_id, attrs, linked_etype, *linked_eid)
-                    .await?
-                    .map(Value::Object)
-                    .unwrap_or(Value::Null);
-                let mut data = Value::Object(old.clone());
-                if let Value::Object(ref mut m) = data {
-                    let sources = program.all_sources();
-                    let paths = extract_ref_paths(&sources, "data");
-                    attach_refs(conn, app_id, attrs, etype, *eid, &paths, m).await?;
-                }
+                // pre-checks (:344-374) bind the pre-tx entity as `data`;
+                // post-create checks (:528-560) bind the created entity
+                let mut data = match old {
+                    Some(o) => o.clone(),
+                    None => new.clone(),
+                };
+                attach_refs(conn, app_id, attrs, etype, *eid, &data_paths, &mut data).await?;
+                let mut linked = match linked_old {
+                    Some(l) => l.clone(),
+                    None => fetch_entity_map(conn, app_id, attrs, linked_etype, *linked_eid)
+                        .await?
+                        .unwrap_or_else(|| base_entity_map(attrs, linked_etype, *linked_eid)),
+                };
+                attach_refs(
+                    conn,
+                    app_id,
+                    attrs,
+                    linked_etype,
+                    *linked_eid,
+                    &linked_paths,
+                    &mut linked,
+                )
+                .await?;
+                let actions = (*action == "link").then(|| {
+                    json!({
+                        "data": if created_here { "create" } else { "update" },
+                        "linkedData": if linked_old.is_some() { "update" } else { "create" },
+                    })
+                });
+                let data = Value::Object(data);
+                let new_data = Value::Object(new);
+                let linked = Value::Object(linked);
                 let auth_val = build_auth_value(conn, app_id, attrs, auth, &[program]).await?;
-                let mut rp = match global_rule_params {
-                    Value::Object(m) => m.clone(),
+                // legacy merges the linked side's rule-params under the
+                // entity's own (:360, :372)
+                let mut rp = match rule_params_for(*linked_eid, linked_etype) {
+                    Value::Object(m) => m,
                     _ => Map::new(),
                 };
-                if let Some(Value::Object(step_rp)) = report.rule_params.get(&(*eid, etype.clone()))
-                {
-                    for (k, v) in step_rp {
-                        rp.insert(k.clone(), v.clone());
+                if let Value::Object(own) = rule_params_for(*eid, etype) {
+                    for (k, v) in own {
+                        rp.insert(k, v);
                     }
                 }
+                let rp = Value::Object(rp);
                 let env = EvalEnv::new(app_id, rules, &auth.request);
                 let ok = eval_program_full(
                     program,
                     &data,
-                    Some(&Value::Object(new)),
+                    Some(&new_data),
                     &auth_val,
-                    &Value::Object(rp),
+                    &rp,
                     Some(&linked),
+                    actions.as_ref(),
                     &env,
                 )
                 .await?;
+                let mut bindings = json!({
+                    "data": binding_value(&data),
+                    "new-data": binding_value(&new_data),
+                    "linked-data": binding_value(&linked),
+                    "linked-etype": linked_etype,
+                    "rule-params": rp,
+                });
+                if let Some(a) = &actions {
+                    bindings["actions"] = a.clone();
+                }
                 check_results.push(json!({
                     "scope": "object",
                     "etype": etype,
                     "action": action,
                     "eid": eid,
+                    "bindings": bindings,
                     "check-result": ok,
                     "check-pass?": ok,
                     "program": {
@@ -1938,21 +2179,42 @@ pub async fn permissioned_transact_checked(
                     },
                 }));
                 if !ok && fail_fast {
-                    return Err(InstantError::permission_denied(
-                        json!([etype, action]),
-                        "Permission denied: not perms-pass?",
-                    ));
+                    return Err(object_denied(etype));
                 }
                 continue;
             }
         };
         let program = rules.program(&etype, action);
+        // legacy passes modified-fields only to create / update checks
+        let modified_fields = if matches!(action, "create" | "update") {
+            Some(modified_fields_for(&writes, attrs, eid))
+        } else {
+            None
+        };
+        let rp = rule_params_for(eid, &etype);
+        let mut bindings = json!({
+            "data": binding_value(&data),
+            "rule-params": rp,
+        });
+        match action {
+            "create" => {
+                bindings["new-data"] = binding_value(&data);
+            }
+            "update" => {
+                bindings["new-data"] = new_data.as_ref().map(binding_value).unwrap_or(Value::Null);
+            }
+            _ => {}
+        }
+        if let Some(mf) = &modified_fields {
+            bindings["modified-fields"] = json!(mf);
+        }
         if program.is_true() {
             check_results.push(json!({
                 "scope": "object",
                 "etype": etype,
                 "action": action,
                 "eid": eid,
+                "bindings": bindings,
                 "check-result": true,
                 "check-pass?": true,
                 "program": {
@@ -1964,7 +2226,8 @@ pub async fn permissioned_transact_checked(
             }));
             continue;
         }
-        // data refs prefetch
+        // data refs prefetch (update / delete snapshots already carry their
+        // pre-tx paths; create / view read the post-tx graph)
         let mut data = data;
         if let Value::Object(ref mut m) = data {
             let sources = program.all_sources();
@@ -1972,37 +2235,15 @@ pub async fn permissioned_transact_checked(
             attach_refs(conn, app_id, attrs, &etype, eid, &paths, m).await?;
         }
         let auth_val = build_auth_value(conn, app_id, attrs, auth, &[&program]).await?;
-        // merge rule params: step-level overrides global
-        let mut rp = match global_rule_params {
-            Value::Object(m) => m.clone(),
-            _ => Map::new(),
-        };
-        if let Some(Value::Object(step_rp)) = report.rule_params.get(&(eid, etype.clone())) {
-            for (k, v) in step_rp {
-                rp.insert(k.clone(), v.clone());
-            }
-        }
-        // legacy passes modified-fields only to create / update checks
-        let modified_fields = if matches!(action, "create" | "update") {
-            modified_fields_for(&writes, attrs, eid)
-        } else {
-            vec![]
-        };
-        let env = EvalEnv::new(app_id, rules, &auth.request).with_modified_fields(modified_fields);
-        let ok = eval_program(
-            &program,
-            &data,
-            new_data.as_ref(),
-            &auth_val,
-            &Value::Object(rp),
-            &env,
-        )
-        .await?;
+        let env = EvalEnv::new(app_id, rules, &auth.request)
+            .with_modified_fields(modified_fields.unwrap_or_default());
+        let ok = eval_program(&program, &data, new_data.as_ref(), &auth_val, &rp, &env).await?;
         check_results.push(json!({
             "scope": "object",
             "etype": etype,
             "action": action,
             "eid": eid,
+            "bindings": bindings,
             "check-result": ok,
             "check-pass?": ok,
             "program": {
@@ -2013,8 +2254,48 @@ pub async fn permissioned_transact_checked(
             },
         }));
         if !ok && fail_fast {
+            return Err(object_denied(&etype));
+        }
+    }
+
+    // ---- attrs.allow.create for inline add-attr steps ----
+    // (permissioned_transaction.clj:519-527: `data` is the attr map itself;
+    // rule.clj:278-290 walks attrs.allow.create -> attrs.allow.$default ->
+    // $default.allow.create -> $default.allow.$default, else allow)
+    for attr_map in added_attrs {
+        let program = rules.program("attrs", "create");
+        let ok = if program.is_true() {
+            true
+        } else {
+            let auth_val = build_auth_value(conn, app_id, attrs, auth, &[&program]).await?;
+            let env = EvalEnv::new(app_id, rules, &auth.request);
+            eval_program(
+                &program,
+                &attr_map,
+                None,
+                &auth_val,
+                global_rule_params,
+                &env,
+            )
+            .await?
+        };
+        check_results.push(json!({
+            "scope": "attr",
+            "etype": "attrs",
+            "action": "create",
+            "bindings": {"data": attr_map},
+            "check-result": ok,
+            "check-pass?": ok,
+            "program": {
+                "etype": "attrs",
+                "action": "create",
+                "code": program.expr,
+                "display-code": program.expr,
+            },
+        }));
+        if !ok && fail_fast {
             return Err(InstantError::permission_denied(
-                json!([etype, action]),
+                json!(["attrs", "attr"]),
                 "Permission denied: not perms-pass?",
             ));
         }
@@ -2036,7 +2317,7 @@ mod tests {
         let rules = Rules { code: json!({}) };
         let request = RequestCtx::default();
         let env = EvalEnv::new(Uuid::nil(), &rules, &request);
-        eval_program_pure(&program, &data, None, &auth, &rule_params, None, &env)
+        eval_program_pure(&program, &data, None, &auth, &rule_params, None, None, &env)
             .unwrap()
             .0
     }
@@ -2115,6 +2396,7 @@ mod tests {
             &Value::Null,
             &json!({}),
             None,
+            None,
             &env,
         )
         .unwrap_err();
@@ -2128,6 +2410,63 @@ mod tests {
             "auth.id == null",
             json!({}),
             json!({"id": "u1"}),
+            json!({})
+        ));
+    }
+
+    #[test]
+    fn actions_binding_and_extension_functions() {
+        // link rules read `actions` (cel.clj:459-497); unlink rules never see it
+        let program = Program {
+            expr: "actions.data == 'create' && actions.linkedData == 'update'".to_string(),
+            binds: vec![],
+            rule: None,
+        };
+        let rules = Rules { code: json!({}) };
+        let request = RequestCtx::default();
+        let env = EvalEnv::new(Uuid::nil(), &rules, &request);
+        let ok = eval_program_pure(
+            &program,
+            &json!({"id": "1"}),
+            None,
+            &Value::Null,
+            &json!({}),
+            Some(&json!({"id": "2"})),
+            Some(&json!({"data": "create", "linkedData": "update"})),
+            &env,
+        )
+        .unwrap()
+        .0;
+        assert!(ok);
+        let err = eval_program_pure(
+            &program,
+            &json!({"id": "1"}),
+            None,
+            &Value::Null,
+            &json!({}),
+            Some(&json!({"id": "2"})),
+            None,
+            &env,
+        )
+        .unwrap_err();
+        assert_eq!(err.error_type, "permission-evaluation-failed");
+        // cel-java string / math extensions and the Instant timestamp overloads
+        assert!(eval(
+            "data.email.lowerAscii().endsWith('@example.com') && data.title.substring(0, 2) == 'Hi'",
+            json!({"email": "A@Example.com", "title": "Hi there"}),
+            Value::Null,
+            json!({})
+        ));
+        assert!(eval(
+            "math.greatest(data.a, data.b) == 3 && request.time.getTime() > timestamp(data.created).getTime()",
+            json!({"a": 1, "b": 3, "created": 0}),
+            Value::Null,
+            json!({})
+        ));
+        assert!(eval(
+            "timestamp('2020-01-01') < timestamp(data.when) && data.tags.join(',') == 'a,b'",
+            json!({"when": "2021-06-01T00:00:00Z", "tags": ["a", "b"]}),
+            Value::Null,
             json!({})
         ));
     }
@@ -2152,6 +2491,7 @@ mod tests {
             &json!({"id": "u1"}),
             &json!({}),
             None,
+            None,
             &env,
         )
         .unwrap()
@@ -2163,6 +2503,7 @@ mod tests {
             None,
             &Value::Null,
             &json!({}),
+            None,
             None,
             &env,
         )

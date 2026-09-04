@@ -375,6 +375,218 @@ async fn create_and_update_modes() {
     assert!(err.message.contains("Creating entities that exist"));
 }
 
+/// Legacy `validate-mode` (transaction.clj:283-358) is one pre-pass over the
+/// pre-tx state: existence is any triple of the etype, offenders are joined
+/// into one message (in step order, with the offending steps as `input`),
+/// lookups are checked as written, and steps earlier in the same tx do not
+/// change the verdict.
+#[tokio::test]
+async fn mode_prepass_matches_legacy() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+
+    // an entity with only a `title` triple (no id triple) still exists
+    let e1 = Uuid::new_v4();
+    transact_json(&pool, app, json!([["add-triple", e1, ids.todos_title, "t1"]]))
+        .await
+        .unwrap();
+    let err = transact_json(
+        &pool,
+        app,
+        json!([["add-triple", e1, ids.todos_id, e1, {"mode": "create"}]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.message,
+        format!("Validation failed for tx-step: Creating entities that exist: {e1}")
+    );
+    assert_eq!(err.hint.as_ref().unwrap()["data-type"], json!("tx-step"));
+    assert_eq!(
+        err.hint.as_ref().unwrap()["input"].as_array().unwrap().len(),
+        1
+    );
+
+    // the same uuid under another etype does not exist there (PR #1555)
+    transact_json(
+        &pool,
+        app,
+        json!([["add-triple", e1, ids.owners_id, e1, {"mode": "create"}]]),
+    )
+    .await
+    .unwrap();
+
+    // create-then-update in one tx: the update sees the pre-tx state
+    let e2 = Uuid::new_v4();
+    let err = transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", e2, ids.todos_id, e2, {"mode": "create"}],
+            ["add-triple", e2, ids.todos_title, "x", {"mode": "update"}]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.message,
+        format!("Validation failed for tx-step: Updating entities that don't exist: {e2}")
+    );
+
+    // create-after-delete in one tx still sees the pre-tx entity
+    let err = transact_json(
+        &pool,
+        app,
+        json!([
+            ["delete-entity", e1, "todos"],
+            ["add-triple", e1, ids.todos_title, "again", {"mode": "create"}]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains("Creating entities that exist"));
+
+    // every offender in one message, in step order, duplicates included
+    let e3 = Uuid::new_v4();
+    let err = transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", e3, ids.todos_title, "a", {"mode": "update"}],
+            ["add-triple", e1, ids.todos_title, "b", {"mode": "update"}],
+            ["add-triple", e3, ids.todos_done, true, {"mode": "update"}]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.message,
+        format!("Validation failed for tx-step: Updating entities that don't exist: {e3}, {e3}")
+    );
+
+    // an update-mode lookup that misses is a mode error naming the lookup,
+    // printed the way Clojure prints the coerced vector
+    let err = transact_json(
+        &pool,
+        app,
+        json!([[
+            "add-triple",
+            [ids.owners_name, "nobody"],
+            ids.owners_name,
+            "nobody",
+            {"mode": "update"}
+        ]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.message,
+        format!(
+            "Validation failed for tx-step: Updating entities that don't exist: [#uuid \"{}\" \"nobody\"]",
+            ids.owners_name
+        )
+    );
+    // a create-mode lookup that resolves is an error on the admin path too
+    let o = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", o, ids.owners_id, o],
+            ["add-triple", o, ids.owners_name, "ann"]
+        ]),
+    )
+    .await
+    .unwrap();
+    let err = transact_json(
+        &pool,
+        app,
+        json!([[
+            "add-triple",
+            [ids.owners_name, "ann"],
+            ids.owners_name,
+            "ann",
+            {"mode": "create"}
+        ]]),
+    )
+    .await
+    .unwrap_err();
+    // (the non-admin path prints the resolved uuid, like legacy's
+    // resolve-lookups-tx-steps rewrite; the admin path prints the vector)
+    assert_eq!(
+        err.message,
+        format!("Validation failed for tx-step: Creating entities that exist: {o}")
+    );
+    // valid creates and updates mixed in one tx pass
+    let e4 = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", e4, ids.todos_id, e4, {"mode": "create"}],
+            ["add-triple", e2, ids.todos_title, "y", {"mode": "upsert"}],
+            ["deep-merge-triple", o, ids.owners_name, "ann2", {"mode": "update"}]
+        ]),
+    )
+    .await
+    .unwrap();
+}
+
+/// Legacy `::tx-steps` specs (transaction.clj:25-69): an unknown `mode`, a
+/// non-map `opts`, a non-string etype, non-map rule-params, a missing value
+/// and trailing elements all fail with the bare "Validation failed for
+/// tx-steps"; a bad entity id gets the friendly message.
+#[tokio::test]
+async fn step_shape_specs() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let e = Uuid::new_v4();
+    let bare = |steps: Value| async {
+        let err = transact_json(&pool, app, steps).await.unwrap_err();
+        assert_eq!(err.error_type, "validation-failed");
+        assert_eq!(err.message, "Validation failed for tx-steps");
+        let hint = err.hint.unwrap();
+        assert_eq!(hint["data-type"], json!("tx-steps"));
+        assert!(hint["input"].is_array());
+        assert!(hint["errors"][0].get("in").is_some());
+    };
+    bare(json!([["add-triple", e, ids.todos_title, "x", {"mode": "replace"}]])).await;
+    bare(json!([["add-triple", e, ids.todos_title, "x", "create"]])).await;
+    bare(json!([["add-triple", e, ids.todos_title]])).await;
+    bare(json!([["retract-triple", e, ids.todos_title, "x", {"mode": "create"}]])).await;
+    bare(json!([["delete-entity", e, 42]])).await;
+    bare(json!([["rule-params", e, "todos", "not-a-map"]])).await;
+    bare(json!([["rule-params", e]])).await;
+    bare(json!([["delete-attr", ids.todos_done, "extra"]])).await;
+    // `upsert` is a legal mode; a null opts slot is fine
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", e, ids.todos_id, e, {"mode": "upsert"}],
+            ["add-triple", e, ids.todos_title, "x", null]
+        ]),
+    )
+    .await
+    .unwrap();
+    let err = transact_json(
+        &pool,
+        app,
+        json!([["add-triple", "not-an-id", ids.todos_title, "x"]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.message,
+        "Validation failed for tx-steps: Invalid entity ID 'not-an-id'. Entity IDs must be UUIDs. Use id() or lookup() to generate a valid UUID."
+    );
+    assert_eq!(err.hint.unwrap()["errors"][0]["in"], json!([0, 1]));
+}
+
 #[tokio::test]
 async fn indexed_attr_backfills_nulls() {
     let pool = pool().await;

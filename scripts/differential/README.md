@@ -22,7 +22,7 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `ghcr.io/instantdb`.
 - `provision.sh` — creates the same app id + admin token in both servers'
   databases (both run the same legacy schema).
-- `replay.mjs` — 24-step scenario across init, schemaless transacts, queries
+- `replay.mjs` — 34-step scenario across init, schemaless transacts, queries
   (nested/paginated/cursor round-trip/aggregate), typed-attr query breadth
   ($gt/$lt/$like/$ilike/$in/$not/$isNull/or/and, typed ordering, offset,
   last, fields projection, dot-paths), authed sessions + permissions (real
@@ -38,7 +38,14 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `result-meta` page-info compared whole) and the generic `POST /admin/sse` +
   `/admin/sse/push` session driving join-rows queries, transacts and a stream a
   socket subscriber tails (`connectSse` in lib.mjs mirrors the SDK's
-  transports). `inferred-types` on
+  transports); and the issue #29 items (steps 29-34): the cel-java strings /
+  math extensions and `getTime` / `timestamp` overloads in binds and every
+  rule kind, view + field rules under a `fields` projection, `$isNull` inside
+  `or`, link-rule `actions` / `linkedData.ref` / link-on-create and pre-tx
+  `data.ref` in update / delete rules, `attrs.allow.create`, the `mode`
+  pre-pass messages and tx-step shape specs, the admin presence route with
+  re-fetched users and `instance-id`, `resync-table` mismatch checks, and the
+  OAuth callback's 400 surfaces + `?test-redirect` page. `inferred-types` on
   attrs is compared for real (it used to be normalized away). Frames are folded into the
   **client-visible projection** (exactly what `Reactor.js`/`SyncTable.ts`/
   `Stream.ts` read, with volatile server-chosen values normalized) and must
@@ -60,7 +67,13 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `schema/push/{plan,apply}`, perms pull, rules push (valid, unchanged and
   invalid rules), the auth/param error matrix, and the HTTP side of the admin
   SSE routes (auth / query / push-envelope errors, `session-missing` and
-  `member-missing` against a live session). Responses are folded to
+  `member-missing` against a live session), and — with `DASH_USER_TOKEN`
+  (a dashboard refresh token `provision.sh` seeds on both servers for the
+  app's creator) — the CLI's app / info / claim / auth / email routes
+  (issue #29): `/dash/me`, `/dash`, app create / get / delete, orgs, OAuth
+  providers / clients / redirect origins and the `/auth` summary, email
+  templates and status, direct indexing-job creation with its validation
+  matrix, ephemeral apps and `claim`. Responses are folded to
   what the CLI reads (server-chosen ids, timestamps and CEL diagnostics
   normalized) and must match. `node dash.mjs <app> <token> [<app2> <token2>]`.
 - `storage.mjs` — the storage surface (issue #9): every `db.storage.*`

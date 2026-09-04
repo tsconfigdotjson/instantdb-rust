@@ -846,6 +846,13 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                 } else {
                     "retract-triple"
                 };
+                // legacy with-id-attr-for-lookup (admin/model.clj:95-103): a
+                // lookup eid gets its `id` triple first, so the entity is
+                // created (and its create rule runs) when it doesn't exist
+                if eid.is_array() {
+                    let id_attr = resolve_obj_attr(attrs, etype, "id", &mut new_attrs)?;
+                    out.push(json!(["add-triple", eid, id_attr, eid]));
+                }
                 for (label, value) in &obj {
                     let (attr_id, forward) =
                         resolve_link_attr(attrs, etype, label, &mut new_attrs)?;
@@ -989,24 +996,31 @@ async fn refresh_tokens_impl(
         .get("id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
+    // legacy refresh-tokens-post (admin/routes.clj:398-427): assert-signup!
+    // with skip-perm-check? validates extra-fields against the $users schema
+    let extra_fields = auth::extra_fields_of(body, "extra-fields");
+    let attrs = service::load_attrs(state, ctx.app_id).await?;
+    auth::validate_extra_fields(&attrs, extra_fields)?;
     let (user_id, created) = match (email, id) {
         (Some(email), _) => match auth::user_by_email(state, ctx.app_id, email).await? {
             Some(u) => (u.id, false),
             None => {
                 let uid = Uuid::new_v4();
-                let steps = json!([
-                    ["add-triple", uid, sc::attr_id("$users", "id"), uid],
-                    ["add-triple", uid, sc::attr_id("$users", "email"), email]
-                ]);
-                service::run_system_transact(state, ctx.app_id, &steps).await?;
+                let mut steps = vec![
+                    json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
+                    json!(["add-triple", uid, sc::attr_id("$users", "email"), email]),
+                ];
+                steps.extend(auth::extra_field_steps(&attrs, uid, extra_fields));
+                service::run_system_transact(state, ctx.app_id, &Value::Array(steps)).await?;
                 (uid, true)
             }
         },
         (None, Some(id)) => match auth::user_by_id(state, ctx.app_id, id).await? {
             Some(u) => (u.id, false),
             None => {
-                let steps = json!([["add-triple", id, sc::attr_id("$users", "id"), id]]);
-                service::run_system_transact(state, ctx.app_id, &steps).await?;
+                let mut steps = vec![json!(["add-triple", id, sc::attr_id("$users", "id"), id])];
+                steps.extend(auth::extra_field_steps(&attrs, id, extra_fields));
+                service::run_system_transact(state, ctx.app_id, &Value::Array(steps)).await?;
                 (id, true)
             }
         },
@@ -1157,10 +1171,57 @@ async fn presence_impl(
     params: &HashMap<String, String>,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
-    let room_id = params
-        .get("room-id")
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: room-id"))?;
-    let snapshot = crate::presence::room_snapshot(state, ctx.app_id, room_id).await?;
+    // legacy presence-get (admin/routes.clj:739-765): `room-type` is
+    // required (unused) alongside `room-id`, and every peer's stored
+    // `{id}` user is replaced with its current $users entity
+    let get_param = |name: &str| -> Result<String> {
+        match params.get(name) {
+            None => Err(InstantError::new(
+                "param-missing",
+                400,
+                format!("Missing parameter: [\"params\" \"{name}\"]"),
+                Some(json!({"in": ["params", name]})),
+            )),
+            Some(v) if v.trim().is_empty() => Err(InstantError::new(
+                "param-malformed",
+                400,
+                format!("Malformed parameter: [\"params\" \"{name}\"]"),
+                Some(json!({"in": ["params", name], "original-input": v})),
+            )),
+            Some(v) => Ok(v.clone()),
+        }
+    };
+    let _room_type = get_param("room-type")?;
+    let room_id = get_param("room-id")?;
+    let mut snapshot = crate::presence::room_snapshot(state, ctx.app_id, &room_id).await?;
+    let attrs = service::load_attrs(state, ctx.app_id).await?;
+    let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
+    let mut users: HashMap<Uuid, Value> = HashMap::new();
+    if let Some(sessions) = snapshot.as_object_mut() {
+        for sess in sessions.values_mut() {
+            let Some(uid) = sess
+                .get("user")
+                .and_then(|u| u.get("id"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+            else {
+                continue;
+            };
+            if !users.contains_key(&uid) {
+                let entity =
+                    instant_core::perms::fetch_entity_map(&mut conn, ctx.app_id, &attrs, "$users", uid)
+                        .await?
+                        .map(|m| {
+                            // legacy get-entities: only the triples the row
+                            // has, plus id
+                            Value::Object(m.into_iter().filter(|(_, v)| !v.is_null()).collect())
+                        })
+                        .unwrap_or(Value::Null);
+                users.insert(uid, entity);
+            }
+            sess["user"] = users.get(&uid).cloned().unwrap_or(Value::Null);
+        }
+    }
     Ok(json!({"sessions": snapshot}))
 }
 
@@ -1804,15 +1865,21 @@ async fn admin_sign_in_guest_impl(
     state: &AppState,
     headers: &HeaderMap,
     params: &HashMap<String, String>,
-    _body: &Value,
+    body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
     let uid = Uuid::new_v4();
-    let steps = json!([
-        ["add-triple", uid, sc::attr_id("$users", "id"), uid],
-        ["add-triple", uid, sc::attr_id("$users", "type"), "guest"]
-    ]);
-    service::run_system_transact(state, ctx.app_id, &steps).await?;
+    // legacy sign-in-guest-post (admin/routes.clj:534-554): extra-fields are
+    // validated (no rule check) and written with the guest
+    let extra_fields = auth::extra_fields_of(body, "extra-fields");
+    let attrs = service::load_attrs(state, ctx.app_id).await?;
+    auth::validate_extra_fields(&attrs, extra_fields)?;
+    let mut steps = vec![
+        json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
+        json!(["add-triple", uid, sc::attr_id("$users", "type"), "guest"]),
+    ];
+    steps.extend(auth::extra_field_steps(&attrs, uid, extra_fields));
+    service::run_system_transact(state, ctx.app_id, &Value::Array(steps)).await?;
     let token = auth::mint_refresh_token(state, ctx.app_id, uid).await?;
     let user = user_json(state, ctx.app_id, uid, Some(token)).await?;
     Ok(json!({"user": user}))
@@ -1872,15 +1939,12 @@ async fn check_files_perm(
     let program = rules.program("$files", action);
     let auth_ctx = perms.auth_ctx(state);
     let env = instant_core::perms::EvalEnv::new(app_id, &rules, &auth_ctx.request);
-    let auth_val = if let Some(uid) = auth_ctx.user_id {
-        let attrs = service::load_attrs(state, app_id).await?;
-        instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$users", uid)
-            .await?
-            .map(Value::Object)
-            .unwrap_or(Value::Null)
-    } else {
-        Value::Null
-    };
+    // legacy binds `auth` as an AuthCelMap here too (coordinator.clj:19-38),
+    // so `auth.ref('$user...')` resolves
+    let attrs = service::load_attrs(state, app_id).await?;
+    let auth_val =
+        instant_core::perms::build_auth_value(&mut conn, app_id, &attrs, &auth_ctx, &[&program])
+            .await?;
     let data = json!({"path": path});
     let ok = instant_core::perms::eval_program(&program, &data, None, &auth_val, &json!({}), &env)
         .await?;
@@ -2112,6 +2176,8 @@ async fn query_perms_check_impl(
     for form in &unfiltered.forms {
         let program = rules.program(&form.etype, "view");
         for e in &form.entities {
+            // legacy `entity-map` (instaql.clj:1956-1963) re-fetches the whole
+            // entity for the check regardless of any `fields` projection
             let mut record = serde_json::Map::new();
             record.insert("id".to_string(), json!(e.eid));
             for t in &e.triples {
@@ -2121,18 +2187,20 @@ async fn query_perms_check_impl(
                     }
                 }
             }
-            let mut data = instant_core::perms::base_entity_map(&attrs, &form.etype, e.eid);
-            for (k, v) in &record {
-                data.insert(k.clone(), v.clone());
-            }
-            let auth_val = if let Some(uid) = auth_ctx.user_id {
-                instant_core::perms::fetch_entity_map(&mut conn, ctx.app_id, &attrs, "$users", uid)
+            let data =
+                instant_core::perms::fetch_entity_map(&mut conn, ctx.app_id, &attrs, &form.etype, e.eid)
                     .await?
-                    .map(Value::Object)
-                    .unwrap_or(Value::Null)
-            } else {
-                Value::Null
-            };
+                    .unwrap_or_else(|| {
+                        instant_core::perms::base_entity_map(&attrs, &form.etype, e.eid)
+                    });
+            let auth_val = instant_core::perms::build_auth_value(
+                &mut conn,
+                ctx.app_id,
+                &attrs,
+                &auth_ctx,
+                &[&program],
+            )
+            .await?;
             let rule_params = q.get("$$ruleParams").cloned().unwrap_or(json!({}));
             let ok = instant_core::perms::eval_program(
                 &program,
@@ -2143,9 +2211,12 @@ async fn query_perms_check_impl(
                 &env,
             )
             .await?;
+            // legacy keys check results by [etype id label] (instaql.clj:2028-2037);
+            // `label` is nil for the entity-level view check
             check_results.push(json!({
                 "id": e.eid,
                 "entity": form.etype,
+                "label": null,
                 "record": record,
                 "program": {
                     "etype": form.etype,
@@ -2164,7 +2235,10 @@ async fn query_perms_check_impl(
     Ok(json!({
         "check-results": check_results,
         "result": tree,
-        "rule-wheres": [],
+        // legacy's map of {etype -> {short-circuit? where-clauses rate-limits}}
+        // from its rule-where rewriter (instaql.clj:2116-2152); rules are
+        // evaluated per entity here, so no where clauses are ever derived
+        "rule-wheres": {},
     }))
 }
 

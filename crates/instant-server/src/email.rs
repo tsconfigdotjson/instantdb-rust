@@ -255,6 +255,18 @@ fn template_replace(template: &str, params: &[(&str, &str)], escape: bool) -> St
 
 /// Legacy default magic-code body (magic_code_auth.clj default-body inside
 /// util.email standard-body).
+/// The default magic-code body with its placeholders left in, as
+/// `GET /dash/default-email-template` returns it (legacy
+/// `default-email-template-params`, magic_code_auth.clj:180-186).
+pub fn default_template_body() -> String {
+    default_body(&[
+        ("code", "{code}"),
+        ("app_title", "{app_title}"),
+        ("user_email", "{user_email}"),
+        ("expiration", "{expiration}"),
+    ])
+}
+
 fn default_body(params: &[(&str, &str)]) -> String {
     let inner = template_replace(
         "<p><strong>Welcome,</strong></p>\

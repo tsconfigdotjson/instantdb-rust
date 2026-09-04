@@ -25,6 +25,7 @@ import {
   projectState,
   makeIdFactory,
   canon,
+  normalize,
   psql,
   uuid,
 } from "./lib.mjs";
@@ -77,6 +78,12 @@ function buildScenario() {
     dupTitleAttr: mk(), reqAttr: mk(), laterReqAttr: mk(), ownersHandle: mk(),
     articlesId: mk(), remarksId: mk(), remarksArticle: mk(), a1: mk(), r1: mk(),
     gatedId: mk(), gatedTitle: mk(), g1: mk(), g2: mk(), g3: mk(), fakeUser: mk(),
+    // issue #29 parity (steps 29-34)
+    celId: mk(), celTitle: mk(), celScore: mk(), celWhen: mk(), c1: mk(), c2: mk(), c3: mk(), c4: mk(),
+    vfId: mk(), vfTitle: mk(), vfOwner: mk(), v1: mk(), v2: mk(),
+    projectsId: mk(), projectsName: mk(), tasksId: mk(), tasksTitle: mk(), tasksProject: mk(),
+    p1: mk(), p2: mk(), k1: mk(), k2: mk(), k3: mk(),
+    dynAttrOk: mk(), dynAttrDenied: mk(), m1: mk(), m2: mk(),
     // stream ids must be v4-shaped uuids on both servers
     stream2Token: "00000000-0000-4000-8000-00000000a5ee",
   };
@@ -1163,6 +1170,310 @@ function buildScenario() {
         rec(view("frameworkQueryAnon", fq, { result: projectResult(fq.body?.result), attrCount: fq.body?.attrs ? Object.keys(projectAttrs(fq.body.attrs)).length : null }));
         const fqAuth = await call("POST", "/runtime/framework/query", { headers: { authorization: `Bearer ${env.scratch.refreshToken}` }, body: { query: { secrets: {} } } });
         rec(view("frameworkQueryAuthed", fqAuth, { result: projectResult(fqAuth.body?.result) }));
+      },
+    },
+    {
+      // cel-java's strings + math extensions and Instant's getTime /
+      // timestamp(int|string) overloads (cel.clj:387-454, :479-488), inside
+      // binds and every rule kind; an unknown function is an evaluation
+      // error on both servers
+      name: "29-cel-extensions",
+      run: async (env) => {
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        const okTx = async (conn, m) => {
+          const before = conn.frames.filter((f) => f.op === "transact-ok").length;
+          msg(conn, m);
+          await conn.waitFor((x) => x.op === "transact-ok" && conn.frames.filter((f) => f.op === "transact-ok").length > before);
+        };
+        const rules = {
+          cel: {
+            bind: ["emailOk", "auth.email != null && auth.email.upperAscii().lowerAscii().endsWith('@example.com') && auth.email.indexOf('@') > 0"],
+            allow: {
+              view: [
+                "emailOk",
+                "data.title != null",
+                "data.title.trim().lowerAscii().startsWith('ok')",
+                "data.title.charAt(0) == 'o'",
+                "data.title.substring(0, 2) == 'ok'",
+                "data.title.substring(1) == 'k one'",
+                "data.title.lastIndexOf('o') > data.title.indexOf('o')",
+                "data.title.replace('o', '0').split(' ').size() == 2",
+                "data.title.replace('o', '0', 1) == '0k one'",
+                "['a', 'b'].join('-') == 'a-b'",
+                "['a', 'b'].join() == 'ab'",
+                "math.greatest(data.score, 1) == data.score",
+                "math.least(data.score, 1) == 1",
+                "math.greatest([1, data.score, 2]) == data.score",
+                "math.abs(-1) == 1",
+                "math.floor(2.5) == 2.0",
+                "math.ceil(2.5) == 3.0",
+                "math.round(2.5) == 3.0",
+                "math.trunc(-2.5) == -2.0",
+                "math.sign(-3) == -1",
+                "math.isNaN(0.0 / 0.0)",
+                "math.bitAnd(6, 3) == 2 && math.bitOr(6, 3) == 7 && math.bitXor(6, 3) == 5 && math.bitShiftLeft(1, 3) == 8 && math.bitShiftRight(8, 3) == 1",
+                "timestamp(data.when) < request.time",
+                "timestamp(data.when).getTime() == 1577836800000",
+                "timestamp(1577836800000).getFullYear() == 2020",
+                "timestamp(1577836800000) == timestamp(data.when)",
+                "timestamp('2020-01-01T00:00:00Z').getTime() == timestamp(data.when).getTime()",
+                "request.time.getTime() > timestamp(data.when).getTime()",
+                "timestamp('01/02/2020').getDate() == 2",
+                "math.isFinite(1.0) && !math.isInf(1.0)",
+              ].join(" && "),
+              create: "emailOk && newData.title.lowerAscii() == newData.title",
+              update: "data.title.frobnicate() == 'x'",
+              delete: "timestamp(data.when) > timestamp('not a date at all')",
+            },
+          },
+        };
+        psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(rules)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
+        await sleep(RULES_SETTLE_MS);
+        const celAttr = (id, label) => [
+          "add-attr",
+          { id, "forward-identity": [id, "cel", label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true },
+        ];
+        await okTx(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [
+            celAttr(ids.celId, "id"), celAttr(ids.celTitle, "title"), celAttr(ids.celScore, "score"), celAttr(ids.celWhen, "when"),
+            ["add-triple", ids.c1, ids.celId, ids.c1], ["add-triple", ids.c1, ids.celTitle, "ok one"], ["add-triple", ids.c1, ids.celScore, 5], ["add-triple", ids.c1, ids.celWhen, "2020-01-01"],
+            ["add-triple", ids.c2, ids.celId, ids.c2], ["add-triple", ids.c2, ids.celTitle, "nope"], ["add-triple", ids.c2, ids.celScore, 5], ["add-triple", ids.c2, ids.celWhen, "2020-01-01"],
+          ],
+        });
+        // only c1 passes the view rule for the authed user; anonymous sees nothing
+        msg(env.conns.AUTH, { op: "add-query", q: { cel: {} } });
+        await env.conns.AUTH.waitFor((m) => m.op === "add-query-ok" && m.q?.cel);
+        msg(env.conns.A, { op: "add-query", q: { cel: {} } });
+        await env.conns.A.waitFor((m) => m.op === "add-query-ok" && m.q?.cel);
+        // create: lowerAscii on newData
+        await okTx(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.c3, ids.celId, ids.c3], ["add-triple", ids.c3, ids.celTitle, "ok three"], ["add-triple", ids.c3, ids.celScore, 1], ["add-triple", ids.c3, ids.celWhen, "2020-01-01"]] });
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.c4, ids.celId, ids.c4], ["add-triple", ids.c4, ids.celTitle, "OK four"]] });
+        // an unknown function and an unparseable date are evaluation errors
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.c1, ids.celTitle, "ok one"]] });
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["delete-entity", ids.c3, "cel"]] });
+      },
+    },
+    {
+      // view + field rules evaluate on the whole entity even when the query
+      // projects `fields` (instaql.clj:1956-2007 preload-entity-maps)
+      name: "30-view-fields-projection",
+      run: async (env) => {
+        const rules = {
+          vf: { allow: { view: "auth.email != null && data.owner == auth.email" }, fields: { title: "data.owner == auth.email" } },
+        };
+        psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(rules)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
+        await sleep(RULES_SETTLE_MS);
+        const vfAttr = (id, label) => [
+          "add-attr",
+          { id, "forward-identity": [id, "vf", label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true },
+        ];
+        msg(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [
+            vfAttr(ids.vfId, "id"), vfAttr(ids.vfTitle, "title"), vfAttr(ids.vfOwner, "owner"),
+            ["add-triple", ids.v1, ids.vfId, ids.v1], ["add-triple", ids.v1, ids.vfTitle, "mine"], ["add-triple", ids.v1, ids.vfOwner, "authuser@example.com"],
+            ["add-triple", ids.v2, ids.vfId, ids.v2], ["add-triple", ids.v2, ids.vfTitle, "theirs"], ["add-triple", ids.v2, ids.vfOwner, "other@example.com"],
+          ],
+        });
+        await env.conns.ADMIN.waitFor((m) => m.op === "transact-ok");
+        msg(env.conns.AUTH, { op: "add-query", q: { vf: { $: { fields: ["title"] } } } });
+        await env.conns.AUTH.waitFor((m) => m.op === "add-query-ok" && m.q?.vf);
+        msg(env.conns.AUTH, { op: "add-query", q: { vf: { $: { fields: ["owner"] } } } });
+        await env.conns.AUTH.waitFor((m) => m.op === "add-query-ok" && m.q?.vf?.$?.fields?.[0] === "owner");
+        // the same query with a `$isNull` inside `or` on an indexed attr folds
+        // to `{in [nil]}` (instaql.clj:204-230)
+        msg(env.conns.A, { op: "add-query", q: { typed: { $: { where: { or: [{ score: { $isNull: true } }, { name: "alice" }] } } } } });
+        await env.conns.A.waitFor((m) => m.op === "add-query-ok" && m.q?.typed?.$?.where?.or);
+      },
+    },
+    {
+      // link rules see `actions` and `linkedData.ref`, a link that creates
+      // the entity runs the link rule with actions.data == "create"
+      // (permissioned_transaction.clj:528-560), `unlink` rules never see
+      // `actions`, and update / delete rules read `data.ref` against the
+      // pre-tx graph (:697-715)
+      name: "31-link-bindings-and-pre-tx-refs",
+      run: async (env) => {
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        const okTx = async (conn, m) => {
+          const before = conn.frames.filter((f) => f.op === "transact-ok").length;
+          msg(conn, m);
+          await conn.waitFor((x) => x.op === "transact-ok" && conn.frames.filter((f) => f.op === "transact-ok").length > before);
+        };
+        const rules = {
+          tasks: {
+            allow: {
+              create: "false",
+              link: { project: "actions.data == 'create' && actions.linkedData == 'update' && linkedData.name == 'main' && 'main' in linkedData.ref('name')" },
+              unlink: { project: "actions.data == 'update'" },
+            },
+          },
+          projects: { allow: { delete: "size(data.ref('tasks.id')) > 0", update: "size(data.ref('tasks.id')) > 0" } },
+        };
+        psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(rules)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
+        await sleep(RULES_SETTLE_MS);
+        const blob = (id, etype, label) => [
+          "add-attr",
+          { id, "forward-identity": [id, etype, label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true },
+        ];
+        await okTx(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [
+            blob(ids.projectsId, "projects", "id"), blob(ids.projectsName, "projects", "name"),
+            blob(ids.tasksId, "tasks", "id"), blob(ids.tasksTitle, "tasks", "title"),
+            ["add-attr", { id: ids.tasksProject, "forward-identity": [ids.tasksProject, "tasks", "project"], "reverse-identity": [mk(), "projects", "tasks"], "value-type": "ref", cardinality: "one", "unique?": false, "index?": false, isUnsynced: true }],
+            ["add-triple", ids.p1, ids.projectsId, ids.p1], ["add-triple", ids.p1, ids.projectsName, "main"],
+            ["add-triple", ids.p2, ids.projectsId, ids.p2], ["add-triple", ids.p2, ids.projectsName, "side"],
+            ["add-triple", ids.k2, ids.tasksId, ids.k2], ["add-triple", ids.k2, ids.tasksTitle, "existing"],
+          ],
+        });
+        // a task brought into being by the link step alone: link rule, not create
+        await okTx(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.k1, ids.tasksProject, ids.p1]] });
+        // the same against the side project: linkedData.name != 'main'
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.k3, ids.tasksProject, ids.p2]] });
+        // an existing task linking: actions.data == 'update' -> denied
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.k2, ids.tasksProject, ids.p1]] });
+        // unlink rules have no `actions`: evaluation error
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["retract-triple", ids.k1, ids.tasksProject, ids.p1]] });
+        // update rule on projects reads data.ref pre-tx: p1 has a task, p2 none
+        await okTx(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.p1, ids.projectsName, "main"]] });
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.p2, ids.projectsName, "side!"]] });
+        // delete rule: the pre-tx link graph still shows p1's task
+        await okTx(env.conns.AUTH, { op: "transact", "tx-steps": [["delete-entity", ids.p1, "projects"]] });
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["delete-entity", ids.p2, "projects"]] });
+        msg(env.conns.ADMIN, { op: "add-query", q: { projects: { tasks: {} } } });
+        await env.conns.ADMIN.waitFor((m) => m.op === "add-query-ok" && m.q?.projects);
+      },
+    },
+    {
+      // `attrs.allow.create` gates inline add-attr steps
+      // (permissioned_transaction.clj:519-527); `mode` is validated in one
+      // pre-pass against the pre-tx state with legacy's messages
+      // (transaction.clj:283-358); step shapes follow the specs (:25-69)
+      name: "32-attrs-create-mode-and-step-shapes",
+      run: async (env) => {
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        const okTx = async (conn, m) => {
+          const before = conn.frames.filter((f) => f.op === "transact-ok").length;
+          msg(conn, m);
+          await conn.waitFor((x) => x.op === "transact-ok" && conn.frames.filter((f) => f.op === "transact-ok").length > before);
+        };
+        const rules = { attrs: { allow: { create: "auth.email == 'authuser@example.com'" } } };
+        psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(rules)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
+        await sleep(RULES_SETTLE_MS);
+        const dyn = (id, label) => [
+          "add-attr",
+          { id, "forward-identity": [id, "todos", label], "value-type": "blob", cardinality: "one", "unique?": false, "index?": false, isUnsynced: true },
+        ];
+        await okTx(env.conns.AUTH, { op: "transact", "tx-steps": [dyn(ids.dynAttrOk, "dynOk"), ["add-triple", ids.e1, ids.dynAttrOk, 1]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [dyn(ids.dynAttrDenied, "dynDenied"), ["add-triple", ids.e1, ids.dynAttrDenied, 1]] });
+        psql(env.db, `UPDATE rules SET code = code - 'attrs' WHERE app_id = '${env.appId}'`);
+        await sleep(RULES_SETTLE_MS);
+        // mode pre-pass: existence by any triple of the etype, all offenders
+        // in one message, lookups checked as written
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["add-triple", ids.e1, ids.todosTitle, "again", { mode: "create" }], ["add-triple", ids.e2, ids.todosDone, true, { mode: "create" }]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["add-triple", ids.m1, ids.todosTitle, "a", { mode: "update" }], ["add-triple", ids.m1, ids.todosDone, true, { mode: "update" }]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["add-triple", ids.m1, ids.todosId, ids.m1, { mode: "create" }], ["add-triple", ids.m1, ids.todosTitle, "x", { mode: "update" }]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["delete-entity", ids.e1, "todos"], ["add-triple", ids.e1, ids.todosTitle, "back", { mode: "create" }]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["add-triple", [ids.ownersHandle, "nobody-mode"], ids.ownersName, "nobody-here", { mode: "update" }]] });
+        await okTx(env.conns.A, { op: "transact", "tx-steps": [["add-triple", ids.m2, ids.todosId, ids.m2, { mode: "create" }], ["add-triple", ids.e1, ids.todosTitle, "one-c", { mode: "update" }], ["add-triple", ids.m2, ids.todosDone, false, { mode: "upsert" }]] });
+        // step-shape specs
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["add-triple", ids.e1, ids.todosTitle, "x", { mode: "replace" }]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["add-triple", ids.e1, ids.todosTitle, "x", "create"]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["add-triple", ids.e1, ids.todosTitle]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["retract-triple", ids.e1, ids.todosTitle, "x", { mode: "create" }]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["delete-entity", ids.e1, 42]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["rule-params", ids.e1, "todos", "not-a-map"]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["add-triple", "not-an-id", ids.todosTitle, "x"]] });
+        await expectErr(env.conns.A, { op: "transact", "tx-steps": [["delete-attr", ids.todosDone, "extra"]] });
+      },
+    },
+    {
+      // /admin/rooms/presence requires room-type and re-fetches each peer's
+      // $users row (admin/routes.clj:739-765), presence entries carry the
+      // node's instance-id (ephemeral.clj:280-286), and resync-table checks
+      // the session's admin-ness / user against the subscription
+      // (model/sync_sub.clj:170-195)
+      name: "33-presence-admin-and-resync-checks",
+      run: async (env) => {
+        const expectErr = async (conn, m) => {
+          const ceid = msg(conn, m);
+          await conn.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        msg(env.conns.AUTH, { op: "join-room", "room-type": "diff", "room-id": "adminroom", data: { who: "auth" } });
+        await env.conns.AUTH.waitFor((m) => m.op === "join-room-ok" && m["room-id"] === "adminroom");
+        msg(env.conns.A, { op: "join-room", "room-type": "diff", "room-id": "adminroom", data: { who: "anon" } });
+        await env.conns.A.waitFor((m) => m.op === "join-room-ok" && m["room-id"] === "adminroom");
+        await settle(Object.values(env.conns), 800);
+        env.conns.HTTP = env.conns.HTTP ?? httpConn(`${env.serverName}:HTTP`);
+        const call = async (p) => {
+          const res = await fetch(`${env.url}${p}`, { headers: { "app-id": env.appId, authorization: `Bearer ${adminToken}` } });
+          return { status: res.status, body: await res.json().catch(() => null) };
+        };
+        const errView = (name, r) => ({ name, status: r.status, type: r.body?.type ?? null, message: r.body?.message ?? null });
+        const pres = await call("/admin/rooms/presence?room-type=diff&room-id=adminroom");
+        const sessions = Object.values(pres.body?.sessions ?? {})
+          .map((e) => ({
+            keys: Object.keys(e).sort(),
+            instanceIdKind: typeof e["instance-id"],
+            data: e.data,
+            user: e.user ? { id: normalize(e.user.id), email: e.user.email ?? null, keys: Object.keys(e.user).sort() } : null,
+          }))
+          .sort((x, y) => (canon(x) < canon(y) ? -1 : 1));
+        env.conns.HTTP.record({ name: "presenceAdmin", status: pres.status, sessions });
+        env.conns.HTTP.record(errView("presenceNoRoomType", await call("/admin/rooms/presence?room-id=adminroom")));
+        env.conns.HTTP.record(errView("presenceNoRoomId", await call("/admin/rooms/presence?room-type=diff")));
+        // resync-table from a non-admin session on the admin's subscription
+        const sub = env.conns.ADMIN.frames.find((f) => f.op === "start-sync-ok");
+        await expectErr(env.conns.A, { op: "resync-table", "subscription-id": sub["subscription-id"], "tx-id": 1, token: sub.token });
+        await expectErr(env.conns.ADMIN, { op: "resync-table", "subscription-id": sub["subscription-id"], "tx-id": 1, token: ids.m1 });
+        await expectErr(env.conns.ADMIN, { op: "resync-table", "subscription-id": ids.m2, "tx-id": 1, token: sub.token });
+        msg(env.conns.AUTH, { op: "leave-room", "room-id": "adminroom" });
+        await env.conns.AUTH.waitFor((m) => m.op === "leave-room-ok" && m["room-id"] === "adminroom");
+        msg(env.conns.A, { op: "leave-room", "room-id": "adminroom" });
+        await env.conns.A.waitFor((m) => m.op === "leave-room-ok" && m["room-id"] === "adminroom");
+      },
+    },
+    {
+      // the OAuth callback's error surfaces up to the client lookup are 400
+      // oauth-errors, never redirects (runtime/routes.clj:506-601), and
+      // ?test-redirect renders the landing page (:379-432)
+      name: "34-oauth-callback-http",
+      run: async (env) => {
+        env.conns.HTTP = env.conns.HTTP ?? httpConn(`${env.serverName}:HTTP`);
+        const call = async (qs, headers = {}) => {
+          const res = await fetch(`${env.url}/runtime/oauth/callback${qs}`, { redirect: "manual", headers });
+          const raw = await res.text();
+          let body = null;
+          try { body = JSON.parse(raw); } catch {}
+          return { status: res.status, body, raw, ct: (res.headers.get("content-type") ?? "").split(";")[0], location: res.headers.get("location") };
+        };
+        const view = (name, r) => ({
+          name,
+          status: r.status,
+          type: r.body?.type ?? null,
+          // legacy renders oauth-error bodies as {type, message}; the text is what a developer reads
+          message: r.body?.message ?? r.body?.error ?? null,
+          redirected: r.location != null,
+        });
+        const rec = (f) => env.conns.HTTP.record(f);
+        rec(view("cbProviderError", await call("?error=access_denied&state=whatever")));
+        rec(view("cbMissingState", await call("")));
+        rec(view("cbInvalidState", await call("?state=nope&code=x")));
+        rec(view("cbMissingCookie", await call(`?state=${env.appId}${ids.m1}&code=x`)));
+        rec(view("cbUnknownRequest", await call(`?state=${env.appId}${ids.m1}&code=x`, { cookie: `__session=${ids.m2}` })));
+        const landing = await call("?test-redirect=1");
+        rec({ name: "cbTestRedirect", status: landing.status, ct: landing.ct, ok: landing.raw.includes("Your OAuth redirect looks good!") });
       },
     },
   ];

@@ -213,9 +213,10 @@ pub async fn run_query_full(
     let mut result = instaql::query(&mut conn, &ctx, q).await?;
     // Topics come from the pre-permissions result: an entity hidden by a
     // view rule is still tracked, so a write that makes it visible refreshes.
-    let mut topics = match instaql::parse_query(q) {
-        Ok(forms) => instant_core::topics::query_topics(attrs, &forms, &result),
-        Err(_) => QueryTopics::catch_all(),
+    let parsed_forms = instaql::parse_query(q).ok();
+    let mut topics = match &parsed_forms {
+        Some(forms) => instant_core::topics::query_topics(attrs, forms, &result),
+        None => QueryTopics::catch_all(),
     };
     if !perms.admin {
         let loaded;
@@ -239,7 +240,17 @@ pub async fn run_query_full(
                 .or(perms.rule_params.clone())
                 .unwrap_or(json!({})),
         };
-        filter.filter(&mut conn, app_id, attrs, &mut result).await?;
+        // view / field rules see the whole entity even under a `fields`
+        // projection (instaql.clj:1956-2007), so the parsed forms ride along
+        filter
+            .filter_with_forms(
+                &mut conn,
+                app_id,
+                attrs,
+                &mut result,
+                parsed_forms.as_deref().unwrap_or(&[]),
+            )
+            .await?;
     }
     drop(conn);
     inject_file_urls(state, app_id, attrs, q, &mut result);

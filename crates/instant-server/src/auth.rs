@@ -3,7 +3,7 @@
 
 use instant_core::error::{InstantError, Result};
 use instant_core::system_catalog as sc;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use uuid::Uuid;
@@ -225,12 +225,81 @@ pub async fn guest_by_refresh_token(
 /// when the app defines `$users.allow.create` (that exact path — no
 /// `$default` fallback), a new user must pass it. `data`, `newData` and
 /// `auth` are all the prospective user `{id, email}`.
+/// Legacy `validate-extra-fields!` (model/app_user.clj:22-41): every
+/// signup `extra-fields` key must be a `$users` attr and not a system one.
+pub fn validate_extra_fields(
+    attrs: &instant_core::attr::AttrMap,
+    extra_fields: Option<&Map<String, Value>>,
+) -> Result<()> {
+    let Some(extra) = extra_fields else {
+        return Ok(());
+    };
+    let err = |message: String| {
+        InstantError::new(
+            "validation-failed",
+            400,
+            format!("Validation failed for extra-fields: {message}"),
+            Some(json!({
+                "data-type": "extra-fields",
+                "input": extra,
+                "errors": [{"message": message}],
+            })),
+        )
+    };
+    for k in extra.keys() {
+        match attrs.by_fwd_name("$users", k) {
+            None => {
+                return Err(err(format!(
+                    "Unknown field: {k}. It must be defined in your $users schema."
+                )))
+            }
+            Some(a) if a.is_system => {
+                return Err(err(format!("Cannot set system field: {k}")));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// The `add-triple` steps that write signup `extra-fields` onto a new
+/// `$users` row (app_user.clj:88-109 `create!`).
+pub fn extra_field_steps(
+    attrs: &instant_core::attr::AttrMap,
+    user_id: Uuid,
+    extra_fields: Option<&Map<String, Value>>,
+) -> Vec<Value> {
+    let mut steps = vec![];
+    if let Some(extra) = extra_fields {
+        for (k, v) in extra {
+            if let Some(a) = attrs.by_fwd_name("$users", k) {
+                steps.push(json!(["add-triple", user_id, a.id, v]));
+            }
+        }
+    }
+    steps
+}
+
+/// Legacy `assert-signup!` (model/app_user.clj:43-86): validates
+/// `extra-fields` against the `$users` schema, then — unless the caller is
+/// an admin flow (`skip_perm_check`) — checks `$users.allow.create` with the
+/// prospective user (id, email and the extra fields) bound as `data`,
+/// `newData` and `auth`. Extra fields without an explicit create rule are
+/// denied.
 pub async fn assert_signup(
     state: &AppState,
     app_id: Uuid,
     user_id: Uuid,
     email: Option<&str>,
+    extra_fields: Option<&Map<String, Value>>,
+    skip_perm_check: bool,
 ) -> Result<()> {
+    let attrs = crate::service::load_attrs(state, app_id).await?;
+    validate_extra_fields(&attrs, extra_fields)?;
+    if skip_perm_check {
+        return Ok(());
+    }
+    let has_extra = extra_fields.map(|m| !m.is_empty()).unwrap_or(false);
     let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
     let rules = instant_core::perms::Rules::load(&mut conn, app_id).await?;
     let defined = rules
@@ -240,12 +309,24 @@ pub async fn assert_signup(
         .and_then(|a| a.get("create"))
         .is_some();
     if !defined {
+        if has_extra {
+            // app_user.clj:70-75: extra fields need an explicit create rule
+            return Err(InstantError::permission_denied(
+                json!(["$users", "create"]),
+                "Permission denied: not perms-pass?",
+            ));
+        }
         return Ok(());
     }
     let program = rules.program("$users", "create");
     let mut user_data = json!({"id": user_id});
     if let Some(email) = email {
         user_data["email"] = json!(email);
+    }
+    if let Some(extra) = extra_fields {
+        for (k, v) in extra {
+            user_data[k.as_str()] = v.clone();
+        }
     }
     let request = instant_core::perms::RequestCtx::default().with_pool(state.pool.clone());
     let env = instant_core::perms::EvalEnv::new(app_id, &rules, &request);
@@ -265,6 +346,12 @@ pub async fn assert_signup(
         ));
     }
     Ok(())
+}
+
+/// `extra-fields` / `extra_fields` from a request body: a JSON object, or
+/// nothing.
+pub fn extra_fields_of<'a>(body: &'a Value, key: &str) -> Option<&'a Map<String, Value>> {
+    body.get(key).and_then(|v| v.as_object())
 }
 
 /// Verify an admin token for an app.

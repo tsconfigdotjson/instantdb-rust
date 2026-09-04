@@ -217,13 +217,13 @@ fn err_msg(original: &Value, e: &InstantError) -> Value {
 
 pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>, msg: Value) {
     let op = msg.get("op").and_then(|o| o.as_str()).unwrap_or("");
-    // Per-app rate limit (issue #1). `init` carries the app id in the
-    // message; every later op uses the session's app. Pre-init ops have no
-    // app scope and fail in their handlers anyway.
+    // Per-app rate limit (issue #1). Like legacy handle-event
+    // (reactive/session.clj:974-984) the bucket is keyed by the session's
+    // established app and `init` is exempt: a frame's own `app-id` is
+    // untrusted and pre-init ops have no app scope (they fail in their
+    // handlers anyway).
     let limit_app_id = if op == "init" {
-        msg.get("app-id")
-            .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok())
+        None
     } else {
         session.state.lock().await.app_id
     };

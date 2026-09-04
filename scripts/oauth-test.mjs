@@ -226,6 +226,83 @@ const verify = await fetch(`${SERVER}/runtime/auth/verify_refresh_token`, {
 }).then((r) => r.json());
 assert(verify.user.email === "oauth-user@example.com", "oauth refresh token verifies");
 
+
+// --- callback error matrix (issue #29): everything up to the client lookup
+// is a 400 oauth-error, never a redirect (runtime/routes.clj:506-601) ---
+{
+  const cb = (qs, headers = {}) => fetch(`${SERVER}/runtime/oauth/callback${qs}`, { redirect: "manual", headers });
+  const body = async (r) => ({ status: r.status, body: await r.json().catch(() => null) });
+  const providerErr = await body(await cb("?error=access_denied&state=x"));
+  assert(providerErr.status === 400 && providerErr.body.type === "oauth-error" && providerErr.body.error === "access_denied", "provider error= is a 400 oauth-error");
+  const noState = await body(await cb(""));
+  assert(noState.status === 400 && noState.body.error === "Missing state param in OAuth redirect.", "missing state");
+  const badState = await body(await cb("?state=nope"));
+  assert(badState.status === 400 && badState.body.error === "Invalid state param in OAuth redirect.", "invalid state");
+  const s3 = await fetch(startUrl, { redirect: "manual" });
+  const st3 = new URL(s3.headers.get("location")).searchParams.get("state");
+  const noCookie = await body(await cb(`?state=${st3}&code=abc`));
+  assert(noCookie.status === 400 && noCookie.body.error === "Missing cookie.", "missing cookie is a 400, not a redirect");
+  const ck3 = s3.headers.get("set-cookie").split(";")[0];
+  const unknown = await body(await cb(`?state=${appId}${crypto.randomUUID()}&code=abc`, { cookie: ck3 }));
+  assert(unknown.status === 400 && unknown.body.error === "Could not find OAuth request.", "unknown request");
+  const mismatch = await body(await cb(`?state=${st3}&code=abc`, { cookie: `__session=${crypto.randomUUID()}` }));
+  assert(mismatch.status === 400 && mismatch.body.error === "Mismatch in OAuth request cookie.", "cookie mismatch is a 400");
+  // the ?test-redirect landing page
+  const landing = await fetch(`${SERVER}/runtime/oauth/callback?test-redirect=1`);
+  assert(landing.status === 200 && (landing.headers.get("content-type") || "").startsWith("text/html") && (await landing.text()).includes("Your OAuth redirect looks good!"), "test-redirect landing page");
+}
+
+// --- PKCE matrix (issue #29): legacy verify-pkce! (auth/oauth.clj:364-415) ---
+{
+  const mint = async (extra = "") => {
+    const s = await fetch(`${startUrl}${extra}`, { redirect: "manual" });
+    const st = new URL(s.headers.get("location")).searchParams.get("state");
+    const ck = s.headers.get("set-cookie").split(";")[0];
+    const cb = await fetch(`${SERVER}/runtime/oauth/callback?state=${st}&code=${issued.code}`, { redirect: "manual", headers: { cookie: ck } });
+    return new URL(cb.headers.get("location")).searchParams.get("code");
+  };
+  const exchange = async (code, extra) => {
+    const r = await fetch(`${SERVER}/runtime/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "http://localhost:5173" },
+      body: JSON.stringify({ app_id: appId, code, ...extra }),
+    });
+    return { status: r.status, body: await r.json().catch(() => null) };
+  };
+  const pkceMsg = (r) => r.body?.hint?.errors?.[0]?.message;
+  // verifier without a challenge
+  const c1 = await mint();
+  const r1 = await exchange(c1, { code_verifier: "abc" });
+  assert(r1.status === 400 && r1.body.type === "validation-failed" && pkceMsg(r1) === "The code_verifier was provided, but no code_challenge was provided." && r1.body.hint["data-type"] === "app-oauth-code", "verifier without challenge is refused");
+  // unknown method
+  const c2 = await mint("&code_challenge=abc&code_challenge_method=md5");
+  const r2 = await exchange(c2, { code_verifier: "abc" });
+  assert(r2.status === 400 && pkceMsg(r2) === "Unknown code challenge method.", "unknown challenge method is refused");
+  // challenge without verifier
+  const c3 = await mint("&code_challenge=abc&code_challenge_method=plain");
+  const r3 = await exchange(c3, {});
+  assert(r3.status === 400 && pkceMsg(r3) === "The code_challenge was provided, but no code_verifier was provided.", "challenge without verifier is refused");
+  // plain happy path + mismatch
+  const c4 = await mint("&code_challenge=abc&code_challenge_method=plain");
+  const r4 = await exchange(c4, { code_verifier: "abc" });
+  assert(r4.status === 200 && r4.body.user, "plain PKCE verifies");
+  const c5 = await mint("&code_challenge=abc&code_challenge_method=plain");
+  const r5 = await exchange(c5, { code_verifier: "abd" });
+  assert(r5.status === 400 && pkceMsg(r5) === "The code_challenge and code_verifier do not match.", "plain mismatch is refused");
+  // S256: sha256(verifier) base64url, with and without padding
+  const verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+  const digest = Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  const challenge = digest.toString("base64url");
+  const c6 = await mint(`&code_challenge=${challenge}&code_challenge_method=S256`);
+  const r6 = await exchange(c6, { code_verifier: verifier });
+  assert(r6.status === 200 && r6.body.user, "S256 PKCE verifies");
+  const c7 = await mint(`&code_challenge=${challenge}%3D&code_challenge_method=S256`);
+  const r7 = await exchange(c7, { code_verifier: verifier });
+  assert(r7.status === 200 && r7.body.user, "S256 PKCE verifies with a padded challenge");
+  const c8 = await mint(`&code_challenge=%2A%2Anot-base64%2A%2A&code_challenge_method=S256`);
+  const r8 = await exchange(c8, { code_verifier: verifier });
+  assert(r8.status === 400 && pkceMsg(r8) === "Invalid code_verifier. Expected a url-safe Base64 string.", "undecodable S256 challenge");
+}
 provider.close();
 console.log("OAUTH TEST PASSED");
 process.exit(0);

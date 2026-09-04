@@ -96,14 +96,16 @@ async fn check_stream_perm(
     let request = instant_core::perms::RequestCtx::default().with_pool(state.pool.clone());
     let env = instant_core::perms::EvalEnv::new(app_id, &rules, &request);
     let attrs = service::load_attrs(state, app_id).await?;
-    let auth_val = if let Some(uid) = user_id {
-        instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$users", uid)
-            .await?
-            .map(Value::Object)
-            .unwrap_or(Value::Null)
-    } else {
-        Value::Null
+    // legacy binds `auth` as an AuthCelMap (app_stream.clj:38-90), so
+    // `auth.ref('$user...')` resolves here too
+    let auth_ctx = instant_core::perms::AuthCtx {
+        user_id,
+        user_map: None,
+        request: request.clone(),
     };
+    let auth_val =
+        instant_core::perms::build_auth_value(&mut conn, app_id, &attrs, &auth_ctx, &[&program])
+            .await?;
     // the rule's `data` is the $streams row when there is one (legacy binds
     // the fetched stream for view checks, session.clj:897-908)
     let data = match stream {
@@ -125,9 +127,12 @@ async fn check_stream_perm(
     )
     .await?;
     if !ok {
-        return Err(InstantError::permission_denied(
-            json!(["$streams", action]),
-            "Permission denied: not perms-pass?",
+        // legacy assert-permitted! :has-streams-permission? (app_stream.clj:44-47)
+        return Err(InstantError::new(
+            "permission-denied",
+            400,
+            "Permission denied: not has-streams-permission?",
+            Some(json!({"input": ["$streams", action], "expected": "has-streams-permission?"})),
         ));
     }
     Ok(())

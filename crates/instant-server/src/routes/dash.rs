@@ -72,25 +72,111 @@ fn parse_app_id(raw: &str) -> Result<Uuid> {
     Uuid::parse_str(raw).map_err(|_| param_malformed(&["params", "app_id"], json!(raw)))
 }
 
-/// Resolve the app for a `/dash/apps/:app_id/*` request.
-async fn dash_authed(state: &AppState, headers: &HeaderMap, app_id_raw: &str) -> Result<AppRow> {
+/// App member roles, least to most privileged (util/roles.clj
+/// `member-role-hierarchy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DashRole {
+    Collaborator,
+    Admin,
+    Owner,
+}
+
+impl DashRole {
+    pub(crate) fn parse(s: &str) -> Option<DashRole> {
+        match s {
+            "collaborator" => Some(DashRole::Collaborator),
+            "admin" => Some(DashRole::Admin),
+            "owner" => Some(DashRole::Owner),
+            _ => None,
+        }
+    }
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            DashRole::Collaborator => "collaborator",
+            DashRole::Admin => "admin",
+            DashRole::Owner => "owner",
+        }
+    }
+}
+
+/// A dashboard user (`instant_users` row).
+pub(crate) struct DashUser {
+    pub id: Uuid,
+    pub email: String,
+    pub created_at: Option<chrono::NaiveDateTime>,
+}
+
+impl DashUser {
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "id": self.id,
+            "email": self.email,
+            "created_at": self.created_at.map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+        })
+    }
+}
+
+/// The bearer token of a `/dash` request as a uuid (legacy
+/// `req->bearer-token!`, util/http.clj:15-25); platform / personal access
+/// tokens belong to the hosted dashboard and are refused.
+fn bearer_uuid(headers: &HeaderMap) -> Result<Uuid> {
     let auth = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| param_missing(&["headers", "authorization"]))?;
-    // legacy req->bearer-token! (util/http.clj:22-25): the header must carry
-    // the `Bearer ` prefix; a bare token is malformed
     let token = auth
         .strip_prefix("Bearer ")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| param_malformed(&["headers", "authorization"], json!(auth)))?;
     if token.starts_with("per_") || token.starts_with("pat_") || token.starts_with("eyJ") {
-        // platform / personal access tokens belong to the hosted dashboard
         return Err(unauthorized());
     }
-    let token = Uuid::parse_str(&token)
-        .map_err(|_| param_malformed(&["headers", "authorization"], json!(auth)))?;
+    Uuid::parse_str(&token).map_err(|_| param_malformed(&["headers", "authorization"], json!(auth)))
+}
+
+async fn user_by_refresh_token(state: &AppState, token: Uuid) -> Result<Option<DashUser>> {
+    let row = sqlx::query(
+        "SELECT u.id, u.email, u.created_at FROM instant_user_refresh_tokens t
+           JOIN instant_users u ON u.id = t.user_id
+          WHERE t.id = $1",
+    )
+    .bind(token)
+    .fetch_optional(&state.pool)
+    .await?;
+    Ok(row.map(|r| DashUser {
+        id: r.get("id"),
+        email: r.get("email"),
+        created_at: r.try_get("created_at").ok(),
+    }))
+}
+
+/// Legacy `req->auth-user!` (util/http.clj:65-69): a dashboard refresh
+/// token only.
+pub(crate) async fn dash_user(state: &AppState, headers: &HeaderMap) -> Result<DashUser> {
+    let token = bearer_uuid(headers)?;
+    user_by_refresh_token(state, token)
+        .await?
+        .ok_or_else(unauthorized)
+}
+
+/// Resolve the app for a `/dash/apps/:app_id/*` request (collaborator role
+/// or the app's admin token).
+async fn dash_authed(state: &AppState, headers: &HeaderMap, app_id_raw: &str) -> Result<AppRow> {
+    dash_authed_with_role(state, headers, app_id_raw, DashRole::Collaborator).await
+}
+
+/// Legacy `req->app-accepting-superadmin-or-ref-token!` (dash/routes.clj
+/// :117-131): the app's admin token (with the admin-token-mismatch error),
+/// or a dashboard refresh token of a member with at least `least` role
+/// (`get-app-with-role!`, util/roles.clj:75-125).
+pub(crate) async fn dash_authed_with_role(
+    state: &AppState,
+    headers: &HeaderMap,
+    app_id_raw: &str,
+    least: DashRole,
+) -> Result<AppRow> {
+    let token = bearer_uuid(headers)?;
 
     // app admin token (superadmin path)
     let admin_app: Option<Uuid> =
@@ -114,43 +200,48 @@ async fn dash_authed(state: &AppState, headers: &HeaderMap, app_id_raw: &str) ->
         return service::get_app(state, admin_app).await;
     }
 
-    // dashboard user refresh token (creator or member of the app)
+    // dashboard user refresh token (creator or member of the app / its org)
     let app_id = parse_app_id(app_id_raw)?;
-    let user_id: Option<Uuid> = sqlx::query(
-        "SELECT u.id FROM instant_user_refresh_tokens t
-           JOIN instant_users u ON u.id = t.user_id
-          WHERE t.id = $1",
-    )
-    .bind(token)
-    .fetch_optional(&state.pool)
-    .await?
-    .map(|r| r.get("id"));
-    let Some(user_id) = user_id else {
+    let Some(user) = user_by_refresh_token(state, token).await? else {
         return Err(unauthorized());
     };
     let app = service::get_app(state, app_id).await?;
     let role: Option<String> = sqlx::query(
-        "SELECT CASE WHEN a.creator_id = $2 THEN 'owner' ELSE m.member_role END AS role
+        "SELECT CASE WHEN a.creator_id = $2 THEN 'owner'
+                     ELSE coalesce(m.member_role, om.role) END AS role
            FROM apps a
            LEFT JOIN app_members m ON m.app_id = a.id AND m.user_id = $2
+           LEFT JOIN org_members om ON om.org_id = a.org_id AND om.user_id = $2
           WHERE a.id = $1",
     )
     .bind(app_id)
-    .bind(user_id)
+    .bind(user.id)
     .fetch_optional(&state.pool)
     .await?
     .and_then(|r| r.get::<Option<String>, _>("role"));
-    match role.as_deref() {
-        Some("owner") | Some("admin") | Some("collaborator") => Ok(app),
-        _ => Err(InstantError::validation_failed(
-            "user-role",
-            "User is missing role collaborator.",
-            json!([{"message": "User is missing role collaborator."}]),
+    let role = role.as_deref().and_then(DashRole::parse);
+    match role {
+        None => Err(InstantError::new(
+            "validation-failed",
+            400,
+            format!("Validation failed for user-role: User is missing role {}.", least.as_str()),
+            Some(json!({
+                "data-type": "user-role",
+                "input": null,
+                "errors": [{"message": format!("User is missing role {}.", least.as_str())}],
+            })),
         )),
+        Some(r) if r < least => Err(InstantError::new(
+            "permission-denied",
+            400,
+            "Permission denied: not allowed-member-role?",
+            Some(json!({"input": r.as_str(), "expected": "allowed-member-role?"})),
+        )),
+        Some(_) => Ok(app),
     }
 }
 
-fn parse_body(body: &Bytes) -> Result<Value> {
+pub(crate) fn parse_body(body: &Bytes) -> Result<Value> {
     if body.is_empty() {
         return Ok(json!({}));
     }
@@ -255,7 +346,7 @@ async fn apply_steps(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
             };
-            let job_id = indexing_jobs::create_job(&mut conn, app_id, group_id, &job).await?;
+            let job_id = indexing_jobs::create_job(&mut conn, app_id, Some(group_id), &job).await?;
             jobs.push(indexing_jobs::get_basic(&mut conn, job_id).await?);
             if let Some(obj) = step.get_mut(1).and_then(|v| v.as_object_mut()) {
                 obj.insert("job-id".into(), json!(job_id));
@@ -388,6 +479,13 @@ pub async fn schema_push_plan(
     json_or_err(r)
 }
 
+/// Plan + apply a client schema for an app (what `POST /dash/apps` and the
+/// ephemeral app route do with an initial `schema`).
+pub(crate) async fn plan_and_apply(state: &Arc<AppState>, app_id: Uuid, body: &Value) -> Result<Value> {
+    let plan = plan(state, app_id, body).await?;
+    apply_steps(state, app_id, plan.steps, false).await
+}
+
 /// POST /dash/apps/:app_id/schema/push/apply — plan + apply in one call.
 pub async fn schema_push_apply(
     State(state): State<Arc<AppState>>,
@@ -453,7 +551,11 @@ pub async fn indexing_job_get(
 }
 
 /// POST /dash/apps/:app_id/indexing-jobs — body `{attr-id, job-type,
-/// checked-data-type?}`
+/// checked-data-type?}`. Legacy indexing-job-post (dash/routes.clj:1875-1906):
+/// an unknown job type is a `job-type` validation error, the attr must
+/// belong to the app (`record-not-found: attrs`), `checked-data-type` is
+/// read only for check-data-type jobs, the job has no group, and the body is
+/// `job->client-format`.
 pub async fn indexing_job_post(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
@@ -475,21 +577,47 @@ pub async fn indexing_job_post(
             .get("job-type")
             .filter(|v| !v.is_null())
             .ok_or_else(|| param_missing(&["body", "job-type"]))?;
-        let job_type = job_type
-            .as_str()
-            .filter(|t| indexing_jobs::job_spec(t).is_some())
-            .ok_or_else(|| param_malformed(&["body", "job-type"], job_type.clone()))?
-            .to_string();
-        let checked_data_type = body
-            .get("checked-data-type")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let group_id = Uuid::new_v4();
+        let job_type = coerce_non_blank_str(job_type)
+            .ok_or_else(|| param_malformed(&["body", "job-type"], job_type.clone()))?;
+        if indexing_jobs::job_spec(&job_type).is_none() {
+            let message = format!("Invalid job type {job_type}.");
+            return Err(InstantError::new(
+                "validation-failed",
+                400,
+                format!("Validation failed for job-type: {message}"),
+                Some(json!({
+                    "data-type": "job-type",
+                    "input": job_type,
+                    "errors": [{"message": message}],
+                })),
+            ));
+        }
+        let attrs = service::load_attrs(&state, app.id).await?;
+        if attrs.get(&attr_id).is_none() {
+            return Err(InstantError::new(
+                "record-not-found",
+                400,
+                "Record not found: attrs",
+                Some(json!({"attr-id": attr_id, "record-type": "attrs"})),
+            ));
+        }
+        let checked_data_type = if job_type == "check-data-type" {
+            let raw = body
+                .get("checked-data-type")
+                .filter(|v| !v.is_null())
+                .ok_or_else(|| param_missing(&["body", "checked-data-type"]))?;
+            Some(
+                coerce_non_blank_str(raw)
+                    .ok_or_else(|| param_malformed(&["body", "checked-data-type"], raw.clone()))?,
+            )
+        } else {
+            None
+        };
         let mut conn = state.pool.acquire().await?;
         let job_id = indexing_jobs::create_job(
             &mut conn,
             app.id,
-            group_id,
+            None,
             &NewJob {
                 attr_id,
                 job_type,
@@ -497,13 +625,23 @@ pub async fn indexing_job_post(
             },
         )
         .await?;
-        let job = indexing_jobs::get_basic(&mut conn, job_id).await?;
+        let job = indexing_jobs::get_client_format(&mut conn, job_id).await?;
         drop(conn);
-        indexing_jobs::spawn_group(state.clone(), app.id, group_id);
+        indexing_jobs::spawn_job(state.clone(), job_id);
         Ok(json!({"job": job}))
     }
     .await;
     json_or_err(r)
+}
+
+/// legacy `string-util/coerce-non-blank-str`: a non-blank string as is, a
+/// number stringified, anything else nothing.
+pub(crate) fn coerce_non_blank_str(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

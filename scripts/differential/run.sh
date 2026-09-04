@@ -45,9 +45,12 @@ DASH_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
 DASH_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 DASH_APP2=$(python3 -c "import uuid; print(uuid.uuid4())")
 DASH_TOKEN2=$(python3 -c "import uuid; print(uuid.uuid4())")
-./provision.sh "$DASH_APP" "$DASH_TOKEN"
+# a dashboard refresh token for the first app's creator: the CLI's app /
+# info / claim / auth routes take one instead of the admin token
+DASH_USER_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+./provision.sh "$DASH_APP" "$DASH_TOKEN" "$DASH_USER_TOKEN"
 ./provision.sh "$DASH_APP2" "$DASH_TOKEN2"
-node dash.mjs "$DASH_APP" "$DASH_TOKEN" "$DASH_APP2" "$DASH_TOKEN2"
+DASH_USER_TOKEN="$DASH_USER_TOKEN" node dash.mjs "$DASH_APP" "$DASH_TOKEN" "$DASH_APP2" "$DASH_TOKEN2"
 
 echo "== storage routes =="
 STORAGE_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
