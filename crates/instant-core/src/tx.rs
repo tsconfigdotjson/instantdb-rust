@@ -319,6 +319,26 @@ pub async fn transact(
     .await?;
     let tx_id: i64 = row.get("id");
 
+    // legacy validate-system-triple-op! (permissioned_transaction.clj:72-79):
+    // stream-backed file paths are never editable, admins included
+    if !opts.allow_system_catalog_writes {
+        for step in &steps {
+            if let TxStep::AddTriple { attr_id, value, .. }
+            | TxStep::DeepMergeTriple { attr_id, value, .. } = step
+            {
+                let is_path = attrs
+                    .get(attr_id)
+                    .map(|a| a.etype == "$files" && a.label == "path")
+                    .unwrap_or(false);
+                if is_path && value.as_str().is_some_and(|s| s.starts_with("$stream/")) {
+                    return Err(tx_step_validation_err(
+                        step,
+                        "The path for stream files can't be edited.".to_string(),
+                    ));
+                }
+            }
+        }
+    }
     // Guard system-catalog triple writes unless explicitly allowed.
     if !opts.allow_system_catalog_writes {
         for step in &steps {
@@ -377,6 +397,7 @@ pub async fn transact(
     }
 
     let mut resolver = LookupResolver::new();
+    let mut required_updates: Vec<Uuid> = vec![];
     let mut report = TxReport {
         tx_id,
         created: vec![],
@@ -398,13 +419,27 @@ pub async fn transact(
                     let TxStep::AddAttr(attr) = step else {
                         unreachable!()
                     };
-                    // Ignore exact re-adds of attrs that already exist under the
-                    // same forward name (client-generated ids may differ).
+                    // A second attr under an existing forward name trips
+                    // legacy's `app_ident_uq` (exception.clj:227-240) and the
+                    // client sees `record-not-unique`; a later add-triple with
+                    // the client's id would fail anyway
                     if let Some(existing) = attrs.by_fwd_name(&attr.etype, &attr.label) {
                         if existing.id != attr.id {
-                            // Client didn't know the server id; treat as no-op.
-                            continue;
+                            return Err(InstantError::new(
+                                "record-not-unique",
+                                400,
+                                format!("`{}` already exists on `{}`", attr.label, attr.etype),
+                                Some(json!({
+                                    "record-type": "idents",
+                                    "etype": attr.etype,
+                                    "label": attr.label,
+                                })),
+                            ));
                         }
+                    }
+                    // legacy validate-add-required! (attr.clj:334-350)
+                    if attr.is_required {
+                        crate::attr::validate_add_required(&mut *conn, app_id, &attr).await?;
                     }
                     crate::attr::insert(&mut *conn, app_id, &attr).await?;
                     backfill_nulls_for_new_attr(&mut *conn, app_id, attrs, &attr).await?;
@@ -437,6 +472,9 @@ pub async fn transact(
                         || patch.get("reverse-identity").is_some();
                     let updated =
                         crate::attr::update(&mut *conn, app_id, &existing, &patch).await?;
+                    if updated.is_required && !existing.is_required {
+                        required_updates.push(updated.id);
+                    }
                     attrs.remove(&id);
                     attrs.insert(updated);
                     report.attrs_changed = true;
@@ -675,7 +713,9 @@ pub async fn transact(
                     }
                 }
                 let expanded = expand_delete_cascade(&mut *conn, app_id, attrs, &seed).await?;
+                let referrers = referrers_of(&mut *conn, app_id, attrs, &expanded).await?;
                 delete_entities(&mut *conn, app_id, attrs, &expanded).await?;
+                report.touched.extend(referrers);
                 report.deleted.extend(expanded);
             }
             "rule-params" => {
@@ -709,6 +749,18 @@ pub async fn transact(
 
     let touched = report.touched.clone();
     validate_required(&mut *conn, app_id, attrs, &touched).await?;
+    // legacy validate-update-required! (attr.clj:533-580, transaction.clj:627)
+    crate::attr::validate_update_required(&mut *conn, app_id, attrs, &required_updates).await?;
+    // legacy validate-system-* create guard (permissioned_transaction.clj:589-596)
+    if !opts.allow_system_catalog_writes && !opts.admin {
+        if let Some((eid, _)) = report.created.iter().find(|(_, et)| et == "$users") {
+            return Err(InstantError::validation_failed(
+                "tx-step",
+                "$users is a system entity. You aren't allowed to create this directly.",
+                json!([{"message": "$users is a system entity. You aren't allowed to create this directly.", "eid": eid}]),
+            ));
+        }
+    }
 
     report.resolved_lookups = resolver.resolved.clone();
     Ok(report)
@@ -723,12 +775,32 @@ async fn resolve_eid(
     created_etypes: &mut HashMap<Uuid, String>,
     eid: &EidRef,
     create_missing: bool,
-    _etype: &str,
+    etype: &str,
 ) -> Result<Uuid> {
     match eid {
         EidRef::Id(id) => Ok(*id),
         EidRef::Lookup(attr_id, value) => {
             let lookup_attr_etype = attrs.get(attr_id).map(|a| a.etype.clone());
+            // legacy validate-lookup-etypes (permissioned_transaction.clj:124-140)
+            match &lookup_attr_etype {
+                None => {
+                    let m = "Invalid lookup. Could not determine namespace from lookup attribute.";
+                    return Err(InstantError::validation_failed(
+                        "lookup",
+                        m,
+                        json!([{"message": m, "attr-id": attr_id, "value": value.value()}]),
+                    ));
+                }
+                Some(le) if !etype.is_empty() && le != etype => {
+                    let m = "Invalid transaction. The namespace in the lookup attribute is different from the namespace of the attribute that is being set";
+                    return Err(InstantError::validation_failed(
+                        "tx-step",
+                        m,
+                        json!([{"message": m}]),
+                    ));
+                }
+                _ => {}
+            }
             let resolved = resolver
                 .resolve(&mut *conn, app_id, attrs, *attr_id, value, create_missing)
                 .await?;
@@ -752,6 +824,69 @@ async fn resolve_eid(
                 )),
             }
         }
+    }
+}
+
+/// Entities that link *to* any of `targets` (the reverse rows legacy's
+/// delete returns, triple.clj:1188-1209), so a required link attr on the
+/// referrer is re-validated after the delete.
+async fn referrers_of(
+    conn: &mut PgConnection,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    targets: &[(Uuid, String)],
+) -> Result<Vec<(Uuid, String)>> {
+    if targets.is_empty() {
+        return Ok(vec![]);
+    }
+    let ids: Vec<Uuid> = targets.iter().map(|(e, _)| *e).collect();
+    let rows = sqlx::query(
+        "SELECT DISTINCT entity_id, attr_id FROM triples
+         WHERE app_id = $1 AND vae AND json_uuid_to_uuid(value) = ANY($2)",
+    )
+    .bind(app_id)
+    .bind(&ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut out = vec![];
+    for r in rows {
+        let eid: Uuid = r.get("entity_id");
+        let attr_id: Uuid = r.get("attr_id");
+        if ids.contains(&eid) {
+            continue;
+        }
+        if let Some(a) = attrs.get(&attr_id) {
+            out.push((eid, a.etype.clone()));
+        }
+    }
+    Ok(out)
+}
+
+/// Legacy `validate-value-lookup-etypes` (transaction.clj:532-556): a
+/// value-position lookup on a ref attr must name an attr of the link's
+/// reverse etype.
+fn validate_value_lookup_etype(attrs: &AttrMap, attr: &Attr, lookup_attr: Uuid) -> Result<()> {
+    let Some(rev_etype) = attr.reverse_etype.as_deref() else {
+        return Ok(());
+    };
+    match attrs.get(&lookup_attr) {
+        None => {
+            let m = "Invalid lookup. Could not determine namespace from lookup attribute.";
+            Err(InstantError::validation_failed(
+                "lookup",
+                m,
+                json!([{"message": m, "attr-id": lookup_attr}]),
+            ))
+        }
+        Some(la) if la.etype != rev_etype => {
+            let m = "Invalid transaction. The namespace in the lookup attribute is different from the namespace of the attribute that is being set";
+            Err(InstantError::validation_failed(
+                "tx-step",
+                m,
+                json!([{"message": m}]),
+            ))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -846,8 +981,15 @@ async fn resolve_add_batch(
         let value = if attr.value_type == crate::attr::ValueType::Ref || attr.label == "id" {
             match value_lookup(&value) {
                 Some((a, v)) => {
+                    // legacy validate-value-lookup-etypes (transaction.clj:532-556)
+                    validate_value_lookup_etype(attrs, attr, a)?;
+                    // a value-position lookup only resolves against existing
+                    // entities (plus eid-position lookups earlier in this tx);
+                    // legacy's `lookups` CTE raises `missing-lookup-value`
+                    // otherwise (triple.clj:885-899) instead of forking a
+                    // phantom entity
                     let target = resolver
-                        .resolve(&mut *conn, app_id, attrs, a, &v, true)
+                        .resolve(&mut *conn, app_id, attrs, a, &v, false)
                         .await?;
                     match target {
                         Some(t) => {
@@ -859,11 +1001,18 @@ async fn resolve_add_batch(
                             json!(t)
                         }
                         None => {
+                            let m = "The entity for the lookup does not exist.";
                             return Err(InstantError::validation_failed(
                                 "lookup",
-                                "The entity for the lookup does not exist.",
-                                json!([]),
-                            ))
+                                m,
+                                json!([{
+                                    "message": m,
+                                    "attribute-id": a,
+                                    "namespace": attrs.get(&a).map(|la| la.etype.clone()),
+                                    "label": attrs.get(&a).map(|la| la.label.clone()),
+                                    "value": v.value(),
+                                }]),
+                            ));
                         }
                     }
                 }

@@ -24,7 +24,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use instant_core::error::{InstantError, Result};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -442,12 +442,22 @@ pub async fn delete_blob(state: &AppState, app_id: Uuid, location_id: &str) {
 /// Signature stable within a day (legacy signs with day-bucketed instants so
 /// browser caches can reuse URLs).
 fn sign(secret: &str, app_id: Uuid, location_id: &str, day: i64) -> String {
-    let mut h = Sha256::new();
-    h.update(secret.as_bytes());
-    h.update(app_id.as_bytes());
-    h.update(location_id.as_bytes());
-    h.update(day.to_be_bytes());
-    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .expect("hmac accepts any key length");
+    mac.update(app_id.as_bytes());
+    mac.update(location_id.as_bytes());
+    mac.update(&day.to_be_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Constant-time equality for the URL signature.
+fn sig_eq(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Start of the current UTC day: legacy `bucketed-signing-instant`.
@@ -483,8 +493,12 @@ pub async fn serve(
     let day: i64 = params.get("d").and_then(|d| d.parse().ok()).unwrap_or(0);
     let sig = params.get("sig").cloned().unwrap_or_default();
     let now_day = chrono::Utc::now().timestamp() / 86_400;
-    // valid for 7 days
-    if now_day - day > 7 || sign(&state.cfg.secret, app_id, &location_id, day) != sig {
+    // valid for 7 days from its signing day; a day in the future is not a
+    // signing day we ever produced
+    if day > now_day
+        || now_day - day > 7
+        || !sig_eq(&sign(&state.cfg.secret, app_id, &location_id, day), &sig)
+    {
         return (StatusCode::FORBIDDEN, "invalid signature").into_response();
     }
     // After the signature check so scanners without valid urls (already a
@@ -508,6 +522,17 @@ pub async fn serve(
                         header::CACHE_CONTROL,
                         crate::s3::RESPONSE_CACHE_CONTROL.to_string(),
                     ),
+                    // Legacy serves blobs from the S3 origin; here they come
+                    // off the API origin with uploader-chosen content-type /
+                    // disposition, so an `inline` text/html upload would be
+                    // stored XSS against the API host. The sandbox CSP keeps
+                    // such a document scriptless and origin-less without
+                    // changing the bytes or headers a browser reads.
+                    (
+                        header::CONTENT_SECURITY_POLICY,
+                        "sandbox; default-src 'none'".to_string(),
+                    ),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
                 ],
                 bytes,
             )

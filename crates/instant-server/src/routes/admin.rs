@@ -85,7 +85,7 @@ pub(crate) fn body_query(body: &Value) -> Result<&Value> {
 
 /// Legacy app-admin-token-model/fetch!: the hint carries the lookup args
 /// and the explanatory message; the message itself is the bare record name.
-fn admin_token_not_found(app_id: Uuid, token: &str) -> InstantError {
+pub(crate) fn admin_token_not_found(app_id: Uuid, token: &str) -> InstantError {
     InstantError::new(
         "record-not-found",
         400,
@@ -108,10 +108,90 @@ fn app_user_not_found(args: Value) -> InstantError {
     )
 }
 
+/// Which legacy auth helper a route uses.
+///
+/// * `Impersonating` — legacy `get-perms!` (routes.clj:78-110): `as-token`
+///   and `as-guest` authenticate on their own (a refresh token / nothing) for
+///   the untrusted app id, `as-email` and the plain form need the app's
+///   admin token. Only `/admin/query`, `/admin/transact`, the SSE session
+///   routes and the storage upload / delete routes use it.
+/// * `AdminOnly` — legacy `req->app-id-authed!` (routes.clj:59-76): the
+///   bearer admin token is required and the `as-*` headers are ignored.
+///   Every other `/admin/*` route (auth, users, presence, signed urls, file
+///   list) uses it: without this gate an app id alone (public in every
+///   client bundle) would mint refresh tokens, read magic codes and delete
+///   users.
+/// * `AdminThenImpersonating` — the perms-check routes, which call
+///   `req->app-id-authed!` first ("make sure the admin has access") and then
+///   `get-perms!` (routes.clj:220-221, :325-326).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    Impersonating,
+    AdminOnly,
+    AdminThenImpersonating,
+}
+
+/// `get-perms!`: impersonation headers honored (see [`Gate`]).
 pub async fn authed(
     state: &AppState,
     headers: &HeaderMap,
     params: &HashMap<String, String>,
+) -> Result<AdminCtx> {
+    authed_with(state, headers, params, Gate::Impersonating).await
+}
+
+/// `req->app-id-authed!`: admin token required, `as-*` headers ignored.
+pub async fn authed_admin(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> Result<AdminCtx> {
+    authed_with(state, headers, params, Gate::AdminOnly).await
+}
+
+/// `req->app-id-authed!` then `get-perms!` (the perms-check routes).
+pub async fn authed_admin_then_impersonating(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> Result<AdminCtx> {
+    authed_with(state, headers, params, Gate::AdminThenImpersonating).await
+}
+
+/// legacy req->bearer-token!: the header is a required param, then the
+/// token row must exist (routes.clj:69-72, util/http.clj:22-25)
+async fn check_admin_header(state: &AppState, app_id: Uuid, header: Option<&str>) -> Result<()> {
+    let header = header.ok_or_else(|| {
+        InstantError::new(
+            "param-missing",
+            400,
+            "Missing parameter: [\"headers\" \"authorization\"]",
+            Some(json!({"in": ["headers", "authorization"]})),
+        )
+    })?;
+    let token = header
+        .strip_prefix("Bearer ")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            InstantError::new(
+                "param-malformed",
+                400,
+                "Malformed parameter: [\"headers\" \"authorization\"]",
+                Some(json!({"in": ["headers", "authorization"], "original-input": header})),
+            )
+        })?;
+    if !auth::check_admin_token(state, app_id, token).await? {
+        return Err(admin_token_not_found(app_id, token));
+    }
+    Ok(())
+}
+
+async fn authed_with(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+    gate: Gate,
 ) -> Result<AdminCtx> {
     let app_id = app_id_param(headers, params)?;
 
@@ -124,14 +204,34 @@ pub async fn authed(
         .check(app_id, 1.0)
         .map_err(crate::rate_limit::rate_limited_err)?;
 
-    let auth_header = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
 
     // request.ip / request.origin for rules come from this HTTP request
     // (legacy binds *request-info* around every handler, util/http.clj:84-118)
     let request = crate::ws::request_ctx_from_headers(headers);
+    let ctx = |admin: bool, user_id: Option<Uuid>| AdminCtx {
+        app_id,
+        perms: PermsCtx {
+            admin,
+            user_id,
+            user_map: None,
+            rule_params: None,
+            ip: request.ip.clone(),
+            origin: request.origin.clone(),
+        },
+    };
+
+    match gate {
+        Gate::AdminOnly => {
+            check_admin_header(state, app_id, auth_header).await?;
+            return Ok(ctx(true, None));
+        }
+        Gate::AdminThenImpersonating => {
+            check_admin_header(state, app_id, auth_header).await?;
+        }
+        Gate::Impersonating => {}
+    }
+
     let as_token = headers.get("as-token").and_then(|v| v.to_str().ok());
     let as_email = headers.get("as-email").and_then(|v| v.to_str().ok());
     let as_guest = headers.get("as-guest").is_some();
@@ -150,88 +250,24 @@ pub async fn authed(
         let user = auth::user_by_refresh_token(state, app_id, token)
             .await?
             .ok_or_else(|| app_user_not_found(json!({"app-id": app_id, "refresh-token": token})))?;
-        return Ok(AdminCtx {
-            app_id,
-            perms: PermsCtx {
-                admin: false,
-                user_id: Some(user.id),
-                user_map: None,
-                rule_params: None,
-                ip: request.ip.clone(),
-                origin: request.origin.clone(),
-            },
-        });
+        return Ok(ctx(false, Some(user.id)));
     }
-    // legacy req->bearer-token!: the header is a required param, then the
-    // token row must exist (routes.clj:69-72, util/http.clj:22-25)
-    let check_admin = |header: Option<String>| async move {
-        let header = header.ok_or_else(|| {
-            InstantError::new(
-                "param-missing",
-                400,
-                "Missing parameter: [\"headers\" \"authorization\"]",
-                Some(json!({"in": ["headers", "authorization"]})),
-            )
-        })?;
-        let token = header
-            .strip_prefix("Bearer ")
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                InstantError::new(
-                    "param-malformed",
-                    400,
-                    "Malformed parameter: [\"headers\" \"authorization\"]",
-                    Some(json!({"in": ["headers", "authorization"], "original-input": header})),
-                )
-            })?;
-        if !auth::check_admin_token(state, app_id, token).await? {
-            return Err(admin_token_not_found(app_id, token));
-        }
-        Ok(())
-    };
     if let Some(email) = as_email {
-        check_admin(auth_header).await?;
+        if gate == Gate::Impersonating {
+            check_admin_header(state, app_id, auth_header).await?;
+        }
         let user = auth::user_by_email(state, app_id, email)
             .await?
             .ok_or_else(|| app_user_not_found(json!({"app-id": app_id, "email": email})))?;
-        return Ok(AdminCtx {
-            app_id,
-            perms: PermsCtx {
-                admin: false,
-                user_id: Some(user.id),
-                user_map: None,
-                rule_params: None,
-                ip: request.ip.clone(),
-                origin: request.origin.clone(),
-            },
-        });
+        return Ok(ctx(false, Some(user.id)));
     }
     if as_guest {
-        return Ok(AdminCtx {
-            app_id,
-            perms: PermsCtx {
-                admin: false,
-                user_id: None,
-                user_map: None,
-                rule_params: None,
-                ip: request.ip.clone(),
-                origin: request.origin.clone(),
-            },
-        });
+        return Ok(ctx(false, None));
     }
-    check_admin(auth_header).await?;
-    Ok(AdminCtx {
-        app_id,
-        perms: PermsCtx {
-            admin: true,
-            user_id: None,
-            user_map: None,
-            rule_params: None,
-            ip: request.ip,
-            origin: request.origin,
-        },
-    })
+    if gate == Gate::Impersonating {
+        check_admin_header(state, app_id, auth_header).await?;
+    }
+    Ok(ctx(true, None))
 }
 
 // ---------------------------------------------------------------------------
@@ -675,11 +711,13 @@ fn resolve_obj_attr(
         }
     }
     let id = Uuid::new_v4();
+    // legacy admin/model.clj:281-284: the `id` attr is created unique+indexed
+    let is_id = label == "id";
     new_attrs.push(json!(["add-attr", {
         "id": id,
         "forward-identity": [Uuid::new_v4(), etype, label],
         "value-type": "blob", "cardinality": "one",
-        "unique?": false, "index?": false
+        "unique?": is_id, "index?": is_id
     }]));
     Ok(id)
 }
@@ -945,7 +983,7 @@ async fn refresh_tokens_impl(
     params: &HashMap<String, String>,
     body: &Value,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin(state, headers, params).await?;
     let email = body.get("email").and_then(|v| v.as_str());
     let id = body
         .get("id")
@@ -1000,7 +1038,7 @@ async fn sign_out_impl(
     params: &HashMap<String, String>,
     body: &Value,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin(state, headers, params).await?;
     if let Some(id) = body
         .get("id")
         .and_then(|v| v.as_str())
@@ -1062,17 +1100,15 @@ async fn get_user_impl(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin(state, headers, params).await?;
     let user = find_user_by_params(state, ctx.app_id, params).await?;
     match user {
         Some(u) => {
             let user = user_json(state, ctx.app_id, u.id, None).await?;
             Ok(json!({"user": user}))
         }
-        None => Err(InstantError::record_not_found(
-            "app-user",
-            "Record not found: app-user",
-        )),
+        // legacy app-users-get uses the non-throwing getter (routes.clj:490-492)
+        None => Ok(json!({"user": null})),
     }
 }
 
@@ -1089,7 +1125,7 @@ async fn delete_user_impl(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin(state, headers, params).await?;
     let user = find_user_by_params(state, ctx.app_id, params).await?;
     match user {
         Some(u) => {
@@ -1102,10 +1138,8 @@ async fn delete_user_impl(
             .await?;
             Ok(json!({"deleted": user}))
         }
-        None => Err(InstantError::record_not_found(
-            "app-user",
-            "Record not found: app-user",
-        )),
+        // legacy app-users-delete: nothing to delete is `{deleted: null}` (routes.clj:494-499)
+        None => Ok(json!({"deleted": null})),
     }
 }
 
@@ -1122,7 +1156,7 @@ async fn presence_impl(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin(state, headers, params).await?;
     let room_id = params
         .get("room-id")
         .ok_or_else(|| InstantError::param_missing("Missing parameter: room-id"))?;
@@ -1419,7 +1453,7 @@ async fn storage_list_impl(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin(state, headers, params).await?;
     service::assert_read_allowed(state, ctx.app_id).await?;
     let attrs = service::load_attrs(state, ctx.app_id).await?;
     let q = json!({"$files": {}});
@@ -1465,7 +1499,7 @@ async fn admin_signed_download_url_impl(
     headers: &HeaderMap,
     params: &HashMap<String, String>,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin(state, headers, params).await?;
     let filename = admin_filename_param(params)?;
     let url = file_location_by_path(state, ctx.app_id, filename)
         .await
@@ -1507,7 +1541,7 @@ async fn admin_signed_upload_url_impl(
     params: &HashMap<String, String>,
     body: &Value,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin(state, headers, params).await?;
     let filename = body
         .get("filename")
         .and_then(|v| v.as_str())
@@ -1655,7 +1689,7 @@ async fn magic_code_impl(
     params: &HashMap<String, String>,
     body: &Value,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin(state, headers, params).await?;
     let email = body
         .get("email")
         .and_then(|v| v.as_str())
@@ -1694,6 +1728,44 @@ async fn magic_code_impl(
     Ok(json!({"code": code}))
 }
 
+pub async fn admin_send_magic_code(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    json_or_err(admin_send_magic_code_impl(&state, &headers, &params, &body).await)
+}
+
+/// Legacy send-magic-code-post (admin/routes.clj:506-511): admin-authed, then
+/// the same generate + deliver path as the runtime route.
+async fn admin_send_magic_code_impl(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+    body: &Value,
+) -> Result<Value> {
+    let ctx = authed_admin(state, headers, params).await?;
+    let email = body
+        .get("email")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            InstantError::new(
+                "param-missing",
+                400,
+                "Missing parameter: [\"body\" \"email\"]",
+                Some(json!({"in": ["body", "email"]})),
+            )
+        })?;
+    let email = crate::routes::runtime::coerce_email_pub(email)?;
+    state
+        .limiters
+        .magic_code_send
+        .check((ctx.app_id, email.clone()), 1.0)
+        .map_err(crate::rate_limit::email_rate_limited_err)?;
+    crate::routes::runtime::send_magic_code_for(state, ctx.app_id, &email).await
+}
+
 pub async fn admin_verify_magic_code(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1713,7 +1785,7 @@ async fn verify_magic_code_admin_impl(
     params: &HashMap<String, String>,
     body: &Value,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin(state, headers, params).await?;
     let mut rt_body = body.clone();
     rt_body["app-id"] = json!(ctx.app_id);
     crate::routes::runtime::verify_magic_code_shared(state, &rt_body).await
@@ -1737,7 +1809,7 @@ async fn admin_sign_in_guest_impl(
     params: &HashMap<String, String>,
     _body: &Value,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin(state, headers, params).await?;
     let uid = Uuid::new_v4();
     let steps = json!([
         ["add-triple", uid, sc::attr_id("$users", "id"), uid],
@@ -2007,7 +2079,7 @@ async fn query_perms_check_impl(
     params: &HashMap<String, String>,
     body: &Value,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin_then_impersonating(state, headers, params).await?;
     if ctx.perms.admin {
         return Err(InstantError::validation_failed(
             "body",
@@ -2114,7 +2186,7 @@ async fn transact_perms_check_impl(
     params: &HashMap<String, String>,
     body: &Value,
 ) -> Result<Value> {
-    let ctx = authed(state, headers, params).await?;
+    let ctx = authed_admin_then_impersonating(state, headers, params).await?;
     if ctx.perms.admin {
         return Err(InstantError::validation_failed(
             "body",

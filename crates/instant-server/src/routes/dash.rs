@@ -78,12 +78,13 @@ async fn dash_authed(state: &AppState, headers: &HeaderMap, app_id_raw: &str) ->
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| param_missing(&["headers", "authorization"]))?;
+    // legacy req->bearer-token! (util/http.clj:22-25): the header must carry
+    // the `Bearer ` prefix; a bare token is malformed
     let token = auth
-        .rsplit("Bearer ")
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+        .strip_prefix("Bearer ")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| param_malformed(&["headers", "authorization"], json!(auth)))?;
     if token.starts_with("per_") || token.starts_with("pat_") || token.starts_with("eyJ") {
         // platform / personal access tokens belong to the hosted dashboard
         return Err(unauthorized());

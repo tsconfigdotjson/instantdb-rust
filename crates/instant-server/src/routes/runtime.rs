@@ -59,6 +59,10 @@ fn get_app_id(body: &Value, key: &str) -> Result<Uuid> {
         .map_err(|_| InstantError::param_malformed(format!("Malformed parameter: {key}")))
 }
 
+pub fn coerce_email_pub(raw: &str) -> Result<String> {
+    coerce_email(raw)
+}
+
 fn coerce_email(raw: &str) -> Result<String> {
     let email = raw.trim().to_lowercase();
     let ok = email.contains('@')
@@ -147,8 +151,19 @@ pub async fn send_magic_code(
 async fn send_magic_code_impl(state: &Arc<AppState>, body: &Value) -> Result<Value> {
     let app_id = get_app_id(body, "app-id")?;
     check_auth_limit(state, app_id)?;
-    let app = service::get_app(state, app_id).await?;
     let email = coerce_email(get_str(body, "email")?)?;
+    send_magic_code_for(state, app_id, &email).await
+}
+
+/// Generate, store and deliver a magic code (legacy magic-code-auth/send!);
+/// shared by `/runtime/auth/send_magic_code` and `/admin/send_magic_code`.
+pub async fn send_magic_code_for(
+    state: &Arc<AppState>,
+    app_id: Uuid,
+    email: &str,
+) -> Result<Value> {
+    let app = service::get_app(state, app_id).await?;
+    let email = email.to_string();
     // per-(app, email) budget, matching legacy's 20/hour default
     // (magic_code_auth.clj:32-59)
     state
@@ -211,14 +226,14 @@ async fn verify_magic_code_runtime(state: &AppState, body: &Value) -> Result<Val
         .magic_code_verify
         .check((app_id, email), 1.0)
         .map_err(rate_limit::email_rate_limited_err)?;
-    verify_magic_code_impl(state, body).await
+    verify_magic_code_impl(state, body, false).await
 }
 
 pub async fn verify_magic_code_shared(state: &AppState, body: &Value) -> Result<Value> {
-    verify_magic_code_impl(state, body).await
+    verify_magic_code_impl(state, body, true).await
 }
 
-async fn verify_magic_code_impl(state: &AppState, body: &Value) -> Result<Value> {
+async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> Result<Value> {
     let app_id = get_app_id(body, "app-id")?;
     let email = coerce_email(get_str(body, "email")?)?;
     let code = get_str(body, "code")?.trim().to_string();
@@ -279,6 +294,13 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value) -> Result<Value>
     let entity: Uuid = row.get("entity_id");
     let created_at: i64 = row.get::<Option<i64>, _>("created_at").unwrap_or(0);
 
+    // legacy checks `$users.allow.create` before consuming the code so a
+    // failed check doesn't burn it (magic_code_auth.clj:277-288); the id a
+    // new user would get is the guest's when upgrading
+    let prospective_id = guest_user.as_ref().map(|g| g.id).unwrap_or_else(Uuid::new_v4);
+    if !admin && auth::user_by_email(state, app_id, &email).await?.is_none() {
+        auth::assert_signup(state, app_id, prospective_id, Some(&email)).await?;
+    }
     // consume (one-time)
     service::run_system_transact(
         state,
@@ -314,10 +336,7 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value) -> Result<Value>
         None => {
             // legacy magic_code_auth.clj:284 `(or guest-user-id (random-uuid))`:
             // a guest upgrading to a NEW email is upgraded in place (same id)
-            let uid = guest_user
-                .as_ref()
-                .map(|g| g.id)
-                .unwrap_or_else(Uuid::new_v4);
+            let uid = prospective_id;
             let steps = json!([
                 ["add-triple", uid, sc::attr_id("$users", "id"), uid],
                 ["add-triple", uid, sc::attr_id("$users", "email"), email],
@@ -379,6 +398,7 @@ async fn sign_in_guest_impl(state: &AppState, body: &Value) -> Result<Value> {
     check_auth_limit(state, app_id)?;
     service::get_app(state, app_id).await?;
     let uid = Uuid::new_v4();
+    auth::assert_signup(state, app_id, uid, None).await?;
     let steps = json!([
         ["add-triple", uid, sc::attr_id("$users", "id"), uid],
         ["add-triple", uid, sc::attr_id("$users", "type"), "guest"]
@@ -387,6 +407,58 @@ async fn sign_in_guest_impl(state: &AppState, body: &Value) -> Result<Value> {
     let token = auth::mint_refresh_token(state, app_id, uid).await?;
     let user = user_json(state, app_id, uid, Some(token)).await?;
     Ok(json!({"user": user}))
+}
+
+/// `POST /runtime/framework/query` — legacy `framework-query-triples`
+/// (runtime/routes.clj:728-743), what `@instantdb/core`'s FrameworkClient
+/// (SSR) calls: optional bearer refresh token, `app-id` header or `app_id`
+/// query param, body `{query, versions}`; answers the permissioned
+/// join-rows result plus the app's attrs.
+pub async fn framework_query(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> Response {
+    json_or_err(framework_query_impl(&state, &headers, &params, &body).await)
+}
+
+async fn framework_query_impl(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    params: &std::collections::HashMap<String, String>,
+    body: &Value,
+) -> Result<Value> {
+    let app_id = crate::routes::admin::app_id_param(headers, params)?;
+    check_auth_limit(state, app_id)?;
+    let q = crate::routes::admin::body_query(body)?;
+    // legacy req->bearer-token (non-throwing): an absent or unknown token is
+    // an anonymous query
+    let mut user_id = None;
+    if let Some(token) = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|s| s.trim())
+    {
+        user_id = auth::user_by_refresh_token(state, app_id, token)
+            .await?
+            .map(|u| u.id);
+    }
+    service::assert_read_allowed(state, app_id).await?;
+    let attrs = service::load_attrs(state, app_id).await?;
+    let request = crate::ws::request_ctx_from_headers(headers);
+    let perms = instant_core::perms::PermsCtx {
+        admin: false,
+        user_id,
+        user_map: None,
+        rule_params: None,
+        ip: request.ip,
+        origin: request.origin,
+    };
+    let result = service::run_query(state, app_id, &attrs, &perms, q).await?;
+    let (wire, _, _) = crate::ws::format_query_result(&result, &attrs, q, false, false);
+    Ok(json!({"result": wire, "attrs": attrs.to_wire_visible()}))
 }
 
 pub async fn signout(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {

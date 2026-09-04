@@ -633,19 +633,118 @@ pub async fn restore(conn: &mut PgConnection, app_id: Uuid, ids: &[Uuid]) -> Res
     get_by_ids(&mut *conn, app_id, &restored).await
 }
 
-/// Insert one attr (attrs row + ident rows). Idempotent for identical re-inserts.
-pub async fn insert<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid, attr: &Attr) -> Result<()> {
-    // Reserved names: users can't claim system idents outside editable etypes.
-    if app_id != system_catalog::SYSTEM_CATALOG_APP_ID
-        && attr.etype.starts_with('$')
-        && !system_catalog::is_editable_etype(&attr.etype)
-    {
+/// Reserved names, checked on the forward AND reverse identity like legacy
+/// `validate-system-ident-names!` (db/model/attr.clj:313-332, run on add and
+/// update): users can't claim a catalog ident, nor open a `$` namespace
+/// outside the editable etypes — a link whose reverse side lands in
+/// `$magicCodes` would otherwise pollute a system table and expose its rows
+/// to `data.ref`.
+pub fn validate_ident_names(app_id: Uuid, attr: &Attr) -> Result<()> {
+    if app_id == system_catalog::SYSTEM_CATALOG_APP_ID {
+        return Ok(());
+    }
+    let fwd = (attr.etype.as_str(), attr.label.as_str());
+    let rev = attr
+        .reverse_etype
+        .as_deref()
+        .zip(attr.reverse_label.as_deref());
+    for (etype, label) in std::iter::once(fwd).chain(rev) {
+        if system_catalog::is_reserved_ident(etype, label) {
+            let m = format!("{etype}.{label} is a system column and it already exists.");
+            return Err(InstantError::validation_failed(
+                "attributes",
+                m.clone(),
+                json!([{"message": m}]),
+            ));
+        }
+        if etype.starts_with('$') && !system_catalog::is_editable_etype(etype) {
+            let m = format!("$ is reserved for system tables. You can't create {etype}");
+            return Err(InstantError::validation_failed(
+                "attributes",
+                m.clone(),
+                json!([{"message": m}]),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Legacy `validate-add-required!` (attr.clj:334-350): a new required attr
+/// on a namespace that already has entities is refused up front.
+pub async fn validate_add_required<'e, E: PgExecutor<'e>>(
+    exec: E,
+    app_id: Uuid,
+    attr: &Attr,
+) -> Result<()> {
+    let row = sqlx::query(
+        "SELECT 1 AS x FROM attrs JOIN triples ON attrs.id = triples.attr_id
+         WHERE attrs.app_id = $1 AND attrs.etype = $2 AND triples.app_id = $1 LIMIT 1",
+    )
+    .bind(app_id)
+    .bind(&attr.etype)
+    .fetch_optional(exec)
+    .await?;
+    if row.is_some() {
+        let m = format!(
+            "Can't create attribute `{}` as required because `{}` already have entities",
+            attr.label, attr.etype
+        );
         return Err(InstantError::validation_failed(
             "attributes",
-            format!("The `{}` namespace is reserved for system use.", attr.etype),
-            json!([]),
+            m.clone(),
+            json!([{"message": m}]),
         ));
     }
+    Ok(())
+}
+
+/// Legacy `validate-update-required!` (attr.clj:533-580): flipping an attr
+/// to required needs every entity of the namespace to carry a non-null value.
+pub async fn validate_update_required(
+    conn: &mut sqlx::PgConnection,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    attr_ids: &[Uuid],
+) -> Result<()> {
+    for id in attr_ids {
+        let Some(attr) = attrs.get(id) else { continue };
+        if !attr.is_required {
+            continue;
+        }
+        let row = sqlx::query(
+            "SELECT
+               (SELECT count(DISTINCT entity_id) FROM triples
+                 WHERE app_id = $1 AND attr_id = $2 AND value IS NOT NULL AND value <> 'null') AS attr_count,
+               (SELECT count(DISTINCT entity_id) FROM triples
+                 WHERE app_id = $1
+                   AND attr_id IN (SELECT id FROM attrs WHERE app_id = $1 AND etype = $3)
+                   AND value IS NOT NULL AND value <> 'null') AS etype_count",
+        )
+        .bind(app_id)
+        .bind(id)
+        .bind(&attr.etype)
+        .fetch_one(&mut *conn)
+        .await?;
+        let attr_count: i64 = row.get("attr_count");
+        let etype_count: i64 = row.get("etype_count");
+        if attr_count != etype_count {
+            let m = format!(
+                "Can't update attribute `{}` to required because `{}` already have entities without it",
+                attr.label, attr.etype
+            );
+            return Err(InstantError::validation_failed(
+                "attributes",
+                m.clone(),
+                json!([{"message": m}]),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Insert one attr (attrs row + ident rows). Idempotent for identical re-inserts.
+pub async fn insert<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid, attr: &Attr) -> Result<()> {
+    validate_ident_names(app_id, attr)?;
     let res = sqlx::query(
         r#"
         WITH fwd AS (
@@ -749,6 +848,8 @@ pub async fn update<'e, E: PgExecutor<'e>>(
     if let Some(od) = patch.get("on-delete-reverse") {
         updated.on_delete_reverse_cascade = od.as_str() == Some("cascade");
     }
+    // legacy update-multi! runs validate-system-ident-names! (attr.clj:585)
+    validate_ident_names(app_id, &updated)?;
 
     sqlx::query(
         r#"

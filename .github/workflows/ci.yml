@@ -120,7 +120,7 @@ jobs:
           APP_ID=$(grep '^app_id=' /tmp/app.txt | cut -d= -f2)
           ./scripts/create-oauth-client.sh "$APP_ID" mock mock-provider \
             mock-client-id mock-secret \
-            "http://localhost:9377/.well-known/openid-configuration" > /dev/null
+            "http://localhost:9377/.well-known/openid-configuration" localhost:5173 > /dev/null
           echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
           echo "ADMIN_TOKEN=$(grep '^admin_token=' /tmp/app.txt | cut -d= -f2)" >> "$GITHUB_ENV"
 

@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Provision an OAuth provider + client for an app (writes system-namespace triples).
 # Usage: ./scripts/create-oauth-client.sh <app-id> <client-name> <provider-name> \
-#           <client-id> <client-secret> <discovery-endpoint>
+#           <client-id> <client-secret> <discovery-endpoint> [<authorized-origin-host>]
+# The optional 7th argument adds a `generic` authorized redirect origin
+# (host[:port], e.g. localhost:5173). Like legacy without shared credentials,
+# no redirect target is allowed until one is listed here.
 set -euo pipefail
 DATABASE_URL="${DATABASE_URL:-postgres://instant:instant@localhost:5432/instant}"
 APP_ID=$1; CLIENT_NAME=$2; PROVIDER_NAME=$3; CLIENT_ID=$4; SECRET=$5; DISCOVERY=$6
+ORIGIN_HOST="${7:-}"
 PROVIDER_EID=$(python3 -c "import uuid; print(uuid.uuid4())")
 CLIENT_EID=$(python3 -c "import uuid; print(uuid.uuid4())")
 
@@ -49,5 +53,16 @@ SELECT pg_temp.ins_triple('$APP_ID', '$CLIENT_EID', '\$oauthClients', 'discovery
 SELECT pg_temp.ins_triple('$APP_ID', '$CLIENT_EID', '\$oauthClients', '\$oauthProvider',
   to_jsonb(COALESCE(current_setting('vars.provider_eid', true), '$PROVIDER_EID')));
 SQL
+if [ -n "$ORIGIN_HOST" ]; then
+  ORIGIN_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
+  psql "$DATABASE_URL" -q -v ON_ERROR_STOP=1 <<SQL
+INSERT INTO app_authorized_redirect_origins (id, app_id, service, params)
+SELECT '$ORIGIN_ID', '$APP_ID', 'generic', ARRAY['$ORIGIN_HOST']::text[]
+WHERE NOT EXISTS (
+  SELECT 1 FROM app_authorized_redirect_origins
+   WHERE app_id = '$APP_ID' AND service = 'generic' AND params = ARRAY['$ORIGIN_HOST']::text[]);
+SQL
+  echo "authorized_origin=$ORIGIN_HOST"
+fi
 echo "provider_eid=$PROVIDER_EID"
 echo "client_eid=$CLIENT_EID"

@@ -147,15 +147,10 @@ async fn origin_authorized(state: &AppState, app_id: Uuid, url: &str) -> Result<
         (Some(h), None) => h.to_string(),
         _ => String::new(),
     };
-    // localhost always allowed for dev convenience
-    if matches!(scheme, "http" | "https")
-        && matches!(
-            parsed.host_str().unwrap_or(""),
-            "localhost" | "127.0.0.1" | "[::1]" | "0.0.0.0"
-        )
-    {
-        return Ok(true);
-    }
+    // legacy allows localhost / exp:// without configuration only for
+    // shared-credential clients (app_authorized_redirect_origin.clj:77-116);
+    // this server has none, so every redirect target must be listed
+    // (scripts/create-oauth-client.sh adds one)
     let rows = sqlx::query(
         "SELECT service, params FROM app_authorized_redirect_origins WHERE app_id = $1",
     )
@@ -240,6 +235,12 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
         .get("redirect_uri")
         .ok_or_else(|| InstantError::param_missing("Missing required parameter: redirect_uri"))?;
 
+    // legacy wraps both start routes in with-rate-limiting (runtime/routes.clj:754-759)
+    state
+        .limiters
+        .auth
+        .check(app_id, 1.0)
+        .map_err(crate::rate_limit::rate_limited_err)?;
     let client = client_by_name(state, app_id, client_name)
         .await?
         .ok_or_else(|| {
@@ -697,8 +698,12 @@ fn decode_jwt_payload(jwt: &str) -> Result<Value> {
 // ---------------------------------------------------------------------------
 // POST /runtime/oauth/token
 
-pub async fn token(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
-    match token_impl(&state, &body).await {
+pub async fn token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    match token_impl(&state, &headers, &body, false).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => oauth_err_response(&e),
     }
@@ -707,21 +712,57 @@ pub async fn token(State(state): State<Arc<AppState>>, Json(body): Json<Value>) 
 pub async fn token_with_app(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
+    headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> Response {
     body["app_id"] = json!(app_id);
-    match token_impl(&state, &body).await {
+    // legacy wraps only the app-scoped route in with-rate-limiting
+    // (runtime/routes.clj:768)
+    match token_impl(&state, &headers, &body, true).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => oauth_err_response(&e),
     }
 }
 
-async fn token_impl(state: &AppState, body: &Value) -> Result<Value> {
+/// Legacy `assert-authorized-request-origin!` (runtime/routes.clj:204-211,
+/// :622, :671): when the browser sends an Origin, it must be one of the
+/// app's authorized redirect origins.
+async fn assert_request_origin(state: &AppState, app_id: Uuid, headers: &HeaderMap) -> Result<()> {
+    let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
+        return Ok(());
+    };
+    let ok = match url::Url::parse(origin) {
+        Ok(_) => origin_authorized(state, app_id, origin).await?,
+        Err(_) => false,
+    };
+    if !ok {
+        return Err(InstantError::validation_failed(
+            "origin",
+            "Unauthorized origin.",
+            json!([{"message": "Unauthorized origin."}]),
+        ));
+    }
+    Ok(())
+}
+
+async fn token_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &Value,
+    rate_limited: bool,
+) -> Result<Value> {
     let app_id = body
         .get("app_id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| InstantError::param_missing("Missing required parameter: app_id"))?;
+    if rate_limited {
+        state
+            .limiters
+            .auth
+            .check(app_id, 1.0)
+            .map_err(crate::rate_limit::rate_limited_err)?;
+    }
     let code = body
         .get("code")
         .and_then(|v| v.as_str())
@@ -789,6 +830,7 @@ async fn token_impl(state: &AppState, body: &Value) -> Result<Value> {
             Some(json!({"record-type": "app-oauth-code"})),
         ));
     }
+    assert_request_origin(state, app_id, headers).await?;
 
     // PKCE
     match (
@@ -834,7 +876,12 @@ async fn token_impl(state: &AppState, body: &Value) -> Result<Value> {
         .await?
         .ok_or_else(|| oauth_err("Could not find oauth client."))?;
 
-    let (user_id, created) = upsert_oauth_link(state, app_id, &client, &user_info).await?;
+    let guest = match body.get("refresh_token").and_then(|v| v.as_str()) {
+        Some(t) => auth::guest_by_refresh_token(state, app_id, t).await?,
+        None => None,
+    };
+    let (user_id, created) =
+        upsert_oauth_link(state, app_id, &client, &user_info, guest.map(|g| g.id)).await?;
     let token = auth::mint_refresh_token(state, app_id, user_id).await?;
     let user = user_json(state, app_id, user_id, Some(token)).await?;
     Ok(json!({"user": user, "created": created, "refresh_token": token}))
@@ -843,14 +890,18 @@ async fn token_impl(state: &AppState, body: &Value) -> Result<Value> {
 // ---------------------------------------------------------------------------
 // POST /runtime/oauth/id_token
 
-pub async fn id_token(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
-    match id_token_impl(&state, &body).await {
+pub async fn id_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    match id_token_impl(&state, &headers, &body).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => oauth_err_response(&e),
     }
 }
 
-async fn id_token_impl(state: &AppState, body: &Value) -> Result<Value> {
+async fn id_token_impl(state: &AppState, headers: &HeaderMap, body: &Value) -> Result<Value> {
     let app_id = body
         .get("app_id")
         .and_then(|v| v.as_str())
@@ -870,6 +921,7 @@ async fn id_token_impl(state: &AppState, body: &Value) -> Result<Value> {
             InstantError::record_not_found("app-oauth-client", "Record not found: app-oauth-client")
         })?;
 
+    assert_request_origin(state, app_id, headers).await?;
     let disc = discovery(state, &client).await?;
     let issuer = disc
         .get("issuer")
@@ -961,7 +1013,12 @@ async fn id_token_impl(state: &AppState, body: &Value) -> Result<Value> {
         "imageURL": claims.get("picture").cloned().unwrap_or(Value::Null),
     });
 
-    let (user_id, created) = upsert_oauth_link(state, app_id, &client, &user_info).await?;
+    let guest = match body.get("refresh_token").and_then(|v| v.as_str()) {
+        Some(t) => auth::guest_by_refresh_token(state, app_id, t).await?,
+        None => None,
+    };
+    let (user_id, created) =
+        upsert_oauth_link(state, app_id, &client, &user_info, guest.map(|g| g.id)).await?;
 
     // token reuse: if the supplied refresh_token belongs to the same user
     let mut token: Option<Uuid> = None;
@@ -1022,6 +1079,17 @@ async fn verify_jwt(state: &AppState, disc: &Value, jwt: &str) -> Result<Value> 
         Algorithm::ES256 => Algorithm::ES256,
         _ => return Err(oauth_err("The id_token used an unsupported algorithm.")),
     };
+    // legacy also rejects algorithms the discovery document doesn't list
+    // (auth/oauth.clj:223-224 `id_token_signing_alg_values_supported`)
+    if let Some(supported) = disc
+        .get("id_token_signing_alg_values_supported")
+        .and_then(|v| v.as_array())
+    {
+        let name = format!("{alg:?}");
+        if !supported.iter().any(|v| v.as_str() == Some(name.as_str())) {
+            return Err(oauth_err("The id_token used an unsupported algorithm."));
+        }
+    }
     let mut validation = Validation::new(alg);
     validation.validate_aud = false;
     validation.validate_exp = true;
@@ -1033,11 +1101,39 @@ async fn verify_jwt(state: &AppState, disc: &Value, jwt: &str) -> Result<Value> 
 // ---------------------------------------------------------------------------
 // User upsert via $oauthUserLinks
 
+/// Legacy `upsert-oauth-link!` (runtime/routes.clj:276-340). A guest
+/// upgrading through OAuth keeps its id for a fresh account, or gets
+/// `linkedPrimaryUser` pointed at the account that already owns the email /
+/// provider sub (`link-guest`, app_user.clj:281-295).
 async fn upsert_oauth_link(
     state: &AppState,
     app_id: Uuid,
     client: &OAuthClient,
     user_info: &Value,
+    guest_user_id: Option<Uuid>,
+) -> Result<(Uuid, bool)> {
+    let (user_id, created) =
+        upsert_oauth_link_inner(state, app_id, client, user_info, guest_user_id).await?;
+    if let Some(guest) = guest_user_id {
+        if guest != user_id {
+            let steps = json!([[
+                "add-triple",
+                guest,
+                sc::attr_id("$users", "linkedPrimaryUser"),
+                user_id
+            ]]);
+            service::run_system_transact(state, app_id, &steps).await?;
+        }
+    }
+    Ok((user_id, created))
+}
+
+async fn upsert_oauth_link_inner(
+    state: &AppState,
+    app_id: Uuid,
+    client: &OAuthClient,
+    user_info: &Value,
+    guest_user_id: Option<Uuid>,
 ) -> Result<(Uuid, bool)> {
     let sub = user_info
         .get("sub")
@@ -1094,7 +1190,9 @@ async fn upsert_oauth_link(
             Some(u) => u.id,
             None => {
                 created = true;
-                let uid = Uuid::new_v4();
+                // legacy `(or guest-user-id (random-uuid))` + assert-signup!
+                let uid = guest_user_id.unwrap_or_else(Uuid::new_v4);
+                auth::assert_signup(state, app_id, uid, Some(email)).await?;
                 let mut steps = vec![
                     json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
                     json!(["add-triple", uid, sc::attr_id("$users", "email"), email]),
@@ -1114,7 +1212,8 @@ async fn upsert_oauth_link(
         },
         None => {
             created = true;
-            let uid = Uuid::new_v4();
+            let uid = guest_user_id.unwrap_or_else(Uuid::new_v4);
+            auth::assert_signup(state, app_id, uid, None).await?;
             let steps = json!([
                 ["add-triple", uid, sc::attr_id("$users", "id"), uid],
                 ["add-triple", uid, sc::attr_id("$users", "type"), "user"]

@@ -532,6 +532,9 @@ here): `id`, `app_id`, `service`, `params text[]`
   reserved schemes (http, https, ...) rejected.
 - Shared-credential apps additionally always allow localhost/127.0.0.1/[::1]/
   0.0.0.0 (http/https) and `exp://` (`app_authorized_redirect_origin.clj:71-93`).
+  This server has no shared credentials, so nothing is allowed by default: add
+  a `generic` origin for local development (`scripts/create-oauth-client.sh`
+  takes it as its optional 7th argument, e.g. `localhost:5173`).
 
 Used for the `redirect_uri` at `/oauth/start` and the `Origin` header at
 `/oauth/token` and `/oauth/id_token`.

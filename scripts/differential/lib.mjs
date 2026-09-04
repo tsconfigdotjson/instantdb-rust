@@ -215,6 +215,28 @@ export function connectSse(serverUrl, appId, name, { path, pushPath, headers = {
 }
 
 // wait until every connection has been frame-silent for quietMs
+// A pseudo-connection for HTTP calls: `record(frame)` queues a frame that
+// folds like any other (normalized whole), so a step can diff HTTP
+// responses (status + the fields a client reads) next to socket frames.
+export function httpConn(name) {
+  const frames = [];
+  let cursorMark = 0;
+  return {
+    name,
+    frames,
+    record(frame) {
+      frames.push({ op: "http", ...frame });
+    },
+    takeNewFrames() {
+      const out = frames.slice(cursorMark);
+      cursorMark = frames.length;
+      return out;
+    },
+    quietSince: () => Number.MAX_SAFE_INTEGER,
+    close() {},
+  };
+}
+
 export async function settle(conns, quietMs = 700, maxMs = 15000) {
   const start = Date.now();
   for (;;) {

@@ -374,6 +374,16 @@ pub fn is_client_visible(etype: &str, label: &str) -> bool {
     }
 }
 
+/// Legacy `reserved-ident-name?` (system_catalog.clj:410-420): every forward
+/// and reverse identity of the catalog is off-limits to user attrs.
+pub fn is_reserved_ident(etype: &str, label: &str) -> bool {
+    all_attrs().iter().any(|a| {
+        (a.etype == etype && a.label == label)
+            || (a.reverse_etype.as_deref() == Some(etype)
+                && a.reverse_label.as_deref() == Some(label))
+    })
+}
+
 pub fn is_editable_etype(etype: &str) -> bool {
     matches!(etype, "$users" | "$files" | "$streams")
 }

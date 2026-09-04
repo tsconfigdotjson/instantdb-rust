@@ -269,6 +269,10 @@ fn parse_opts(v: &Value, level: usize) -> Result<Opts> {
             "where" => opts.where_conds = Some(parse_where(v)?),
             "order" => {
                 let m = v.as_object().ok_or_else(|| verr("`order` must be an object."))?;
+                if m.is_empty() {
+                    // legacy `(case (count order-map) 0 nil ...)`
+                    continue;
+                }
                 if m.len() != 1 {
                     return Err(verr("`order` must have exactly one key."));
                 }
@@ -433,17 +437,16 @@ fn parse_where_value(v: &Value) -> Result<Vec<WhereOp>> {
                     "$gte" => WhereOp::Cmp(">=", val.clone()),
                     "$lt" => WhereOp::Cmp("<", val.clone()),
                     "$lte" => WhereOp::Cmp("<=", val.clone()),
-                    "$like" => WhereOp::Like(
+                    "$like" | "$ilike" => WhereOp::Like(
                         val.as_str()
-                            .ok_or_else(|| verr("`$like` expects a string."))?
+                            .ok_or_else(|| {
+                                verr(format!(
+                                    "The {} value must be a string, but the query got the value `{}` of type `{}`.",
+                                    k, val, json_type_name(val)
+                                ))
+                            })?
                             .to_string(),
-                        false,
-                    ),
-                    "$ilike" => WhereOp::Like(
-                        val.as_str()
-                            .ok_or_else(|| verr("`$ilike` expects a string."))?
-                            .to_string(),
-                        true,
+                        k == "$ilike",
                     ),
                     other => return Err(verr(format!("Unsupported where operator `{other}`."))),
                 };
@@ -452,6 +455,10 @@ fn parse_where_value(v: &Value) -> Result<Vec<WhereOp>> {
             if ops.is_empty() {
                 return Err(verr("Empty where args map."));
             }
+            // legacy `(let [[func args-map-val] (first v-value)] ...)`
+            // (instaql.clj:669-675): only the first operator of an args map
+            // is applied; the rest are dropped
+            ops.truncate(1);
             Ok(ops)
         }
         Value::String(_) | Value::Number(_) | Value::Bool(_) => Ok(vec![WhereOp::Eq(v.clone())]),
@@ -516,42 +523,96 @@ fn extract_fn(t: CheckedDataType) -> &'static str {
 
 /// Coerce a query value for a typed comparison; returns the SQL-bindable text
 /// and validates types roughly like attr_pat.clj.
-fn coerce_typed(attr: &Attr, t: CheckedDataType, v: &Value, op: &str) -> Result<Value> {
+/// Legacy `json-type-of-clj`.
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Legacy `throw-invalid-data-value!` / `throw-invalid-date-string!`
+/// (attr_pat.clj:228-262): the value's type must match the attr's checked
+/// type. `op` is unused by the message but kept for call-site clarity.
+fn coerce_typed(attr: &Attr, t: CheckedDataType, v: &Value, _op: &str) -> Result<Value> {
+    let bad = || {
+        verr(format!(
+            "The data type of `{}.{}` is `{}`, but the query got the value `{}` of type `{}`.",
+            attr.etype,
+            attr.label,
+            t.as_str(),
+            v,
+            json_type_name(v)
+        ))
+    };
+    let bad_date = || {
+        verr(format!(
+            "The data type of `{}.{}` is `date`, but the query got value `{}` of type `{}`.",
+            attr.etype,
+            attr.label,
+            v,
+            json_type_name(v)
+        ))
+    };
     match t {
         CheckedDataType::Number => {
             if !v.is_number() {
-                return Err(verr(format!(
-                    "Invalid value for {} comparison on `{}.{}`: expected a number.",
-                    op, attr.etype, attr.label
-                )));
+                return Err(bad());
             }
             Ok(v.clone())
         }
         CheckedDataType::Boolean => {
             if !v.is_boolean() {
-                return Err(verr(format!(
-                    "Invalid value for {} comparison on `{}.{}`: expected a boolean.",
-                    op, attr.etype, attr.label
-                )));
+                return Err(bad());
             }
             Ok(v.clone())
         }
-        CheckedDataType::String => Ok(v.clone()),
+        CheckedDataType::String => {
+            if !v.is_string() {
+                return Err(bad());
+            }
+            Ok(v.clone())
+        }
         CheckedDataType::Date => match v {
             Value::Number(_) => Ok(v.clone()),
             Value::String(s) => {
-                // Validate parseable-ish; PG will parse the string form.
-                if s.trim().is_empty() {
-                    return Err(verr("Invalid date value."));
+                // legacy refuses the relative keywords it can parse but the
+                // client can't agree on (attr_pat.clj:286-293), and anything
+                // its date parser rejects
+                if s.trim().is_empty()
+                    || matches!(s.as_str(), "now" | "today" | "tomorrow" | "yesterday")
+                    || !looks_like_date(s)
+                {
+                    return Err(bad_date());
                 }
                 Ok(v.clone())
             }
-            _ => Err(verr(format!(
-                "Invalid value for {} comparison on `{}.{}`: expected a date.",
-                op, attr.etype, attr.label
-            ))),
+            _ => Err(bad_date()),
         },
     }
+}
+
+/// Cheap pre-check standing in for legacy `parse-date-value`: RFC 3339,
+/// `YYYY-MM-DD`, and the common `Date.toString()` / RFC 2822 shapes. Postgres
+/// does the real parse; this keeps garbage from reaching it as a 500.
+fn looks_like_date(s: &str) -> bool {
+    let s = s.trim();
+    if chrono::DateTime::parse_from_rfc3339(s).is_ok()
+        || chrono::DateTime::parse_from_rfc2822(s).is_ok()
+        || chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
+        || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").is_ok()
+        || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").is_ok()
+        || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").is_ok()
+        || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f").is_ok()
+    {
+        return true;
+    }
+    // JS `Date.toString()`: "Tue Jan 02 2024 03:04:05 GMT+0000 (...)"
+    chrono::NaiveDateTime::parse_from_str(&s[..s.len().min(24)], "%a %b %d %Y %H:%M:%S").is_ok()
 }
 
 /// Push SQL for a date/number/boolean/string extract-value expression of `v`.
@@ -831,6 +892,22 @@ impl<'a> SqlCtx<'a> {
         } else {
             None
         };
+        // legacy coerces against the checked type whether or not the attr is
+        // indexed (attr_pat.clj:366-372: the coerced value is only *used*
+        // when indexed, but a mismatch always throws)
+        if let Some(t) = attr.checked_type_for_query() {
+            match emit {
+                LeafEmit::Eq(vals) => {
+                    for v in vals.iter().filter(|v| !v.is_null()) {
+                        coerce_typed(attr, t, v, "$eq")?;
+                    }
+                }
+                LeafEmit::NotRaw(v) if !v.is_null() => {
+                    coerce_typed(attr, t, v, "$not")?;
+                }
+                _ => {}
+            }
+        }
         let base = |qb: &mut QueryBuilder<Postgres>, negate: bool| {
             if negate {
                 qb.push("NOT ");
@@ -1041,19 +1118,18 @@ impl<'a> SqlCtx<'a> {
                 Ok(())
             }
             LeafEmit::NotRaw(v) => {
-                let u = v.as_str().and_then(|s| Uuid::parse_str(s).ok());
+                // legacy coerce-value-uuid (attr_pat.clj:410-419)
+                let u = v
+                    .as_str()
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                    .ok_or_else(|| {
+                        verr(format!("Expected {} to be a uuid, got {}", attr.label, v))
+                    })?;
                 base(qb, false);
                 qb.push(" AND ");
                 qb.push(other_expr);
-                match u {
-                    Some(u) => {
-                        qb.push(" != ");
-                        qb.push_bind(u);
-                    }
-                    None => {
-                        qb.push(" IS NOT NULL");
-                    }
-                }
+                qb.push(" != ");
+                qb.push_bind(u);
                 qb.push(")");
                 Ok(())
             }
@@ -1132,7 +1208,8 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
                 etype: form.etype.clone(),
                 entities: vec![],
                 page_info: None,
-                aggregate: if form.opts.aggregate { Some(0) } else { None },
+                // legacy: no aggregate key for an unknown namespace
+                aggregate: None,
             })
         }
     };
@@ -1341,12 +1418,9 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
             k: form.k.clone(),
             etype: form.etype.clone(),
             entities: vec![],
-            page_info: paginated.then(|| PageInfoOut {
-                start_cursor: None,
-                end_cursor: None,
-                has_next_page: false,
-                has_previous_page: false,
-            }),
+            // legacy emits neither page-info nor aggregate for a form whose
+            // attrs don't exist (instaql.clj:1171-1172)
+            page_info: None,
             aggregate: None,
         });
     }
@@ -1407,7 +1481,7 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
         .iter()
         .map(|r| MatchedRow {
             eid: r.get("eid"),
-            order_v: r.get::<Value, _>("order_v"),
+            order_v: r.try_get::<Value, _>("order_v").unwrap_or(Value::Null),
             order_t: r.get::<i64, _>("order_t"),
         })
         .collect();
