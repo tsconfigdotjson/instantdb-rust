@@ -460,17 +460,18 @@ pub async fn handle_subscribe_stream(
     let offset = msg.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
 
     // Register before reading the catch-up snapshot so an append landing
-    // between the two is delivered live instead of lost. The subscriber may
-    // then see a range twice (once live, once in the catch-up), but frames
-    // apply content at their absolute offset (Stream.ts:1077-1090), so
-    // overlap is idempotent; and a live frame can only precede the catch-up
-    // frame if its write committed first, in which case the catch-up read
-    // includes it and cannot truncate it away.
+    // between the two is delivered instead of lost. Live frames that arrive
+    // meanwhile (including a NOTIFY still in flight from an append that
+    // committed before the subscription) are parked and replayed after the
+    // snapshot: the client rejects a frame ahead of what it has seen
+    // (Stream.ts:565-570), while overlap is idempotent (:577).
+    let sub_key = (session.id, subscribe_event_id.clone());
+    state.stream_catchup.insert(sub_key.clone(), vec![]);
     state
         .stream_subs
         .entry((app_id, stream_id))
         .or_default()
-        .insert((session.id, subscribe_event_id.clone()));
+        .insert(sub_key.clone());
 
     // catch-up: send stored content from offset
     let stored = crate::storage::read_blob(state, app_id, &stream_key(stream_id))
@@ -506,6 +507,28 @@ pub async fn handle_subscribe_stream(
         reply["abort-reason"] = reason.clone();
     }
     session.send(reply);
+    // replay the frames parked during the snapshot: anything the snapshot
+    // already covers is dropped, a frame adding bytes beyond it (its offset
+    // is at most the snapshot end, appends are contiguous) or carrying
+    // `done` / an abort is delivered
+    let snapshot_end = stored.len() as i64;
+    let parked = state
+        .stream_catchup
+        .remove(&sub_key)
+        .map(|(_, v)| v)
+        .unwrap_or_default();
+    for frame in parked {
+        let offset = frame.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
+        let len = frame
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|c| c.len() as i64)
+            .unwrap_or(0);
+        let frame_done = frame.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+        if offset + len > snapshot_end || (frame_done && !done) || frame.get("abort-reason").is_some() {
+            session.send(frame);
+        }
+    }
 
     if done {
         // already-done streams get no live appends; drop the registration
@@ -534,6 +557,7 @@ pub async fn handle_unsubscribe_stream(
             .retain(|(sid, ev)| !(*sid == session.id && *ev == target));
         removed |= e.value().len() != before;
     });
+    state.stream_catchup.remove(&(session.id, target.clone()));
     if !removed {
         return Err(InstantError::validation_failed(
             "unsubscribe-stream",
@@ -582,6 +606,11 @@ pub async fn deliver_append(state: &Arc<AppState>, payload: &Value) {
             });
             if let Some(reason) = payload.get("abort_reason").filter(|r| r.is_string()) {
                 msg["abort-reason"] = reason.clone();
+            }
+            // a subscriber still receiving its snapshot gets the frame after it
+            if let Some(mut parked) = state.stream_catchup.get_mut(&(session_id, event_id)) {
+                parked.push(msg);
+                continue;
             }
             session.send(msg);
         }

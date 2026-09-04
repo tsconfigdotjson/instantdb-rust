@@ -274,6 +274,12 @@ pub struct AppState {
     pub query_cache: DashMap<QueryCacheKey, QueryCacheEntry>,
     /// live stream subscribers on this node: (app, stream) -> (session, subscribe event id)
     pub stream_subs: DashMap<(Uuid, Uuid), HashSet<(Uuid, String)>>,
+    /// subscribers still receiving their catch-up snapshot: live appends
+    /// that arrive meanwhile are parked here (keyed by (session, subscribe
+    /// event id)) and replayed after the snapshot, so the reader never sees
+    /// a frame ahead of what it has been told (Stream.ts:565-570 treats a
+    /// gap as a corrupted stream)
+    pub stream_catchup: DashMap<(Uuid, String), Vec<Value>>,
     /// per-app token buckets (issue #1)
     pub limiters: crate::rate_limit::Limiters,
     /// per-app attr catalog cache (issue #11), invalidated on attrs_changed
@@ -302,6 +308,7 @@ impl AppState {
             room_snapshots: DashMap::new(),
             query_cache: DashMap::new(),
             stream_subs: DashMap::new(),
+            stream_catchup: DashMap::new(),
             limiters: crate::rate_limit::Limiters::from_env(),
             attr_cache: DashMap::new(),
             attr_gen: DashMap::new(),
