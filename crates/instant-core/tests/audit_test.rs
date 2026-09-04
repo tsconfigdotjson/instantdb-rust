@@ -486,16 +486,19 @@ async fn stream_file_paths_are_locked() {
             "Validation failed for tx-step: The path for stream files can't be edited."
         );
     }
+    // an ordinary path is fine ($files.size is a required catalog attr, so
+    // the row is written the way the upload route writes it)
     transact_opts(
         &pool,
         app,
         json!([
             ["add-triple", f, sc::attr_id("$files", "id"), f],
-            ["add-triple", f, sc::attr_id("$files", "path"), "docs/a.txt"]
+            ["add-triple", f, sc::attr_id("$files", "path"), "docs/a.txt"],
+            ["add-triple", f, sc::attr_id("$files", "size"), 3]
         ]),
         TxOptions {
             admin: true,
-            ..TxOptions::default()
+            allow_system_catalog_writes: true,
         },
     )
     .await
