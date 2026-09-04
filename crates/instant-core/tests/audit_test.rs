@@ -494,7 +494,8 @@ async fn stream_file_paths_are_locked() {
         json!([
             ["add-triple", f, sc::attr_id("$files", "id"), f],
             ["add-triple", f, sc::attr_id("$files", "path"), "docs/a.txt"],
-            ["add-triple", f, sc::attr_id("$files", "size"), 3]
+            ["add-triple", f, sc::attr_id("$files", "size"), 3],
+            ["add-triple", f, sc::attr_id("$files", "location-id"), f]
         ]),
         TxOptions {
             admin: true,
