@@ -34,11 +34,7 @@ impl Rules {
     /// Lookup chain: [etype allow action] -> [etype allow $default]
     /// -> [$default allow action] -> [$default allow $default] -> system default.
     /// Returns (expr, binds) or None = allow (user etypes) / system default.
-    fn rule_source(
-        &self,
-        etype: &str,
-        action: &str,
-    ) -> Option<(String, Vec<(String, String)>, Vec<String>)> {
+    fn rule_source(&self, etype: &str, action: &str) -> Option<RuleSource> {
         for (et, act) in [
             (etype, action),
             (etype, "$default"),
@@ -57,11 +53,11 @@ impl Rules {
             // legacy `with-binds` (rule.clj:139-142): every rule sees
             // `$default.bind` followed by the *requested* etype's binds,
             // whichever namespace the allow expression came from
-            return Some((
-                expr_str,
-                self.binds_of(etype),
-                vec![et.to_string(), "allow".to_string(), act.to_string()],
-            ));
+            return Some(RuleSource {
+                expr: expr_str,
+                binds: self.binds_of(etype),
+                path: vec![et.to_string(), "allow".to_string(), act.to_string()],
+            });
         }
         None
     }
@@ -138,7 +134,7 @@ impl Rules {
 
     /// Effective program for etype+action: falls back to system defaults.
     pub fn program(&self, etype: &str, action: &str) -> Program {
-        if let Some((expr, binds, path)) = self.rule_source(etype, action) {
+        if let Some(RuleSource { expr, binds, path }) = self.rule_source(etype, action) {
             return Program {
                 expr,
                 binds,
@@ -179,6 +175,14 @@ impl Rules {
             path: vec![],
         }
     }
+}
+
+/// A rule expression found in the rules document, with the binds it sees
+/// and the path it was found at.
+struct RuleSource {
+    expr: String,
+    binds: Vec<(String, String)>,
+    path: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
