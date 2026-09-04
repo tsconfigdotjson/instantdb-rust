@@ -1192,21 +1192,26 @@ function buildScenario() {
           cel: {
             bind: ["emailOk", "auth.email != null && auth.email.upperAscii().lowerAscii().endsWith('@example.com') && auth.email.indexOf('@') > 0"],
             allow: {
-              view: [
+              view: "emailOk && data.title.trim().lowerAscii().startsWith('ok')",
+              // every extension function, evaluated per entity on the
+              // created row (legacy rewrites view rules into where clauses,
+              // so the breadth lives on the create rule)
+              create: [
                 "emailOk",
-                "data.title != null",
-                "data.title.trim().lowerAscii().startsWith('ok')",
-                "data.title.charAt(0) == 'o'",
-                "data.title.substring(0, 2) == 'ok'",
-                "data.title.substring(1) == 'k one'",
-                "data.title.lastIndexOf('o') > data.title.indexOf('o')",
-                "data.title.replace('o', '0').split(' ').size() == 2",
-                "data.title.replace('o', '0', 1) == '0k one'",
+                "newData.title.lowerAscii() == newData.title",
+                "newData.title.charAt(0) == 'o'",
+                "newData.title.substring(0, 2) == 'ok'",
+                "newData.title.substring(3) == 'three'",
+                "newData.title.indexOf('t') == 3",
+                "newData.title.lastIndexOf('e') > newData.title.indexOf('e')",
+                "newData.title.replace('o', '0').split(' ').size() == 2",
+                "newData.title.replace('e', '3', 1) == 'ok thr3e'",
+                "newData.title.upperAscii() == 'OK THREE'",
                 "['a', 'b'].join('-') == 'a-b'",
                 "['a', 'b'].join() == 'ab'",
-                "math.greatest(data.score, 1) == data.score",
-                "math.least(data.score, 1) == 1",
-                "math.greatest([1, data.score, 2]) == data.score",
+                "math.greatest(newData.score, 0) == newData.score",
+                "math.least(newData.score, 0) == 0",
+                "math.greatest([0, newData.score, 1]) == newData.score",
                 "math.abs(-1) == 1",
                 "math.floor(2.5) == 2.0",
                 "math.ceil(2.5) == 3.0",
@@ -1214,19 +1219,19 @@ function buildScenario() {
                 "math.trunc(-2.5) == -2.0",
                 "math.sign(-3) == -1",
                 "math.isNaN(0.0 / 0.0)",
-                "math.bitAnd(6, 3) == 2 && math.bitOr(6, 3) == 7 && math.bitXor(6, 3) == 5 && math.bitShiftLeft(1, 3) == 8 && math.bitShiftRight(8, 3) == 1",
-                "timestamp(data.when) < request.time",
-                "timestamp(data.when).getTime() == 1577836800000",
-                "timestamp(1577836800000).getFullYear() == 2020",
-                "timestamp(1577836800000) == timestamp(data.when)",
-                "timestamp('2020-01-01T00:00:00Z').getTime() == timestamp(data.when).getTime()",
-                "request.time.getTime() > timestamp(data.when).getTime()",
-                "timestamp('01/02/2020').getDate() == 2",
                 "math.isFinite(1.0) && !math.isInf(1.0)",
+                "math.bitAnd(6, 3) == 2 && math.bitOr(6, 3) == 7 && math.bitXor(6, 3) == 5 && math.bitShiftLeft(1, 3) == 8 && math.bitShiftRight(8, 3) == 1",
+                "timestamp(newData.when) < request.time",
+                "timestamp(newData.when).getTime() == 1577836800000",
+                "timestamp(1577836800000).getFullYear() == 2020",
+                "timestamp(1577836800000) == timestamp(newData.when)",
+                "timestamp('2020-01-01T00:00:00Z').getTime() == timestamp(newData.when).getTime()",
+                "request.time.getTime() > timestamp(newData.when).getTime()",
+                "timestamp('01/02/2020').getDate() == 2",
               ].join(" && "),
-              create: "emailOk && newData.title.lowerAscii() == newData.title",
+              // an unknown function is a compile-time undeclared reference
               update: "data.title.frobnicate() == 'x'",
-              delete: "timestamp(data.when) > timestamp('not a date at all')",
+              delete: "auth.email.trim() == 'nobody@example.com'",
             },
           },
         };
@@ -1252,7 +1257,7 @@ function buildScenario() {
         // create: lowerAscii on newData
         await okTx(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.c3, ids.celId, ids.c3], ["add-triple", ids.c3, ids.celTitle, "ok three"], ["add-triple", ids.c3, ids.celScore, 1], ["add-triple", ids.c3, ids.celWhen, "2020-01-01"]] });
         await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.c4, ids.celId, ids.c4], ["add-triple", ids.c4, ids.celTitle, "OK four"]] });
-        // an unknown function and an unparseable date are evaluation errors
+        // an unknown function fails to compile; the delete rule denies
         await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.c1, ids.celTitle, "ok one"]] });
         await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["delete-entity", ids.c3, "cel"]] });
       },
@@ -1487,7 +1492,9 @@ function buildScenario() {
         rec(view("cbMissingState", await call("")));
         rec(view("cbInvalidState", await call("?state=nope&code=x")));
         rec(view("cbMissingCookie", await call(`?state=${env.appId}${ids.m1}&code=x`)));
-        rec(view("cbUnknownRequest", await call(`?state=${env.appId}${ids.m1}&code=x`, { cookie: `__session=${ids.m2}` })));
+        // the cookie value is `instantdb_<uuid>`; a bare uuid is no cookie
+        rec(view("cbBareCookie", await call(`?state=${env.appId}${ids.m1}&code=x`, { cookie: `__session=${ids.m2}` })));
+        rec(view("cbUnknownRequest", await call(`?state=${env.appId}${ids.m1}&code=x`, { cookie: `__session=instantdb_${ids.m2}` })));
         const landing = await call("?test-redirect=1");
         rec({ name: "cbTestRedirect", status: landing.status, ct: landing.ct, ok: landing.raw.includes("Your OAuth redirect looks good!") });
       },

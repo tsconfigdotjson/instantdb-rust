@@ -551,9 +551,11 @@ async fn callback_inner(
         .get(header::COOKIE)
         .and_then(|c| c.to_str().ok())
         .and_then(|c| {
+            // legacy reads `instantdb_<uuid>`; anything else is no cookie
             c.split(';').map(|p| p.trim()).find_map(|p| {
                 p.strip_prefix("__session=")
-                    .map(|v| v.trim_start_matches("instantdb_").to_string())
+                    .and_then(|v| v.strip_prefix("instantdb_"))
+                    .map(|v| v.to_string())
             })
         })
         .filter(|v| Uuid::parse_str(v).is_ok())

@@ -113,6 +113,11 @@ pub struct SessionState {
 pub struct SyncSub {
     pub etype: String,
     pub last_tx: i64,
+    /// the etype's cardinality-one attrs when the subscription started (or
+    /// was resynced): legacy derives the sub's topics then and keeps them
+    /// for the session's lifetime, so an attr added later is not synced
+    /// until a resync
+    pub attr_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone)]

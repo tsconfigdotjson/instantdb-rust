@@ -821,8 +821,85 @@ fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
     }
 }
 
-/// Free identifiers of an expression: comprehension (macro) variables are
-/// bound, everything else is a reference the compiler must know.
+/// Every function the legacy runtime knows: the CEL standard library, the
+/// cel-java strings / math extensions and Instant's own overloads. A call
+/// to anything else is a compile-time `undeclared reference` like an
+/// unknown variable.
+const KNOWN_FUNCTIONS: [&str; 61] = [
+    "size",
+    "contains",
+    "startsWith",
+    "endsWith",
+    "matches",
+    "string",
+    "int",
+    "uint",
+    "double",
+    "bool",
+    "bytes",
+    "timestamp",
+    "duration",
+    "type",
+    "dyn",
+    "getFullYear",
+    "getMonth",
+    "getDayOfMonth",
+    "getDayOfWeek",
+    "getDayOfYear",
+    "getDate",
+    "getHours",
+    "getMinutes",
+    "getSeconds",
+    "getMilliseconds",
+    "has",
+    "all",
+    "exists",
+    "exists_one",
+    "map",
+    "filter",
+    "ref",
+    "limit",
+    "getTime",
+    "charAt",
+    "indexOf",
+    "lastIndexOf",
+    "lowerAscii",
+    "upperAscii",
+    "replace",
+    "split",
+    "substring",
+    "trim",
+    "join",
+    "reverse",
+    "quote",
+    "format",
+    "greatest",
+    "least",
+    "abs",
+    "sign",
+    "ceil",
+    "floor",
+    "round",
+    "trunc",
+    "sqrt",
+    "isInf",
+    "isNaN",
+    "isFinite",
+    "bitAnd",
+    "bitOr",
+];
+const KNOWN_FUNCTIONS_MORE: [&str; 4] = ["bitXor", "bitNot", "bitShiftLeft", "bitShiftRight"];
+
+fn known_function(name: &str) -> bool {
+    // operators and macro internals are named `_==_`, `!_`, `-_`, `@in`, ...
+    name.starts_with(['_', '!', '-', '@'])
+        || KNOWN_FUNCTIONS.contains(&name)
+        || KNOWN_FUNCTIONS_MORE.contains(&name)
+}
+
+/// Free identifiers (and unknown function names) of an expression, in
+/// source order: comprehension (macro) variables are bound, everything else
+/// is a reference the compiler must know.
 fn collect_free_idents(expr: &cel::IdedExpr, bound: &mut Vec<String>, out: &mut Vec<String>) {
     use cel::common::ast::{EntryExpr, Expr};
     match &expr.expr {
@@ -835,6 +912,9 @@ fn collect_free_idents(expr: &cel::IdedExpr, bound: &mut Vec<String>, out: &mut 
         Expr::Call(c) => {
             if let Some(t) = &c.target {
                 collect_free_idents(t, bound, out);
+            }
+            if !known_function(&c.func_name) && !out.contains(&c.func_name) {
+                out.push(c.func_name.clone());
             }
             for a in &c.args {
                 collect_free_idents(a, bound, out);

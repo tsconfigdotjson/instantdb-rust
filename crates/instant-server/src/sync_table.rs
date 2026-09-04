@@ -129,6 +129,7 @@ pub async fn handle_start_sync(
             SyncSub {
                 etype,
                 last_tx: tx_id,
+                attr_ids: ea_ids,
             },
         );
     }
@@ -311,6 +312,7 @@ pub async fn handle_resync_table(
             SyncSub {
                 etype: etype.clone(),
                 last_tx: from_tx,
+                attr_ids: ea_attr_ids(&attrs, &etype),
             },
         );
     }
@@ -372,7 +374,7 @@ pub async fn push_updates(state: &AppState, session: &Arc<Session>, app_id: Uuid
         if sub.last_tx >= latest {
             continue;
         }
-        let ea_ids = ea_attr_ids(&attrs, &sub.etype);
+        let ea_ids = sub.attr_ids.clone();
         let rows = sqlx::query(
             "SELECT tx_id, entity_id, attr_id, value, created_at, action
              FROM rust_tx_changes

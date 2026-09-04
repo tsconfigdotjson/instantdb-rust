@@ -1210,16 +1210,11 @@ async fn presence_impl(
             let entity = match users.get(&uid) {
                 Some(cached) => cached.clone(),
                 None => {
-                    let fetched = instant_core::perms::fetch_entity_map(
-                        &mut conn, ctx.app_id, &attrs, "$users", uid,
-                    )
-                    .await?
-                    .map(|m| {
-                        // legacy get-entities: only the triples the row
-                        // has, plus id
-                        Value::Object(m.into_iter().filter(|(_, v)| !v.is_null()).collect())
-                    })
-                    .unwrap_or(Value::Null);
+                    // legacy app-user-model/get-by-ids: the app-user shape
+                    // (`id`, `app_id`, `email`, `created_at`, `isGuest`)
+                    let fetched = user_json(state, ctx.app_id, uid, None)
+                        .await
+                        .unwrap_or(Value::Null);
                     users.insert(uid, fetched.clone());
                     fetched
                 }
