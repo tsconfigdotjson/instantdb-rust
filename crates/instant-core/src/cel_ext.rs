@@ -137,7 +137,12 @@ fn is_numeric(v: &Value) -> bool {
 fn extreme(name: &str, args: &[Value], greatest: bool) -> R {
     let items: Vec<Value> = match args {
         [Value::List(l)] => l.iter().cloned().collect(),
-        [] => return Err(ferr(name, format!("{name}() requires at least one argument"))),
+        [] => {
+            return Err(ferr(
+                name,
+                format!("{name}() requires at least one argument"),
+            ))
+        }
         other => other.to_vec(),
     };
     if items.is_empty() {
@@ -209,7 +214,14 @@ pub fn parse_date_string(raw: &str) -> Option<DateTime<FixedOffset>> {
         }
         // `Z`-suffixed local date-time without seconds precision handled above;
         // trailing `Z` on a date-time chrono's rfc3339 already accepts.
-        for f in ["%Y-%m-%d", "%m-%d-%Y", "%m/%d/%Y", "%a %b %d %Y", "%b %d %Y", "%B %d %Y"] {
+        for f in [
+            "%Y-%m-%d",
+            "%m-%d-%Y",
+            "%m/%d/%Y",
+            "%a %b %d %Y",
+            "%b %d %Y",
+            "%B %d %Y",
+        ] {
             if let Ok(d) = NaiveDate::parse_from_str(s, f) {
                 let t = d.and_hms_opt(0, 0, 0)?;
                 return Some(Utc.from_utc_datetime(&t).fixed_offset());
@@ -219,7 +231,10 @@ pub fn parse_date_string(raw: &str) -> Option<DateTime<FixedOffset>> {
         if let Some(idx) = s.find(" GMT") {
             let head = &s[..idx];
             let tail = &s[idx + 4..];
-            let off: String = tail.chars().take_while(|c| *c == '+' || *c == '-' || c.is_ascii_digit()).collect();
+            let off: String = tail
+                .chars()
+                .take_while(|c| *c == '+' || *c == '-' || c.is_ascii_digit())
+                .collect();
             let candidate = format!("{head} {off}");
             if let Ok(t) = DateTime::parse_from_str(&candidate, "%a %b %d %Y %H:%M:%S %z") {
                 return Some(t);
@@ -306,138 +321,190 @@ pub fn rewrite_timestamp_calls(expr: &mut cel::IdedExpr) {
 /// Register every extension function on a context.
 pub fn register(ctx: &mut cel::Context) {
     // ---- strings ---------------------------------------------------------
-    ctx.add_function("charAt", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        let s = as_str("charAt", &this)?;
-        let [i] = args.as_slice() else {
-            return Err(no_overload("charAt"));
-        };
-        let i = as_int("charAt", i)?;
-        let n = char_count(&s) as i64;
-        if !(0..=n).contains(&i) {
-            return Err(ferr("charAt", format!("index out of range: {i}")));
-        }
-        Ok(string(s.chars().nth(i as usize).map(|c| c.to_string()).unwrap_or_default()))
-    });
-    ctx.add_function("indexOf", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        let s = as_str("indexOf", &this)?;
-        let (needle, from) = match args.as_slice() {
-            [n] => (as_str("indexOf", n)?, 0i64),
-            [n, f] => (as_str("indexOf", n)?, as_int("indexOf", f)?),
-            _ => return Err(no_overload("indexOf")),
-        };
-        let len = char_count(&s) as i64;
-        if !(0..=len).contains(&from) {
-            return Err(ferr("indexOf", format!("index out of range: {from}")));
-        }
-        Ok(Value::Int(index_of(&s, &needle, from as usize).unwrap_or(-1)))
-    });
-    ctx.add_function("lastIndexOf", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        let s = as_str("lastIndexOf", &this)?;
-        let len = char_count(&s) as i64;
-        let (needle, from) = match args.as_slice() {
-            [n] => (as_str("lastIndexOf", n)?, len),
-            [n, f] => (as_str("lastIndexOf", n)?, as_int("lastIndexOf", f)?),
-            _ => return Err(no_overload("lastIndexOf")),
-        };
-        if !(0..=len).contains(&from) {
-            return Err(ferr("lastIndexOf", format!("index out of range: {from}")));
-        }
-        Ok(Value::Int(last_index_of(&s, &needle, from as usize).unwrap_or(-1)))
-    });
-    ctx.add_function("lowerAscii", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        if !args.is_empty() {
-            return Err(no_overload("lowerAscii"));
-        }
-        let s = as_str("lowerAscii", &this)?;
-        Ok(string(s.to_ascii_lowercase()))
-    });
-    ctx.add_function("upperAscii", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        if !args.is_empty() {
-            return Err(no_overload("upperAscii"));
-        }
-        let s = as_str("upperAscii", &this)?;
-        Ok(string(s.to_ascii_uppercase()))
-    });
-    ctx.add_function("replace", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        let s = as_str("replace", &this)?;
-        let (from, to, limit) = match args.as_slice() {
-            [a, b] => (as_str("replace", a)?, as_str("replace", b)?, -1i64),
-            [a, b, n] => (as_str("replace", a)?, as_str("replace", b)?, as_int("replace", n)?),
-            _ => return Err(no_overload("replace")),
-        };
-        let out = if limit < 0 {
-            s.replace(from.as_str(), to.as_str())
-        } else {
-            s.replacen(from.as_str(), to.as_str(), limit as usize)
-        };
-        Ok(string(out))
-    });
-    ctx.add_function("split", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        let s = as_str("split", &this)?;
-        let (sep, limit) = match args.as_slice() {
-            [a] => (as_str("split", a)?, -1i64),
-            [a, n] => (as_str("split", a)?, as_int("split", n)?),
-            _ => return Err(no_overload("split")),
-        };
-        let parts: Vec<Value> = match limit {
-            0 => vec![],
-            1 => vec![string(s.to_string())],
-            n if n < 0 => s.split(sep.as_str()).map(|p| string(p.to_string())).collect(),
-            n => s
-                .splitn(n as usize, sep.as_str())
-                .map(|p| string(p.to_string()))
-                .collect(),
-        };
-        Ok(Value::List(Arc::new(parts)))
-    });
-    ctx.add_function("substring", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        let s = as_str("substring", &this)?;
-        let len = char_count(&s) as i64;
-        let (start, end) = match args.as_slice() {
-            [a] => (as_int("substring", a)?, len),
-            [a, b] => (as_int("substring", a)?, as_int("substring", b)?),
-            _ => return Err(no_overload("substring")),
-        };
-        if !(0..=len).contains(&start) || !(0..=len).contains(&end) {
-            return Err(ferr("substring", format!("index out of range: {start}")));
-        }
-        if start > end {
-            return Err(ferr("substring", format!("invalid substring range. start: {start}, end: {end}")));
-        }
-        let b0 = byte_offset(&s, start as usize).unwrap_or(s.len());
-        let b1 = byte_offset(&s, end as usize).unwrap_or(s.len());
-        Ok(string(s[b0..b1].to_string()))
-    });
-    ctx.add_function("trim", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        if !args.is_empty() {
-            return Err(no_overload("trim"));
-        }
-        let s = as_str("trim", &this)?;
-        Ok(string(s.trim().to_string()))
-    });
-    ctx.add_function("reverse", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        if !args.is_empty() {
-            return Err(no_overload("reverse"));
-        }
-        let s = as_str("reverse", &this)?;
-        Ok(string(s.chars().rev().collect()))
-    });
-    ctx.add_function("join", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        let list = match &this {
-            Value::List(l) => l.clone(),
-            _ => return Err(no_overload("join")),
-        };
-        let sep = match args.as_slice() {
-            [] => Arc::new(String::new()),
-            [a] => as_str("join", a)?,
-            _ => return Err(no_overload("join")),
-        };
-        let mut parts: Vec<String> = Vec::with_capacity(list.len());
-        for v in list.iter() {
-            parts.push(as_str("join", v)?.to_string());
-        }
-        Ok(string(parts.join(sep.as_str())))
-    });
+    ctx.add_function(
+        "charAt",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            let s = as_str("charAt", &this)?;
+            let [i] = args.as_slice() else {
+                return Err(no_overload("charAt"));
+            };
+            let i = as_int("charAt", i)?;
+            let n = char_count(&s) as i64;
+            if !(0..=n).contains(&i) {
+                return Err(ferr("charAt", format!("index out of range: {i}")));
+            }
+            Ok(string(
+                s.chars()
+                    .nth(i as usize)
+                    .map(|c| c.to_string())
+                    .unwrap_or_default(),
+            ))
+        },
+    );
+    ctx.add_function(
+        "indexOf",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            let s = as_str("indexOf", &this)?;
+            let (needle, from) = match args.as_slice() {
+                [n] => (as_str("indexOf", n)?, 0i64),
+                [n, f] => (as_str("indexOf", n)?, as_int("indexOf", f)?),
+                _ => return Err(no_overload("indexOf")),
+            };
+            let len = char_count(&s) as i64;
+            if !(0..=len).contains(&from) {
+                return Err(ferr("indexOf", format!("index out of range: {from}")));
+            }
+            Ok(Value::Int(
+                index_of(&s, &needle, from as usize).unwrap_or(-1),
+            ))
+        },
+    );
+    ctx.add_function(
+        "lastIndexOf",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            let s = as_str("lastIndexOf", &this)?;
+            let len = char_count(&s) as i64;
+            let (needle, from) = match args.as_slice() {
+                [n] => (as_str("lastIndexOf", n)?, len),
+                [n, f] => (as_str("lastIndexOf", n)?, as_int("lastIndexOf", f)?),
+                _ => return Err(no_overload("lastIndexOf")),
+            };
+            if !(0..=len).contains(&from) {
+                return Err(ferr("lastIndexOf", format!("index out of range: {from}")));
+            }
+            Ok(Value::Int(
+                last_index_of(&s, &needle, from as usize).unwrap_or(-1),
+            ))
+        },
+    );
+    ctx.add_function(
+        "lowerAscii",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            if !args.is_empty() {
+                return Err(no_overload("lowerAscii"));
+            }
+            let s = as_str("lowerAscii", &this)?;
+            Ok(string(s.to_ascii_lowercase()))
+        },
+    );
+    ctx.add_function(
+        "upperAscii",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            if !args.is_empty() {
+                return Err(no_overload("upperAscii"));
+            }
+            let s = as_str("upperAscii", &this)?;
+            Ok(string(s.to_ascii_uppercase()))
+        },
+    );
+    ctx.add_function(
+        "replace",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            let s = as_str("replace", &this)?;
+            let (from, to, limit) = match args.as_slice() {
+                [a, b] => (as_str("replace", a)?, as_str("replace", b)?, -1i64),
+                [a, b, n] => (
+                    as_str("replace", a)?,
+                    as_str("replace", b)?,
+                    as_int("replace", n)?,
+                ),
+                _ => return Err(no_overload("replace")),
+            };
+            let out = if limit < 0 {
+                s.replace(from.as_str(), to.as_str())
+            } else {
+                s.replacen(from.as_str(), to.as_str(), limit as usize)
+            };
+            Ok(string(out))
+        },
+    );
+    ctx.add_function(
+        "split",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            let s = as_str("split", &this)?;
+            let (sep, limit) = match args.as_slice() {
+                [a] => (as_str("split", a)?, -1i64),
+                [a, n] => (as_str("split", a)?, as_int("split", n)?),
+                _ => return Err(no_overload("split")),
+            };
+            let parts: Vec<Value> = match limit {
+                0 => vec![],
+                1 => vec![string(s.to_string())],
+                n if n < 0 => s
+                    .split(sep.as_str())
+                    .map(|p| string(p.to_string()))
+                    .collect(),
+                n => s
+                    .splitn(n as usize, sep.as_str())
+                    .map(|p| string(p.to_string()))
+                    .collect(),
+            };
+            Ok(Value::List(Arc::new(parts)))
+        },
+    );
+    ctx.add_function(
+        "substring",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            let s = as_str("substring", &this)?;
+            let len = char_count(&s) as i64;
+            let (start, end) = match args.as_slice() {
+                [a] => (as_int("substring", a)?, len),
+                [a, b] => (as_int("substring", a)?, as_int("substring", b)?),
+                _ => return Err(no_overload("substring")),
+            };
+            if !(0..=len).contains(&start) || !(0..=len).contains(&end) {
+                return Err(ferr("substring", format!("index out of range: {start}")));
+            }
+            if start > end {
+                return Err(ferr(
+                    "substring",
+                    format!("invalid substring range. start: {start}, end: {end}"),
+                ));
+            }
+            let b0 = byte_offset(&s, start as usize).unwrap_or(s.len());
+            let b1 = byte_offset(&s, end as usize).unwrap_or(s.len());
+            Ok(string(s[b0..b1].to_string()))
+        },
+    );
+    ctx.add_function(
+        "trim",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            if !args.is_empty() {
+                return Err(no_overload("trim"));
+            }
+            let s = as_str("trim", &this)?;
+            Ok(string(s.trim().to_string()))
+        },
+    );
+    ctx.add_function(
+        "reverse",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            if !args.is_empty() {
+                return Err(no_overload("reverse"));
+            }
+            let s = as_str("reverse", &this)?;
+            Ok(string(s.chars().rev().collect()))
+        },
+    );
+    ctx.add_function(
+        "join",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            let list = match &this {
+                Value::List(l) => l.clone(),
+                _ => return Err(no_overload("join")),
+            };
+            let sep = match args.as_slice() {
+                [] => Arc::new(String::new()),
+                [a] => as_str("join", a)?,
+                _ => return Err(no_overload("join")),
+            };
+            let mut parts: Vec<String> = Vec::with_capacity(list.len());
+            for v in list.iter() {
+                parts.push(as_str("join", v)?.to_string());
+            }
+            Ok(string(parts.join(sep.as_str())))
+        },
+    );
     ctx.add_function("strings.quote", |Arguments(args): Arguments| -> R {
         let [v] = args.as_slice() else {
             return Err(no_overload("strings.quote"));
@@ -530,7 +597,10 @@ pub fn register(ctx: &mut cel::Context) {
         });
     }
     for (name, f) in [
-        ("math.bitAnd", (|a: i64, b: i64| a & b) as fn(i64, i64) -> i64),
+        (
+            "math.bitAnd",
+            (|a: i64, b: i64| a & b) as fn(i64, i64) -> i64,
+        ),
         ("math.bitOr", |a: i64, b: i64| a | b),
         ("math.bitXor", |a: i64, b: i64| a ^ b),
     ] {
@@ -582,15 +652,18 @@ pub fn register(ctx: &mut cel::Context) {
     });
 
     // ---- Instant's timestamp overloads ------------------------------------
-    ctx.add_function("getTime", |This(this): This<Value>, Arguments(args): Arguments| -> R {
-        if !args.is_empty() {
-            return Err(no_overload("getTime"));
-        }
-        match this {
-            Value::Timestamp(t) => Ok(Value::Int(t.timestamp_millis())),
-            _ => Err(no_overload("getTime")),
-        }
-    });
+    ctx.add_function(
+        "getTime",
+        |This(this): This<Value>, Arguments(args): Arguments| -> R {
+            if !args.is_empty() {
+                return Err(no_overload("getTime"));
+            }
+            match this {
+                Value::Timestamp(t) => Ok(Value::Int(t.timestamp_millis())),
+                _ => Err(no_overload("getTime")),
+            }
+        },
+    );
     ctx.add_function(TIMESTAMP_FN, |Arguments(args): Arguments| -> R {
         let [v] = args.as_slice() else {
             return Err(no_overload("timestamp"));
@@ -649,10 +722,22 @@ mod tests {
         assert_eq!(eval("'TacoCat'.lowerAscii()"), s("tacocat"));
         assert_eq!(eval("'TacoCÆt'.upperAscii()"), s("TACOCÆT"));
         assert_eq!(eval("'hello hello'.replace('he', 'we')"), s("wello wello"));
-        assert_eq!(eval("'hello hello'.replace('he', 'we', 1)"), s("wello hello"));
-        assert_eq!(eval("'hello hello'.replace('he', 'we', 0)"), s("hello hello"));
-        assert_eq!(eval("'hello hello hello'.split(' ')"), Value::List(Arc::new(vec![s("hello"), s("hello"), s("hello")])));
-        assert_eq!(eval("'hello hello hello'.split(' ', 2)"), Value::List(Arc::new(vec![s("hello"), s("hello hello")])));
+        assert_eq!(
+            eval("'hello hello'.replace('he', 'we', 1)"),
+            s("wello hello")
+        );
+        assert_eq!(
+            eval("'hello hello'.replace('he', 'we', 0)"),
+            s("hello hello")
+        );
+        assert_eq!(
+            eval("'hello hello hello'.split(' ')"),
+            Value::List(Arc::new(vec![s("hello"), s("hello"), s("hello")]))
+        );
+        assert_eq!(
+            eval("'hello hello hello'.split(' ', 2)"),
+            Value::List(Arc::new(vec![s("hello"), s("hello hello")]))
+        );
         assert_eq!(eval("'tacocat'.substring(4)"), s("cat"));
         assert_eq!(eval("'tacocat'.substring(0, 4)"), s("taco"));
         assert_eq!(eval("'  \\ttrim\\n    '.trim()"), s("trim"));
@@ -661,10 +746,19 @@ mod tests {
         assert_eq!(eval("'gums'.reverse()"), s("smug"));
         assert_eq!(eval("strings.quote('a\"b')"), s("\"a\\\"b\""));
         // out-of-range indexes are evaluation errors like cel-java
-        assert!(matches!(eval_err("'abc'.charAt(7)"), ExecutionError::FunctionError { .. }));
-        assert!(matches!(eval_err("'abc'.substring(2, 1)"), ExecutionError::FunctionError { .. }));
+        assert!(matches!(
+            eval_err("'abc'.charAt(7)"),
+            ExecutionError::FunctionError { .. }
+        ));
+        assert!(matches!(
+            eval_err("'abc'.substring(2, 1)"),
+            ExecutionError::FunctionError { .. }
+        ));
         // the crate's own string functions still resolve first
-        assert_eq!(eval("'hello'.startsWith('he') && 'hello'.contains('ell')"), Value::Bool(true));
+        assert_eq!(
+            eval("'hello'.startsWith('he') && 'hello'.contains('ell')"),
+            Value::Bool(true)
+        );
     }
 
     #[test]
@@ -688,27 +782,66 @@ mod tests {
         assert_eq!(eval("math.bitNot(0)"), Value::Int(-1));
         assert_eq!(eval("math.bitShiftLeft(1, 3)"), Value::Int(8));
         assert_eq!(eval("math.bitShiftRight(8, 3)"), Value::Int(1));
-        assert!(matches!(eval_err("math.greatest([])"), ExecutionError::FunctionError { .. }));
-        assert!(matches!(eval_err("math.greatest('a', 'b')"), ExecutionError::FunctionError { .. }));
+        assert!(matches!(
+            eval_err("math.greatest([])"),
+            ExecutionError::FunctionError { .. }
+        ));
+        assert!(matches!(
+            eval_err("math.greatest('a', 'b')"),
+            ExecutionError::FunctionError { .. }
+        ));
     }
 
     #[test]
     fn timestamp_overloads() {
         // getTime is epoch milliseconds (proto.clj:56-57 calls Timestamps/toMillis)
-        assert_eq!(eval("timestamp('2020-01-01T00:00:00Z').getTime()"), Value::Int(1577836800000));
+        assert_eq!(
+            eval("timestamp('2020-01-01T00:00:00Z').getTime()"),
+            Value::Int(1577836800000)
+        );
         // timestamp(int) is epoch milliseconds (Instant/ofEpochMilli)
-        assert_eq!(eval("timestamp(1577836800000).getFullYear()"), Value::Int(2020));
-        assert_eq!(eval("timestamp(0) < timestamp('1970-01-02T00:00:00Z')"), Value::Bool(true));
+        assert_eq!(
+            eval("timestamp(1577836800000).getFullYear()"),
+            Value::Int(2020)
+        );
+        assert_eq!(
+            eval("timestamp(0) < timestamp('1970-01-02T00:00:00Z')"),
+            Value::Bool(true)
+        );
         // the lenient string parser accepts what the `date` checked type accepts
-        assert_eq!(eval("timestamp('2020-01-01').getTime()"), Value::Int(1577836800000));
-        assert_eq!(eval("timestamp('2020-01-01 10:00:00').getHours()"), Value::Int(10));
-        assert_eq!(eval("timestamp('2025-01-02T00:00:00-08').getDate()"), Value::Int(2));
-        assert_eq!(eval("timestamp('\"2020-01-01T00:00:00Z\"').getTime()"), Value::Int(1577836800000));
-        assert_eq!(eval("timestamp(' 2020-01-01T00:00:00Z ').getTime()"), Value::Int(1577836800000));
+        assert_eq!(
+            eval("timestamp('2020-01-01').getTime()"),
+            Value::Int(1577836800000)
+        );
+        assert_eq!(
+            eval("timestamp('2020-01-01 10:00:00').getHours()"),
+            Value::Int(10)
+        );
+        assert_eq!(
+            eval("timestamp('2025-01-02T00:00:00-08').getDate()"),
+            Value::Int(2)
+        );
+        assert_eq!(
+            eval("timestamp('\"2020-01-01T00:00:00Z\"').getTime()"),
+            Value::Int(1577836800000)
+        );
+        assert_eq!(
+            eval("timestamp(' 2020-01-01T00:00:00Z ').getTime()"),
+            Value::Int(1577836800000)
+        );
         assert_eq!(eval("timestamp('01/02/2020').getMonth()"), Value::Int(0));
-        assert_eq!(eval("timestamp('Tue Jan 02 2024').getFullYear()"), Value::Int(2024));
-        assert!(matches!(eval_err("timestamp('not a date')"), ExecutionError::FunctionError { .. }));
+        assert_eq!(
+            eval("timestamp('Tue Jan 02 2024').getFullYear()"),
+            Value::Int(2024)
+        );
+        assert!(matches!(
+            eval_err("timestamp('not a date')"),
+            ExecutionError::FunctionError { .. }
+        ));
         // request.time style comparisons compose with the standard overloads
-        assert_eq!(eval("timestamp(0) + duration('1h') == timestamp(3600000)"), Value::Bool(true));
+        assert_eq!(
+            eval("timestamp(0) + duration('1h') == timestamp(3600000)"),
+            Value::Bool(true)
+        );
     }
 }

@@ -159,7 +159,14 @@ fn app_row_json(r: &sqlx::postgres::PgRow) -> Value {
 /// legacy `app-model/get-by-id!`: live apps only.
 async fn live_app_row(state: &AppState, app_id: Uuid) -> Result<Value> {
     match app_row(state, app_id).await? {
-        Some(app) if app.get("deletion_marked_at").map(|v| v.is_null()).unwrap_or(true) => Ok(app),
+        Some(app)
+            if app
+                .get("deletion_marked_at")
+                .map(|v| v.is_null())
+                .unwrap_or(true) =>
+        {
+            Ok(app)
+        }
         _ => Err(record_not_found("app", json!({"args": [{"id": app_id}]}))),
     }
 }
@@ -199,17 +206,38 @@ async fn apps_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
         .map(|r| {
             let mut app = app_row_json(r);
             if let Some(m) = app.as_object_mut() {
-                m.insert("admin_token".into(), json!(r.get::<Option<Uuid>, _>("admin_token")));
-                m.insert("rules".into(), r.get::<Option<Value>, _>("rules").unwrap_or(Value::Null));
-                m.insert("rules_version".into(), json!(r.get::<Option<i32>, _>("rules_version")));
+                m.insert(
+                    "admin_token".into(),
+                    json!(r.get::<Option<Uuid>, _>("admin_token")),
+                );
+                m.insert(
+                    "rules".into(),
+                    r.get::<Option<Value>, _>("rules").unwrap_or(Value::Null),
+                );
+                m.insert(
+                    "rules_version".into(),
+                    json!(r.get::<Option<i32>, _>("rules_version")),
+                );
                 m.insert("org".into(), Value::Null);
                 m.insert("pro".into(), json!(false));
-                m.insert("user_app_role".into(), json!(r.get::<Option<String>, _>("user_app_role")));
-                m.insert("members".into(), r.get::<Option<Value>, _>("members").unwrap_or(Value::Null));
-                m.insert("invites".into(), r.get::<Option<Value>, _>("invites").unwrap_or(Value::Null));
+                m.insert(
+                    "user_app_role".into(),
+                    json!(r.get::<Option<String>, _>("user_app_role")),
+                );
+                m.insert(
+                    "members".into(),
+                    r.get::<Option<Value>, _>("members").unwrap_or(Value::Null),
+                );
+                m.insert(
+                    "invites".into(),
+                    r.get::<Option<Value>, _>("invites").unwrap_or(Value::Null),
+                );
                 m.insert("webhooks".into(), Value::Null);
                 // with-effective-status: no sunset stage here
-                m.insert("effective_status".into(), json!(r.get::<String, _>("status")));
+                m.insert(
+                    "effective_status".into(),
+                    json!(r.get::<String, _>("status")),
+                );
             }
             app
         })
@@ -233,17 +261,19 @@ pub async fn dash_get(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         let user = dash_user(&state, &headers).await?;
         let apps = apps_for_user(&state, user.id).await?;
         let orgs = orgs_for_user(&state, user.id).await?;
-        let profile: Option<Value> = sqlx::query("SELECT id, meta, created_at FROM instant_profiles WHERE id = $1")
-            .bind(user.id)
-            .fetch_optional(&state.pool)
-            .await?
-            .map(|r| {
-                json!({
-                    "id": r.get::<Uuid, _>("id"),
-                    "meta": r.get::<Value, _>("meta"),
-                    "created_at": ts_naive(r.get::<Option<chrono::NaiveDateTime>, _>("created_at")),
-                })
-            });
+        let profile: Option<Value> = sqlx::query(
+            "SELECT id, meta, created_at FROM instant_profiles WHERE id = $1",
+        )
+        .bind(user.id)
+        .fetch_optional(&state.pool)
+        .await?
+        .map(|r| {
+            json!({
+                "id": r.get::<Uuid, _>("id"),
+                "meta": r.get::<Value, _>("meta"),
+                "created_at": ts_naive(r.get::<Option<chrono::NaiveDateTime>, _>("created_at")),
+            })
+        });
         let invites: Vec<Value> = sqlx::query(
             "SELECT i.id, i.app_id, a.title AS app_title, i.invitee_role, i.status, i.sent_at,
                     u.email AS inviter_email
@@ -373,7 +403,8 @@ async fn apply_initial_schema(state: &Arc<AppState>, app_id: Uuid, body: &Value)
     let Some(schema) = body.get("schema").filter(|s| !s.is_null()) else {
         return Ok(());
     };
-    let plan_body = json!({"schema": schema, "check_types": true, "supports_background_updates": false});
+    let plan_body =
+        json!({"schema": schema, "check_types": true, "supports_background_updates": false});
     crate::routes::dash::plan_and_apply(state, app_id, &plan_body).await?;
     Ok(())
 }
@@ -473,7 +504,11 @@ pub async fn apps_delete(
 
 /// The caller's role on an app (`get-app-with-role!`, util/roles.clj:75-125):
 /// creator is owner, else the `app_members` role, else the org role.
-async fn app_role_for_user(state: &AppState, app: &Value, user_id: Uuid) -> Result<Option<DashRole>> {
+async fn app_role_for_user(
+    state: &AppState,
+    app: &Value,
+    user_id: Uuid,
+) -> Result<Option<DashRole>> {
     let creator: Option<Uuid> = app
         .get("creator_id")
         .and_then(|v| v.as_str())
@@ -521,7 +556,9 @@ fn assert_least_privilege(least: DashRole, role: Option<DashRole>) -> Result<()>
             "validation-failed",
             400,
             format!("Validation failed for user-role: {message}"),
-            Some(json!({"data-type": "user-role", "input": null, "errors": [{"message": message}]})),
+            Some(
+                json!({"data-type": "user-role", "input": null, "errors": [{"message": message}]}),
+            ),
         ));
     };
     if role < least {
@@ -683,12 +720,13 @@ pub async fn claim_post(
             ));
         }
         // the request must carry a valid admin token (app-admin-token-model/fetch!)
-        let ok = sqlx::query("SELECT 1 AS x FROM app_admin_tokens WHERE app_id = $1 AND token = $2")
-            .bind(app_id)
-            .bind(token)
-            .fetch_optional(&state.pool)
-            .await?
-            .is_some();
+        let ok =
+            sqlx::query("SELECT 1 AS x FROM app_admin_tokens WHERE app_id = $1 AND token = $2")
+                .bind(app_id)
+                .bind(token)
+                .fetch_optional(&state.pool)
+                .await?
+                .is_some();
         if !ok {
             return Err(record_not_found(
                 "app-admin-token",
@@ -950,7 +988,10 @@ async fn system_entities(
             Map::new()
         });
         if attr.label == "id" {
-            ent.insert("created_at".into(), ts_ms(r.get::<Option<i64>, _>("created_at")));
+            ent.insert(
+                "created_at".into(),
+                ts_ms(r.get::<Option<i64>, _>("created_at")),
+            );
         }
         ent.insert(attr.label.clone(), v);
     }
@@ -991,7 +1032,10 @@ fn client_view(c: &Map<String, Value>, keys: &[&str]) -> Value {
     });
     let mut out = Map::new();
     for k in keys {
-        out.insert((*k).to_string(), full.get(*k).cloned().unwrap_or(Value::Null));
+        out.insert(
+            (*k).to_string(),
+            full.get(*k).cloned().unwrap_or(Value::Null),
+        );
     }
     Value::Object(out)
 }
@@ -1077,7 +1121,12 @@ pub async fn providers_post(
         let id = Uuid::new_v4();
         let steps = json!([
             ["add-triple", id, sc::attr_id("$oauthProviders", "id"), id],
-            ["add-triple", id, sc::attr_id("$oauthProviders", "name"), name],
+            [
+                "add-triple",
+                id,
+                sc::attr_id("$oauthProviders", "name"),
+                name
+            ],
         ]);
         service::run_system_transact(&state, app.id, &steps).await?;
         let provider = system_entity(&state, app.id, "$oauthProviders", id)
@@ -1383,8 +1432,18 @@ fn origin_validation_error(service: &str, params: &[Value]) -> Option<String> {
         }
         "custom-scheme" => {
             const RESERVED: [&str; 12] = [
-                "http", "https", "ftp", "file", "mailto", "tel", "sms", "data", "javascript",
-                "ws", "wss", "blob",
+                "http",
+                "https",
+                "ftp",
+                "file",
+                "mailto",
+                "tel",
+                "sms",
+                "data",
+                "javascript",
+                "ws",
+                "wss",
+                "blob",
             ];
             if params.len() != 1 {
                 Some("Custom scheme should have only one parameter.".into())
@@ -1443,12 +1502,14 @@ pub async fn origins_post(
         .fetch_one(&state.pool)
         .await
         .map_err(|e| match &e {
-            sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => InstantError::new(
-                "record-not-unique",
-                400,
-                "Record not unique: app-authorized-redirect-origin",
-                Some(json!({"record-type": "app-authorized-redirect-origin"})),
-            ),
+            sqlx::Error::Database(db) if db.code().as_deref() == Some("23505") => {
+                InstantError::new(
+                    "record-not-unique",
+                    400,
+                    "Record not unique: app-authorized-redirect-origin",
+                    Some(json!({"record-type": "app-authorized-redirect-origin"})),
+                )
+            }
             _ => InstantError::from(e),
         })?;
         Ok(json!({"origin": origin_view(&row)}))

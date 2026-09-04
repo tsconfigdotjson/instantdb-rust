@@ -224,7 +224,10 @@ pub(crate) async fn dash_authed_with_role(
         None => Err(InstantError::new(
             "validation-failed",
             400,
-            format!("Validation failed for user-role: User is missing role {}.", least.as_str()),
+            format!(
+                "Validation failed for user-role: User is missing role {}.",
+                least.as_str()
+            ),
             Some(json!({
                 "data-type": "user-role",
                 "input": null,
@@ -481,7 +484,11 @@ pub async fn schema_push_plan(
 
 /// Plan + apply a client schema for an app (what `POST /dash/apps` and the
 /// ephemeral app route do with an initial `schema`).
-pub(crate) async fn plan_and_apply(state: &Arc<AppState>, app_id: Uuid, body: &Value) -> Result<Value> {
+pub(crate) async fn plan_and_apply(
+    state: &Arc<AppState>,
+    app_id: Uuid,
+    body: &Value,
+) -> Result<Value> {
     let plan = plan(state, app_id, body).await?;
     apply_steps(state, app_id, plan.steps, false).await
 }

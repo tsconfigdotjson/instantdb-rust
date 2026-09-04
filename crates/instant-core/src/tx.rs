@@ -244,7 +244,11 @@ pub fn clj_print(v: &Value) -> String {
         Value::Object(m) => format!(
             "{{{}}}",
             m.iter()
-                .map(|(k, v)| format!("{} {}", serde_json::to_string(k).unwrap_or_default(), clj_print(v)))
+                .map(|(k, v)| format!(
+                    "{} {}",
+                    serde_json::to_string(k).unwrap_or_default(),
+                    clj_print(v)
+                ))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -384,11 +388,7 @@ pub fn parse_tx_steps(steps: &Value) -> Result<Vec<TxStep>> {
                     (Some(etype), &step_arr[3])
                 };
                 if !params.is_object() {
-                    return Err(spec_err(
-                        steps,
-                        "map?",
-                        json!([idx, step_arr.len() - 1]),
-                    ));
+                    return Err(spec_err(steps, "map?", json!([idx, step_arr.len() - 1])));
                 }
                 TxStep::RuleParams {
                     eid,
@@ -1131,9 +1131,7 @@ async fn validate_modes(
     }
     let exists = |eid: &EidRef, etype: &str| -> Option<Uuid> {
         match eid {
-            EidRef::Id(id) => existing
-                .contains(&(*id, etype.to_string()))
-                .then_some(*id),
+            EidRef::Id(id) => existing.contains(&(*id, etype.to_string())).then_some(*id),
             EidRef::Lookup(a, v) => resolved_lookups.get(&(*a, v.clone())).copied(),
         }
     };
@@ -1144,9 +1142,7 @@ async fn validate_modes(
         match (eid, resolved) {
             (EidRef::Id(id), _) => id.to_string(),
             (EidRef::Lookup(..), Some(id)) if !admin => id.to_string(),
-            (EidRef::Lookup(a, v), _) => {
-                clj_print(&json!([a.to_string(), v.value()]))
-            }
+            (EidRef::Lookup(a, v), _) => clj_print(&json!([a.to_string(), v.value()])),
         }
     };
     let err = |offenders: Vec<(&TxStep, String)>, prefix: &str| -> InstantError {
@@ -1183,16 +1179,11 @@ async fn validate_modes(
         .iter()
         .filter(|(_, _, _, mode)| *mode == WriteMode::Update)
         .filter_map(|(s, eid, etype, _)| {
-            exists(eid, etype)
-                .is_none()
-                .then(|| (*s, shown(eid, None)))
+            exists(eid, etype).is_none().then(|| (*s, shown(eid, None)))
         })
         .collect();
     if !missing_updates.is_empty() {
-        return Err(err(
-            missing_updates,
-            "Updating entities that don't exist: ",
-        ));
+        return Err(err(missing_updates, "Updating entities that don't exist: "));
     }
     Ok(())
 }

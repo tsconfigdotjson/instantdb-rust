@@ -1208,15 +1208,16 @@ async fn presence_impl(
                 continue;
             };
             if !users.contains_key(&uid) {
-                let entity =
-                    instant_core::perms::fetch_entity_map(&mut conn, ctx.app_id, &attrs, "$users", uid)
-                        .await?
-                        .map(|m| {
-                            // legacy get-entities: only the triples the row
-                            // has, plus id
-                            Value::Object(m.into_iter().filter(|(_, v)| !v.is_null()).collect())
-                        })
-                        .unwrap_or(Value::Null);
+                let entity = instant_core::perms::fetch_entity_map(
+                    &mut conn, ctx.app_id, &attrs, "$users", uid,
+                )
+                .await?
+                .map(|m| {
+                    // legacy get-entities: only the triples the row
+                    // has, plus id
+                    Value::Object(m.into_iter().filter(|(_, v)| !v.is_null()).collect())
+                })
+                .unwrap_or(Value::Null);
                 users.insert(uid, entity);
             }
             sess["user"] = users.get(&uid).cloned().unwrap_or(Value::Null);
@@ -2187,12 +2188,15 @@ async fn query_perms_check_impl(
                     }
                 }
             }
-            let data =
-                instant_core::perms::fetch_entity_map(&mut conn, ctx.app_id, &attrs, &form.etype, e.eid)
-                    .await?
-                    .unwrap_or_else(|| {
-                        instant_core::perms::base_entity_map(&attrs, &form.etype, e.eid)
-                    });
+            let data = instant_core::perms::fetch_entity_map(
+                &mut conn,
+                ctx.app_id,
+                &attrs,
+                &form.etype,
+                e.eid,
+            )
+            .await?
+            .unwrap_or_else(|| instant_core::perms::base_entity_map(&attrs, &form.etype, e.eid));
             let auth_val = instant_core::perms::build_auth_value(
                 &mut conn,
                 ctx.app_id,

@@ -500,12 +500,7 @@ fn callback_landing(email: Option<&str>, redirect_url: &str) -> Response {
     let body = format!(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><meta http-equiv=\"refresh\" content=\"0; url={escaped_url}\"><title>Finish Sign In</title><style>body {{ margin: 0; height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f6f6f6; color: #111; }} .button {{ display: inline-block; padding: 0.75rem 1.5rem; border-radius: 0.5rem; background: #111; color: #fff; text-decoration: none; font-weight: 600; }}</style></head><body><p>Logged in as {who}</p><p><a class=\"button\" href=\"{escaped_url}\">Open app</a></p><script type=\"text/javascript\" id=\"redirect-script\" data-redirect-uri=\"{escaped_url}\">{script}</script></body></html>"
     );
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html")],
-        body,
-    )
-        .into_response()
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/html")], body).into_response()
 }
 
 /// Legacy `oauth-callback*` (runtime/routes.clj:506-601). Every problem up to
@@ -649,7 +644,10 @@ async fn callback_inner(
 
     let target = add_query_params(
         &redirect_url,
-        &[("code", &app_code.to_string()), ("_instant_oauth_redirect", "true")],
+        &[
+            ("code", &app_code.to_string()),
+            ("_instant_oauth_redirect", "true"),
+        ],
     );
     let http_scheme = url::Url::parse(&target)
         .map(|u| u.scheme().starts_with("http"))

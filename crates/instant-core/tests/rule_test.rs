@@ -934,7 +934,12 @@ async fn attrs_create_rule_gates_inline_add_attr() {
     assert_eq!(err.error_type, "permission-denied");
     assert_eq!(err.hint.unwrap()["input"], json!(["attrs", "attr"]));
     // $default.allow.create applies too
-    set_rules(&pool, app, json!({"$default": {"allow": {"create": "false"}}})).await;
+    set_rules(
+        &pool,
+        app,
+        json!({"$default": {"allow": {"create": "false"}}}),
+    )
+    .await;
     let err = transact_with_perms(&pool, app, &AuthCtx::default(), json!([new_attr("later")]))
         .await
         .unwrap_err();

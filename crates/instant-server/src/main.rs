@@ -235,7 +235,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/dash", get(routes::dash_apps::dash_get))
         .route("/dash/me", get(routes::dash_apps::me_get))
         .route("/dash/apps", post(routes::dash_apps::apps_post))
-        .route("/dash/apps/ephemeral", post(routes::dash_apps::ephemeral_post))
+        .route(
+            "/dash/apps/ephemeral",
+            post(routes::dash_apps::ephemeral_post),
+        )
         .route(
             "/dash/apps/ephemeral/{app_id}",
             get(routes::dash_apps::ephemeral_get),

@@ -389,9 +389,13 @@ async fn mode_prepass_matches_legacy() {
 
     // an entity with only a `title` triple (no id triple) still exists
     let e1 = Uuid::new_v4();
-    transact_json(&pool, app, json!([["add-triple", e1, ids.todos_title, "t1"]]))
-        .await
-        .unwrap();
+    transact_json(
+        &pool,
+        app,
+        json!([["add-triple", e1, ids.todos_title, "t1"]]),
+    )
+    .await
+    .unwrap();
     let err = transact_json(
         &pool,
         app,
@@ -405,7 +409,10 @@ async fn mode_prepass_matches_legacy() {
     );
     assert_eq!(err.hint.as_ref().unwrap()["data-type"], json!("tx-step"));
     assert_eq!(
-        err.hint.as_ref().unwrap()["input"].as_array().unwrap().len(),
+        err.hint.as_ref().unwrap()["input"]
+            .as_array()
+            .unwrap()
+            .len(),
         1
     );
 
@@ -545,7 +552,7 @@ async fn step_shape_specs() {
     let (schema, ids) = todo_schema_steps();
     transact_json(&pool, app, schema).await.unwrap();
     let e = Uuid::new_v4();
-    let bare = |steps: Value| async {
+    let bare = |steps: Value| async move {
         let err = transact_json(&pool, app, steps).await.unwrap_err();
         assert_eq!(err.error_type, "validation-failed");
         assert_eq!(err.message, "Validation failed for tx-steps");

@@ -72,9 +72,7 @@ pub fn valid_email(email: &str) -> bool {
     let Some((local, domain)) = email.split_once('@') else {
         return false;
     };
-    let atom_char = |c: char| {
-        c.is_ascii_alphanumeric() || "!#$%&'*+/=?^_`{|}~-".contains(c)
-    };
+    let atom_char = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+/=?^_`{|}~-".contains(c);
     let local_ok = !local.is_empty()
         && local
             .split('.')
