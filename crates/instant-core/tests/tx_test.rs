@@ -552,8 +552,9 @@ async fn step_shape_specs() {
     let (schema, ids) = todo_schema_steps();
     transact_json(&pool, app, schema).await.unwrap();
     let e = Uuid::new_v4();
-    let bare = |steps: Value| async move {
-        let err = transact_json(&pool, app, steps).await.unwrap_err();
+    let pool_ref = &pool;
+    let bare = move |steps: Value| async move {
+        let err = transact_json(pool_ref, app, steps).await.unwrap_err();
         assert_eq!(err.error_type, "validation-failed");
         assert_eq!(err.message, "Validation failed for tx-steps");
         let hint = err.hint.unwrap();
