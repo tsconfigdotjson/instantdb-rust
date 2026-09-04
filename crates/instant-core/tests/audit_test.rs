@@ -174,7 +174,12 @@ async fn value_lookup_never_creates_a_phantom_entity() {
         app,
         json!([
             ["add-triple", todo, ids.todos_id, todo],
-            ["add-triple", todo, ids.todos_owner, [ids.owners_name, "ghost"]]
+            [
+                "add-triple",
+                todo,
+                ids.todos_owner,
+                [ids.owners_name, "ghost"]
+            ]
         ]),
     )
     .await
@@ -197,11 +202,19 @@ async fn value_lookup_never_creates_a_phantom_entity() {
     transact_json(
         &pool,
         app,
-        json!([["add-triple", [ids.owners_name, "real"], ids.owners_id, [ids.owners_name, "real"]]]),
+        json!([[
+            "add-triple",
+            [ids.owners_name, "real"],
+            ids.owners_id,
+            [ids.owners_name, "real"]
+        ]]),
     )
     .await
     .unwrap();
-    assert_eq!(count_triples(&pool, app, ids.owners_name, json!("real")).await, 1);
+    assert_eq!(
+        count_triples(&pool, app, ids.owners_name, json!("real")).await,
+        1
+    );
 }
 
 /// transaction.clj:532-556 + permissioned_transaction.clj:124-140 run in the
@@ -223,7 +236,8 @@ async fn lookup_namespaces_validated_for_non_admins_only() {
     .unwrap_err();
     assert_eq!(err.error_type, "validation-failed");
     assert!(
-        err.message.contains("The namespace in the lookup attribute is different"),
+        err.message
+            .contains("The namespace in the lookup attribute is different"),
         "{}",
         err.message
     );
@@ -234,13 +248,19 @@ async fn lookup_namespaces_validated_for_non_admins_only() {
         app,
         json!([
             ["add-triple", todo, ids.todos_id, todo],
-            ["add-triple", todo, ids.todos_owner, [ids.todos_id, Uuid::new_v4()]]
+            [
+                "add-triple",
+                todo,
+                ids.todos_owner,
+                [ids.todos_id, Uuid::new_v4()]
+            ]
         ]),
     )
     .await
     .unwrap_err();
     assert!(
-        err.message.contains("The namespace in the lookup attribute is different"),
+        err.message
+            .contains("The namespace in the lookup attribute is different"),
         "{}",
         err.message
     );
@@ -250,7 +270,12 @@ async fn lookup_namespaces_validated_for_non_admins_only() {
         app,
         json!([
             ["add-triple", todo, ids.todos_id, todo],
-            ["add-triple", todo, ids.todos_owner, [ids.todos_id, Uuid::new_v4()]]
+            [
+                "add-triple",
+                todo,
+                ids.todos_owner,
+                [ids.todos_id, Uuid::new_v4()]
+            ]
         ]),
         TxOptions {
             admin: true,
@@ -275,7 +300,14 @@ async fn duplicate_attr_name_is_record_not_unique() {
     let err = transact_json(
         &pool,
         app,
-        json!([blob(Uuid::new_v4(), "todos", "title", false, false, json!({}))]),
+        json!([blob(
+            Uuid::new_v4(),
+            "todos",
+            "title",
+            false,
+            false,
+            json!({})
+        )]),
     )
     .await
     .unwrap_err();
@@ -305,7 +337,14 @@ async fn required_attr_guards() {
     let err = transact_json(
         &pool,
         app,
-        json!([blob(priority, "todos", "priority", false, false, json!({"required?": true}))]),
+        json!([blob(
+            priority,
+            "todos",
+            "priority",
+            false,
+            false,
+            json!({"required?": true})
+        )]),
     )
     .await
     .unwrap_err();
@@ -331,15 +370,17 @@ async fn required_attr_guards() {
         err.message,
         "Validation failed for attributes: Can't update attribute `priority` to required because `todos` already have entities without it"
     );
-    assert!(!attrs_of(&pool, app).await.get(&priority).unwrap().is_required);
+    assert!(
+        !attrs_of(&pool, app)
+            .await
+            .get(&priority)
+            .unwrap()
+            .is_required
+    );
     // once every entity carries a value the flip goes through
-    transact_json(
-        &pool,
-        app,
-        json!([["add-triple", todo, priority, "high"]]),
-    )
-    .await
-    .unwrap();
+    transact_json(&pool, app, json!([["add-triple", todo, priority, "high"]]))
+        .await
+        .unwrap();
     transact_json(
         &pool,
         app,
@@ -347,7 +388,13 @@ async fn required_attr_guards() {
     )
     .await
     .unwrap();
-    assert!(attrs_of(&pool, app).await.get(&priority).unwrap().is_required);
+    assert!(
+        attrs_of(&pool, app)
+            .await
+            .get(&priority)
+            .unwrap()
+            .is_required
+    );
 }
 
 /// transaction.clj:617-623 feeds the deleted reverse rows to
@@ -420,7 +467,12 @@ async fn stream_file_paths_are_locked() {
             app,
             json!([
                 ["add-triple", f, sc::attr_id("$files", "id"), f],
-                ["add-triple", f, sc::attr_id("$files", "path"), "$stream/abc"]
+                [
+                    "add-triple",
+                    f,
+                    sc::attr_id("$files", "path"),
+                    "$stream/abc"
+                ]
             ]),
             TxOptions {
                 admin,
@@ -489,7 +541,14 @@ async fn reverse_identities_are_validated() {
     let err = transact_json(
         &pool,
         app,
-        json!([link(Uuid::new_v4(), "things", "code", "$magicCodes", "things", json!({}))]),
+        json!([link(
+            Uuid::new_v4(),
+            "things",
+            "code",
+            "$magicCodes",
+            "things",
+            json!({})
+        )]),
     )
     .await
     .unwrap_err();
@@ -500,7 +559,14 @@ async fn reverse_identities_are_validated() {
     let err = transact_json(
         &pool,
         app,
-        json!([link(Uuid::new_v4(), "things", "owner", "$users", "email", json!({}))]),
+        json!([link(
+            Uuid::new_v4(),
+            "things",
+            "owner",
+            "$users",
+            "email",
+            json!({})
+        )]),
     )
     .await
     .unwrap_err();
@@ -513,7 +579,14 @@ async fn reverse_identities_are_validated() {
     transact_json(
         &pool,
         app,
-        json!([link(owner, "things", "owner", "$users", "things", json!({}))]),
+        json!([link(
+            owner,
+            "things",
+            "owner",
+            "$users",
+            "things",
+            json!({})
+        )]),
     )
     .await
     .unwrap();
@@ -583,10 +656,38 @@ async fn things(pool: &PgPool) -> Things {
         app,
         json!([
             blob(id, "things", "id", true, false, json!({})),
-            blob(score, "things", "score", false, true, json!({"checked-data-type": "number"})),
-            blob(name, "things", "name", false, true, json!({"checked-data-type": "string"})),
-            blob(nick, "things", "nick", false, false, json!({"checked-data-type": "string"})),
-            blob(when, "things", "when", false, true, json!({"checked-data-type": "date"})),
+            blob(
+                score,
+                "things",
+                "score",
+                false,
+                true,
+                json!({"checked-data-type": "number"})
+            ),
+            blob(
+                name,
+                "things",
+                "name",
+                false,
+                true,
+                json!({"checked-data-type": "string"})
+            ),
+            blob(
+                nick,
+                "things",
+                "nick",
+                false,
+                false,
+                json!({"checked-data-type": "string"})
+            ),
+            blob(
+                when,
+                "things",
+                "when",
+                false,
+                true,
+                json!({"checked-data-type": "date"})
+            ),
             blob(people_id, "people", "id", true, false, json!({})),
             link(owner, "things", "owner", "people", "things", json!({})),
         ]),
@@ -677,9 +778,13 @@ async fn query_value_validation_matches_legacy() {
     );
 
     // comparison parses relative keywords (every row is in 2024)
-    let res = q(&pool, app, json!({"things": {"$": {"where": {"when": {"$gt": "now"}}}}}))
-        .await
-        .unwrap();
+    let res = q(
+        &pool,
+        app,
+        json!({"things": {"$": {"where": {"when": {"$gt": "now"}}}}}),
+    )
+    .await
+    .unwrap();
     assert!(eids(&res).is_empty());
     // only the first operator of an args map applies
     let res = q(
@@ -724,9 +829,13 @@ async fn ordering_by_an_attr_some_rows_lack() {
         .execute(&pool)
         .await
         .unwrap();
-    let res = q(&pool, t.app, json!({"things": {"$": {"order": {"score": "asc"}}}}))
-        .await
-        .unwrap();
+    let res = q(
+        &pool,
+        t.app,
+        json!({"things": {"$": {"order": {"score": "asc"}}}}),
+    )
+    .await
+    .unwrap();
     assert_eq!(eids(&res), vec![t.rows[2], t.rows[0], t.rows[1]]);
     let res = q(
         &pool,
@@ -792,7 +901,12 @@ async fn non_boolean_rule_results_are_truthy() {
     let app = mk_app(&pool).await;
     let (schema, ids) = todo_schema_steps();
     transact_json(&pool, app, schema).await.unwrap();
-    set_rules(&pool, app, json!({"todos": {"allow": {"view": "data.title"}}})).await;
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"view": "data.title"}}}),
+    )
+    .await;
     let (e1, e2) = (Uuid::new_v4(), Uuid::new_v4());
     transact_json(
         &pool,
