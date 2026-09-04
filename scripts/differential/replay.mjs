@@ -1312,13 +1312,15 @@ function buildScenario() {
             allow: {
               create: "false",
               link: { project: "actions.data == 'create' && actions.linkedData == 'update' && linkedData.name == 'main' && 'main' in linkedData.ref('name')" },
-              unlink: { project: "actions.data == 'update'" },
             },
           },
           projects: { allow: { delete: "size(data.ref('tasks.id')) > 0", update: "size(data.ref('tasks.id')) > 0" } },
         };
-        psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(rules)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
-        await sleep(RULES_SETTLE_MS);
+        const setRules = async (r) => {
+          psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(r)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
+          await sleep(RULES_SETTLE_MS);
+        };
+        await setRules(rules);
         const blob = (id, etype, label) => [
           "add-attr",
           { id, "forward-identity": [id, etype, label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true },
@@ -1340,8 +1342,19 @@ function buildScenario() {
         await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.k3, ids.tasksProject, ids.p2]] });
         // an existing task linking: actions.data == 'update' -> denied
         await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.k2, ids.tasksProject, ids.p1]] });
-        // unlink rules have no `actions`: evaluation error
+        // unlink programs don't declare `actions`: legacy fails to compile
+        // the rule (`validation-failed` for permission with the rule's path)
+        // and, since every ref step loads both sides' link and unlink
+        // programs, a link step trips over it too
+        await setRules({ tasks: { allow: { ...rules.tasks.allow, unlink: { project: "actions.data == 'update'" } } } });
         await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["retract-triple", ids.k1, ids.tasksProject, ids.p1]] });
+        await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.k3, ids.tasksProject, ids.p1]] });
+        // a view rule mentioning newData / a typo'd identifier fail the same way
+        await setRules({ tasks: { allow: { ...rules.tasks.allow, view: "newData.title == 'x'" } } });
+        await expectErr(env.conns.AUTH, { op: "add-query", q: { tasks: {} } });
+        await setRules({ tasks: { allow: { ...rules.tasks.allow, view: "dta.title == 'x'" } } });
+        await expectErr(env.conns.AUTH, { op: "add-query", q: { tasks: {} } });
+        await setRules(rules);
         // update rule on projects reads data.ref pre-tx: p1 has a task, p2 none
         await okTx(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.p1, ids.projectsName, "main"]] });
         await expectErr(env.conns.AUTH, { op: "transact", "tx-steps": [["add-triple", ids.p2, ids.projectsName, "side!"]] });

@@ -34,7 +34,11 @@ impl Rules {
     /// Lookup chain: [etype allow action] -> [etype allow $default]
     /// -> [$default allow action] -> [$default allow $default] -> system default.
     /// Returns (expr, binds) or None = allow (user etypes) / system default.
-    fn rule_source(&self, etype: &str, action: &str) -> Option<(String, Vec<(String, String)>)> {
+    fn rule_source(
+        &self,
+        etype: &str,
+        action: &str,
+    ) -> Option<(String, Vec<(String, String)>, Vec<String>)> {
         for (et, act) in [
             (etype, action),
             (etype, "$default"),
@@ -53,7 +57,11 @@ impl Rules {
             // legacy `with-binds` (rule.clj:139-142): every rule sees
             // `$default.bind` followed by the *requested* etype's binds,
             // whichever namespace the allow expression came from
-            return Some((expr_str, self.binds_of(etype)));
+            return Some((
+                expr_str,
+                self.binds_of(etype),
+                vec![et.to_string(), "allow".to_string(), act.to_string()],
+            ));
         }
         None
     }
@@ -88,9 +96,15 @@ impl Rules {
                     _ => continue,
                 };
                 return Some(Program {
-                    rule: None,
+                    rule: Some((etype.to_string(), action.to_string())),
                     expr,
                     binds: self.binds_of(etype),
+                    path: vec![
+                        etype.to_string(),
+                        "allow".to_string(),
+                        action.to_string(),
+                        key.to_string(),
+                    ],
                 });
             }
         }
@@ -109,6 +123,7 @@ impl Rules {
             rule: None,
             expr,
             binds: self.binds_of(etype),
+            path: vec![etype.to_string(), "fields".to_string(), field.to_string()],
         })
     }
 
@@ -123,11 +138,12 @@ impl Rules {
 
     /// Effective program for etype+action: falls back to system defaults.
     pub fn program(&self, etype: &str, action: &str) -> Program {
-        if let Some((expr, binds)) = self.rule_source(etype, action) {
+        if let Some((expr, binds, path)) = self.rule_source(etype, action) {
             return Program {
                 expr,
                 binds,
                 rule: Some((etype.to_string(), action.to_string())),
+                path,
             };
         }
         // System defaults
@@ -145,6 +161,7 @@ impl Rules {
                 expr: expr.to_string(),
                 binds: vec![],
                 rule: Some((etype.to_string(), action.to_string())),
+                path: vec![],
             };
         }
         if etype.starts_with('$') {
@@ -152,12 +169,14 @@ impl Rules {
                 expr: "false".to_string(),
                 binds: vec![],
                 rule: Some((etype.to_string(), action.to_string())),
+                path: vec![],
             };
         }
         Program {
             expr: "true".to_string(),
             binds: vec![],
             rule: Some((etype.to_string(), action.to_string())),
+            path: vec![],
         }
     }
 }
@@ -169,6 +188,11 @@ pub struct Program {
     /// `[etype action]` for legacy's `permission-evaluation-failed` hint;
     /// None for ad-hoc programs.
     pub rule: Option<(String, String)>,
+    /// Where the expression lives in the rules document (`["posts" "allow"
+    /// "view"]`, `["tasks" "allow" "link" "project"]`, `["posts" "fields"
+    /// "secret"]`); empty for system defaults and ad-hoc programs. It is the
+    /// `input` of legacy's compile-time `permission` validation errors.
+    pub path: Vec<String>,
 }
 
 impl Program {
@@ -710,6 +734,182 @@ pub fn rate_limit_names(expr: &cel::IdedExpr) -> Vec<String> {
     out
 }
 
+/// The variables each action's compiler declares (cel.clj:459-497:
+/// view / delete see the base set, create / update add `newData`, `link`
+/// adds `newData` / `linkedData` / `actions`, `unlink` `newData` /
+/// `linkedData`). `math` and `strings` are the extension namespaces.
+fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
+    const BASE: [&str; 7] = [
+        "data",
+        "auth",
+        "ruleParams",
+        "request",
+        "rateLimit",
+        "math",
+        "strings",
+    ];
+    const VIEW: &[&str] = &BASE;
+    const CREATE: &[&str] = &[
+        "data",
+        "auth",
+        "ruleParams",
+        "request",
+        "rateLimit",
+        "math",
+        "strings",
+        "newData",
+    ];
+    const LINK: &[&str] = &[
+        "data",
+        "auth",
+        "ruleParams",
+        "request",
+        "rateLimit",
+        "math",
+        "strings",
+        "newData",
+        "linkedData",
+        "actions",
+    ];
+    const UNLINK: &[&str] = &[
+        "data",
+        "auth",
+        "ruleParams",
+        "request",
+        "rateLimit",
+        "math",
+        "strings",
+        "newData",
+        "linkedData",
+    ];
+    match action {
+        Some("view") | Some("delete") => VIEW,
+        Some("link") => LINK,
+        Some("unlink") => UNLINK,
+        _ => CREATE,
+    }
+}
+
+/// Free identifiers of an expression: comprehension (macro) variables are
+/// bound, everything else is a reference the compiler must know.
+fn collect_free_idents(expr: &cel::IdedExpr, bound: &mut Vec<String>, out: &mut Vec<String>) {
+    use cel::common::ast::{EntryExpr, Expr};
+    match &expr.expr {
+        Expr::Unspecified | Expr::Literal(_) => {}
+        Expr::Ident(name) => {
+            if !bound.contains(name) && !out.contains(name) {
+                out.push(name.clone());
+            }
+        }
+        Expr::Call(c) => {
+            if let Some(t) = &c.target {
+                collect_free_idents(t, bound, out);
+            }
+            for a in &c.args {
+                collect_free_idents(a, bound, out);
+            }
+        }
+        Expr::Comprehension(c) => {
+            collect_free_idents(&c.iter_range, bound, out);
+            let depth = bound.len();
+            bound.push(c.iter_var.clone());
+            if let Some(v2) = &c.iter_var2 {
+                bound.push(v2.clone());
+            }
+            bound.push(c.accu_var.clone());
+            for e in [&c.accu_init, &c.loop_cond, &c.loop_step, &c.result] {
+                collect_free_idents(e, bound, out);
+            }
+            bound.truncate(depth);
+        }
+        Expr::List(l) => {
+            for e in &l.elements {
+                collect_free_idents(e, bound, out);
+            }
+        }
+        Expr::Map(m) => {
+            for e in &m.entries {
+                if let EntryExpr::MapEntry(me) = &e.expr {
+                    collect_free_idents(&me.key, bound, out);
+                    collect_free_idents(&me.value, bound, out);
+                }
+            }
+        }
+        Expr::Select(s) => collect_free_idents(&s.operand, bound, out),
+        Expr::Struct(st) => {
+            for e in &st.entries {
+                match &e.expr {
+                    EntryExpr::StructField(fl) => collect_free_idents(&fl.value, bound, out),
+                    EntryExpr::MapEntry(me) => {
+                        collect_free_idents(&me.key, bound, out);
+                        collect_free_idents(&me.value, bound, out);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Legacy compiles a rule with its action's declared variables
+/// (`rule-model/get-program!` → cel-java type-check), so a `view` rule
+/// mentioning `newData`, an `unlink` rule mentioning `actions`, or any
+/// typo'd identifier is a `validation-failed` for `permission` with the
+/// rule's path as `input` — raised whenever the program is loaded, which
+/// for link / unlink programs is every ref step (permissioned_transaction.clj
+/// :281-329). Used binds are checked transitively like `with-binds`.
+pub fn undeclared_reference(program: &Program) -> Option<InstantError> {
+    if program.path.is_empty() {
+        return None;
+    }
+    let action = program.rule.as_ref().map(|(_, a)| a.as_str());
+    let declared = declared_vars(action);
+    let bind_names: HashSet<&str> = program.binds.iter().map(|(n, _)| n.as_str()).collect();
+    let compiled = cel::Program::compile(&program.expr).ok()?;
+    let mut idents: Vec<String> = vec![];
+    collect_free_idents(compiled.expression(), &mut vec![], &mut idents);
+    let mut queue: Vec<String> = idents
+        .iter()
+        .filter(|i| bind_names.contains(i.as_str()))
+        .cloned()
+        .collect();
+    let mut seen: HashSet<String> = HashSet::new();
+    while let Some(name) = queue.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some((_, expr)) = program.binds.iter().find(|(n, _)| *n == name) else {
+            continue;
+        };
+        let Ok(p) = cel::Program::compile(expr) else {
+            continue;
+        };
+        let mut inner = vec![];
+        collect_free_idents(p.expression(), &mut vec![], &mut inner);
+        for i in inner {
+            if bind_names.contains(i.as_str()) {
+                queue.push(i.clone());
+            }
+            if !idents.contains(&i) {
+                idents.push(i);
+            }
+        }
+    }
+    let bad = idents
+        .into_iter()
+        .find(|i| !declared.contains(&i.as_str()) && !bind_names.contains(i.as_str()))?;
+    let message = format!("undeclared reference to '{bad}' (in container '')");
+    Some(InstantError::new(
+        "validation-failed",
+        400,
+        format!("Validation failed for permission: {message}"),
+        Some(json!({
+            "data-type": "permission",
+            "input": program.path,
+            "errors": [{"message": message}],
+        })),
+    ))
+}
+
 /// Proto semantics for `has(request.<field>)`: an unset singular field is
 /// "absent" for `has()` but still reads as its default (`""`). A plain CEL
 /// map can't do both, so `has(request.x)` tests are folded to literals before
@@ -895,6 +1095,9 @@ pub fn eval_program_pure(
                 json!([{"message": message}]),
             ));
         }
+    }
+    if let Some(e) = undeclared_reference(program) {
+        return Err(e);
     }
 
     // legacy CelMap null-safety: pre-insert every statically-mentioned key
@@ -1777,6 +1980,22 @@ pub async fn permissioned_transact_checked(
                     let target = value.as_str().and_then(|s| Uuid::parse_str(s).ok());
                     let retype = attr.reverse_etype.clone().unwrap_or_default();
                     let rlabel = attr.reverse_label.clone().unwrap_or_default();
+                    // legacy pre-checks load the link AND unlink programs of
+                    // both sides for every ref step (:305-329), so a program
+                    // that doesn't compile fails the transaction whatever the
+                    // step's own action
+                    for (et, act, label) in [
+                        (&attr.etype, "link", &attr.label),
+                        (&retype, "link", &rlabel),
+                        (&attr.etype, "unlink", &attr.label),
+                        (&retype, "unlink", &rlabel),
+                    ] {
+                        if let Some(p) = rules.link_program(et, act, label) {
+                            if let Some(e) = undeclared_reference(&p) {
+                                return Err(e);
+                            }
+                        }
+                    }
                     let fwd_prog = rules.link_program(&attr.etype, action, &attr.label);
                     let rev_prog = rules.link_program(&retype, action, &rlabel);
                     if fwd_prog.is_some() || rev_prog.is_some() {
@@ -2314,6 +2533,7 @@ mod tests {
             expr: expr.to_string(),
             binds: vec![],
             rule: None,
+            path: vec![],
         };
         let rules = Rules { code: json!({}) };
         let request = RequestCtx::default();
@@ -2386,6 +2606,7 @@ mod tests {
             expr: "data.missing.b == null".to_string(),
             binds: vec![],
             rule: Some(("t".to_string(), "view".to_string())),
+            path: vec![],
         };
         let rules = Rules { code: json!({}) };
         let request = RequestCtx::default();
@@ -2422,6 +2643,7 @@ mod tests {
             expr: "actions.data == 'create' && actions.linkedData == 'update'".to_string(),
             binds: vec![],
             rule: None,
+            path: vec![],
         };
         let rules = Rules { code: json!({}) };
         let request = RequestCtx::default();
@@ -2481,6 +2703,7 @@ mod tests {
                 "data.creatorTypo == auth.id".to_string(),
             )],
             rule: None,
+            path: vec![],
         };
         let rules = Rules { code: json!({}) };
         let request = RequestCtx::default();
@@ -2640,6 +2863,36 @@ fn expr_validation_errors(rules: &Value, etype: &str, path: &[&str]) -> Vec<Valu
     // legacy type-checks `request` as a proto struct (cel_test.clj:70-99)
     if let Some(field) = undefined_request_field(compiled.expression()) {
         return err(format!("undefined field '{field}'"));
+    }
+    // ...and every other identifier against the action's declared variables
+    {
+        let action = if path.get(1) == Some(&"allow") {
+            path.get(2).copied().unwrap_or("view")
+        } else {
+            "view"
+        };
+        let program = Program {
+            expr: code.clone(),
+            binds: bind_map
+                .iter()
+                .filter_map(|(k, v)| match v {
+                    Value::String(s) => Some((k.clone(), s.clone())),
+                    Value::Bool(b) => Some((k.clone(), b.to_string())),
+                    _ => None,
+                })
+                .collect(),
+            rule: Some((etype.to_string(), action.to_string())),
+            path: path.iter().map(|s| s.to_string()).collect(),
+        };
+        if let Some(e) = undeclared_reference(&program) {
+            let message = e
+                .hint
+                .as_ref()
+                .and_then(|h| h["errors"][0]["message"].as_str())
+                .unwrap_or_default()
+                .to_string();
+            return err(message);
+        }
     }
     // legacy rate-limit-validator (cel.clj:1850-1872)
     let rate_limit_keys: HashSet<String> = rules
