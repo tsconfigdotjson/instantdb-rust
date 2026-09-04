@@ -851,9 +851,13 @@ async fn ordering_by_an_attr_some_rows_lack() {
     .unwrap();
     assert_eq!(eids(&res), vec![t.rows[1], t.rows[0]]);
     // an explicit null (the backfilled kind) still sorts first
-    let res = q(&pool, t.app, json!({"things": {"$": {"order": {"when": "asc"}}}}))
-        .await
-        .unwrap();
+    let res = q(
+        &pool,
+        t.app,
+        json!({"things": {"$": {"order": {"when": "asc"}}}}),
+    )
+    .await
+    .unwrap();
     assert_eq!(eids(&res).len(), 3);
     assert_ne!(eids(&res)[0], t.rows[0]);
 }
