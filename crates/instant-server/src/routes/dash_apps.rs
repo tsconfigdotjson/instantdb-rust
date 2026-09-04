@@ -183,13 +183,13 @@ async fn apps_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
                 CASE WHEN a.creator_id = $1 THEN 'owner'
                      ELSE (SELECT m.member_role FROM app_members m WHERE m.app_id = a.id AND m.user_id = $1)
                 END AS user_app_role,
-                (SELECT json_agg(json_build_object('id', m.id, 'email', u.email, 'role', m.member_role))
+                coalesce((SELECT json_agg(json_build_object('id', m.id, 'email', u.email, 'role', m.member_role))
                    FROM app_members m JOIN instant_users u ON u.id = m.user_id
-                  WHERE m.app_id = a.id) AS members,
-                (SELECT json_agg(json_build_object('id', i.id, 'email', i.invitee_email, 'role', i.invitee_role,
+                  WHERE m.app_id = a.id), '[]'::json) AS members,
+                coalesce((SELECT json_agg(json_build_object('id', i.id, 'email', i.invitee_email, 'role', i.invitee_role,
                                                    'status', i.status, 'sent_at', i.sent_at,
                                                    'expired', i.sent_at < now() - interval '3 days'))
-                   FROM app_member_invites i WHERE i.app_id = a.id) AS invites
+                   FROM app_member_invites i WHERE i.app_id = a.id), '[]'::json) AS invites
            FROM apps a
            LEFT JOIN app_admin_tokens at ON at.app_id = a.id
            LEFT JOIN rules r ON r.app_id = a.id
@@ -226,13 +226,13 @@ async fn apps_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
                 );
                 m.insert(
                     "members".into(),
-                    r.get::<Option<Value>, _>("members").unwrap_or(Value::Null),
+                    r.get::<Option<Value>, _>("members").unwrap_or(json!([])),
                 );
                 m.insert(
                     "invites".into(),
-                    r.get::<Option<Value>, _>("invites").unwrap_or(Value::Null),
+                    r.get::<Option<Value>, _>("invites").unwrap_or(json!([])),
                 );
-                m.insert("webhooks".into(), Value::Null);
+                m.insert("webhooks".into(), json!([]));
                 // with-effective-status: no sunset stage here
                 m.insert(
                     "effective_status".into(),
@@ -885,9 +885,9 @@ pub async fn org_get(
                 m.insert("org".into(), json!({"id": org["id"], "title": org["title"]}));
                 m.insert("pro".into(), json!(false));
                 m.insert("user_app_role".into(), json!(r.get::<Option<String>, _>("user_app_role")));
-                m.insert("members".into(), Value::Null);
-                m.insert("invites".into(), Value::Null);
-                m.insert("webhooks".into(), Value::Null);
+                m.insert("members".into(), json!([]));
+                m.insert("invites".into(), json!([]));
+                m.insert("webhooks".into(), json!([]));
                 m.insert("effective_status".into(), json!(r.get::<String, _>("status")));
             }
             app
