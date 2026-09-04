@@ -537,8 +537,10 @@ fn json_type_name(v: &Value) -> &'static str {
 
 /// Legacy `throw-invalid-data-value!` / `throw-invalid-date-string!`
 /// (attr_pat.clj:228-262): the value's type must match the attr's checked
-/// type. `op` is unused by the message but kept for call-site clarity.
-fn coerce_typed(attr: &Attr, t: CheckedDataType, v: &Value, _op: &str) -> Result<Value> {
+/// type. `op` distinguishes the equality path (`coerce-value-data-value!`,
+/// which refuses the relative date keywords) from the comparison path
+/// (`coerced-type-comparison-value!`, which parses them).
+fn coerce_typed(attr: &Attr, t: CheckedDataType, v: &Value, op: &str) -> Result<Value> {
     let bad = || {
         verr(format!(
             "The data type of `{}.{}` is `{}`, but the query got the value `{}` of type `{}`.",
@@ -580,12 +582,14 @@ fn coerce_typed(attr: &Attr, t: CheckedDataType, v: &Value, _op: &str) -> Result
         CheckedDataType::Date => match v {
             Value::Number(_) => Ok(v.clone()),
             Value::String(s) => {
-                // legacy refuses the relative keywords it can parse but the
-                // client can't agree on (attr_pat.clj:286-293), and anything
-                // its date parser rejects
+                // equality refuses the relative keywords legacy can parse but
+                // the client can't agree on (attr_pat.clj:286-293); comparison
+                // parses them (verified live: `{$gt: "now"}` is a valid
+                // query). Anything the parser rejects is a 400 either way.
+                let keyword = matches!(s.trim(), "now" | "today" | "tomorrow" | "yesterday");
                 if s.trim().is_empty()
-                    || matches!(s.as_str(), "now" | "today" | "tomorrow" | "yesterday")
-                    || !looks_like_date(s)
+                    || (keyword && matches!(op, "$eq" | "$not"))
+                    || (!keyword && !looks_like_date(s))
                 {
                     return Err(bad_date());
                 }
@@ -596,23 +600,16 @@ fn coerce_typed(attr: &Attr, t: CheckedDataType, v: &Value, _op: &str) -> Result
     }
 }
 
-/// Cheap pre-check standing in for legacy `parse-date-value`: RFC 3339,
-/// `YYYY-MM-DD`, and the common `Date.toString()` / RFC 2822 shapes. Postgres
-/// does the real parse; this keeps garbage from reaching it as a 500.
+/// Cheap pre-check standing in for legacy `parse-date-value`
+/// (triple.clj:1630-1640), which accepts a wide family of formats (ISO,
+/// RFC 2822, `M/D/YYYY`, `Date.toString()`, quoted JSON strings, ...).
+/// Postgres does the real parse; this only keeps digit-less garbage like
+/// `not-a-date` from reaching it as a 500. Postgres' own special strings
+/// (`epoch`, `infinity`, `allballs`) stay accepted.
 fn looks_like_date(s: &str) -> bool {
-    let s = s.trim();
-    if chrono::DateTime::parse_from_rfc3339(s).is_ok()
-        || chrono::DateTime::parse_from_rfc2822(s).is_ok()
-        || chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok()
-        || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").is_ok()
-        || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").is_ok()
-        || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").is_ok()
-        || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f").is_ok()
-    {
-        return true;
-    }
-    // JS `Date.toString()`: "Tue Jan 02 2024 03:04:05 GMT+0000 (...)"
-    chrono::NaiveDateTime::parse_from_str(&s[..s.len().min(24)], "%a %b %d %Y %H:%M:%S").is_ok()
+    let s = s.trim().trim_matches('"');
+    s.chars().any(|c| c.is_ascii_digit())
+        || matches!(s, "epoch" | "infinity" | "-infinity" | "allballs")
 }
 
 /// Push SQL for a date/number/boolean/string extract-value expression of `v`.

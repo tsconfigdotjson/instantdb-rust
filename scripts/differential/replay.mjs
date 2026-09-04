@@ -918,7 +918,9 @@ function buildScenario() {
         await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { name: { $gt: 5 } } } } } });
         await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { score: "2" } } } } });
         await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { name: 5 } } } } });
-        await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { when: { $gt: "now" } } } } } });
+        // equality refuses relative keywords; comparison parses them (rows are all in 2024, so the result is stable)
+        await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { when: "now" } } } } });
+        await okQuery(env.conns.A, { typed: { $: { where: { when: { $gt: "now" } } } } });
         await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { when: { $gt: "not-a-date" } } } } } });
         await expectErr(env.conns.A, { op: "add-query", q: { todos: { $: { where: { owner: { $not: "nope" } } } } } });
         await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { name: { $like: 5 } } } } } });
