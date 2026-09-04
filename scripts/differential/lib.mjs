@@ -368,12 +368,27 @@ export async function foldFrames(frames, state) {
       }
       case "patch-presence": {
         if (state.leftRooms?.has(m["room-id"])) break; // straggler after leave
-        // Reactor.js:2672-2697
+        // Reactor.js:2672-2697 applies editscript edits generically: a path
+        // is [sid] (whole entry), [sid, "data"] (whole data) or deeper
+        // (legacy diffs inside data, e.g. [sid, "data", "x"] "+" 1)
         const room = (state.rooms[m["room-id"]] ??= {});
         for (const [path, op, val] of m.edits) {
-          if (op === "-") delete room[path[0]];
-          else if (path.length === 1) room[path[0]] = val.data;
-          else if (path.length === 2 && path[1] === "data") room[path[0]] = val;
+          const [sid, ...rest] = path;
+          if (rest.length === 0) {
+            if (op === "-") delete room[sid];
+            else room[sid] = val.data;
+          } else if (rest[0] === "data") {
+            const inner = rest.slice(1);
+            if (inner.length === 0) {
+              if (op === "-") delete room[sid];
+              else room[sid] = val;
+            } else {
+              let node = (room[sid] ??= {});
+              for (const k of inner.slice(0, -1)) node = node[k] ??= {};
+              if (op === "-") delete node[inner[inner.length - 1]];
+              else node[inner[inner.length - 1]] = val;
+            }
+          }
         }
         break;
       }

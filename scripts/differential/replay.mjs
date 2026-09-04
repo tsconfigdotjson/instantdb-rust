@@ -968,7 +968,7 @@ function buildScenario() {
         msg(env.conns.B, { op: "join-room", "room-type": "diff", "room-id": "rejoin", data: { who: "B" } });
         await env.conns.B.waitFor((m) => m.op === "join-room-ok" && m["room-id"] === "rejoin");
         msg(env.conns.B, { op: "set-presence", "room-id": "rejoin", data: { who: "B", x: 1 } });
-        await env.conns.A.waitFor((m) => (m.op === "refresh-presence" || m.op === "patch-presence") && m["room-id"] === "rejoin" && JSON.stringify(m).includes('"x":1'));
+        await env.conns.A.waitFor((m) => (m.op === "refresh-presence" || m.op === "patch-presence") && m["room-id"] === "rejoin" && JSON.stringify(m).includes('"x"'));
         msg(env.conns.B, { op: "join-room", "room-type": "diff", "room-id": "rejoin" });
         await env.conns.B.waitFor((m) => m.op === "join-room-ok" && m["room-id"] === "rejoin" && env.conns.B.frames.filter((f) => f.op === "join-room-ok" && f["room-id"] === "rejoin").length >= 2);
         // streams
