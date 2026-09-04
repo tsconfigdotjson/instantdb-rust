@@ -525,7 +525,10 @@ pub async fn handle_subscribe_stream(
             .map(|c| c.len() as i64)
             .unwrap_or(0);
         let frame_done = frame.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
-        if offset + len > snapshot_end || (frame_done && !done) || frame.get("abort-reason").is_some() {
+        if offset + len > snapshot_end
+            || (frame_done && !done)
+            || frame.get("abort-reason").is_some()
+        {
             session.send(frame);
         }
     }

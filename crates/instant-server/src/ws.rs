@@ -149,7 +149,9 @@ async fn session_loop(
     state.stream_subs.iter_mut().for_each(|mut e| {
         e.value_mut().retain(|(sid, _)| *sid != session_id);
     });
-    state.stream_catchup.retain(|(sid, _), _| *sid != session_id);
+    state
+        .stream_catchup
+        .retain(|(sid, _), _| *sid != session_id);
     crate::presence::leave_all(&state, session_id).await;
     writer.abort();
 }
