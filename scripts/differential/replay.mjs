@@ -1093,7 +1093,9 @@ function buildScenario() {
           status: r.status,
           type: r.body?.type ?? null,
           message: r.body?.message ?? null,
-          ...(!r.body ? { raw: String(r.raw ?? "").slice(0, 200) } : {}),
+          // non-JSON bodies are kept verbatim (key always present so the
+          // per-op key sets match)
+          raw: r.body ? null : String(r.raw ?? "").slice(0, 200),
           ...extra,
         });
         const auth = { authorization: `Bearer ${adminToken}` };
