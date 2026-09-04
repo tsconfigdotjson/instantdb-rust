@@ -35,7 +35,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | where: eq, dot-paths, `$in`/`in`, `$not`/`$ne`, `$isNull`, `or`, `and` | ✅ | including missing-attr null-prefix expansion; an args map with several operators applies only its first key like legacy `(first v-value)` (instaql.clj:669-675); `$not` on a link needs a uuid ("Expected owner to be a uuid, got ..."); a form on missing attrs / unknown namespace carries no `page-info` / `aggregate` key (differential step 25) |
 | `$like` / `$ilike` / `$gt` `$gte` `$lt` `$lte` (typed) | ✅ | index+type guards with legacy error messages; every checked-type attr, indexed or not, validates the query value with legacy's "The data type of `x.y` is `t`, but the query got the value `v` of type `T`." (attr_pat.clj:228-295, :366-372); date strings reject `now`/`today`/`tomorrow`/`yesterday` and unparseable text (a cheap pre-parse stands in for `parse-date-value`) instead of a 500 |
 | `$entityIdStartsWith` | ✅ | |
-| order by serverCreatedAt / typed attrs, asc/desc, nulls placement | ✅ | `order: {}` is a no-op (instaql.clj:313-315); a row without the order attr sorts as null instead of failing the query |
+| order by serverCreatedAt / typed attrs, asc/desc, nulls placement | ✅ | `order: {}` is a no-op (instaql.clj:313-315); a row with no triple at all for the order attr (data predating the indexed-null backfill) is left out of an ordered query like legacy, instead of failing the query (differential step 25) |
 | pagination: limit/first/last/offset/before/after/inclusive + page-info | ✅ | top-level only, like legacy |
 | fields projection | ✅ | |
 | aggregate `count` (admin-only) | ✅ | |

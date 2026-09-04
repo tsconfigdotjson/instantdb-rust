@@ -950,6 +950,10 @@ function buildScenario() {
         // a row that predates the indexed-null backfill (datalog.clj:2946-2959
         // synthesizes a null for it): drop t5's score triple on both servers
         psql(env.db, `DELETE FROM triples WHERE app_id = '${env.appId}' AND attr_id = '${ids.typedScore}' AND entity_id = '${ids.t5}'`);
+        // a write on `typed` makes both servers recompute the registered
+        // typed queries (the direct delete notifies neither invalidator)
+        await okTx(env.conns.A, { op: "transact", "tx-steps": [["add-triple", ids.t4, ids.typedFlag, false]] });
+        await okQuery(env.conns.A, { typed: { $: { order: { score: "asc" } } } });
         await okQuery(env.conns.A, { typed: { $: { order: { score: "asc" }, limit: 3 } } });
         await okQuery(env.conns.A, { typed: { $: { order: { score: "desc" }, limit: 3 } } });
         // first operator wins; empty order is a no-op; missing attrs carry no page-info

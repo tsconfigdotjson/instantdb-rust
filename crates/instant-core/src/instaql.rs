@@ -1395,6 +1395,10 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
     }
     qb.push(" FROM triples idt ");
     if !by_created {
+        // an entity with no triple at all for the order attr is left out of
+        // an ordered query (verified against legacy in differential step 25:
+        // the row is neither first nor last, it is absent); explicit null
+        // triples, which the backfills write, still sort as nulls
         qb.push("JOIN triples ord ON ord.app_id = ");
         qb.push_bind(ctx.app_id);
         qb.push(" AND ord.entity_id = idt.entity_id AND ord.attr_id = ");

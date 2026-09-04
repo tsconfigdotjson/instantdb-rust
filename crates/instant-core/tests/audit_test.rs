@@ -820,8 +820,9 @@ async fn query_value_validation_matches_legacy() {
     assert!(res.forms[0].page_info.is_none());
 }
 
-/// datalog.clj:2946-2959 synthesizes a null row for entities lacking the
-/// order attr; rows predating the null backfill must not break the query.
+/// Rows predating the indexed-null backfill have no triple for the order
+/// attr; legacy leaves them out of an ordered query (verified live in
+/// differential step 25) and the query must not break on them.
 #[tokio::test]
 async fn ordering_by_an_attr_some_rows_lack() {
     let pool = pool().await;
@@ -840,7 +841,7 @@ async fn ordering_by_an_attr_some_rows_lack() {
     )
     .await
     .unwrap();
-    assert_eq!(eids(&res), vec![t.rows[2], t.rows[0], t.rows[1]]);
+    assert_eq!(eids(&res), vec![t.rows[0], t.rows[1]]);
     let res = q(
         &pool,
         t.app,
@@ -849,6 +850,12 @@ async fn ordering_by_an_attr_some_rows_lack() {
     .await
     .unwrap();
     assert_eq!(eids(&res), vec![t.rows[1], t.rows[0]]);
+    // an explicit null (the backfilled kind) still sorts first
+    let res = q(&pool, t.app, json!({"things": {"$": {"order": {"when": "asc"}}}}))
+        .await
+        .unwrap();
+    assert_eq!(eids(&res).len(), 3);
+    assert_ne!(eids(&res)[0], t.rows[0]);
 }
 
 // ---------------------------------------------------------------------------
