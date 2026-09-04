@@ -122,6 +122,7 @@ pub async fn handle_start_sync(
     }));
 
     let tx_id = initial_load(state, session, app_id, &attrs, &etype, sub_id).await?;
+    let attr_ids = ea_attr_ids(&attrs, &etype);
     {
         let mut st = session.state.lock().await;
         st.sync_subs.insert(
@@ -129,7 +130,7 @@ pub async fn handle_start_sync(
             SyncSub {
                 etype,
                 last_tx: tx_id,
-                attr_ids: ea_ids,
+                attr_ids,
             },
         );
     }
