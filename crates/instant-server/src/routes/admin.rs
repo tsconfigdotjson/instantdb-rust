@@ -1207,20 +1207,24 @@ async fn presence_impl(
             else {
                 continue;
             };
-            if !users.contains_key(&uid) {
-                let entity = instant_core::perms::fetch_entity_map(
-                    &mut conn, ctx.app_id, &attrs, "$users", uid,
-                )
-                .await?
-                .map(|m| {
-                    // legacy get-entities: only the triples the row
-                    // has, plus id
-                    Value::Object(m.into_iter().filter(|(_, v)| !v.is_null()).collect())
-                })
-                .unwrap_or(Value::Null);
-                users.insert(uid, entity);
-            }
-            sess["user"] = users.get(&uid).cloned().unwrap_or(Value::Null);
+            let entity = match users.get(&uid) {
+                Some(cached) => cached.clone(),
+                None => {
+                    let fetched = instant_core::perms::fetch_entity_map(
+                        &mut conn, ctx.app_id, &attrs, "$users", uid,
+                    )
+                    .await?
+                    .map(|m| {
+                        // legacy get-entities: only the triples the row
+                        // has, plus id
+                        Value::Object(m.into_iter().filter(|(_, v)| !v.is_null()).collect())
+                    })
+                    .unwrap_or(Value::Null);
+                    users.insert(uid, fetched.clone());
+                    fetched
+                }
+            };
+            sess["user"] = entity;
         }
     }
     Ok(json!({"sessions": snapshot}))
