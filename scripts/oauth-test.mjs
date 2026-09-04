@@ -245,7 +245,9 @@ assert(verify.user.email === "oauth-user@example.com", "oauth refresh token veri
   const ck3 = s3.headers.get("set-cookie").split(";")[0];
   const unknown = await body(await cb(`?state=${appId}${crypto.randomUUID()}&code=abc`, { cookie: ck3 }));
   assert(unknown.status === 400 && unknown.body.error === "Could not find OAuth request.", "unknown request");
-  const mismatch = await body(await cb(`?state=${st3}&code=abc`, { cookie: `__session=${crypto.randomUUID()}` }));
+  const bare = await body(await cb(`?state=${st3}&code=abc`, { cookie: `__session=${crypto.randomUUID()}` }));
+  assert(bare.status === 400 && bare.body.error === "Missing cookie.", "a cookie without the instantdb_ prefix is no cookie");
+  const mismatch = await body(await cb(`?state=${st3}&code=abc`, { cookie: `__session=instantdb_${crypto.randomUUID()}` }));
   assert(mismatch.status === 400 && mismatch.body.error === "Mismatch in OAuth request cookie.", "cookie mismatch is a 400");
   // the ?test-redirect landing page
   const landing = await fetch(`${SERVER}/runtime/oauth/callback?test-redirect=1`);
