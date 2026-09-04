@@ -75,6 +75,7 @@ function buildScenario() {
     sseTodo: mk(), sseSecret: mk(), sseTodo2: mk(),
     // audit follow-ups (steps 25-28)
     dupTitleAttr: mk(), reqAttr: mk(), laterReqAttr: mk(), ownersHandle: mk(),
+    articlesId: mk(), remarksId: mk(), remarksArticle: mk(), a1: mk(), r1: mk(),
     gatedId: mk(), gatedTitle: mk(), g1: mk(), g2: mk(), g3: mk(), fakeUser: mk(),
     // stream ids must be v4-shaped uuids on both servers
     stream2Token: "00000000-0000-4000-8000-00000000a5ee",
@@ -931,6 +932,26 @@ function buildScenario() {
         await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { when: { $gt: "not-a-date" } } } } } });
         await expectErr(env.conns.A, { op: "add-query", q: { todos: { $: { where: { owner: { $not: "nope" } } } } } });
         await expectErr(env.conns.A, { op: "add-query", q: { typed: { $: { where: { name: { $like: 5 } } } } } });
+        // deleting a link target re-validates required links on its referrers
+        // (transaction.clj:617-623 feeds the deleted reverse rows to validate-required!)
+        await okTx(env.conns.ADMIN, {
+          op: "transact",
+          "tx-steps": [
+            attr(ids.articlesId, "articles", "id", { unique: true, fwd: ids.articlesId }),
+            attr(ids.remarksId, "remarks", "id", { unique: true, fwd: ids.remarksId }),
+            ["add-attr", { id: ids.remarksArticle, "forward-identity": [ids.remarksArticle, "remarks", "article"], "reverse-identity": [mk(), "articles", "remarks"], "value-type": "ref", cardinality: "one", "unique?": false, "index?": false, "required?": true, isUnsynced: true }],
+            ["add-triple", ids.a1, ids.articlesId, ids.a1],
+            ["add-triple", ids.r1, ids.remarksId, ids.r1],
+            ["add-triple", ids.r1, ids.remarksArticle, ids.a1],
+          ],
+        });
+        await expectErr(env.conns.ADMIN, { op: "transact", "tx-steps": [["delete-entity", ids.a1, "articles"]] });
+        await okTx(env.conns.ADMIN, { op: "transact", "tx-steps": [["delete-entity", ids.r1, "remarks"], ["delete-entity", ids.a1, "articles"]] });
+        // a row that predates the indexed-null backfill (datalog.clj:2946-2959
+        // synthesizes a null for it): drop t5's score triple on both servers
+        psql(env.db, `DELETE FROM triples WHERE app_id = '${env.appId}' AND attr_id = '${ids.typedScore}' AND entity_id = '${ids.t5}'`);
+        await okQuery(env.conns.A, { typed: { $: { order: { score: "asc" }, limit: 3 } } });
+        await okQuery(env.conns.A, { typed: { $: { order: { score: "desc" }, limit: 3 } } });
         // first operator wins; empty order is a no-op; missing attrs carry no page-info
         await okQuery(env.conns.A, { typed: { $: { where: { score: { $gt: 0, $lt: 3 } } } } });
         await okQuery(env.conns.A, { typed: { $: { order: {} } } });

@@ -788,7 +788,8 @@ pub async fn validate_required(
                         "Missing required attribute `{}/{}`: {}",
                         etype, attr.label, eid
                     ),
-                    Some(json!({"data-type": "triples", "records": [eid]})),
+                    // legacy hint (triple.clj:227-235): the failing rows, no data-type
+                    Some(json!({"records": [{"entity_id": eid, "etype": etype, "label": attr.label}]})),
                 ));
             }
         }
