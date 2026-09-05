@@ -203,7 +203,7 @@ probe("http/permission-denied/query-perms-check-as-admin", async (ctx) =>
 probe("http/oauth-error/callback", async (ctx) =>
   httpView(await call(ctx.url, "GET", "/runtime/oauth/callback?error=access_denied&state=x", { token: null })));
 probe("http/record-expired/magic-code", async (ctx) => {
-  const email = `expired-${ctx.name}@example.com`;
+  const email = "expired@example.com";
   const gen = await admin(ctx, "/admin/magic_code", { email });
   if (gen.status !== 200) return { generateFailed: httpView(gen) };
   // magic codes are `$magicCodes` entities on both servers; the expiry clock
@@ -212,7 +212,10 @@ probe("http/record-expired/magic-code", async (ctx) => {
     ctx.db,
     `UPDATE triples SET created_at = created_at - 3 * 24 * 60 * 60 * 1000 WHERE app_id = '${appId}' AND entity_id IN (SELECT entity_id FROM triples WHERE app_id = '${appId}' AND value = '"${email}"'::jsonb);`,
   );
-  return httpView(await call(ctx.url, "POST", "/runtime/auth/verify_magic_code", { token: null, body: { "app-id": appId, email, code: gen.body.code } }));
+  const view = httpView(await call(ctx.url, "POST", "/runtime/auth/verify_magic_code", { token: null, body: { "app-id": appId, email, code: gen.body.code } }));
+  // the code is random per server; the hint echoes it
+  if (view.hint?.args?.[0]?.code) view.hint.args[0].code = "<code>";
+  return view;
 });
 probe("http/record-not-found/magic-code", async (ctx) =>
   httpView(await call(ctx.url, "POST", "/runtime/auth/verify_magic_code", { token: null, body: { "app-id": appId, email: "nobody@example.com", code: "000000" } })));
