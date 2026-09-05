@@ -129,7 +129,7 @@ fn assert_valid(data_type: &str, input: Value, errors: Vec<String>) -> Result<()
 // apps
 
 /// The `apps` row as legacy returns it (`apps.*`).
-async fn app_row(state: &AppState, app_id: Uuid) -> Result<Option<Value>> {
+pub(crate) async fn app_row(state: &AppState, app_id: Uuid) -> Result<Option<Value>> {
     let row = sqlx::query(
         "SELECT id, creator_id, org_id, title, created_at, status, deletion_marked_at,
                 subscription_id, magic_code_expiry_minutes, connection_string
@@ -195,10 +195,13 @@ async fn apps_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
            LEFT JOIN rules r ON r.app_id = a.id
           WHERE a.deletion_marked_at IS NULL AND a.org_id IS NULL
             AND (a.creator_id = $1
-                 OR EXISTS (SELECT 1 FROM app_members m WHERE m.app_id = a.id AND m.user_id = $1))
+                 OR EXISTS (SELECT 1 FROM app_members m WHERE m.app_id = a.id AND m.user_id = $1
+                             AND ($2 OR m.created_at < $3 OR m.member_role = 'owner')))
           ORDER BY a.created_at, a.id",
     )
     .bind(user_id)
+    .bind(state.cfg.paid_features_free)
+    .bind(free_teams_cutoff())
     .fetch_all(&state.pool)
     .await?;
     Ok(rows
@@ -475,8 +478,8 @@ pub async fn apps_delete(
         let user = dash_user(&state, &headers).await?;
         let app_id = path_uuid(&app_id, "app_id")?;
         let row = live_app_row(&state, app_id).await?;
-        let role = app_role_for_user(&state, &row, user.id).await?;
-        assert_least_privilege(DashRole::Admin, role)?;
+        let access = app_role_for_user(&state, &row, user.id).await?;
+        assert_app_access(DashRole::Admin, access)?;
         let creator: Option<Uuid> = row
             .get("creator_id")
             .and_then(|v| v.as_str())
@@ -502,50 +505,132 @@ pub async fn apps_delete(
     json_or_err(r)
 }
 
-/// The caller's role on an app (`get-app-with-role!`, util/roles.clj:75-125):
-/// creator is owner, else the `app_members` role, else the org role.
+/// legacy `config/free-teams-cutoff`: 2026-03-01 in Etc/GMT+12 (UTC-12);
+/// members created before it are grandfathered into team features.
+pub(crate) fn free_teams_cutoff() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-03-01T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+/// One membership path of legacy `get-app-with-role!`: the role and whether
+/// the plan lets it count (owner, grandfathered, or paid features free).
+#[derive(Clone, Copy)]
+pub(crate) struct RolePath {
+    pub role: DashRole,
+    pub plan_ok: bool,
+}
+
+/// Both membership paths of `get-app-with-role!` (util/roles.clj:75-125).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AppAccess {
+    pub app: Option<RolePath>,
+    pub org: Option<RolePath>,
+}
+
+impl AppAccess {
+    pub(crate) fn any_role(&self) -> Option<DashRole> {
+        match (self.app, self.org) {
+            (Some(a), Some(o)) => Some(a.role.max(o.role)),
+            (Some(a), None) => Some(a.role),
+            (None, Some(o)) => Some(o.role),
+            (None, None) => None,
+        }
+    }
+}
+
+/// The caller's access to an app (`get-app-with-role!`): creator is owner,
+/// else the `app_members` row, plus the org membership.
 pub(crate) async fn app_role_for_user(
     state: &AppState,
     app: &Value,
     user_id: Uuid,
-) -> Result<Option<DashRole>> {
+) -> Result<AppAccess> {
     let creator: Option<Uuid> = app
         .get("creator_id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
-    if creator == Some(user_id) {
-        return Ok(Some(DashRole::Owner));
-    }
     let app_id: Uuid = app
         .get("id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok())
         .unwrap_or_default();
-    let member: Option<String> =
-        sqlx::query("SELECT member_role FROM app_members WHERE app_id = $1 AND user_id = $2")
-            .bind(app_id)
-            .bind(user_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .map(|r| r.get("member_role"));
-    if let Some(role) = member.and_then(|r| DashRole::parse(&r)) {
-        return Ok(Some(role));
+    let cutoff = free_teams_cutoff();
+    let free = state.cfg.paid_features_free;
+    let mut access = AppAccess::default();
+    if creator == Some(user_id) {
+        access.app = Some(RolePath {
+            role: DashRole::Owner,
+            plan_ok: true,
+        });
+    } else if let Some(r) = sqlx::query(
+        "SELECT member_role, created_at FROM app_members WHERE app_id = $1 AND user_id = $2",
+    )
+    .bind(app_id)
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await?
+    {
+        if let Some(role) = DashRole::parse(&r.get::<String, _>("member_role")) {
+            let created: chrono::DateTime<chrono::Utc> = r.get("created_at");
+            access.app = Some(RolePath {
+                role,
+                plan_ok: role == DashRole::Owner || created < cutoff || free,
+            });
+        }
     }
     let org_id: Option<Uuid> = app
         .get("org_id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
     if let Some(org_id) = org_id {
-        let role: Option<String> =
-            sqlx::query("SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2")
-                .bind(org_id)
-                .bind(user_id)
-                .fetch_optional(&state.pool)
-                .await?
-                .map(|r| r.get("role"));
-        return Ok(role.and_then(|r| DashRole::parse(&r)));
+        if let Some(r) = sqlx::query(
+            "SELECT role, created_at FROM org_members WHERE org_id = $1 AND user_id = $2",
+        )
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_optional(&state.pool)
+        .await?
+        {
+            if let Some(role) = DashRole::parse(&r.get::<String, _>("role")) {
+                let created: chrono::DateTime<chrono::Utc> = r.get("created_at");
+                access.org = Some(RolePath {
+                    role,
+                    plan_ok: role == DashRole::Owner || created < cutoff || free,
+                });
+            }
+        }
     }
-    Ok(None)
+    Ok(access)
+}
+
+/// legacy `throw-insufficient-plan!` (util/exception.clj)
+pub(crate) fn insufficient_plan() -> InstantError {
+    InstantError::new(
+        "permission-denied",
+        400,
+        "The plan for your app or organization does not support multiple members.",
+        None,
+    )
+}
+
+/// The decision of `get-app-with-role!` (util/roles.clj:98-125): a path
+/// with a good enough role whose plan allows it wins; else missing role /
+/// insufficient role / insufficient plan, in that order. Returns the
+/// caller's effective role (the max over both paths).
+pub(crate) fn assert_app_access(least: DashRole, access: AppAccess) -> Result<DashRole> {
+    let good = |p: Option<RolePath>| p.map(|p| p.role >= least).unwrap_or(false);
+    let ok = |p: Option<RolePath>| p.map(|p| p.role >= least && p.plan_ok).unwrap_or(false);
+    if ok(access.app) || ok(access.org) {
+        return Ok(access.any_role().unwrap_or(least));
+    }
+    if access.app.is_none() && access.org.is_none() {
+        return assert_least_privilege(least, None).map(|_| least);
+    }
+    if !good(access.app) && !good(access.org) {
+        return assert_least_privilege(least, access.any_role()).map(|_| least);
+    }
+    Err(insufficient_plan())
 }
 
 /// legacy `assert-least-privilege!` (util/roles.clj:43-57).
@@ -785,7 +870,7 @@ pub(crate) async fn org_role_for_user(
     least: DashRole,
 ) -> Result<Value> {
     let row = sqlx::query(
-        "SELECT o.id, o.title, o.created_at, o.updated_at, m.role
+        "SELECT o.id, o.title, o.created_at, o.updated_at, m.role, m.created_at AS member_created_at
            FROM orgs o JOIN org_members m ON m.org_id = o.id
           WHERE o.id = $1 AND m.user_id = $2",
     )
@@ -801,6 +886,14 @@ pub(crate) async fn org_role_for_user(
     })?;
     let role: String = row.get("role");
     assert_least_privilege(least, DashRole::parse(&role))?;
+    // org-with-role-for-user! plan gate (util/roles.clj:144-156)
+    let created: chrono::DateTime<chrono::Utc> = row.get("member_created_at");
+    if DashRole::parse(&role) != Some(DashRole::Owner)
+        && created >= free_teams_cutoff()
+        && !state.cfg.paid_features_free
+    {
+        return Err(insufficient_plan());
+    }
     Ok(json!({
         "id": row.get::<Uuid, _>("id"),
         "title": row.get::<String, _>("title"),

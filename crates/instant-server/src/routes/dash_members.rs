@@ -362,14 +362,20 @@ pub async fn invites_accept(
         }
         let mut dbtx = state.pool.begin().await?;
         // accept-by-id! (member_invites.clj:115-134): pending and sent within
-        // 3 days; legacy asserts the statement result, which is a map even
-        // for zero rows, so the membership is written either way
+        // 3 days, else record-not-found (execute-one! returns the updated row
+        // or nil)
         let sql = format!(
             "UPDATE {t} SET status = 'accepted'
               WHERE id = $1 AND status = 'pending' AND sent_at >= now() - interval '3 days'",
             t = invite.side.invites_table()
         );
-        sqlx::query(&sql).bind(invite_id).execute(&mut *dbtx).await?;
+        let res = sqlx::query(&sql).bind(invite_id).execute(&mut *dbtx).await?;
+        if res.rows_affected() == 0 {
+            return Err(record_not_found(
+                "member-invite",
+                json!({"args": [{"id": invite_id}]}),
+            ));
+        }
         match invite.side {
             Side::App => {
                 if invite.invitee_role == "creator" {

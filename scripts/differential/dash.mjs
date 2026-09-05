@@ -150,6 +150,8 @@ function pullView(res) {
 function errView(res) {
   const b = res.body ?? {};
   const view = norm({ status: res.status, type: b.type, message: b.message, hint: b.hint ?? null, keys: Object.keys(b).sort() });
+  // magic codes are random per server; legacy echoes them in hint args
+  if (view.hint?.args?.[0]?.code) view.hint.args[0].code = "<code>";
   // rule validation walks the rules map in key order, which differs between
   // Clojure hash maps and ours for larger maps; the CLI prints the joined
   // message, so compare the error set instead
@@ -884,7 +886,8 @@ async function runAgainst(name) {
     r33.expiryZero = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: 0 } }));
     r33.expiryTooLong = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: 2000 } }));
     r33.expiryAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { body: { expiry: 30 } }));
-    r33.expiry = plainView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: 30.7 } }));
+    const expiryRes = await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: 30.7 } });
+    r33.expiry = expiryRes.status === 200 ? { status: 200, keys: Object.keys(expiryRes.body).sort(), app: norm({ id: expiryRes.body.app?.id, magic_code_expiry_minutes: expiryRes.body.app?.magic_code_expiry_minutes, title: expiryRes.body.app?.title }) } : errView(expiryRes);
     r33.expiryAfter = (await call(base, "GET", `/dash/apps/${appId}`, { token: userToken })).body?.app?.magic_code_expiry_minutes ?? null;
     // rule versions (rules were pushed by earlier sections)
     const rv = await call(base, "GET", `/dash/apps/${appId}/rule-versions`);
@@ -895,7 +898,7 @@ async function runAgainst(name) {
     const tmpAttr = mk();
     await call(base, "POST", `/dash/apps/${appId}/schema/steps/apply`, { body: { steps: [addAttr(tmpAttr, "posts", "tmpdel")] } });
     await call(base, "POST", `/dash/apps/${appId}/schema/steps/apply`, { body: { steps: [["delete-attr", tmpAttr]] } });
-    const softView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), grace: res.body["grace-period-days"], attrs: (res.body.attrs ?? []).map(attrView) } : errView(res));
+    const softView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), grace: res.body["grace-period-days"], attrs: (res.body.attrs ?? []).map((a) => ({ ...attrView(a), "deletion-marked-at": norm(a["deletion-marked-at"] ?? null) })).sort((a, c) => (canon(a["forward-identity"]) < canon(c["forward-identity"]) ? -1 : 1)) } : errView(res));
     r33.softDeleted = softView(await call(base, "GET", `/dash/apps/${appId}/soft_deleted_attrs`));
     r33.softDeletedUser = softView(await call(base, "GET", `/dash/apps/${appId}/soft_deleted_attrs`, { token: userToken }));
     r33.softDeletedAdmin = softView(await call(base, "GET", "/admin/soft_deleted_attrs", appHdr));

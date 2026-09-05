@@ -34,7 +34,7 @@ use crate::routes::dash::{
     parse_body, DashRole, DashUser,
 };
 use crate::routes::dash_apps::{
-    app_role_for_user, assert_least_privilege, body_str, body_uuid, live_app_row, path_uuid,
+    app_role_for_user, app_row, assert_app_access, body_str, body_uuid, live_app_row, path_uuid,
     record_not_found, ts_naive, ts_tz,
 };
 use crate::routes::runtime::{coerce_email_pub, json_or_err};
@@ -61,9 +61,9 @@ pub(crate) async fn app_and_user(
     let app_id = path_uuid(app_id_raw, "app_id")?;
     let user = dash_user(state, headers).await?;
     let app = live_app_row(state, app_id).await?;
-    let role = app_role_for_user(state, &app, user.id).await?;
-    assert_least_privilege(least, role)?;
-    Ok((user, app, role.unwrap_or(least)))
+    let access = app_role_for_user(state, &app, user.id).await?;
+    let role = assert_app_access(least, access)?;
+    Ok((user, app, role))
 }
 
 fn app_uuid(app: &Value) -> Uuid {
@@ -125,8 +125,31 @@ pub async fn admin_schema(
 
 async fn soft_deleted_attrs(state: &AppState, app_id: Uuid) -> Result<Value> {
     let attrs = attr::get_soft_deleted_by_app_id(&state.pool, app_id).await?;
+    // legacy row->attr keeps `deletion-marked-at` on soft-deleted rows
+    let stamps: std::collections::HashMap<Uuid, Value> = sqlx::query(
+        "SELECT id, deletion_marked_at FROM attrs WHERE app_id = $1 AND deletion_marked_at IS NOT NULL",
+    )
+    .bind(app_id)
+    .fetch_all(&state.pool)
+    .await?
+    .iter()
+    .map(|r| (r.get::<Uuid, _>("id"), ts_col(r, "deletion_marked_at")))
+    .collect();
+    let wire: Vec<Value> = attrs
+        .iter()
+        .map(|a| {
+            let mut w = a.to_wire();
+            if let Some(m) = w.as_object_mut() {
+                m.insert(
+                    "deletion-marked-at".into(),
+                    stamps.get(&a.id).cloned().unwrap_or(Value::Null),
+                );
+            }
+            w
+        })
+        .collect();
     Ok(json!({
-        "attrs": attrs.iter().map(|a| a.to_wire()).collect::<Vec<_>>(),
+        "attrs": wire,
         "grace-period-days": GRACE_PERIOD_DAYS,
     }))
 }
@@ -284,13 +307,14 @@ pub async fn app_tokens_post(
             .bind(app_id)
             .execute(&mut *dbtx)
             .await?;
-        let res = sqlx::query("INSERT INTO app_admin_tokens (token, app_id) VALUES ($1, $2)")
+        sqlx::query("INSERT INTO app_admin_tokens (token, app_id) VALUES ($1, $2)")
             .bind(token)
             .bind(app_id)
             .execute(&mut *dbtx)
             .await?;
         dbtx.commit().await?;
-        Ok(update_count(res.rows_affected()))
+        // next.jdbc execute-one! returns the inserted row
+        Ok(json!({"token": token, "app_id": app_id}))
     }
     .await;
     json_or_err(r)
@@ -332,12 +356,14 @@ pub async fn app_set_magic_code_expiry(
                 "The magic token expiry must be under 1,440 minutes (24 hours).",
             ));
         }
-        let res = sqlx::query("UPDATE apps SET magic_code_expiry_minutes = $1 WHERE id = $2")
+        let app_id = app_uuid(&app);
+        sqlx::query("UPDATE apps SET magic_code_expiry_minutes = $1 WHERE id = $2")
             .bind(expiry as i32)
-            .bind(app_uuid(&app))
+            .bind(app_id)
             .execute(&state.pool)
             .await?;
-        Ok(json!({"app": update_count(res.rows_affected())}))
+        // next.jdbc execute-one! returns the updated row
+        Ok(json!({"app": app_row(&state, app_id).await?}))
     }
     .await;
     json_or_err(r)
@@ -530,8 +556,7 @@ pub async fn storage_upload(
             return Err(param_missing(&["body"]));
         }
         let meta = admin::blob_meta_from_headers(&headers)?;
-        let data = admin::store_file(&state, app.id, &path, &body, &meta).await?;
-        Ok(json!({"data": data}))
+        admin::store_file(&state, app.id, &path, &body, &meta).await
     }
     .await;
     json_or_err(r)
@@ -552,14 +577,19 @@ pub async fn storage_files_delete(
             .get("filenames")
             .filter(|v| !v.is_null())
             .ok_or_else(|| param_missing(&["body", "filenames"]))?;
-        let filenames: Vec<String> = raw
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .ok_or_else(|| param_malformed(&["body", "filenames"], raw.clone()))?;
+        // legacy coerces with `vec`: an array as-is, a string into its
+        // characters, anything else is malformed
+        let filenames: Vec<String> = match raw {
+            Value::Array(a) => a
+                .iter()
+                .map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect(),
+            Value::String(s) => s.chars().map(|c| c.to_string()).collect(),
+            _ => return Err(param_malformed(&["body", "filenames"], raw.clone())),
+        };
         let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
         let mut ids = vec![];
         for f in &filenames {
@@ -664,15 +694,20 @@ pub async fn profiles_post(
             .filter(|v| !v.is_null())
             .cloned()
             .ok_or_else(|| param_missing(&["body", "meta"]))?;
-        let res = sqlx::query(
+        let row = sqlx::query(
             "INSERT INTO instant_profiles (id, meta) VALUES ($1, $2)
-             ON CONFLICT (id) DO UPDATE SET meta = excluded.meta",
+             ON CONFLICT (id) DO UPDATE SET meta = excluded.meta
+             RETURNING id, meta, created_at",
         )
         .bind(user.id)
         .bind(meta)
-        .execute(&state.pool)
+        .fetch_one(&state.pool)
         .await?;
-        Ok(json!({"profile": update_count(res.rows_affected())}))
+        Ok(json!({"profile": {
+            "id": row.get::<Uuid, _>("id"),
+            "meta": row.get::<Value, _>("meta"),
+            "created_at": ts_col(&row, "created_at"),
+        }}))
     }
     .await;
     json_or_err(r)
@@ -810,7 +845,7 @@ pub async fn auth_send_magic_code(State(state): State<Arc<AppState>>, body: Byte
 
 /// POST /dash/auth/verify_magic_code — legacy verify-magic-code-post
 /// (:296-314) + `instant-user-magic-code-model/consume!` (10-minute expiry)
-/// + `instant-user-refresh-token-model/create!` (the dashboard-login-disabled
+/// and `instant-user-refresh-token-model/create!` (the dashboard-login-disabled
 /// user flag).
 pub async fn auth_verify_magic_code(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
     let r = async {
@@ -940,8 +975,7 @@ pub(crate) fn token_lookup_key(token: &str) -> Vec<u8> {
 }
 
 /// POST /dash/personal_access_tokens — legacy personal-access-tokens-post:
-/// the plaintext token is returned once (and, matching legacy's
-/// `format-token-for-api` over a statement result, it is the only key).
+/// the inserted row plus the plaintext token, returned once.
 pub async fn personal_access_tokens_post(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -952,17 +986,19 @@ pub async fn personal_access_tokens_post(
         let body = parse_body(&body)?;
         let name = body_str(&body, "name")?;
         let token = generate_personal_access_token();
-        sqlx::query(
+        let row = sqlx::query(
             "INSERT INTO instant_personal_access_tokens (id, user_id, name, lookup_key)
-             VALUES ($1, $2, $3, $4)",
+             VALUES ($1, $2, $3, $4) RETURNING id, user_id, name, created_at",
         )
         .bind(Uuid::new_v4())
         .bind(user.id)
         .bind(&name)
         .bind(token_lookup_key(&token))
-        .execute(&state.pool)
+        .fetch_one(&state.pool)
         .await?;
-        Ok(json!({"data": {"token": token}}))
+        let mut data = pat_json(&row);
+        data["token"] = json!(token);
+        Ok(json!({"data": data}))
     }
     .await;
     json_or_err(r)

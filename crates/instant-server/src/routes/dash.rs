@@ -226,43 +226,10 @@ pub(crate) async fn dash_authed_with_role(
     let Some(user) = user_by_refresh_token(state, token).await? else {
         return Err(unauthorized());
     };
-    let app = app_or_not_found(state, app_id).await?;
-    let role: Option<String> = sqlx::query(
-        "SELECT CASE WHEN a.creator_id = $2 THEN 'owner'
-                     ELSE coalesce(m.member_role, om.role) END AS role
-           FROM apps a
-           LEFT JOIN app_members m ON m.app_id = a.id AND m.user_id = $2
-           LEFT JOIN org_members om ON om.org_id = a.org_id AND om.user_id = $2
-          WHERE a.id = $1",
-    )
-    .bind(app_id)
-    .bind(user.id)
-    .fetch_optional(&state.pool)
-    .await?
-    .and_then(|r| r.get::<Option<String>, _>("role"));
-    let role = role.as_deref().and_then(DashRole::parse);
-    match role {
-        None => Err(InstantError::new(
-            "validation-failed",
-            400,
-            format!(
-                "Validation failed for user-role: User is missing role {}.",
-                least.as_str()
-            ),
-            Some(json!({
-                "data-type": "user-role",
-                "input": null,
-                "errors": [{"message": format!("User is missing role {}.", least.as_str())}],
-            })),
-        )),
-        Some(r) if r < least => Err(InstantError::new(
-            "permission-denied",
-            400,
-            "Permission denied: not allowed-member-role?",
-            Some(json!({"input": r.as_str(), "expected": "allowed-member-role?"})),
-        )),
-        Some(_) => Ok(app),
-    }
+    let row = crate::routes::dash_apps::live_app_row(state, app_id).await?;
+    let access = crate::routes::dash_apps::app_role_for_user(state, &row, user.id).await?;
+    crate::routes::dash_apps::assert_app_access(least, access)?;
+    app_or_not_found(state, app_id).await
 }
 
 pub(crate) fn parse_body(body: &Bytes) -> Result<Value> {

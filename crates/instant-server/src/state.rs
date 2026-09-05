@@ -48,6 +48,11 @@ pub struct Config {
     /// comma-separated).
     pub dashboard_signup_mode: String,
     pub dashboard_allowed_emails: Vec<String>,
+    /// Legacy `flags/paid-features-free?`: when false (the self-hosted legacy
+    /// default) app/org members added after the free-teams cutoff need a paid
+    /// plan, which does not exist here, so they get legacy's
+    /// insufficient-plan error and don't see the app (`INSTANT_PAID_FEATURES_FREE`).
+    pub paid_features_free: bool,
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -89,6 +94,10 @@ impl Config {
                 .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            paid_features_free: matches!(
+                std::env::var("INSTANT_PAID_FEATURES_FREE").as_deref(),
+                Ok("1") | Ok("true") | Ok("on")
+            ),
         }
     }
 }

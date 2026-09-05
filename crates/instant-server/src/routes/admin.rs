@@ -765,7 +765,9 @@ fn resolve_obj_attr(
         "id": id,
         "forward-identity": [Uuid::new_v4(), etype, label],
         "value-type": "blob", "cardinality": "one",
-        "unique?": is_id, "index?": is_id
+        // legacy create-object-attr (admin/model.clj:280-284): the auto-created
+        // `id` attr is unique but not indexed
+        "unique?": is_id, "index?": false
     }]));
     Ok(id)
 }
