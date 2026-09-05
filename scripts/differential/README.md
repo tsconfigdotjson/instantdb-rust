@@ -124,7 +124,11 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   exercised; `run.sh` prints per-group coverage with the uncovered list and
   fails if an item in the committed baseline is no longer exercised
   (`node coverage.mjs --write <file>` updates the baseline after adding
-  coverage). Groups `demo`, `health`, `ws-internal`, `cel-internal` are
+  coverage). `out-of-scope.json` names the hosted-only items (billing,
+  backups / restores, sunset stages, Postmark sender verification, the
+  operators' reports) with a reason each; they leave the counted total and
+  are reported on their own line, so the percentage measures what a
+  self-hosted server can serve. Groups `demo`, `health`, `ws-internal`, `cel-internal` are
   listed but not counted.
 
 This harness found (and pinned as regression coverage) real divergences during
