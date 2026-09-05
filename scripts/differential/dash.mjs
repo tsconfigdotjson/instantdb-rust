@@ -1147,7 +1147,8 @@ async function runAgainst(name) {
     r38.detailsUserToken = detailsView(await call(base, "GET", `/superadmin/apps/${pApp}`, { token: userToken }));
     r38.detailsStranger = errView(await call(base, "GET", `/superadmin/apps/${pApp}`, { token: inviteeToken }));
     r38.detailsUnknown = errView(await sa("GET", `/superadmin/apps/${mk()}`));
-    r38.update = plainView(await sa("POST", `/superadmin/apps/${pApp}`, { body: { title: "renamed platform app" } }));
+    const saUpView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), app: saApp(res.body.app), deleted: res.body.app?.deletion_marked_at != null } : errView(res));
+    r38.update = saUpView(await sa("POST", `/superadmin/apps/${pApp}`, { body: { title: "renamed platform app" } }));
     r38.updateMissingTitle = errView(await sa("POST", `/superadmin/apps/${pApp}`, { body: {} }));
     const sg = await sa("GET", `/superadmin/apps/${pApp}/schema`);
     r38.schemaGet = sg.status === 200 ? { status: 200, schema: schemaView(sg.body.schema) } : errView(sg);
@@ -1160,11 +1161,11 @@ async function runAgainst(name) {
     r38.permsPostBad = errView(await sa("POST", `/superadmin/apps/${pApp}/perms`, { body: { code: { posts: { allow: { view: "nope nope" } } } } }));
     r38.permsPostMissing = errView(await sa("POST", `/superadmin/apps/${pApp}/perms`, { body: {} }));
     r38.transferSendMissingEmail = errView(await sa("POST", `/superadmin/apps/${pApp}/transfers/send`, { body: {} }));
-    r38.transferSend = plainView(await sa("POST", `/superadmin/apps/${pApp}/transfers/send`, { body: { dest_email: inviteeEmail } }));
+    r38.transferSend = okKeys(await sa("POST", `/superadmin/apps/${pApp}/transfers/send`, { body: { dest_email: inviteeEmail } }));
     r38.transferRevoke = plainView(await sa("POST", `/superadmin/apps/${pApp}/transfers/revoke`, { body: { dest_email: inviteeEmail } }));
     r38.transferRevokeAgain = plainView(await sa("POST", `/superadmin/apps/${pApp}/transfers/revoke`, { body: { dest_email: inviteeEmail } }));
     r38.deleteStranger = errView(await call(base, "DELETE", `/superadmin/apps/${pApp}`, { token: inviteeToken }));
-    r38.delete = plainView(await sa("DELETE", `/superadmin/apps/${pApp}`));
+    r38.delete = saUpView(await sa("DELETE", `/superadmin/apps/${pApp}`));
     r38.detailsAfterDelete = errView(await sa("GET", `/superadmin/apps/${pApp}`));
     // OAuth-app management
     const oaView = (a) => norm({ appName: a?.appName, isPublic: a?.isPublic, grantedScopes: a?.grantedScopes, supportEmail: a?.supportEmail, appHomePage: a?.appHomePage, appLogo: a?.appLogo, keys: Object.keys(a ?? {}).sort() });
@@ -1183,21 +1184,21 @@ async function runAgainst(name) {
     r38.oauthAppUpdate = oaUpd.status === 200 ? { status: 200, app: oaView(oaUpd.body.app), tos: oaUpd.body.app?.appTosLink } : errView(oaUpd);
     r38.oauthAppUpdateUnknown = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps/${mk()}`, { token: userToken, body: { app_name: "z" } }));
     const pclient = await call(base, "POST", `/dash/apps/${appId}/oauth-apps/${oaId}/clients`, { token: userToken, body: { client_name: "web", authorized_redirect_urls: ["https://example.com/callback", "http://localhost:3000/callback"] } });
-    r38.clientCreate = pclient.status === 200 ? { status: 200, keys: Object.keys(pclient.body).sort(), pclient: norm({ clientName: pclient.body.pclient?.clientName, authorizedRedirectUrls: pclient.body.pclient?.authorizedRedirectUrls, keys: Object.keys(pclient.body.pclient ?? {}).sort() }), secretKeys: Object.keys(pclient.body.clientSecret ?? {}).sort(), secretShape: /^[0-9a-f]{68}$/.test(pclient.body.secretValue), firstFourMatches: pclient.body.secretValue?.slice(0, 4) === pclient.body.clientSecret?.firstFour } : errView(pclient);
+    r38.clientCreate = pclient.status === 200 ? { status: 200, keys: Object.keys(pclient.body).sort(), client: norm({ clientName: pclient.body.client?.clientName, authorizedRedirectUrls: pclient.body.client?.authorizedRedirectUrls, keys: Object.keys(pclient.body.client ?? {}).sort() }), secretKeys: Object.keys(pclient.body.clientSecret ?? {}).sort(), secretShape: /^[0-9a-f]{68}$/.test(pclient.body.secretValue), firstFourMatches: pclient.body.secretValue?.slice(0, 4) === pclient.body.clientSecret?.firstFour } : errView(pclient);
     r38.clientCreateBadRedirect = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps/${oaId}/clients`, { token: userToken, body: { client_name: "bad", authorized_redirect_urls: ["http://example.com/x"] } }));
     r38.clientCreateMissingName = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps/${oaId}/clients`, { token: userToken, body: {} }));
     r38.clientCreateUnknownApp = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps/${mk()}/clients`, { token: userToken, body: { client_name: "x" } }));
-    const pclientId = pclient.body?.pclient?.pclientId;
+    const pclientId = pclient.body?.client?.clientId;
     const secretValue = pclient.body?.secretValue;
     const cupd = await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${pclientId}`, { token: userToken, body: { client_name: "web2", add_redirect_url: "https://example.com/cb2", remove_redirect_url: "http://localhost:3000/callback" } });
-    r38.clientUpdate = cupd.status === 200 ? { status: 200, pclient: norm({ clientName: cupd.body.pclient?.clientName, authorizedRedirectUrls: cupd.body.pclient?.authorizedRedirectUrls }) } : errView(cupd);
+    r38.clientUpdate = cupd.status === 200 ? { status: 200, client: norm({ clientName: cupd.body.client?.clientName, authorizedRedirectUrls: cupd.body.client?.authorizedRedirectUrls }) } : errView(cupd);
     r38.clientUpdateBadUrl = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${pclientId}`, { token: userToken, body: { add_redirect_url: "http://bad.example.com" } }));
     r38.clientUpdateUnknown = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${mk()}`, { token: userToken, body: { client_name: "x" } }));
-    const sec2 = await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${pclientId}/pclient-secrets`, { token: userToken });
+    const sec2 = await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${pclientId}/client-secrets`, { token: userToken });
     r38.secretCreate = sec2.status === 200 ? { status: 200, keys: Object.keys(sec2.body).sort(), secretKeys: Object.keys(sec2.body.clientSecret ?? {}).sort(), shape: /^[0-9a-f]{68}$/.test(sec2.body.secretValue) } : errView(sec2);
-    r38.secretCreateUnknownClient = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${mk()}/pclient-secrets`, { token: userToken }));
-    r38.secretDelete = okKeys(await call(base, "DELETE", `/dash/apps/${appId}/oauth-app-pclient-secrets/${sec2.body?.clientSecret?.id}`, { token: userToken }), (b) => b.clientSecret);
-    r38.secretDeleteUnknown = errView(await call(base, "DELETE", `/dash/apps/${appId}/oauth-app-pclient-secrets/${mk()}`, { token: userToken }));
+    r38.secretCreateUnknownClient = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${mk()}/client-secrets`, { token: userToken }));
+    r38.secretDelete = okKeys(await call(base, "DELETE", `/dash/apps/${appId}/oauth-app-client-secrets/${sec2.body?.clientSecret?.id}`, { token: userToken }), (b) => b.clientSecret);
+    r38.secretDeleteUnknown = errView(await call(base, "DELETE", `/dash/apps/${appId}/oauth-app-client-secrets/${mk()}`, { token: userToken }));
     const oaList = await call(base, "GET", `/dash/apps/${appId}/oauth-apps`, { token: userToken });
     r38.oauthAppsList = oaList.status === 200 ? { status: 200, keys: Object.keys(oaList.body).sort(), apps: (oaList.body.apps ?? []).map((a) => ({ appName: a.appName, keys: Object.keys(a).sort(), clients: (a.clients ?? []).map((c) => ({ clientName: c.clientName, keys: Object.keys(c).sort(), secrets: (c.clientSecrets ?? []).length, secretKeys: Object.keys(c.clientSecrets?.[0] ?? {}).sort() })) })).sort((a, c) => (a.appName < c.appName ? -1 : 1)) } : errView(oaList);
     // the OAuth flow
@@ -1316,7 +1317,7 @@ async function runAgainst(name) {
     r38.userOauthApps = ua.status === 200 ? { status: 200, apps: (ua.body.oauthApps ?? []).map((x) => ({ name: x.name, keys: Object.keys(x).sort() })) } : errView(ua);
     r38.userOauthAppsRevoke = plainView(await call(base, "POST", "/dash/user/oauth_apps/revoke_access", { token: userToken, body: { oauthAppId: oaId } }));
     r38.userOauthAppsRevokeMissing = errView(await call(base, "POST", "/dash/user/oauth_apps/revoke_access", { token: userToken, body: {} }));
-    r38.clientDelete = okKeys(await call(base, "DELETE", `/dash/apps/${appId}/oauth-app-clients/${pclientId}`, { token: userToken }), (b) => b.pclient);
+    r38.clientDelete = okKeys(await call(base, "DELETE", `/dash/apps/${appId}/oauth-app-clients/${pclientId}`, { token: userToken }), (b) => b.client);
     r38.clientDeleteAgain = errView(await call(base, "DELETE", `/dash/apps/${appId}/oauth-app-clients/${pclientId}`, { token: userToken }));
     r38.oauthAppDeleteCollaborator = errView(await call(base, "DELETE", `/dash/apps/${appId}/oauth-apps/${oaId}`, { token: inviteeToken }));
     r38.oauthAppDelete = okKeys(await call(base, "DELETE", `/dash/apps/${appId}/oauth-apps/${oaId}`, { token: userToken }), (b) => b.app);

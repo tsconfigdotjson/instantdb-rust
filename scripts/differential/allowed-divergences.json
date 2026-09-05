@@ -17,7 +17,7 @@
   {
     "path": "^dash:23-errors/badAttr$",
     "reason": "An add-attr step whose attr map is garbage (`{id: \"x\"}`) reaches the legacy SQL layer and surfaces as a 500 `sql-exception`; this server rejects it as a 400 `validation-failed` on parse. The CLI never sends such a step (its steps come from @instantdb/platform convertTxSteps) and only prints `message` on failure either way.",
-    "citation": "LEGACY/client/packages/cli/src/lib/http.ts:67-101 (error body → message); LEGACY/client/packages/platform/src/migrations.ts:230-252"
+    "citation": "LEGACY/client/packages/cli/src/lib/http.ts:67-101 (error body \u2192 message); LEGACY/client/packages/platform/src/migrations.ts:230-252"
   },
   {
     "path": "^dash:24-admin-ref-lookups/queryAfterDelete$",
@@ -32,5 +32,10 @@
     "path": "^step:28-admin-http-gates/HTTP_ROUTING$",
     "reason": "Unmatched /admin paths and wrong methods: the self-hosted legacy image answers with HTTP 200 and a non-JSON body (observed in the differential replay; its core.clj not-found handler with the JSON `Oops! We couldn't match this route.` body is not what the image serves). This server returns that JSON 404, which is what the CLI's error path parses.",
     "citation": "LEGACY/server/src/instant/core.clj:189-190; LEGACY/client/packages/cli/src/lib/http.ts:71-90 (JSON error body -> message, else generic failure text)"
+  },
+  {
+    "path": "^dash:38-platform/transferRevoke(Again)?$",
+    "reason": "Legacy's app-transfer revoke 500s: `make-reject-by-email-and-role-q` binds the role to a `:?email` placeholder that the caller never supplies (member_invites.clj:205-229), so the query can't be formatted. This server revokes the pending creator invite and answers `{count}` as the handler intends.",
+    "citation": "LEGACY/server/src/instant/model/member_invites.clj:205-229; superadmin/routes.clj:235-245"
   }
 ]

@@ -270,7 +270,7 @@ pub async fn oauth_apps_post(
         .bind(logo)
         .fetch_one(&state.pool)
         .await
-        .map_err(unique_err("oauth-app"))?;
+        .map_err(unique_err("instant-oauth-app"))?;
         Ok(json!({"app": oauth_app_json(&row)}))
     }
     .await;
@@ -327,7 +327,7 @@ pub async fn oauth_app_update(
         .bind(logo)
         .fetch_optional(&state.pool)
         .await
-        .map_err(unique_err("oauth-app"))?
+        .map_err(unique_err("instant-oauth-app"))?
         .ok_or_else(|| {
             record_not_found(
                 "oauth-app",
@@ -438,7 +438,7 @@ pub async fn oauth_clients_post(
         .bind(&urls)
         .fetch_one(&mut *dbtx)
         .await
-        .map_err(unique_err("oauth-app-client"))?;
+        .map_err(unique_err("instant-oauth-app-client"))?;
         let secret_row = sqlx::query(&format!(
             "INSERT INTO instant_oauth_app_client_secrets (id, client_id, hashed_secret, first_four)
              VALUES ($1, $2, $3, $4) RETURNING {SECRET_COLUMNS}"
@@ -1061,7 +1061,10 @@ pub async fn claim(
         let localhost = host.as_deref() == Some("localhost");
         if !ca.is_public || localhost {
             let app = live_app_row(&state, ca.app_id).await?;
-            let member = app_role_for_user(&state, &app, user.id).await?.is_some();
+            let member = app_role_for_user(&state, &app, user.id)
+                .await?
+                .any_role()
+                .is_some();
             if !member {
                 sqlx::query("DELETE FROM instant_oauth_app_redirects WHERE lookup_key = $1")
                     .bind(uuid_sha256(redirect_id))
