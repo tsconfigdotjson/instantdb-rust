@@ -320,7 +320,11 @@ async fn invite_by_id(state: &AppState, id: Uuid) -> Result<Invite> {
             fk = side.fk(),
             t = side.invites_table()
         );
-        if let Some(r) = sqlx::query(&sql).bind(id).fetch_optional(&state.pool).await? {
+        if let Some(r) = sqlx::query(&sql)
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await?
+        {
             return Ok(Invite {
                 side,
                 foreign_key: r.get("fk"),
@@ -426,7 +430,10 @@ pub async fn invites_decline(
             "UPDATE {t} SET status = 'revoked' WHERE id = $1 AND status = 'pending'",
             t = invite.side.invites_table()
         );
-        sqlx::query(&sql).bind(invite_id).execute(&state.pool).await?;
+        sqlx::query(&sql)
+            .bind(invite_id)
+            .execute(&state.pool)
+            .await?;
         Ok(json!({}))
     }
     .await;

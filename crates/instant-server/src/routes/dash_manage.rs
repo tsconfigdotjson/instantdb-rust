@@ -88,7 +88,11 @@ fn ts_col(row: &sqlx::postgres::PgRow, col: &str) -> Value {
     if let Ok(t) = row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(col) {
         return ts_tz(t);
     }
-    ts_naive(row.try_get::<Option<chrono::NaiveDateTime>, _>(col).ok().flatten())
+    ts_naive(
+        row.try_get::<Option<chrono::NaiveDateTime>, _>(col)
+            .ok()
+            .flatten(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +200,7 @@ pub async fn app_clear(
         let attrs = service::load_attrs(&state, app_id).await?;
         let steps: Vec<Value> = attrs
             .iter()
-            .filter(|a| a.app_id == app_id)
+            .filter(|a| !a.is_system)
             .map(|a| json!(["delete-attr", a.id]))
             .collect();
         // legacy always writes a transactions row, even for an empty app
@@ -315,7 +319,11 @@ pub async fn app_set_magic_code_expiry(
         let (_, app, _) = app_and_user(&state, &headers, &app_id, DashRole::Admin).await?;
         let input = json!({"magic-token-expiry-minutes": expiry});
         if expiry <= 0 {
-            return Err(validation_err("app", input, "The magic token expiry must be positive."));
+            return Err(validation_err(
+                "app",
+                input,
+                "The magic token expiry must be positive.",
+            ));
         }
         if expiry > 24 * 60 {
             return Err(validation_err(
@@ -418,7 +426,11 @@ pub async fn test_users_post(
             .ok_or_else(|| param_malformed(&["body", "email"], raw_email.clone()))?;
         let code = body_str(&body, "code")?;
         if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(validation_err("code", json!(code), "Code must be a 6-digit number."));
+            return Err(validation_err(
+                "code",
+                json!(code),
+                "Code must be a 6-digit number.",
+            ));
         }
         let row = sqlx::query(
             "INSERT INTO app_test_users (id, app_id, email, code) VALUES ($1, $2, $3, $4)
@@ -542,7 +554,11 @@ pub async fn storage_files_delete(
             .ok_or_else(|| param_missing(&["body", "filenames"]))?;
         let filenames: Vec<String> = raw
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .ok_or_else(|| param_malformed(&["body", "filenames"], raw.clone()))?;
         let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
         let mut ids = vec![];
