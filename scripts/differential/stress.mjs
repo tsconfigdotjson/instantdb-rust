@@ -92,7 +92,8 @@ async function runOn(serverName) {
     waitAck("presence", (m) => m["client-event-id"] === ids.presence),
     waitAck("query", (m) => m["client-event-id"] === ids.query),
     waitAck("broadcast", (m) => m["client-event-id"] === ids.broadcast),
-    peer.conn.waitFor((m) => m.op === "refresh-presence" && JSON.stringify(m).includes('"cursor":1'), 60000).then(() => (arrivals.peerPresence = Date.now() - t0)),
+    // clients newer than core 0.17.5 get patch-presence instead of refresh-presence
+    peer.conn.waitFor((m) => (m.op === "refresh-presence" || m.op === "patch-presence") && JSON.stringify(m).includes('"cursor":1'), 60000).then(() => (arrivals.peerPresence = Date.now() - t0)),
     peer.conn.waitFor((m) => m.op === "server-broadcast" && m.topic === "ping", 60000).then(() => (arrivals.peerBroadcast = Date.now() - t0)),
   ]);
   const order = Object.entries(arrivals).sort((a, b) => a[1] - b[1]).map(([k, ms]) => `${k}@${ms}ms`);

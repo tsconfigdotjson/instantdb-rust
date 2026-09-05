@@ -152,12 +152,14 @@ impl InstantError {
     }
 
     /// JSON body for HTTP error responses / fields for ws `error` op.
+    /// Legacy `instant-ex->bad-request` (util/http.clj:148-158) always
+    /// emits the `hint` key, null when the exception carried none.
     pub fn to_body(&self) -> Value {
-        let mut body = json!({"type": self.error_type, "message": self.message});
-        if let Some(h) = &self.hint {
-            body["hint"] = h.clone();
-        }
-        body
+        json!({
+            "type": self.error_type,
+            "message": self.message,
+            "hint": self.hint.clone().unwrap_or(Value::Null),
+        })
     }
 }
 

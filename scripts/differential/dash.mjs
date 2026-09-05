@@ -900,6 +900,8 @@ for (const d of diffs) {
     console.log(`  first differing sub-path: ${fd.p}`);
     console.log("  legacy:", JSON.stringify(fd.a)?.slice(0, 1500));
     console.log("  rust:  ", JSON.stringify(fd.b)?.slice(0, 1500));
+    console.log("  full legacy:", JSON.stringify(d.legacy)?.slice(0, 700));
+    console.log("  full rust:  ", JSON.stringify(d.rust)?.slice(0, 700));
   } else {
     console.log("  legacy:", JSON.stringify(d.legacy)?.slice(0, 1500));
     console.log("  rust:  ", JSON.stringify(d.rust)?.slice(0, 1500));
