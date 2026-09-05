@@ -95,6 +95,17 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   asserts per-server invariants (monotonic tx-ids) and cross-server equality
   of every query result. `node fuzz.mjs <app> <app> <token> [seed] [rounds]`.
 - `lib.mjs` — capture clients, normalization, folding.
+- `surface.mjs` / `surface.json` — the legacy server's public surface derived
+  mechanically from the vendored source (every route table, ws op, tx-step
+  op, InstaQL option and where operator, custom CEL overload, error type);
+  `--check` runs in CI so the manifest can't drift from `LEGACY/`.
+- `coverage-hook.mjs` / `coverage.mjs` / `coverage-baseline.json` — the
+  capture clients and a wrapped `fetch` record which surface items a run
+  exercised; `run.sh` prints per-group coverage with the uncovered list and
+  fails if an item in the committed baseline is no longer exercised
+  (`node coverage.mjs --write <file>` updates the baseline after adding
+  coverage). Groups `demo`, `health`, `ws-internal`, `cel-internal` are
+  listed but not counted.
 
 This harness found (and pinned as regression coverage) real divergences during
 development: deep-merge null semantics, system-catalog attr visibility,

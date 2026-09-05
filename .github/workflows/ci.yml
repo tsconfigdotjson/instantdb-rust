@@ -84,6 +84,10 @@ jobs:
       - name: Run Rust tests
         run: cargo test --workspace
 
+      # the legacy surface manifest must track the vendored source
+      - name: Legacy surface manifest is current
+        run: node scripts/differential/surface.mjs --check
+
       # The legacy SDK is frozen reference code — cache its build output and
       # skip the tsc/tshy compile entirely on a hit. pnpm install still runs
       # (fast via the store cache): dist imports resolve deps via node_modules.

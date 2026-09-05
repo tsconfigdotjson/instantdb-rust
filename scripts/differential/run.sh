@@ -10,6 +10,11 @@ RUST_URL="${RUST_URL:-http://localhost:8888}"
 LEGACY_URL="${LEGACY_URL:-http://localhost:8891}"
 KEEP="${KEEP:-0}"
 
+echo "== legacy surface manifest =="
+node surface.mjs --check
+export COVERAGE_FILE="${COVERAGE_FILE:-$(pwd)/.coverage.jsonl}"
+rm -f "$COVERAGE_FILE"
+
 echo "== booting legacy stack =="
 docker compose up -d --quiet-pull
 
@@ -65,5 +70,8 @@ for SEED in ${FUZZ_SEEDS:-42 99}; do
   ./provision.sh "$FUZZ_APP" "$FUZZ_TOKEN"
   node fuzz.mjs "$FUZZ_APP" "$FUZZ_APP" "$FUZZ_TOKEN" "$SEED" "${FUZZ_ROUNDS:-60}"
 done
+
+echo "== legacy surface coverage =="
+node coverage.mjs --check "$COVERAGE_FILE"
 
 echo "DIFFERENTIAL HARNESS PASSED"

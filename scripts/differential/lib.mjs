@@ -10,6 +10,7 @@
 // says otherwise.
 
 import { execSync } from "node:child_process";
+import { noteCel, noteWsFrame, noteWsMessage } from "./coverage-hook.mjs";
 
 export const uuid = () => crypto.randomUUID();
 
@@ -33,6 +34,7 @@ export const isFixedId = (s) =>
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function psql(url, sql) {
+  noteCel(sql);
   execSync(`psql "${url}" -q -v ON_ERROR_STOP=1 -f -`, { input: sql });
 }
 
@@ -55,6 +57,7 @@ export function connect(serverUrl, appId, name, headers) {
     const msg = JSON.parse(e.data);
     for (const m of Array.isArray(msg) ? msg : [msg]) {
       frames.push(m);
+      noteWsFrame(m);
       lastFrameAt = Date.now();
       for (let i = waiters.length - 1; i >= 0; i--) {
         const [pred, resolve] = waiters[i];
@@ -66,6 +69,7 @@ export function connect(serverUrl, appId, name, headers) {
     }
   };
   const send = (msg) => {
+    noteWsMessage(msg);
     ws.send(JSON.stringify(msg));
     return msg["client-event-id"];
   };
@@ -114,6 +118,7 @@ export function connectSse(serverUrl, appId, name, { path, pushPath, headers = {
   let httpStatus = null;
   const deliver = (m) => {
     frames.push(m);
+    noteWsFrame(m);
     lastFrameAt = Date.now();
     if (m.op === "sse-init") init = m;
     for (let i = waiters.length - 1; i >= 0; i--) {
@@ -174,6 +179,7 @@ export function connectSse(serverUrl, appId, name, { path, pushPath, headers = {
   })();
   const send = (msg) => {
     if (!init) throw new Error(`sse ${name} not open`);
+    noteWsMessage(msg);
     const envelope = {
       machine_id: init["machine-id"],
       session_id: init["session-id"],
