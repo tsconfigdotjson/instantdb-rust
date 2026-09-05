@@ -4,36 +4,7 @@
 # host at 8888 against its own postgres).
 name: instant-differential
 
-networks:
-  default:
-  # the mock OIDC provider's network uses a documentation range: legacy's
-  # SSRF guard refuses private / loopback hosts, and docker's bridge ranges
-  # are private (scripts/differential/oauth.mjs)
-  oidc:
-    ipam:
-      config:
-        - subnet: 203.0.113.0/24
-
 services:
-  mock-oidc:
-    image: node:22-alpine
-    volumes:
-      - ../mock-oidc.mjs:/mock-oidc.mjs:ro
-    command: ["node", "/mock-oidc.mjs"]
-    environment:
-      MOCK_OIDC_PORT: "9377"
-    # host-mapped so the rust server and the harness reach it as localhost:9377
-    ports:
-      - "9377:9377"
-    networks:
-      oidc:
-        ipv4_address: 203.0.113.10
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9377/health"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
-
   legacy-postgres:
     image: ghcr.io/instantdb/postgresql:postgresql-17-pg-hint-plan
     ports:
@@ -92,11 +63,6 @@ services:
         condition: service_healthy
       createbuckets:
         condition: service_completed_successfully
-      mock-oidc:
-        condition: service_healthy
-    networks:
-      - default
-      - oidc
     image: "ghcr.io/instantdb/server:latest"
     ports:
       - "8891:8888"

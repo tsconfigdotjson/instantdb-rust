@@ -121,17 +121,6 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   (`send_magic_code` hands the code back, `verify_magic_code` signs in).
   `scripts/dash-login-test.mjs` (the `cargo test + e2e` job) runs the full
   Google round trip against a mock token endpoint.
-- `oauth.mjs` — the client-facing OAuth routes end to end on both servers
-  against one mock OpenID Connect provider (`scripts/mock-oidc.mjs`, run as a
-  container on a documentation-range network so legacy's SSRF guard lets it
-  through): `start` (both spellings, extra params, every param error), the
-  callback (GET and form_post, every error path, the provider rejecting the
-  code, an unverified email), the token exchange (JSON / form / query
-  params, double use, wrong app, `Origin` gating, guest upgrade, the PKCE
-  flow through `/runtime/:app_id/oauth/*`), `id_token` sign-in (nonce rules,
-  audience, issuer, algorithm, forged signatures, public clients, refresh
-  token reuse, guest upgrade), the openid configuration and `signout`;
-  `oauth-allowed.json` for accepted divergences.
 - `lib.mjs` — capture clients, normalization, folding.
 - `surface.mjs` / `surface.json` — the legacy server's public surface derived
   mechanically from the vendored source (every route table, ws op, tx-step
