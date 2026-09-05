@@ -35,6 +35,9 @@ pub(crate) const PLATFORM_ACCESS_TOKEN_PREFIX: &str = "pat_";
 pub(crate) const PERSONAL_ACCESS_TOKEN_PREFIX: &str = "per_";
 
 /// OAuth scopes (model/oauth_app.clj:18-46); `*-write` satisfies `*-read`.
+/// The data / storage scopes gate the admin-style routes (webhooks, storage)
+/// that accept platform tokens.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scope {
     AppsRead,

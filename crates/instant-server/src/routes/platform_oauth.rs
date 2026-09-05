@@ -747,7 +747,6 @@ fn qp_uuid(params: &HashMap<String, String>, key: &str) -> Result<Uuid> {
 struct ClientAndApp {
     client_id: Uuid,
     authorized_redirect_urls: Vec<String>,
-    oauth_app_id: Uuid,
     app_id: Uuid,
     app_name: String,
     granted_scopes: Vec<String>,
@@ -762,7 +761,7 @@ struct ClientAndApp {
 /// `get-client-and-app-by-client-id!` (oauth_app.clj:254-276)
 async fn client_and_app(state: &AppState, client_id: Uuid) -> Result<ClientAndApp> {
     let r = sqlx::query(
-        "SELECT c.client_id, c.authorized_redirect_urls, a.id AS oauth_app_id, a.app_id, a.app_name,
+        "SELECT c.client_id, c.authorized_redirect_urls, a.app_id, a.app_name,
                 a.granted_scopes, a.is_public, a.support_email, a.app_home_page,
                 a.app_privacy_policy_link, a.app_tos_link, a.app_logo
            FROM instant_oauth_app_clients c JOIN instant_oauth_apps a ON a.id = c.oauth_app_id
@@ -771,13 +770,17 @@ async fn client_and_app(state: &AppState, client_id: Uuid) -> Result<ClientAndAp
     .bind(client_id)
     .fetch_optional(&state.pool)
     .await?
-    .ok_or_else(|| record_not_found("oauth-app-client", json!({"args": [{"client-id": client_id}]})))?;
+    .ok_or_else(|| {
+        record_not_found(
+            "oauth-app-client",
+            json!({"args": [{"client-id": client_id}]}),
+        )
+    })?;
     Ok(ClientAndApp {
         client_id: r.get("client_id"),
         authorized_redirect_urls: r
             .get::<Option<Vec<String>>, _>("authorized_redirect_urls")
             .unwrap_or_default(),
-        oauth_app_id: r.get("oauth_app_id"),
         app_id: r.get("app_id"),
         app_name: r.get("app_name"),
         granted_scopes: r
