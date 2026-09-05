@@ -175,6 +175,15 @@ fn check_ref_value(attrs: &AttrMap, attr_id: &Uuid, value: &Value) -> Result<()>
 /// Step-shape (spec-level) failure. Legacy's message for these is the bare
 /// "Validation failed for tx-steps" — spec explain data lives in the hint
 /// (util/exception.clj throw-validation-err! with coercion errors).
+/// Legacy `hsql-attr-id-or-raise` (db/model/triple.clj:235-246): a triple
+/// naming an attr that doesn't exist raises inside the insert, which
+/// surfaces as a `sql-raise`.
+fn unknown_attr_raise(attr_id: Uuid) -> InstantError {
+    InstantError::sql_raise(format!(
+        "We could not find an attribute with id = '{attr_id}'"
+    ))
+}
+
 fn coerce_err(detail: impl Into<String>) -> InstantError {
     InstantError::new(
         "validation-failed",
@@ -758,9 +767,10 @@ pub async fn transact(
                     else {
                         unreachable!()
                     };
-                    let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
-                        InstantError::record_not_found("attr", format!("attr {attr_id} not found"))
-                    })?;
+                    let attr = attrs
+                        .get(&attr_id)
+                        .cloned()
+                        .ok_or_else(|| unknown_attr_raise(attr_id))?;
                     check_ref_value(attrs, &attr_id, &value)?;
                     let eid = resolve_eid(
                         &mut *conn,
@@ -817,9 +827,10 @@ pub async fn transact(
                     else {
                         unreachable!()
                     };
-                    let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
-                        InstantError::record_not_found("attr", format!("attr {attr_id} not found"))
-                    })?;
+                    let attr = attrs
+                        .get(&attr_id)
+                        .cloned()
+                        .ok_or_else(|| unknown_attr_raise(attr_id))?;
                     check_ref_value(attrs, &attr_id, &value)?;
                     let eid = match eid {
                         EidRef::Id(id) => Some(id),
@@ -1202,9 +1213,10 @@ async fn resolve_add_batch(
 ) -> Result<Vec<ResolvedTriple>> {
     let mut out = vec![];
     for (eid, attr_id, value, mode) in items {
-        let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
-            InstantError::record_not_found("attr", format!("attr {attr_id} not found"))
-        })?;
+        let attr = attrs
+            .get(&attr_id)
+            .cloned()
+            .ok_or_else(|| unknown_attr_raise(attr_id))?;
         let eid = resolve_eid(
             &mut *conn,
             app_id,

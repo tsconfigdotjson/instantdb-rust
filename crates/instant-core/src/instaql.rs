@@ -1860,8 +1860,16 @@ async fn fetch_entities(
             continue;
         }
         if let Some(fields) = &form.opts.fields {
+            // legacy keeps the order attr in a fields projection (the client
+            // orders by it): instaql.clj fields + order handling
             let keep = a.label == "id"
                 || fields.contains(&a.label)
+                || form
+                    .opts
+                    .order
+                    .as_ref()
+                    .map(|o| o.key == a.label)
+                    .unwrap_or(false)
                 || (form.etype == "$files"
                     && a.label == "location-id"
                     && fields.contains(&"url".to_string()));
