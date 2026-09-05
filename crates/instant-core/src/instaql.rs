@@ -227,12 +227,22 @@ fn verr(message: impl Into<String>) -> InstantError {
 
 /// Legacy `throw-validation-err! :query (:root state) [{expected in message}]`:
 /// the whole query as the input and the path of the offending option.
-fn qerr(root: &Value, expected_key: &str, expected: &str, path: Vec<Value>, message: String) -> InstantError {
+fn qerr(
+    root: &Value,
+    expected_key: &str,
+    expected: &str,
+    path: Vec<Value>,
+    message: String,
+) -> InstantError {
     let mut err = Map::new();
     err.insert(expected_key.to_string(), json!(expected));
     err.insert("in".to_string(), Value::Array(path));
     err.insert("message".to_string(), json!(message));
-    InstantError::validation_failed_input("query", root.clone(), Value::Array(vec![Value::Object(err)]))
+    InstantError::validation_failed_input(
+        "query",
+        root.clone(),
+        Value::Array(vec![Value::Object(err)]),
+    )
 }
 
 fn in_path(prefix: &[String], rest: &[&str]) -> Vec<Value> {
@@ -520,8 +530,9 @@ struct SqlCtx<'a> {
     /// the form's whole query + key path, for validation-error hints
     root: &'a Value,
     path: &'a [String],
-    /// the where path currently being compiled (set by push_leaf)
-    cur_where: std::cell::RefCell<Vec<String>>,
+    /// the where path currently being compiled (set by push_leaf; a Mutex
+    /// only so the ctx stays Sync inside the query futures)
+    cur_where: std::sync::Mutex<Vec<String>>,
 }
 
 impl SqlCtx<'_> {
@@ -529,7 +540,7 @@ impl SqlCtx<'_> {
     /// validation error with the root query as input and
     /// `[form.. "$" "where" <path>]` as `in`
     fn where_err(&self, expected: &str, message: String) -> InstantError {
-        let joined = self.cur_where.borrow().join(".");
+        let joined = self.cur_where.lock().unwrap().join(".");
         qerr(
             self.root,
             "expected?",
@@ -782,7 +793,7 @@ impl<'a> SqlCtx<'a> {
         op: &WhereOp,
         depth: usize,
     ) -> std::result::Result<Result<()>, MissingAttr> {
-        *self.cur_where.borrow_mut() = path.to_vec();
+        *self.cur_where.lock().unwrap() = path.to_vec();
         // $entityIdStartsWith special label
         if path.len() == 1 && path[0] == "$entityIdStartsWith" {
             if let WhereOp::Eq(Value::String(prefix)) = op {

@@ -72,7 +72,9 @@ pub async fn handle_start_sync(
 ) -> std::result::Result<(), InstantError> {
     let (app_id, admin, user_id) = {
         let st = session.state.lock().await;
-        let app_id = st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?;
+        let app_id = st
+            .app_id
+            .ok_or_else(|| crate::ws::not_initialized(session.id))?;
         (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
     let q = msg
@@ -209,7 +211,9 @@ pub async fn handle_resync_table(
 ) -> std::result::Result<(), InstantError> {
     let (app_id, admin, user_id) = {
         let st = session.state.lock().await;
-        let app_id = st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?;
+        let app_id = st
+            .app_id
+            .ok_or_else(|| crate::ws::not_initialized(session.id))?;
         (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
     let sub_id = msg
@@ -339,7 +343,9 @@ pub async fn handle_remove_sync(
         .unwrap_or(false);
     let (app_id, owned) = {
         let mut st = session.state.lock().await;
-        let app_id = st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?;
+        let app_id = st
+            .app_id
+            .ok_or_else(|| crate::ws::not_initialized(session.id))?;
         (app_id, st.sync_subs.remove(&sub_id).is_some())
     };
     // legacy deletes only `{:id ... :app-id app-id}` and only for a sub this

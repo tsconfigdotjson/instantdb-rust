@@ -145,7 +145,8 @@ pub async fn handle_start_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?
+        st.app_id
+            .ok_or_else(|| crate::ws::not_initialized(session.id))?
     };
     let client_id = msg
         .get("client-id")
@@ -269,7 +270,8 @@ pub async fn handle_append_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?
+        st.app_id
+            .ok_or_else(|| crate::ws::not_initialized(session.id))?
     };
     let stream_id = msg
         .get("stream-id")
@@ -410,7 +412,8 @@ pub async fn handle_subscribe_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?
+        st.app_id
+            .ok_or_else(|| crate::ws::not_initialized(session.id))?
     };
     // legacy validates params before perms (session.clj:889-896 missing ids,
     // :928-931 missing stream)

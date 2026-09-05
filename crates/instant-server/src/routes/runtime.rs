@@ -311,7 +311,10 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
     // are the hint args, for the not-found and the expired case alike
     let args = json!({"app-id": app_id, "code": code, "email": email});
     let Some(row) = row else {
-        return Err(InstantError::record_not_found_args("app-user-magic-code", args));
+        return Err(InstantError::record_not_found_args(
+            "app-user-magic-code",
+            args,
+        ));
     };
     let entity: Uuid = row.get("entity_id");
     let created_at: i64 = row.get::<Option<i64>, _>("created_at").unwrap_or(0);
