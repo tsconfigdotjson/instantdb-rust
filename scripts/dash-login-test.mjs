@@ -172,7 +172,7 @@ check("get-a-db needs a title", (await call("POST", "/dash/apps/get_a_db", { tok
 check("get-a-db validates rules", (await call("POST", "/dash/apps/get_a_db", { token: pat, body: { title: "x", rules: { code: { posts: { allow: { view: "nope(" } } } } } })).body.type === "validation-failed");
 const created = await call("POST", "/dash/apps/get_a_db", {
   token: pat,
-  body: { title: "get a db", rules: { code: { posts: { allow: { view: "true" } } } }, schema: { entities: { posts: { title: { valueType: "string", config: { indexed: true, unique: false } } } }, links: {} } },
+  body: { title: "get a db", rules: { code: { posts: { allow: { view: "true" } } } }, schema: { entities: { posts: { attrs: { title: { valueType: "string", config: { indexed: true, unique: false } } } } }, links: {} } },
 });
 const serviceUserId = execFileSync("psql", [dbUrl, "-tA", "-c", "SELECT id FROM instant_users WHERE email = 'hello+getadbapps@instantdb.com'"]).toString().trim();
 check("get-a-db creates the app", created.status === 200 && created.body.app?.title === "get a db" && created.body.app.creator_id === serviceUserId && /^[0-9a-f-]{36}$/.test(created.body.app["admin-token"] ?? ""), created.body);

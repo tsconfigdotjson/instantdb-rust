@@ -1868,12 +1868,8 @@ async fn admin_send_magic_code_impl(
         )
     })?;
     let email = crate::routes::runtime::coerce_email_pub(email)?;
-    state
-        .limiters
-        .magic_code_send
-        .check((ctx.app_id, email.clone()), 1.0)
-        .map_err(crate::rate_limit::email_rate_limited_err)?;
-    crate::routes::runtime::send_magic_code_for(state, ctx.app_id, &email).await
+    let code = crate::routes::runtime::send_magic_code_for(state, ctx.app_id, &email).await?;
+    Ok(json!({"code": code}))
 }
 
 pub async fn admin_verify_magic_code(
@@ -1896,6 +1892,17 @@ async fn verify_magic_code_admin_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
+    // legacy `ex/get-param!` shapes for the two required body params
+    for key in ["email", "code"] {
+        if body.get(key).and_then(|v| v.as_str()).is_none() {
+            return Err(InstantError::new(
+                "param-missing",
+                400,
+                format!("Missing parameter: [\"body\" \"{key}\"]"),
+                Some(json!({"in": ["body", key]})),
+            ));
+        }
+    }
     let mut rt_body = body.clone();
     rt_body["app-id"] = json!(ctx.app_id);
     crate::routes::runtime::verify_magic_code_shared(state, &rt_body).await

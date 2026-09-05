@@ -1436,11 +1436,13 @@ async function runAgainst(name) {
     r40.cbBadCookie = await loginCallback("?state=" + mk(), "nope");
     r40.cbNoCode = await loginCallback("?state=" + mk(), mk());
     r40.cbUnknownRedirect = await loginCallback("?state=" + mk() + "&code=abc", mk());
+    // a callback with a valid state + cookie consumes the redirect before the
+    // code check; a later callback then can't find it. A callback that carries
+    // a code AND a live redirect is left to the mock-provider e2e, since it
+    // makes a real outbound token request that isn't comparable here.
     const l1 = await loginStart();
-    r40.cbMismatchCookie = await loginCallback(`?state=${l1.state}&code=abc`, mk());
+    r40.cbConsumesRedirect = await loginCallback(`?state=${l1.state}`, l1.cookie);
     r40.cbConsumed = await loginCallback(`?state=${l1.state}&code=abc`, l1.cookie);
-    const l2 = await loginStart();
-    r40.cbGoogleRejects = await loginCallback(`?state=${l2.state}&code=abc`, l2.cookie);
     r40.tokenMissing = errView(await call(base, "POST", "/dash/oauth/token", { token: null, body: {} }));
     r40.tokenMalformed = errView(await call(base, "POST", "/dash/oauth/token", { token: null, body: { code: "nope" } }));
     r40.tokenUnknown = errView(await call(base, "POST", "/dash/oauth/token", { token: null, body: { code: mk() } }));
