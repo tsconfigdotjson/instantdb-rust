@@ -44,12 +44,6 @@ use crate::state::AppState;
 /// legacy `hard-deletion-sweeper/grace-period-days`
 const GRACE_PERIOD_DAYS: i64 = 2;
 
-/// next.jdbc's result for a statement without RETURNING, as Cheshire
-/// serializes it — several legacy handlers return it verbatim.
-fn update_count(n: u64) -> Value {
-    json!({"next.jdbc/update-count": n})
-}
-
 /// Legacy `req->app-and-user!` (util/http.clj:71-79): the app id param,
 /// then the dashboard user, then `get-app-with-role!`.
 pub(crate) async fn app_and_user(
