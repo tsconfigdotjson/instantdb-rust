@@ -19,10 +19,10 @@ use uuid::Uuid;
 
 use crate::routes::dash::{param_malformed, param_missing, parse_body, DashRole, DashUser};
 use crate::routes::dash_apps::{
-    app_role_for_user, apps_for_org, assert_least_privilege, body_str, create_app,
+    app_role_for_user, app_row, apps_for_org, assert_app_access, body_str, create_app,
     live_app_row, org_role_for_user, orgs_for_user, path_uuid, record_not_found,
 };
-use crate::routes::dash_manage::{app_and_user, token_lookup_key, update_count};
+use crate::routes::dash_manage::{app_and_user, token_lookup_key};
 use crate::routes::runtime::{coerce_email_pub, json_or_err};
 use crate::service;
 use crate::state::AppState;
@@ -161,7 +161,10 @@ pub(crate) async fn access_token_by_value(state: &AppState, token: &str) -> Resu
 }
 
 /// `assert-not-expired!` (oauth_app.clj:551-556)
-pub(crate) fn expired(record_type: &str, expires_at: chrono::DateTime<chrono::Utc>) -> InstantError {
+pub(crate) fn expired(
+    record_type: &str,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> InstantError {
     InstantError::new(
         "record-expired",
         400,
@@ -201,13 +204,15 @@ pub(crate) async fn superadmin_user_for_token(
         if !scope.satisfied_by(&record.scopes) {
             return Err(missing_scope(scope));
         }
-        let row = sqlx::query("SELECT id, email, created_at, google_sub FROM instant_users WHERE id = $1")
-            .bind(record.user_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .ok_or_else(|| {
-                record_not_found("instant-user", json!({"args": [{"id": record.user_id}]}))
-            })?;
+        let row = sqlx::query(
+            "SELECT id, email, created_at, google_sub FROM instant_users WHERE id = $1",
+        )
+        .bind(record.user_id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(|| {
+            record_not_found("instant-user", json!({"args": [{"id": record.user_id}]}))
+        })?;
         return Ok(user_from_row(&row));
     }
     user_by_personal_access_token(state, token)
@@ -226,9 +231,9 @@ pub(crate) async fn superadmin_user_and_app(
     let user = superadmin_user(state, headers, scope).await?;
     let app_id = path_uuid(app_id_raw, "app_id")?;
     let app = live_app_row(state, app_id).await?;
-    let user_role = app_role_for_user(state, &app, user.id).await?;
-    assert_least_privilege(role, user_role)?;
-    Ok((user, app, user_role.unwrap_or(role)))
+    let access = app_role_for_user(state, &app, user.id).await?;
+    let user_role = assert_app_access(role, access)?;
+    Ok((user, app, user_role))
 }
 
 /// Does this bearer string authenticate through the superadmin path
@@ -265,7 +270,11 @@ pub(crate) async fn superadmin_app(
 ) -> Result<Value> {
     let token = bearer_string(headers)?;
     if is_superadmin_token(state, &token).await? {
-        return Ok(superadmin_user_and_app(state, headers, scope, role, app_id_raw).await?.1);
+        return Ok(
+            superadmin_user_and_app(state, headers, scope, role, app_id_raw)
+                .await?
+                .1,
+        );
     }
     if let Ok(token_uuid) = Uuid::parse_str(&token) {
         let admin_app: Option<Uuid> =
@@ -290,10 +299,19 @@ pub(crate) async fn superadmin_app(
 // ---------------------------------------------------------------------------
 // enhance-apps: ?include=schema,perms
 
-async fn enhance_apps(state: &AppState, params: &HashMap<String, String>, apps: Vec<Value>) -> Result<Vec<Value>> {
+async fn enhance_apps(
+    state: &AppState,
+    params: &HashMap<String, String>,
+    apps: Vec<Value>,
+) -> Result<Vec<Value>> {
     let includes: Vec<&str> = params
         .get("include")
-        .map(|s| s.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).collect())
+        .map(|s| {
+            s.split(',')
+                .map(|x| x.trim())
+                .filter(|x| !x.is_empty())
+                .collect()
+        })
         .unwrap_or_default();
     let want_schema = includes.contains(&"schema");
     let want_perms = includes.contains(&"perms");
@@ -377,7 +395,10 @@ pub async fn apps_list(
         .bind(user.id)
         .fetch_all(&state.pool)
         .await?;
-        let apps: Vec<Value> = rows.iter().map(crate::routes::dash_apps::app_row_json).collect();
+        let apps: Vec<Value> = rows
+            .iter()
+            .map(crate::routes::dash_apps::app_row_json)
+            .collect();
         Ok(json!({"apps": enhance_apps(&state, &params, apps).await?}))
     }
     .await;
@@ -470,7 +491,14 @@ pub async fn app_details(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = superadmin_app(&state, &headers, Scope::AppsRead, DashRole::Collaborator, &app_id).await?;
+        let app = superadmin_app(
+            &state,
+            &headers,
+            Scope::AppsRead,
+            DashRole::Collaborator,
+            &app_id,
+        )
+        .await?;
         Ok(json!({"app": app}))
     }
     .await;
@@ -485,16 +513,22 @@ pub async fn app_update(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = superadmin_app(&state, &headers, Scope::AppsWrite, DashRole::Admin, &app_id).await?;
+        let app =
+            superadmin_app(&state, &headers, Scope::AppsWrite, DashRole::Admin, &app_id).await?;
         let body = parse_body(&body)?;
         let title = body_str(&body, "title")?;
-        let id = app.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()).unwrap_or_default();
-        let res = sqlx::query("UPDATE apps SET title = $1 WHERE id = $2")
+        let id = app
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .unwrap_or_default();
+        sqlx::query("UPDATE apps SET title = $1 WHERE id = $2")
             .bind(title)
             .bind(id)
             .execute(&state.pool)
             .await?;
-        Ok(json!({"app": update_count(res.rows_affected())}))
+        // next.jdbc execute-one! returns the updated row
+        Ok(json!({"app": app_row(&state, id).await?}))
     }
     .await;
     json_or_err(r)
@@ -509,8 +543,12 @@ pub async fn app_delete(
 ) -> Response {
     let r = async {
         let (user, app, _) =
-            superadmin_user_and_app(&state, &headers, Scope::AppsWrite, DashRole::Admin, &app_id).await?;
-        let creator = app.get("creator_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
+            superadmin_user_and_app(&state, &headers, Scope::AppsWrite, DashRole::Admin, &app_id)
+                .await?;
+        let creator = app
+            .get("creator_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok());
         if let Some(creator) = creator {
             if creator != user.id {
                 return Err(InstantError::new(
@@ -521,13 +559,17 @@ pub async fn app_delete(
                 ));
             }
         }
-        let id = app.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()).unwrap_or_default();
-        let res = sqlx::query("UPDATE apps SET deletion_marked_at = NOW() WHERE id = $1")
+        let id = app
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .unwrap_or_default();
+        sqlx::query("UPDATE apps SET deletion_marked_at = NOW() WHERE id = $1")
             .bind(id)
             .execute(&state.pool)
             .await?;
         service::invalidate_attrs(&state, id);
-        Ok(json!({"app": update_count(res.rows_affected())}))
+        Ok(json!({"app": app_row(&state, id).await?}))
     }
     .await;
     json_or_err(r)
@@ -549,8 +591,7 @@ fn body_email(body: &Value, key: &str) -> Result<String> {
 /// POST /superadmin/apps/:app_id/transfers/send — legacy
 /// app-transfer-send-invite-post (:218-233): PAT only (the `apps-transfer`
 /// scope exists for no OAuth app); a `creator` invite is upserted; the
-/// invite email is log-only here; legacy answers `{id: null}` (its upsert
-/// returns no row).
+/// invite email is log-only here; the upserted invite's id is returned.
 pub async fn transfer_send(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
@@ -563,20 +604,21 @@ pub async fn transfer_send(
         let body = parse_body(&body)?;
         let email = body_email(&body, "dest_email")?;
         let id = app.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()).unwrap_or_default();
-        sqlx::query(
+        let row = sqlx::query(
             "INSERT INTO app_member_invites (id, app_id, inviter_id, invitee_email, invitee_role, status, sent_at)
              VALUES ($1, $2, $3, $4, 'creator', 'pending', now())
              ON CONFLICT (app_id, invitee_email)
-             DO UPDATE SET status = 'pending', sent_at = now(), invitee_role = excluded.invitee_role",
+             DO UPDATE SET status = 'pending', sent_at = now(), invitee_role = excluded.invitee_role
+             RETURNING id",
         )
         .bind(Uuid::new_v4())
         .bind(id)
         .bind(user.id)
         .bind(&email)
-        .execute(&state.pool)
+        .fetch_one(&state.pool)
         .await?;
         tracing::info!("app transfer invite (log-only mail): {email} asked to own app {id}");
-        Ok(json!({"id": null}))
+        Ok(json!({"id": row.get::<Uuid, _>("id")}))
     }
     .await;
     json_or_err(r)
@@ -591,11 +633,21 @@ pub async fn transfer_revoke(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let (user, app, _) =
-            superadmin_user_and_app(&state, &headers, Scope::AppsTransfer, DashRole::Owner, &app_id).await?;
+        let (user, app, _) = superadmin_user_and_app(
+            &state,
+            &headers,
+            Scope::AppsTransfer,
+            DashRole::Owner,
+            &app_id,
+        )
+        .await?;
         let body = parse_body(&body)?;
         let email = body_email(&body, "dest_email")?;
-        let id = app.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()).unwrap_or_default();
+        let id = app
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .unwrap_or_default();
         let res = sqlx::query(
             "UPDATE app_member_invites SET status = 'revoked'
               WHERE inviter_id = $1 AND app_id = $2 AND invitee_email = $3
@@ -616,7 +668,10 @@ pub async fn transfer_revoke(
 // rules + schema
 
 fn app_uuid(app: &Value) -> Uuid {
-    app.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()).unwrap_or_default()
+    app.get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .unwrap_or_default()
 }
 
 /// GET /superadmin/apps/:app_id/perms — legacy app-rules-get (:249-252)
@@ -626,7 +681,14 @@ pub async fn perms_get(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = superadmin_app(&state, &headers, Scope::AppsRead, DashRole::Collaborator, &app_id).await?;
+        let app = superadmin_app(
+            &state,
+            &headers,
+            Scope::AppsRead,
+            DashRole::Collaborator,
+            &app_id,
+        )
+        .await?;
         let code: Option<Value> = sqlx::query("SELECT code FROM rules WHERE app_id = $1")
             .bind(app_uuid(&app))
             .fetch_optional(&state.pool)
@@ -646,7 +708,14 @@ pub async fn perms_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = superadmin_app(&state, &headers, Scope::AppsWrite, DashRole::Collaborator, &app_id).await?;
+        let app = superadmin_app(
+            &state,
+            &headers,
+            Scope::AppsWrite,
+            DashRole::Collaborator,
+            &app_id,
+        )
+        .await?;
         let body = parse_body(&body)?;
         let code = body
             .get("code")
@@ -696,7 +765,14 @@ pub async fn schema_get(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = superadmin_app(&state, &headers, Scope::AppsRead, DashRole::Collaborator, &app_id).await?;
+        let app = superadmin_app(
+            &state,
+            &headers,
+            Scope::AppsRead,
+            DashRole::Collaborator,
+            &app_id,
+        )
+        .await?;
         let attrs = service::load_attrs(&state, app_uuid(&app)).await?;
         Ok(json!({"schema": schema::attrs_to_schema(&attrs).to_wire()}))
     }
@@ -712,9 +788,18 @@ pub async fn schema_plan(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = superadmin_app(&state, &headers, Scope::AppsRead, DashRole::Collaborator, &app_id).await?;
+        let app = superadmin_app(
+            &state,
+            &headers,
+            Scope::AppsRead,
+            DashRole::Collaborator,
+            &app_id,
+        )
+        .await?;
         let body = parse_body(&body)?;
-        Ok(crate::routes::dash::plan(&state, app_uuid(&app), &body).await?.wire)
+        Ok(crate::routes::dash::plan(&state, app_uuid(&app), &body)
+            .await?
+            .wire)
     }
     .await;
     json_or_err(r)
@@ -728,7 +813,14 @@ pub async fn schema_apply(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = superadmin_app(&state, &headers, Scope::AppsWrite, DashRole::Collaborator, &app_id).await?;
+        let app = superadmin_app(
+            &state,
+            &headers,
+            Scope::AppsWrite,
+            DashRole::Collaborator,
+            &app_id,
+        )
+        .await?;
         let body = parse_body(&body)?;
         let id = app_uuid(&app);
         let plan = crate::routes::dash::plan(&state, id, &body).await?;

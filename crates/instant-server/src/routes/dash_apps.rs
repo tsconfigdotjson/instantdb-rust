@@ -460,7 +460,14 @@ pub async fn apps_get(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsRead).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsRead,
+        )
+        .await?;
         let row = live_app_row(&state, app.id).await?;
         Ok(json!({"app": row}))
     }
@@ -991,7 +998,6 @@ pub async fn org_get(
     json_or_err(r)
 }
 
-
 /// The org's live apps in the dashboard app shape (legacy `apps-for-org`,
 /// model/org.clj:89-123 over `make-apps-q`).
 pub(crate) async fn apps_for_org(
@@ -1243,7 +1249,14 @@ pub async fn providers_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsWrite,
+        )
+        .await?;
         let body = parse_body(&body)?;
         let name = body_str(&body, "provider_name")?;
         let id = Uuid::new_v4();
@@ -1610,7 +1623,14 @@ pub async fn origins_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsWrite,
+        )
+        .await?;
         let body = parse_body(&body)?;
         let service_name = body_str(&body, "service")?;
         let params_v = body
@@ -1664,7 +1684,14 @@ pub async fn origins_delete(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsWrite,
+        )
+        .await?;
         let id = path_uuid(&id, "id")?;
         let row = sqlx::query(
             "DELETE FROM app_authorized_redirect_origins WHERE id = $1 AND app_id = $2
@@ -1736,7 +1763,9 @@ pub async fn email_status(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsWrite).await?;
+        let app =
+            dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsWrite)
+                .await?;
         Ok(json!({"info": email_template_info(&state, app.id).await?}))
     }
     .await;
@@ -1855,7 +1884,9 @@ pub async fn email_template_delete(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsWrite).await?;
+        let app =
+            dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsWrite)
+                .await?;
         let id = path_uuid(&id, "id")?;
         sqlx::query("DELETE FROM app_email_templates WHERE id = $1 AND app_id = $2")
             .bind(id)

@@ -20,7 +20,10 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::routes::dash::{dash_user, param_malformed, param_missing, parse_body, DashRole};
-use crate::routes::dash_apps::{app_role_for_user, live_app_row, path_uuid, record_not_found, redirect_url_validation_errors_opt};
+use crate::routes::dash_apps::{
+    app_role_for_user, live_app_row, path_uuid, record_not_found,
+    redirect_url_validation_errors_opt,
+};
 use crate::routes::dash_manage::{app_and_user, token_lookup_key};
 use crate::routes::runtime::{err_response, json_or_err};
 use crate::routes::superadmin::{
@@ -180,7 +183,8 @@ fn secret_json(r: &sqlx::postgres::PgRow) -> Value {
 }
 
 const OAUTH_APP_COLUMNS: &str = "id, app_id, app_name, granted_scopes, is_public, support_email, app_home_page, app_privacy_policy_link, app_tos_link, app_logo, created_at, updated_at";
-const CLIENT_COLUMNS: &str = "client_id, oauth_app_id, client_name, authorized_redirect_urls, created_at, updated_at";
+const CLIENT_COLUMNS: &str =
+    "client_id, oauth_app_id, client_name, authorized_redirect_urls, created_at, updated_at";
 const SECRET_COLUMNS: &str = "id, client_id, first_four, created_at";
 
 // ---------------------------------------------------------------------------
@@ -230,7 +234,10 @@ pub async fn oauth_apps_get(
 }
 
 fn app_uuid(app: &Value) -> Uuid {
-    app.get("id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()).unwrap_or_default()
+    app.get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .unwrap_or_default()
 }
 
 /// POST /dash/apps/:app_id/oauth-apps — legacy oauth-apps-post (:2465-2508)
@@ -321,7 +328,12 @@ pub async fn oauth_app_update(
         .fetch_optional(&state.pool)
         .await
         .map_err(unique_err("oauth-app"))?
-        .ok_or_else(|| record_not_found("oauth-app", json!({"args": [{"app-id": id, "oauth-app-id": oauth_app_id}]})))?;
+        .ok_or_else(|| {
+            record_not_found(
+                "oauth-app",
+                json!({"args": [{"app-id": id, "oauth-app-id": oauth_app_id}]}),
+            )
+        })?;
         Ok(json!({"app": oauth_app_json(&row)}))
     }
     .await;
@@ -350,13 +362,22 @@ pub async fn oauth_app_delete(
     json_or_err(r)
 }
 
-async fn oauth_app_is_public_by_id(state: &AppState, app_id: Uuid, oauth_app_id: Uuid) -> Result<bool> {
+async fn oauth_app_is_public_by_id(
+    state: &AppState,
+    app_id: Uuid,
+    oauth_app_id: Uuid,
+) -> Result<bool> {
     let row = sqlx::query("SELECT is_public FROM instant_oauth_apps WHERE app_id = $1 AND id = $2")
         .bind(app_id)
         .bind(oauth_app_id)
         .fetch_optional(&state.pool)
         .await?
-        .ok_or_else(|| record_not_found("oauth-app", json!({"args": [{"app-id": app_id, "oauth-app-id": oauth_app_id}]})))?;
+        .ok_or_else(|| {
+            record_not_found(
+                "oauth-app",
+                json!({"args": [{"app-id": app_id, "oauth-app-id": oauth_app_id}]}),
+            )
+        })?;
     Ok(row.get("is_public"))
 }
 
@@ -368,7 +389,9 @@ fn assert_redirect_urls(urls: &[String], allow_localhost: bool) -> Result<()> {
                 "validation-failed",
                 400,
                 "Validation failed for authorized_redirect_urls",
-                Some(json!({"data-type": "authorized_redirect_urls", "input": u, "errors": errors})),
+                Some(
+                    json!({"data-type": "authorized_redirect_urls", "input": u, "errors": errors}),
+                ),
             ));
         }
     }
@@ -511,7 +534,12 @@ pub async fn oauth_client_delete(
         .bind(client_id)
         .fetch_optional(&state.pool)
         .await?
-        .ok_or_else(|| record_not_found("oauth-client", json!({"args": [{"app-id": id, "client-id": client_id}]})))?;
+        .ok_or_else(|| {
+            record_not_found(
+                "oauth-client",
+                json!({"args": [{"app-id": id, "client-id": client_id}]}),
+            )
+        })?;
         Ok(json!({"client": client_json(&row)}))
     }
     .await;
@@ -543,7 +571,12 @@ pub async fn oauth_client_secrets_post(
         .bind(id)
         .fetch_optional(&state.pool)
         .await?
-        .ok_or_else(|| record_not_found("oauth-app-client-secrets", json!({"args": [{"app-id": id, "client-id": client_id}]})))?;
+        .ok_or_else(|| {
+            record_not_found(
+                "oauth-app-client-secrets",
+                json!({"args": [{"app-id": id, "client-id": client_id}]}),
+            )
+        })?;
         Ok(json!({"clientSecret": secret_json(&row), "secretValue": secret}))
     }
     .await;
@@ -571,7 +604,12 @@ pub async fn oauth_client_secret_delete(
         .bind(id)
         .fetch_optional(&state.pool)
         .await?
-        .ok_or_else(|| record_not_found("oauth-app-client-secrets", json!({"args": [{"app-id": id, "client-secret-id": secret_id}]})))?;
+        .ok_or_else(|| {
+            record_not_found(
+                "oauth-app-client-secrets",
+                json!({"args": [{"app-id": id, "client-secret-id": secret_id}]}),
+            )
+        })?;
         Ok(json!({"clientSecret": secret_json(&row)}))
     }
     .await;
@@ -610,7 +648,10 @@ async fn authorized_oauth_apps(state: &AppState, user_id: Uuid) -> Result<Vec<Va
 }
 
 /// GET /dash/user/oauth_apps
-pub async fn user_oauth_apps_get(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+pub async fn user_oauth_apps_get(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Response {
     let r = async {
         let user = dash_user(&state, &headers).await?;
         Ok(json!({"oauthApps": authorized_oauth_apps(&state, user.id).await?}))
@@ -658,11 +699,19 @@ fn oauth_error_page(error: &str) -> Response {
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>OAuth error</title><style>body {{ margin: 0; height: 100vh; display: flex; justify-content: center; align-items: center; background-color: white; flex-direction: column; font-family: sans-serif; }} a.button {{ text-decoration: none; padding: 15px 30px; font-size: 18px; border-radius: 5px; font-family: sans-serif; text-align: center; }} a {{ cursor: pointer; }} @media (prefers-color-scheme: dark) {{ body {{ background-color: black; }} a.button {{ color: black; background-color: white; }} }} @media (prefers-color-scheme: light) {{ a.button {{ color: white; background-color: black; }} }}</style></head><body><p>There was an error with your OAuth request.</p><p>{}</p></body></html>",
         html_escape(error)
     );
-    (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html")], html).into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CONTENT_TYPE, "text/html")],
+        html,
+    )
+        .into_response()
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn found(url: &str) -> Response {
@@ -670,7 +719,8 @@ fn found(url: &str) -> Response {
 }
 
 fn add_query_params(url: &str, params: &[(&str, &str)]) -> String {
-    let mut u = url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("http://invalid/").unwrap());
+    let mut u =
+        url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("http://invalid/").unwrap());
     {
         let mut q = u.query_pairs_mut();
         for (k, v) in params {
@@ -688,7 +738,9 @@ fn qp<'a>(params: &'a HashMap<String, String>, key: &str) -> Result<&'a str> {
         .ok_or_else(|| param_missing(&["params", key]))
 }
 fn qp_uuid(params: &HashMap<String, String>, key: &str) -> Result<Uuid> {
-    let raw = params.get(key).ok_or_else(|| param_missing(&["params", key]))?;
+    let raw = params
+        .get(key)
+        .ok_or_else(|| param_missing(&["params", key]))?;
     Uuid::parse_str(raw.trim()).map_err(|_| param_malformed(&["params", key], json!(raw)))
 }
 
@@ -722,11 +774,15 @@ async fn client_and_app(state: &AppState, client_id: Uuid) -> Result<ClientAndAp
     .ok_or_else(|| record_not_found("oauth-app-client", json!({"args": [{"client-id": client_id}]})))?;
     Ok(ClientAndApp {
         client_id: r.get("client_id"),
-        authorized_redirect_urls: r.get::<Option<Vec<String>>, _>("authorized_redirect_urls").unwrap_or_default(),
+        authorized_redirect_urls: r
+            .get::<Option<Vec<String>>, _>("authorized_redirect_urls")
+            .unwrap_or_default(),
         oauth_app_id: r.get("oauth_app_id"),
         app_id: r.get("app_id"),
         app_name: r.get("app_name"),
-        granted_scopes: r.get::<Option<Vec<String>>, _>("granted_scopes").unwrap_or_default(),
+        granted_scopes: r
+            .get::<Option<Vec<String>>, _>("granted_scopes")
+            .unwrap_or_default(),
         is_public: r.get("is_public"),
         support_email: r.get("support_email"),
         app_home_page: r.get("app_home_page"),
@@ -769,7 +825,9 @@ fn cookie_value(headers: &HeaderMap) -> Option<Uuid> {
                     return None;
                 }
                 // legacy parse-cookie reads `instantdb_<uuid>`
-                v.trim().strip_prefix("instantdb_").and_then(|s| Uuid::parse_str(s).ok())
+                v.trim()
+                    .strip_prefix("instantdb_")
+                    .and_then(|s| Uuid::parse_str(s).ok())
             })
         })
 }
@@ -791,12 +849,22 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
     let redirect_uri = qp(params, "redirect_uri")?.to_string();
     let response_type = qp(params, "response_type")?;
     if response_type != "code" {
-        return Err(InstantError::new("param-malformed", 400, "`response_type` parameter must have value `code`", None));
+        return Err(InstantError::new(
+            "param-malformed",
+            400,
+            "`response_type` parameter must have value `code`",
+            None,
+        ));
     }
     let scope_input = qp(params, "scope")?.to_string();
     let requested: Vec<String> = scope_input.split(' ').map(|s| s.to_string()).collect();
     if requested.is_empty() {
-        return Err(InstantError::new("param-malformed", 400, "The scope param must specify at least one scope", None));
+        return Err(InstantError::new(
+            "param-malformed",
+            400,
+            "The scope param must specify at least one scope",
+            None,
+        ));
     }
     for s in &requested {
         if !ALL_SCOPES.contains(&s.as_str()) {
@@ -809,17 +877,28 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
         }
     }
     let state_param = qp(params, "state")?.to_string();
-    let code_challenge = params.get("code_challenge").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let code_challenge = params
+        .get("code_challenge")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let code_challenge_method = match params.get("code_challenge_method") {
         None => None,
         Some(m) if m == "S256" || m == "plain" => Some(m.clone()),
-        Some(m) => return Err(param_malformed(&["params", "code_challenge_method"], json!(m))),
+        Some(m) => {
+            return Err(param_malformed(
+                &["params", "code_challenge_method"],
+                json!(m),
+            ))
+        }
     };
     assert_valid_bare(
         "code-challenge",
         json!(code_challenge),
         if code_challenge_method.is_some() && code_challenge.is_none() {
-            vec!["The code_challenge param must be provided when code_challenge_method is provided".to_string()]
+            vec![
+                "The code_challenge param must be provided when code_challenge_method is provided"
+                    .to_string(),
+            ]
         } else {
             vec![]
         },
@@ -828,28 +907,42 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
         "code-challenge-method",
         json!(code_challenge_method),
         if code_challenge.is_some() && code_challenge_method.is_none() {
-            vec!["The code_challenge_method param must be provided when code_challenge is provided".to_string()]
+            vec![
+                "The code_challenge_method param must be provided when code_challenge is provided"
+                    .to_string(),
+            ]
         } else {
             vec![]
         },
     )?;
     let ca = client_and_app(state, client_id).await?;
     if ca.is_public {
-        let invalid: Vec<String> = requested.iter().filter(|s| !ca.granted_scopes.contains(s)).cloned().collect();
+        let invalid: Vec<String> = requested
+            .iter()
+            .filter(|s| !ca.granted_scopes.contains(s))
+            .cloned()
+            .collect();
         assert_valid_bare(
             "scope",
             json!(scope_input),
             if invalid.is_empty() {
                 vec![]
             } else {
-                vec![format!("this OAuth app has not been granted the {} scopes", join_in_sentence(&invalid))]
+                vec![format!(
+                    "this OAuth app has not been granted the {} scopes",
+                    join_in_sentence(&invalid)
+                )]
             },
         )?;
     }
     assert_valid_bare(
         "redirect_uri",
         json!(redirect_uri),
-        if ca.authorized_redirect_urls.iter().any(|u| u == &redirect_uri) {
+        if ca
+            .authorized_redirect_urls
+            .iter()
+            .any(|u| u == &redirect_uri)
+        {
             vec![]
         } else {
             vec!["The redirect_uri does not appear in the set of authorized redirect uri for the OAuth client.".to_string()]
@@ -882,12 +975,25 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
         &format!("{}/platform/oauth/start", state.cfg.dashboard_origin),
         &[("redirect-id", &redirect_id.to_string())],
     );
-    let expires = (chrono::Utc::now() + chrono::Duration::hours(1)).format("%a, %d %b %Y %H:%M:%S GMT");
-    let secure = if state.cfg.base_url.starts_with("https://") { "; Secure" } else { "" };
+    let expires =
+        (chrono::Utc::now() + chrono::Duration::hours(1)).format("%a, %d %b %Y %H:%M:%S GMT");
+    let secure = if state.cfg.base_url.starts_with("https://") {
+        "; Secure"
+    } else {
+        ""
+    };
     let cookie_header = format!(
         "{COOKIE_NAME}=instantdb_{cookie}; HttpOnly{secure}; Expires={expires}; Path=/platform/oauth; SameSite=Lax"
     );
-    Ok((StatusCode::FOUND, [(header::LOCATION, dash_url), (header::SET_COOKIE, cookie_header)], "").into_response())
+    Ok((
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, dash_url),
+            (header::SET_COOKIE, cookie_header),
+        ],
+        "",
+    )
+        .into_response())
 }
 
 struct Redirect {
@@ -909,7 +1015,9 @@ fn redirect_from_row(r: &sqlx::postgres::PgRow) -> Redirect {
         state: r.get("state"),
         cookie: r.get("cookie"),
         redirect_uri: r.get("redirect_uri"),
-        scopes: r.get::<Option<Vec<String>>, _>("scopes").unwrap_or_default(),
+        scopes: r
+            .get::<Option<Vec<String>>, _>("scopes")
+            .unwrap_or_default(),
         code_challenge_method: r.get("code_challenge_method"),
         code_challenge: r.get("code_challenge"),
         user_id: r.get("user_id"),
@@ -986,9 +1094,16 @@ pub async fn claim(
 
 /// Form (`application/x-www-form-urlencoded`) or JSON body, or the query
 /// string: legacy reads `:params`, which ring fills from all three.
-fn merged_params(headers: &HeaderMap, query: &HashMap<String, String>, body: &Bytes) -> HashMap<String, String> {
+fn merged_params(
+    headers: &HeaderMap,
+    query: &HashMap<String, String>,
+    body: &Bytes,
+) -> HashMap<String, String> {
     let mut out = query.clone();
-    let ct = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     if ct.starts_with("application/x-www-form-urlencoded") {
         for (k, v) in url::form_urlencoded::parse(body) {
             out.insert(k.to_string(), v.to_string());
@@ -1031,7 +1146,11 @@ pub async fn grant(
             };
             found(&add_query_params(
                 &redirect.redirect_uri,
-                &[("error", code), ("error_description", &e.message), ("state", &redirect.state)],
+                &[
+                    ("error", code),
+                    ("error_description", &e.message),
+                    ("state", &redirect.state),
+                ],
             ))
         }
     }
@@ -1047,8 +1166,15 @@ async fn grant_outer(state: &AppState, params: &HashMap<String, String>) -> Resu
     .bind(uuid_sha256(redirect_id))
     .fetch_optional(&state.pool)
     .await?;
-    let not_found = || record_not_found("oauth-app-redirect", json!({"args": [{"redirect-id": redirect_id}]}));
-    let Some(row) = row else { return Err(not_found()) };
+    let not_found = || {
+        record_not_found(
+            "oauth-app-redirect",
+            json!({"args": [{"redirect-id": redirect_id}]}),
+        )
+    };
+    let Some(row) = row else {
+        return Err(not_found());
+    };
     let redirect = redirect_from_row(&row);
     if redirect.grant_token != Some(grant_token) {
         return Err(not_found());
@@ -1059,11 +1185,21 @@ async fn grant_outer(state: &AppState, params: &HashMap<String, String>) -> Resu
     Ok(redirect)
 }
 
-async fn grant_inner(state: &AppState, headers: &HeaderMap, redirect: &Redirect) -> Result<Response> {
+async fn grant_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    redirect: &Redirect,
+) -> Result<Response> {
     client_and_app(state, redirect.client_id).await?;
-    let cookie = cookie_value(headers).ok_or_else(|| InstantError::new("param-missing", 400, "Missing cookie.", None))?;
+    let cookie = cookie_value(headers)
+        .ok_or_else(|| InstantError::new("param-missing", 400, "Missing cookie.", None))?;
     if cookie != redirect.cookie {
-        return Err(InstantError::new("param-missing", 400, "Invalid cookie.", None));
+        return Err(InstantError::new(
+            "param-missing",
+            400,
+            "Invalid cookie.",
+            None,
+        ));
     }
     let code = Uuid::new_v4();
     sqlx::query(
@@ -1083,7 +1219,11 @@ async fn grant_inner(state: &AppState, headers: &HeaderMap, redirect: &Redirect)
     .await?;
     Ok(found(&add_query_params(
         &redirect.redirect_uri,
-        &[("code", &code.to_string()), ("state", &redirect.state), ("scope", &redirect.scopes.join(" "))],
+        &[
+            ("code", &code.to_string()),
+            ("state", &redirect.state),
+            ("scope", &redirect.scopes.join(" ")),
+        ],
     )))
 }
 
@@ -1149,7 +1289,9 @@ async fn claim_code(state: &AppState, code: Uuid) -> Result<Code> {
         client_id: row.get("client_id"),
         redirect_uri: row.get("redirect_uri"),
         user_id: row.get("user_id"),
-        scopes: row.get::<Option<Vec<String>>, _>("scopes").unwrap_or_default(),
+        scopes: row
+            .get::<Option<Vec<String>>, _>("scopes")
+            .unwrap_or_default(),
         code_challenge: row.get("code_challenge"),
         code_challenge_method: row.get("code_challenge_method"),
     })
@@ -1184,7 +1326,9 @@ async fn create_access_token(
     let expires_at: chrono::DateTime<chrono::Utc> = row.get("expires_at");
     Ok(IssuedToken {
         value,
-        scopes: row.get::<Option<Vec<String>>, _>("scopes").unwrap_or_default(),
+        scopes: row
+            .get::<Option<Vec<String>>, _>("scopes")
+            .unwrap_or_default(),
         expires_in: (expires_at - chrono::Utc::now()).num_seconds(),
     })
 }
@@ -1210,8 +1354,13 @@ pub async fn token(
     Query(query): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Response {
-    let ct = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
-    let params = if ct.starts_with("application/x-www-form-urlencoded") || ct.starts_with("application/json") {
+    let ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let params = if ct.starts_with("application/x-www-form-urlencoded")
+        || ct.starts_with("application/json")
+    {
         merged_params(&headers, &HashMap::new(), &body)
     } else {
         query
@@ -1222,7 +1371,10 @@ pub async fn token(
 async fn token_impl(state: &AppState, params: &HashMap<String, String>) -> Result<Value> {
     let grant_type = pm(params, "grant_type")?;
     let client_id = pm_uuid(params, "client_id")?;
-    let client_secret = params.get("client_secret").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let client_secret = params
+        .get("client_secret")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let Some(client_secret) = client_secret else {
         if grant_type != "authorization_code" {
             return Err(InstantError::new(
@@ -1237,10 +1389,20 @@ async fn token_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
         let code_param = pm_uuid(params, "code")?;
         let code = claim_code(state, code_param).await?;
         if code.client_id != client_id {
-            return Err(InstantError::new("param-malformed", 400, "Invalid client_id parameter", Some(json!({"input": client_id}))));
+            return Err(InstantError::new(
+                "param-malformed",
+                400,
+                "Invalid client_id parameter",
+                Some(json!({"input": client_id})),
+            ));
         }
         if !constant_eq(redirect_uri.as_bytes(), code.redirect_uri.as_bytes()) {
-            return Err(InstantError::new("param-malformed", 400, "Invalid redirect_uri parameter", Some(json!({"input": redirect_uri}))));
+            return Err(InstantError::new(
+                "param-malformed",
+                400,
+                "Invalid redirect_uri parameter",
+                Some(json!({"input": redirect_uri})),
+            ));
         }
         if code.code_challenge.is_none() || code.code_challenge_method.is_none() {
             return Err(InstantError::new(
@@ -1258,7 +1420,9 @@ async fn token_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
             Some(&verifier),
         )?;
         let mut conn = state.pool.acquire().await?;
-        let access = create_access_token(&mut conn, code.client_id, code.user_id, &code.scopes, None).await?;
+        let access =
+            create_access_token(&mut conn, code.client_id, code.user_id, &code.scopes, None)
+                .await?;
         return Ok(json!({
             "access_token": access.value,
             "expires_in": access.expires_in,
@@ -1275,7 +1439,12 @@ async fn token_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
     .bind(token_lookup_key(&client_secret))
     .fetch_optional(&state.pool)
     .await?
-    .ok_or_else(|| record_not_found("oauth-app-client", json!({"args": [{"client-id": client_id}]})))?;
+    .ok_or_else(|| {
+        record_not_found(
+            "oauth-app-client",
+            json!({"args": [{"client-id": client_id}]}),
+        )
+    })?;
     let secret_client: Uuid = client_row.get("client_id");
     match grant_type.as_str() {
         "authorization_code" => {
@@ -1412,7 +1581,12 @@ pub async fn revoke(
                 .execute(&state.pool)
                 .await?;
         } else {
-            return Err(InstantError::new("param-malformed", 400, "Token is not a access token or a refresh token.", None));
+            return Err(InstantError::new(
+                "param-malformed",
+                400,
+                "Token is not a access token or a refresh token.",
+                None,
+            ));
         }
         Ok(json!({}))
     }

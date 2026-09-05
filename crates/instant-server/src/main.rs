@@ -460,10 +460,14 @@ async fn main() -> anyhow::Result<()> {
             "/platform/oauth/token-info",
             get(routes::platform_oauth::token_info),
         )
-        .route("/platform/oauth/revoke", post(routes::platform_oauth::revoke))
+        .route(
+            "/platform/oauth/revoke",
+            post(routes::platform_oauth::revoke),
+        )
         .route(
             "/dash/apps/{app_id}/oauth-apps",
-            get(routes::platform_oauth::oauth_apps_get).post(routes::platform_oauth::oauth_apps_post),
+            get(routes::platform_oauth::oauth_apps_get)
+                .post(routes::platform_oauth::oauth_apps_post),
         )
         .route(
             "/dash/apps/{app_id}/oauth-apps/{oauth_app_id}",
