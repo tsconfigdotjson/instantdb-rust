@@ -34,6 +34,7 @@ dashmap.workspace = true
 # Faster allocator for the fan-out hot paths (issue #11); opt out with
 # `--no-default-features` on platforms without a C toolchain.
 mimalloc = { version = "0.1", optional = true }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 
 [features]
 default = ["mimalloc"]
