@@ -37,5 +37,15 @@
     "path": "^dash:38-platform/transferRevoke(Again)?$",
     "reason": "Legacy's app-transfer revoke 500s: `make-reject-by-email-and-role-q` binds the role to a `:?email` placeholder that the caller never supplies (member_invites.clj:205-229), so the query can't be formatted. This server revokes the pending creator invite and answers `{count}` as the handler intends.",
     "citation": "LEGACY/server/src/instant/model/member_invites.clj:205-229; superadmin/routes.clj:235-245"
+  },
+  {
+    "path": "^dash:38-platform/secretCreateUnknownClient$",
+    "reason": "Legacy creates a client secret with the client-id as a sub-select; for a client id that is not one of the app's, the sub-select is NULL and Postgres answers not-null-violation before `assert-record!` runs, so legacy 500s with an sql-exception. This server answers the record-not-found the handler intends.",
+    "citation": "LEGACY/server/src/instant/model/oauth_app.clj:312-335"
+  },
+  {
+    "path": "^dash:38-platform/transferWithAccessToken$",
+    "reason": "Legacy maps `:apps/transfer` to the unused scope string `apps-transfer` and then asks `satisfies-scope?`, whose `condp` has no clause for it, so a platform access token on the transfer routes raises `No matching clause` (a 500) instead of the intended missing-scope permission-denied. This server answers `You are missing the apps-transfer scope`.",
+    "citation": "LEGACY/server/src/instant/superadmin/routes.clj:44-57; model/oauth_app.clj:34-46"
   }
 ]

@@ -714,8 +714,14 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// a bare 302 like ring's `response/found`: no body and no content-type
 fn found(url: &str) -> Response {
-    (StatusCode::FOUND, [(header::LOCATION, url)], "").into_response()
+    (
+        StatusCode::FOUND,
+        [(header::LOCATION, url)],
+        axum::body::Body::empty(),
+    )
+        .into_response()
 }
 
 fn add_query_params(url: &str, params: &[(&str, &str)]) -> String {
@@ -730,12 +736,17 @@ fn add_query_params(url: &str, params: &[(&str, &str)]) -> String {
     u.to_string()
 }
 
+/// `ex/get-param!` with `coerce-non-blank-str`: absent is param-missing, a
+/// blank value is param-malformed
 fn qp<'a>(params: &'a HashMap<String, String>, key: &str) -> Result<&'a str> {
-    params
+    let raw = params
         .get(key)
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| param_missing(&["params", key]))
+        .ok_or_else(|| param_missing(&["params", key]))?;
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err(param_malformed(&["params", key], json!(raw)));
+    }
+    Ok(s)
 }
 fn qp_uuid(params: &HashMap<String, String>, key: &str) -> Result<Uuid> {
     let raw = params
@@ -994,7 +1005,7 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
             (header::LOCATION, dash_url),
             (header::SET_COOKIE, cookie_header),
         ],
-        "",
+        axum::body::Body::empty(),
     )
         .into_response())
 }
