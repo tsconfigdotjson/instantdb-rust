@@ -1257,8 +1257,9 @@ async function runAgainst(name) {
     r38.deny = { status: denyRes.status, params: denyLoc ? Object.fromEntries(new URL(denyLoc).searchParams.entries()) : null };
     r38.denyAgain = errView(await (async () => { const res = await fetch(base + "/platform/oauth/deny", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", cookie: `__session=${d.cookie}` }, body: new URLSearchParams({ redirect_id: d.redirectId, grant_token: d.grantToken }), redirect: "manual" }); const text = await res.text(); let json; try { json = JSON.parse(text); } catch { json = { "<non-json>": text.slice(0, 80) }; } return { status: res.status, body: json }; })());
     const e = await startAndClaim();
-    r38.grant = await grantView(e);
-    const code1 = r38.grant.code;
+    const grant1 = await grantView(e);
+    const code1 = grant1.code;
+    r38.grant = { ...grant1, code: code1 ? "<uuid>" : null };
     const tokenCall = async (form) => {
       const res = await fetch(base + "/platform/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(form) });
       const text = await res.text();
