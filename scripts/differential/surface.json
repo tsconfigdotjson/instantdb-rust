@@ -1,6 +1,6 @@
 {
  "generatedFrom": "LEGACY/server/src/instant",
- "count": 316,
+ "count": 315,
  "items": [
   {
    "id": "cel:_checked_data_ref",
@@ -134,11 +134,6 @@
   },
   {
    "id": "err:member-missing",
-   "group": "errors",
-   "source": "util/exception.clj"
-  },
-  {
-   "id": "err:message",
    "group": "errors",
    "source": "util/exception.clj"
   },

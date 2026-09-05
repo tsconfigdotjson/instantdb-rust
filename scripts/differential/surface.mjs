@@ -94,7 +94,10 @@ export function legacySurface() {
   }
   // error types: every `::type ::x` thrown by util/exception.clj
   const ex = read("util/exception.clj");
+  // `(s/keys :req [::type ::message ...])` mentions ::message next to ::type
+  const NOT_TYPES = new Set(["message"]);
   for (const m of new Set([...ex.matchAll(/::type ::([a-z-]+)/g)].map((x) => x[1]))) {
+    if (NOT_TYPES.has(m)) continue;
     items.push({ id: `err:${m}`, group: "errors", source: "util/exception.clj" });
   }
   // dedupe, stable order

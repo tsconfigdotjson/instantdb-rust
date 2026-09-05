@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # nightly: the differential fuzz layer with more seeds and longer scripts
+  schedule:
+    - cron: "17 3 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -256,12 +259,85 @@ jobs:
           done
           echo "rust server failed to boot"; cat /tmp/rust-server.log; exit 1
       - name: Differential replay + fuzz vs legacy server
+        env:
+          FUZZ_SEEDS: ${{ github.event_name == 'schedule' && '1 2 3 4 5 6 7 8 9 10' || '42 99' }}
+          FUZZ_ROUNDS: ${{ github.event_name == 'schedule' && '250' || '80' }}
         run: KEEP=1 ./scripts/differential/run.sh
       - name: Server logs
         if: failure()
         run: |
           echo "=== rust server ==="; cat /tmp/rust-server.log || true
           echo "=== legacy server ==="; docker compose -f scripts/differential/docker-compose.yml logs legacy-server | tail -100 || true
+
+  # The legacy CLI's own end-to-end suite (LEGACY/client/packages/cli
+  # __tests__/e2e) pointed at this server via INSTANT_CLI_API_URI: the
+  # published instant-cli must work unchanged against it.
+  sdk-e2e:
+    name: legacy SDK e2e (instant-cli)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: instant
+          POSTGRES_PASSWORD: instant
+          POSTGRES_DB: instant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U instant"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://instant:instant@localhost:5432/instant
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.2.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: LEGACY/client/pnpm-lock.yaml
+      - name: Apply migrations
+        run: ./scripts/apply-migrations.sh
+      - name: Boot rust server
+        run: |
+          cargo build -p instant-server
+          PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/rust-server.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8888/health >/dev/null && exit 0
+            sleep 1
+          done
+          echo "rust server failed to boot"; cat /tmp/rust-server.log; exit 1
+      - name: Cache CLI dist
+        id: cli-dist
+        uses: actions/cache@v4
+        with:
+          path: LEGACY/client/packages/*/dist
+          key: cli-dist-${{ hashFiles('LEGACY/client/pnpm-lock.yaml', 'LEGACY/client/packages/**/src/**', 'LEGACY/client/packages/**/package.json') }}
+      - name: Build instant-cli
+        working-directory: LEGACY/client
+        run: |
+          pnpm install --frozen-lockfile --filter "instant-cli..."
+          if [ "${{ steps.cli-dist.outputs.cache-hit }}" != "true" ]; then
+            pnpm --filter "instant-cli..." run build
+          fi
+      - name: "instant-cli e2e suite against this server"
+        working-directory: LEGACY/client/packages/cli
+        env:
+          INSTANT_CLI_API_URI: http://localhost:8888
+        run: pnpm exec vitest run --project e2e
+      - name: Server log
+        if: failure()
+        run: cat /tmp/rust-server.log || true
 
   docker:
     name: docker build

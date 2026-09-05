@@ -10,7 +10,7 @@
 // says otherwise.
 
 import { execSync } from "node:child_process";
-import { noteCel, noteWsFrame, noteWsMessage } from "./coverage-hook.mjs";
+import { noteHttp, noteCel, noteWsFrame, noteWsMessage } from "./coverage-hook.mjs";
 
 export const uuid = () => crypto.randomUUID();
 
@@ -45,6 +45,7 @@ export function psql(url, sql) {
 // browser's would; both servers read them into request.origin / request.ip
 // for rule evaluation (node's WebSocket accepts them as an undici option).
 export function connect(serverUrl, appId, name, headers) {
+  noteHttp("GET", `${serverUrl}/runtime/session`);
   const ws = new WebSocket(
     `${serverUrl.replace(/^http/, "ws")}/runtime/session?app_id=${appId}`,
     headers ? { headers } : undefined,

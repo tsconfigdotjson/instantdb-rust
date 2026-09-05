@@ -91,9 +91,27 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   is compared with legacy's too; on the other backends rust proxies through
   `/storage/serve` and only the fetched content is compared.
   `node storage.mjs <app> <token>`.
-- `fuzz.mjs` — seeded random tx-steps + queries replayed on both servers;
-  asserts per-server invariants (monotonic tx-ids) and cross-server equality
-  of every query result. `node fuzz.mjs <app> <app> <token> [seed] [rounds]`.
+- `fuzz.mjs` — seeded random tx-steps + queries over the whole client
+  grammar (every tx-step op incl. `mode`, links, schema churn, malformed
+  steps; every where operator, dotted link paths, first/last/after/before
+  cursor walks, fields, nested links, `$$ruleParams`) replayed on both
+  servers; asserts per-server invariants (monotonic tx-ids) and cross-server
+  equality of every query result and error type.
+  `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. CI runs two seeds per
+  PR and ten longer seeds nightly (`schedule` in ci.yml).
+- `errors.mjs` / `errors-allowed.json` — the error matrix: one probe per
+  externally reachable legacy error type (`err:*` in surface.json) over HTTP
+  and the ws session; the normalized envelope (status, type, message, hint)
+  must match. `node errors.mjs <app> <token> <user-refresh-token>`.
+- `schema.mjs` / `schema-allowed.json` — diffs the two live database
+  catalogs (tables, columns, constraints, indexes, enums, functions,
+  triggers): an upstream migration the vendored copy lacks fails CI here
+  instead of at runtime. `node schema.mjs`.
+- `stress.mjs` — scheduling stress: a large transact followed immediately by
+  presence, a query and a broadcast on the same session; every op must be
+  answered on both servers, peers must see the presence/broadcast, and the
+  states must converge (the reply order is printed; legacy's per-op group
+  keys vs this server's in-order handling is documented in docs/PARITY.md).
 - `lib.mjs` — capture clients, normalization, folding.
 - `surface.mjs` / `surface.json` — the legacy server's public surface derived
   mechanically from the vendored source (every route table, ws op, tx-step
