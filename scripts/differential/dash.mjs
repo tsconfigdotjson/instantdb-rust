@@ -1325,6 +1325,82 @@ async function runAgainst(name) {
     r38.oauthAppDeleteAgain = errView(await call(base, "DELETE", `/dash/apps/${appId}/oauth-apps/${oaId}`, { token: userToken }));
     raw("38-platform", r38);
     record("38-platform", r38);
+
+    // 39 webhooks: management routes, the events queued by a transaction,
+    // the payload for one event (fetched with the admin token), resend
+    const r39 = {};
+    const hookNs = "orders";
+    await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["update", hookNs, mk(), { total: 1 }]] } });
+    const hookView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), webhook: norm({ ...res.body.webhook, id: undefined, keys: Object.keys(res.body.webhook ?? {}).sort() }) } : errView(res));
+    const wh = (p, opts) => call(base, "POST", `/dash/apps/${appId}/webhooks${p}`, opts);
+    r39.createHttp = errView(await wh("", { body: { url: "http://example.com/hook", namespaces: [hookNs], actions: ["create"] } }));
+    r39.createLocalhost = errView(await wh("", { body: { url: "https://localhost/hook", namespaces: [hookNs], actions: ["create"] } }));
+    r39.createUnknownNamespace = errView(await wh("", { body: { url: "https://example.com/hook", namespaces: ["nope"], actions: ["create"] } }));
+    r39.createNoNamespaces = errView(await wh("", { body: { url: "https://example.com/hook", namespaces: [], actions: ["create"] } }));
+    r39.createNoActions = errView(await wh("", { body: { url: "https://example.com/hook", namespaces: [hookNs], actions: [] } }));
+    r39.createMissingUrl = errView(await wh("", { body: { namespaces: [hookNs], actions: ["create"] } }));
+    r39.createBadNamespaces = errView(await wh("", { body: { url: "https://example.com/hook", namespaces: "orders", actions: ["create"] } }));
+    r39.createNoAuth = errView(await wh("", { token: null, body: { url: "https://example.com/hook", namespaces: [hookNs], actions: ["create"] } }));
+    const hookCreated = await wh("", { body: { url: "https://example.com/hook", namespaces: [hookNs], actions: ["create", "update", "delete"] } });
+    r39.create = hookView(hookCreated);
+    const hookId = hookCreated.body?.webhook?.id;
+    r39.createDuplicate = errView(await wh("", { body: { url: "https://example.com/hook", namespaces: [hookNs], actions: ["delete", "update", "create"] } }));
+    r39.createUser = hookView(await wh("", { token: userToken, body: { url: "https://example.com/hook2", namespaces: [hookNs], actions: ["create"] } }));
+    const listed = await call(base, "GET", `/dash/apps/${appId}/webhooks`);
+    r39.list = listed.status === 200 ? { status: 200, hooks: (listed.body.webhooks ?? []).map((w) => norm({ url: w.sink?.url, namespaces: w.namespaces, actions: w.actions, status: w.status, keys: Object.keys(w).sort() })).sort((a, c) => (a.url < c.url ? -1 : 1)) } : errView(listed);
+    r39.update = hookView(await wh(`/${hookId}`, { body: { url: "https://example.com/hook3", actions: ["create"] } }));
+    r39.updateBadUrl = errView(await wh(`/${hookId}`, { body: { url: "nope" } }));
+    r39.updateEmptyActions = errView(await wh(`/${hookId}`, { body: { actions: [] } }));
+    r39.updateUnknown = errView(await wh(`/${mk()}`, { body: { url: "https://example.com/x" } }));
+    r39.disable = hookView(await wh(`/${hookId}/disable`, { body: { reason: "paused" } }));
+    r39.enable = hookView(await wh(`/${hookId}/enable`, {}));
+    r39.updateBack = hookView(await wh(`/${hookId}`, { body: { actions: ["create", "update", "delete"] } }));
+    // a transaction the webhook matches → an event on both servers
+    const orderId = mk();
+    await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["update", hookNs, orderId, { total: 42, note: "n" }]] } });
+    let evs;
+    for (let i = 0; i < 100; i++) {
+      evs = await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events`);
+      if ((evs.body?.events ?? []).length >= 1) break;
+      await sleep(100);
+    }
+    const evView = (e) => ({ isn: typeof e.isn === "string" ? "<isn>" : e.isn, keys: Object.keys(e).sort() });
+    r39.events = evs.status === 200 ? { status: 200, keys: Object.keys(evs.body).sort(), count: (evs.body.events ?? []).length, events: (evs.body.events ?? []).map(evView), pageInfo: { keys: Object.keys(evs.body.pageInfo ?? {}).sort(), hasNextPage: evs.body.pageInfo?.hasNextPage, cursors: !!evs.body.pageInfo?.startCursor } } : errView(evs);
+    r39.eventsBadCursor = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events?after=%%%`));
+    r39.eventsUnknownHook = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${mk()}/events`));
+    const isn = evs.body?.events?.[0]?.isn;
+    const one = await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events/${isn}`);
+    r39.event = one.status === 200 ? { status: 200, event: evView(one.body.event) } : errView(one);
+    r39.eventUnknownIsn = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events/0/0/1`));
+    r39.eventBadIsn = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events/nope`));
+    const payload = await call(base, "GET", `/webhooks/payload/${appId}/${hookId}/${isn}`);
+    r39.payload = payload.status === 200 ? { status: 200, keys: Object.keys(payload.body).sort(), data: norm((payload.body.data ?? []).map((d) => ({ ...d, keys: Object.keys(d).sort() }))) } : errView(payload);
+    r39.payloadNoAuth = errView(await call(base, "GET", `/webhooks/payload/${appId}/${hookId}/${isn}`, { token: null }));
+    r39.payloadBadJwt = errView(await call(base, "GET", `/webhooks/payload/${appId}/${hookId}/${isn}`, { token: "eyJhbGciOiJFZERTQSJ9.e30.AAAA" }));
+    r39.payloadUser = okKeys(await call(base, "GET", `/webhooks/payload/${appId}/${hookId}/${isn}`, { token: userToken }));
+    // an update and a delete of the same entity: before/after in the payload
+    await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["update", hookNs, orderId, { total: 43 }]] } });
+    await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["delete", hookNs, orderId]] } });
+    for (let i = 0; i < 100; i++) {
+      evs = await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events`);
+      if ((evs.body?.events ?? []).length >= 3) break;
+      await sleep(100);
+    }
+    const isns = (evs.body?.events ?? []).map((e) => e.isn).reverse();
+    const payloads = [];
+    for (const i of isns) {
+      const p = await call(base, "GET", `/webhooks/payload/${appId}/${hookId}/${i}`);
+      payloads.push(p.status === 200 ? norm((p.body.data ?? []).map((d) => ({ namespace: d.namespace, action: d.action, id: d.id, before: d.before, after: d.after }))) : errView(p));
+    }
+    r39.payloadSequence = payloads;
+    r39.resendUnknown = errView(await wh(`/${hookId}/events/0/0/1`, {}));
+    r39.delete = hookView(await call(base, "DELETE", `/dash/apps/${appId}/webhooks/${hookId}`));
+    r39.deleteAgain = errView(await call(base, "DELETE", `/dash/apps/${appId}/webhooks/${hookId}`));
+    r39.eventsAfterDelete = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events`));
+    const jwksRes = await call(base, "GET", "/.well-known/webhooks/jwks.json", { token: null });
+    r39.jwks = jwksRes.status === 200 ? { status: 200, keys: Object.keys(jwksRes.body).sort(), key: norm({ ...jwksRes.body.keys?.[0], x: "<x>", kid: "<kid>", keys: Object.keys(jwksRes.body.keys?.[0] ?? {}).sort() }) } : errView(jwksRes);
+    raw("39-webhooks", r39);
+    record("39-webhooks", r39);
   }
 
   return out;

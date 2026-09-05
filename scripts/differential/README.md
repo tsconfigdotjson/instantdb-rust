@@ -112,6 +112,8 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   answered on both servers, peers must see the presence/broadcast, and the
   states must converge (the reply order is printed; legacy's per-op group
   keys vs this server's in-order handling is documented in docs/PARITY.md).
+- `dash.mjs` step 39 drives the webhook management routes, the events a
+  transaction queues and the payload for them on both servers.
 - `lib.mjs` — capture clients, normalization, folding.
 - `surface.mjs` / `surface.json` — the legacy server's public surface derived
   mechanically from the vendored source (every route table, ws op, tx-step

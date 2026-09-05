@@ -111,8 +111,8 @@ jobs:
       - name: Boot two server nodes
         run: |
           cargo build -p instant-server
-          PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/server1.log 2>&1 &
-          PORT=8889 BASE_URL=http://localhost:8889 ./target/debug/instant-server > /tmp/server2.log 2>&1 &
+          INSTANT_WEBHOOK_ALLOW_INSECURE=1 PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/server1.log 2>&1 &
+          INSTANT_WEBHOOK_ALLOW_INSECURE=1 PORT=8889 BASE_URL=http://localhost:8889 ./target/debug/instant-server > /tmp/server2.log 2>&1 &
           # a node whose ws handlers always overrun (security-test.mjs timeout section)
           INSTANT_HANDLE_RECEIVE_TIMEOUT_MS=1 PORT=8887 BASE_URL=http://localhost:8887 ./target/debug/instant-server > /tmp/server-timeout.log 2>&1 &
           for i in $(seq 1 60); do
@@ -153,6 +153,8 @@ jobs:
         run: TIMEOUT_NODE_URL=http://localhost:8887 node scripts/security-test.mjs "$APP_ID" "$ADMIN_TOKEN"
       - name: "e2e: admin SDK"
         run: node scripts/admin-sdk-test.mjs "$APP_ID" "$ADMIN_TOKEN"
+      - name: "e2e: webhooks (local receiver)"
+        run: node scripts/webhooks-test.mjs "$APP_ID" "$ADMIN_TOKEN"
       - name: "e2e: multinode ws"
         run: node scripts/multinode-ws.mjs "$APP_ID"
       - name: "e2e: multinode storage"
