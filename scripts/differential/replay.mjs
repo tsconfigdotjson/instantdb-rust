@@ -1023,6 +1023,9 @@ function buildScenario() {
         await env.conns.A.waitFor((m) => (m.op === "refresh-presence" || m.op === "patch-presence") && m["room-id"] === "rejoin" && JSON.stringify(m).includes('"x"'));
         msg(env.conns.B, { op: "join-room", "room-type": "diff", "room-id": "rejoin" });
         await env.conns.B.waitFor((m) => m.op === "join-room-ok" && m["room-id"] === "rejoin" && env.conns.B.frames.filter((f) => f.op === "join-room-ok" && f["room-id"] === "rejoin").length >= 2);
+        // the rejoin's presence snapshot (A's data) reaches B after the ok;
+        // don't let the final rooms state depend on that race
+        await env.conns.B.waitFor((m) => (m.op === "refresh-presence" || m.op === "patch-presence") && m["room-id"] === "rejoin" && JSON.stringify(m).includes('"who":"A"'), 5000).catch(() => {});
         // streams
         await expectErr(env.conns.A, { op: "start-stream", "client-id": "diff-stream-2" });
         msg(env.conns.A, { op: "start-stream", "client-id": "diff-stream-2", "reconnect-token": ids.stream2Token });

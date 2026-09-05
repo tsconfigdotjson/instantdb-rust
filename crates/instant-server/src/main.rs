@@ -580,21 +580,22 @@ async fn main() -> anyhow::Result<()> {
             "/dash/personal_access_tokens/{id}",
             delete(routes::dash_manage::personal_access_tokens_delete),
         )
+        // instant-cli login: register a ticket, the dashboard login claims it
         .route(
             "/dash/cli/auth/register",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_register),
         )
         .route(
             "/dash/cli/auth/check",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_check),
         )
         .route(
             "/dash/cli/auth/claim",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_claim),
         )
         .route(
             "/dash/cli/auth/void",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_void),
         )
         .route(
             "/admin/query_perms_check",

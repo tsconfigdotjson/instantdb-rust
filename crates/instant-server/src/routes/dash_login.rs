@@ -19,9 +19,9 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::routes::dash::{param_malformed, param_missing, parse_body};
+use crate::routes::dash::{dash_user, param_malformed, param_missing, parse_body};
 use crate::routes::dash_apps::{
-    body_str, create_app, path_uuid, record_not_found, GET_A_DB_CREATOR_EMAIL,
+    body_str, body_uuid, create_app, path_uuid, record_not_found, GET_A_DB_CREATOR_EMAIL,
 };
 use crate::routes::dash_manage::{
     create_dashboard_refresh_token, dashboard_login_user, signup_allowed,
@@ -152,7 +152,24 @@ pub async fn oauth_start(
         .bind(redirect_to_dev)
         .bind(ticket)
         .execute(&state.pool)
-        .await?;
+        .await
+        .map_err(|e| match &e {
+            // a ticket that is not a registered CLI login: legacy's
+            // translate-and-throw-psql-exception! (util/exception.clj:633-649)
+            sqlx::Error::Database(db) if db.code().as_deref() == Some("23503") => {
+                InstantError::new(
+                    "record-foreign-key-invalid",
+                    400,
+                    "Foreign Key Invalid: foreign-key-violation",
+                    Some(json!({
+                        "table": db.table(),
+                        "condition": "foreign-key-violation",
+                        "constraint": db.constraint(),
+                    })),
+                )
+            }
+            _ => InstantError::from(e),
+        })?;
         let expires =
             (chrono::Utc::now() + chrono::Duration::hours(1)).format("%a, %d %b %Y %H:%M:%S GMT");
         let secure = if state.cfg.base_url.starts_with("https://") {
@@ -613,4 +630,153 @@ pub async fn active_sessions(State(state): State<Arc<AppState>>) -> Response {
         "total-count": state.sessions.len(),
         "total-queries": total_queries,
     })))
+}
+
+// ---------------------------------------------------------------------------
+// CLI login (legacy dash/routes.clj cli-auth-* :2375-2413, model
+// instant_cli_login.clj): `instant-cli login` registers a ticket + secret, the
+// dashboard's Google / magic-code login claims the ticket for the user, and
+// the CLI polls `check` with the secret until it gets a refresh token.
+
+/// legacy `instant-cli-login-model/expired?`
+const CLI_LOGIN_TTL_MINUTES: i64 = 2;
+
+/// POST /dash/cli/auth/register — a fresh ticket (the row id) and the secret
+/// stored as its sha256.
+pub async fn cli_auth_register(State(state): State<Arc<AppState>>) -> Response {
+    let r = async {
+        let secret = Uuid::new_v4();
+        let ticket = Uuid::new_v4();
+        sqlx::query("INSERT INTO instant_cli_logins (id, secret) VALUES ($1, $2)")
+            .bind(ticket)
+            .bind(uuid_sha256(secret))
+            .execute(&state.pool)
+            .await?;
+        Ok(json!({"secret": secret, "ticket": ticket}))
+    }
+    .await;
+    json_or_err(r)
+}
+
+/// POST /dash/cli/auth/claim {ticket} — the logged-in user attaches
+/// themselves to the ticket (an unknown ticket updates nothing, like legacy).
+pub async fn cli_auth_claim(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let r = async {
+        let user = dash_user(&state, &headers).await?;
+        let body = parse_body(&body)?;
+        let ticket = body_uuid(&body, "ticket")?;
+        sqlx::query("UPDATE instant_cli_logins SET user_id = $1 WHERE id = $2")
+            .bind(user.id)
+            .bind(ticket)
+            .execute(&state.pool)
+            .await?;
+        Ok(json!({"ticket": ticket}))
+    }
+    .await;
+    json_or_err(r)
+}
+
+/// POST /dash/cli/auth/void {ticket} — the user denies the request.
+pub async fn cli_auth_void(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let r = async {
+        dash_user(&state, &headers).await?;
+        let body = parse_body(&body)?;
+        let ticket = body_uuid(&body, "ticket")?;
+        sqlx::query("UPDATE instant_cli_logins SET used = true WHERE id = $1")
+            .bind(ticket)
+            .execute(&state.pool)
+            .await?;
+        Ok(json!({}))
+    }
+    .await;
+    json_or_err(r)
+}
+
+fn cli_login_validation(input: Value, issue: &str, message: &str) -> InstantError {
+    InstantError::validation_failed_input(
+        "instant-cli-login",
+        input,
+        json!([{"issue": issue, "message": message}]),
+    )
+}
+
+/// POST /dash/cli/auth/check {secret} — legacy `instant-cli-login-model/use!`:
+/// unknown → record-not-found, older than 2 minutes → record-expired, voided
+/// (used without a user) / unclaimed / already used → validation-failed with
+/// the CLI's `issue` codes (the already-claimed one reports `:id` as its
+/// input, which is the literal string "id" on the wire), then a refresh
+/// token for the claiming user.
+pub async fn cli_auth_check(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    let r = async {
+        let body = parse_body(&body)?;
+        let secret = body_uuid(&body, "secret")?;
+        let key = uuid_sha256(secret);
+        let login = sqlx::query(
+            "SELECT id, used, user_id, created_at FROM instant_cli_logins WHERE secret = $1",
+        )
+        .bind(&key)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(|| record_not_found("instant-cli-login", json!({})))?;
+        let id: Uuid = login.get("id");
+        let used: bool = login.get("used");
+        let user_id: Option<Uuid> = login.get("user_id");
+        let created: chrono::NaiveDateTime = login.get("created_at");
+        if chrono::Utc::now().naive_utc() - created
+            > chrono::Duration::minutes(CLI_LOGIN_TTL_MINUTES)
+        {
+            return Err(InstantError::new(
+                "record-expired",
+                400,
+                "Record expired: instant-cli-login",
+                Some(json!({"args": [id]})),
+            ));
+        }
+        if used && user_id.is_none() {
+            return Err(cli_login_validation(
+                json!(id),
+                "user-voided-request",
+                "This request has been denied",
+            ));
+        }
+        let Some(user_id) = user_id else {
+            return Err(cli_login_validation(
+                json!(id),
+                "waiting-for-user",
+                "Waiting for a user to accept this request",
+            ));
+        };
+        let claimed = sqlx::query(
+            "UPDATE instant_cli_logins SET used = true
+              WHERE secret = $1 AND user_id IS NOT NULL AND used = false RETURNING id",
+        )
+        .bind(&key)
+        .fetch_optional(&state.pool)
+        .await?;
+        if claimed.is_none() {
+            return Err(cli_login_validation(
+                json!("id"),
+                "user-already-claimed",
+                "This request has already been claimed",
+            ));
+        }
+        let token = create_dashboard_refresh_token(&state, user_id).await?;
+        let email: String = sqlx::query("SELECT email FROM instant_users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .map(|r| r.get("email"))
+            .ok_or_else(|| record_not_found("instant-user", json!({"args": [{"id": user_id}]})))?;
+        Ok(json!({"token": token, "email": email}))
+    }
+    .await;
+    json_or_err(r)
 }

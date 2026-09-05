@@ -1420,7 +1420,9 @@ async function runAgainst(name) {
     };
     const strip = ({ state, cookie, ...rest }) => rest;
     r40.start = strip(await loginStart());
-    r40.startWithPath = strip(await loginStart("?redirect_path=apps&redirect_to_dev=true&ticket=" + mk()));
+    r40.startWithPath = strip(await loginStart("?redirect_path=apps&redirect_to_dev=true"));
+    // a ticket that is not a registered CLI login violates the foreign key on both servers
+    r40.startUnknownTicket = strip(await loginStart("?ticket=" + mk()));
     const loginCallback = async (qs, cookie) => {
       const res = await fetch(base + "/dash/oauth/callback" + qs, { redirect: "manual", headers: cookie ? { cookie: `__session=${cookie}` } : {} });
       const text = await res.text();
@@ -1437,7 +1439,7 @@ async function runAgainst(name) {
     const l1 = await loginStart();
     r40.cbMismatchCookie = await loginCallback(`?state=${l1.state}&code=abc`, mk());
     r40.cbConsumed = await loginCallback(`?state=${l1.state}&code=abc`, l1.cookie);
-    const l2 = await loginStart("?ticket=" + mk());
+    const l2 = await loginStart();
     r40.cbGoogleRejects = await loginCallback(`?state=${l2.state}&code=abc`, l2.cookie);
     r40.tokenMissing = errView(await call(base, "POST", "/dash/oauth/token", { token: null, body: {} }));
     r40.tokenMalformed = errView(await call(base, "POST", "/dash/oauth/token", { token: null, body: { code: "nope" } }));
@@ -1448,6 +1450,26 @@ async function runAgainst(name) {
     r40.getADbAdminToken = errView(await call(base, "POST", "/dash/apps/get_a_db", { body: { title: "x" } }));
     const gpat = await call(base, "POST", "/dash/personal_access_tokens", { token: userToken, body: { name: "get-a-db probe" } });
     r40.getADbNotServiceUser = errView(await call(base, "POST", "/dash/apps/get_a_db", { token: gpat.body?.token, body: { title: "x" } }));
+    // the CLI login: register, the dashboard user claims / voids, check
+    const creg = await call(base, "POST", "/dash/cli/auth/register", { token: null });
+    r40.cliRegister = creg.status === 200 ? { status: 200, keys: Object.keys(creg.body).sort(), shapes: [creg.body.ticket, creg.body.secret].map((v) => /^[0-9a-f-]{36}$/.test(String(v))) } : errView(creg);
+    r40.cliCheckWaiting = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg.body?.secret } }));
+    r40.cliCheckUnknown = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: mk() } }));
+    r40.cliCheckMalformed = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: "nope" } }));
+    r40.cliCheckMissing = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: {} }));
+    r40.cliClaimNoAuth = errView(await call(base, "POST", "/dash/cli/auth/claim", { token: null, body: { ticket: creg.body?.ticket } }));
+    r40.cliClaimMissing = errView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: {} }));
+    r40.cliClaimUnknown = plainView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: { ticket: mk() } }));
+    r40.cliClaim = plainView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: { ticket: creg.body?.ticket } }));
+    const cchecked = await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg.body?.secret } });
+    r40.cliCheck = cchecked.status === 200 ? { status: 200, keys: Object.keys(cchecked.body).sort(), email: cchecked.body.email } : errView(cchecked);
+    r40.cliCheckAgain = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg.body?.secret } }));
+    const creg2 = await call(base, "POST", "/dash/cli/auth/register", { token: null });
+    r40.cliVoid = plainView(await call(base, "POST", "/dash/cli/auth/void", { token: userToken, body: { ticket: creg2.body?.ticket } }));
+    r40.cliVoidNoAuth = errView(await call(base, "POST", "/dash/cli/auth/void", { token: null, body: { ticket: creg2.body?.ticket } }));
+    r40.cliCheckVoided = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg2.body?.secret } }));
+    // start with a registered ticket: the callback hands it back to the dashboard
+    r40.startWithTicket = strip(await loginStart("?ticket=" + creg2.body?.ticket));
     const active = await call(base, "GET", "/dash/stats/active_sessions", { token: null });
     r40.activeSessions = active.status === 200 ? { status: 200, keys: Object.keys(active.body).sort() } : errView(active);
     raw("40-dash-login", r40);

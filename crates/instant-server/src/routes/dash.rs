@@ -23,7 +23,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::indexing_jobs::{self, NewJob};
-use crate::routes::runtime::{err_response, json_or_err};
+use crate::routes::runtime::json_or_err;
 use crate::routes::superadmin::Scope;
 use crate::service::{self, AppRow, PermsCtx};
 use crate::state::AppState;
@@ -744,16 +744,4 @@ pub async fn cli_version() -> Response {
     json_or_err(Ok(json!({
         "min-version": {"major": 0, "minor": 19, "patch": 0, "dev?": false}
     })))
-}
-
-/// POST /dash/cli/auth/{register,check,claim,void}: the browser login flow
-/// needs the hosted dashboard. Point users at the admin token instead of a
-/// bare 404.
-pub async fn cli_auth_unsupported() -> Response {
-    err_response(&InstantError::new(
-        "validation-failed",
-        400,
-        "Dashboard login is not available on this server. Authenticate instant-cli with your app's admin token instead: set INSTANT_APP_ADMIN_TOKEN (or pass --token) alongside INSTANT_APP_ID.",
-        Some(json!({"data-type": "instant-cli-login", "errors": [{"issue": "unsupported", "message": "Dashboard login is not available on this server."}]})),
-    ))
 }

@@ -65,8 +65,11 @@ const callback = async (qs, cookie) => {
   return { status: res.status, loc, params: loc ? Object.fromEntries(loc.searchParams) : null, contentType: res.headers.get("content-type") };
 };
 
-// --- start ---
-const ticket = crypto.randomUUID();
+// --- start (the ticket is a registered CLI login, as `instant-cli login` does) ---
+const reg = await call("POST", "/dash/cli/auth/register");
+check("cli register", reg.status === 200 && /^[0-9a-f-]{36}$/.test(reg.body.ticket) && /^[0-9a-f-]{36}$/.test(reg.body.secret), reg);
+const ticket = reg.body.ticket;
+check("cli check waits for a user", (await call("POST", "/dash/cli/auth/check", { body: { secret: reg.body.secret } })).body.hint?.errors?.[0]?.issue === "waiting-for-user");
 const s1 = await start(`?redirect_path=apps&ticket=${ticket}`);
 check("start redirects to the auth url", s1.res.status === 302 && s1.loc.origin + s1.loc.pathname === `http://localhost:${port}/authorize`, s1.loc.href);
 check("start params", s1.loc.searchParams.get("scope") === "email" && s1.loc.searchParams.get("response_type") === "code" && s1.loc.searchParams.get("redirect_uri") === `${base}/dash/oauth/callback` && s1.loc.searchParams.get("client_id") === "mock-google-client" && /^[0-9a-f-]{36}$/.test(s1.state), s1.loc.search);
@@ -99,6 +102,21 @@ check("token malformed code", (await call("POST", "/dash/oauth/token", { body: {
 const me = await call("GET", "/dash", { token: t1.body.token });
 check("refresh token works on /dash", me.status === 200 && me.body.user?.email === "login.user@example.com", me.body?.user);
 const userId = t1.body.user.id;
+
+// --- the CLI side: claim the ticket as the user, then check with the secret ---
+check("cli claim needs a user", (await call("POST", "/dash/cli/auth/claim", { body: { ticket } })).status === 400);
+check("cli claim needs a ticket", (await call("POST", "/dash/cli/auth/claim", { token: t1.body.token, body: {} })).body.type === "param-missing");
+const claimed = await call("POST", "/dash/cli/auth/claim", { token: t1.body.token, body: { ticket } });
+check("cli claim", claimed.status === 200 && claimed.body.ticket === ticket, claimed);
+const checked = await call("POST", "/dash/cli/auth/check", { body: { secret: reg.body.secret } });
+check("cli check hands out a token", checked.status === 200 && /^[0-9a-f-]{36}$/.test(checked.body.token) && checked.body.email === "login.user@example.com" && Object.keys(checked.body).sort().join() === "email,token", checked);
+check("cli token works", (await call("GET", "/dash", { token: checked.body.token })).status === 200);
+check("cli check is one-use", (await call("POST", "/dash/cli/auth/check", { body: { secret: reg.body.secret } })).body.hint?.errors?.[0]?.issue === "user-already-claimed");
+check("cli check unknown secret", (await call("POST", "/dash/cli/auth/check", { body: { secret: crypto.randomUUID() } })).body.type === "record-not-found");
+check("cli check malformed secret", (await call("POST", "/dash/cli/auth/check", { body: { secret: "nope" } })).body.type === "param-malformed");
+const reg2 = await call("POST", "/dash/cli/auth/register");
+check("cli void", (await call("POST", "/dash/cli/auth/void", { token: t1.body.token, body: { ticket: reg2.body.ticket } })).status === 200);
+check("cli check after void", (await call("POST", "/dash/cli/auth/check", { body: { secret: reg2.body.secret } })).body.hint?.errors?.[0]?.issue === "user-voided-request");
 
 // --- the same google sub with a new email updates the user ---
 google.claims = { sub: "google-sub-1", email: "renamed@example.com", email_verified: true };
