@@ -305,8 +305,12 @@ function buildScenario() {
         // are the same for an unknown / malformed id
         const syncSub = env.conns.ADMIN.frames.find((f) => f.op === "start-sync-ok");
         msg(env.conns.ADMIN, { op: "remove-sync", "subscription-id": syncSub["subscription-id"] });
-        await expectErr(env.conns.ADMIN, { op: "remove-sync", "subscription-id": "nope" });
-        await expectErr(env.conns.ADMIN, { op: "remove-sync" });
+        const syncErr = async (m) => {
+          const ceid = msg(env.conns.ADMIN, m);
+          await env.conns.ADMIN.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        await syncErr({ op: "remove-sync", "subscription-id": "nope" });
+        await syncErr({ op: "remove-sync" });
         msg(env.conns.ADMIN, { op: "start-sync", q: { todos: {} } });
         await env.conns.ADMIN.waitFor((m) => m.op === "sync-init-finish");
         const syncSub2 = env.conns.ADMIN.frames.filter((f) => f.op === "start-sync-ok").at(-1);

@@ -84,7 +84,11 @@ check("callback error param", (await callback("?error=access_denied")).params?.e
 check("callback without cookie", (await callback(`?state=${s1.state}`)).params?.error === "Missing cookie.");
 check("callback bad state", (await callback("?state=nope", s1.cookie)).params?.error === "Invalid state param in OAuth redirect.");
 check("callback bad cookie", (await callback(`?state=${s1.state}`, "nope")).params?.error === "Invalid cookie.");
-check("callback without code", (await callback(`?state=${s1.state}`, s1.cookie)).params?.error === "Missing code param in OAuth redirect.");
+// a callback with a valid state + cookie consumes the redirect before the
+// code check (legacy's side-effect order), so this one gets its own start
+const s0 = await start();
+check("callback without code", (await callback(`?state=${s0.state}`, s0.cookie)).params?.error === "Missing code param in OAuth redirect.");
+check("that callback consumed the redirect", (await callback(`?state=${s0.state}&code=mock-code`, s0.cookie)).params?.error === "Could not find OAuth request.");
 check("callback unknown state", (await callback(`?state=${crypto.randomUUID()}&code=x`, s1.cookie)).params?.error === "Could not find OAuth request.");
 const cb1 = await callback(`?state=${s1.state}&code=mock-code`, s1.cookie);
 check("callback redirects to the dashboard with a code + ticket", cb1.status === 302 && cb1.loc.origin + cb1.loc.pathname === "http://localhost:3000/dash/oauth/callback" && /^[0-9a-f-]{36}$/.test(cb1.params.code) && cb1.params.ticket === ticket, cb1);
