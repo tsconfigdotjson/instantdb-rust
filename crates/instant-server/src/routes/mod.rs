@@ -8,3 +8,4 @@ pub mod platform_oauth;
 pub mod runtime;
 pub mod sse;
 pub mod superadmin;
+pub mod webhooks;

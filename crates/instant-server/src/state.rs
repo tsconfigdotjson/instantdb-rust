@@ -339,6 +339,11 @@ pub struct AppState {
     /// per-app `apps.status` cache for the read gate, refreshed by the
     /// `instant_app_status` NOTIFY (and a TTL as the safety net)
     pub app_status_cache: DashMap<Uuid, (String, std::time::Instant)>,
+    /// the Ed25519 key that signs webhook deliveries and payload JWTs
+    /// (webhooks::load_or_generate_key at boot)
+    pub webhook_key: std::sync::OnceLock<crate::webhooks::WebhookKey>,
+    /// wakes this node's webhook delivery loop after events are queued
+    pub webhook_notify: tokio::sync::Notify,
 }
 
 impl AppState {
@@ -361,6 +366,8 @@ impl AppState {
             attr_gen: DashMap::new(),
             refresh_queues: DashMap::new(),
             app_status_cache: DashMap::new(),
+            webhook_key: std::sync::OnceLock::new(),
+            webhook_notify: tokio::sync::Notify::new(),
         })
     }
 

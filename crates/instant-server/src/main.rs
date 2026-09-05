@@ -12,6 +12,7 @@ mod state;
 mod storage;
 mod streams;
 mod sync_table;
+mod webhooks;
 mod ws;
 
 use axum::routing::{delete, get, post, put};
@@ -102,6 +103,14 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::new(cfg.clone(), pool);
 
+    webhooks::ensure_tables(&state.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("webhook tables: {e}"))?;
+    let webhook_key = webhooks::load_or_generate_key(&state.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("webhook signing key: {e}"))?;
+    let _ = state.webhook_key.set(webhook_key);
+    tokio::spawn(webhooks::run(state.clone()));
     tokio::spawn(invalidator::run(state.clone()));
     tokio::spawn(presence::heartbeat_loop(state.clone()));
     tokio::spawn(indexing_jobs::sweep_loop(state.clone()));
@@ -498,6 +507,39 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/dash/user/oauth_apps/revoke_access",
             post(routes::platform_oauth::user_oauth_apps_revoke),
+        )
+        // webhooks (dashboard management + receiver-facing routes)
+        .route(
+            "/dash/apps/{app_id}/webhooks",
+            get(routes::webhooks::list).post(routes::webhooks::create),
+        )
+        .route(
+            "/dash/apps/{app_id}/webhooks/{webhook_id}",
+            post(routes::webhooks::update).delete(routes::webhooks::delete),
+        )
+        .route(
+            "/dash/apps/{app_id}/webhooks/{webhook_id}/enable",
+            post(routes::webhooks::enable),
+        )
+        .route(
+            "/dash/apps/{app_id}/webhooks/{webhook_id}/disable",
+            post(routes::webhooks::disable),
+        )
+        .route(
+            "/dash/apps/{app_id}/webhooks/{webhook_id}/events",
+            get(routes::webhooks::events),
+        )
+        .route(
+            "/dash/apps/{app_id}/webhooks/{webhook_id}/events/{*isn}",
+            get(routes::webhooks::event).post(routes::webhooks::resend),
+        )
+        .route(
+            "/.well-known/webhooks/jwks.json",
+            get(routes::webhooks::jwks),
+        )
+        .route(
+            "/webhooks/payload/{app_id}/{webhook_id}/{*isn}",
+            get(routes::webhooks::payload),
         )
         .route("/dash/profiles", post(routes::dash_manage::profiles_post))
         .route("/dash/signout", post(routes::dash_manage::signout))

@@ -372,6 +372,7 @@ pub async fn run_transact(
 
     dbtx.commit().await.map_err(InstantError::from)?;
     notify_tx(state, app_id, &TxNotice::from(&report)).await;
+    crate::webhooks::after_transact(state, app_id, &report).await;
     crate::metrics::METRICS
         .transact_seconds
         .observe_since(started);
@@ -400,6 +401,7 @@ pub async fn run_system_transact(
     .await?;
     dbtx.commit().await.map_err(InstantError::from)?;
     notify_tx(state, app_id, &TxNotice::from(&report)).await;
+    crate::webhooks::after_transact(state, app_id, &report).await;
     Ok(report)
 }
 
