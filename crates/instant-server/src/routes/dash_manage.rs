@@ -810,8 +810,8 @@ pub async fn auth_send_magic_code(State(state): State<Arc<AppState>>, body: Byte
 
 /// POST /dash/auth/verify_magic_code — legacy verify-magic-code-post
 /// (:296-314) + `instant-user-magic-code-model/consume!` (10-minute expiry)
-/// + `instant-user-refresh-token-model/create!` (dashboard-login-disabled
-/// flag).
+/// + `instant-user-refresh-token-model/create!` (the dashboard-login-disabled
+/// user flag).
 pub async fn auth_verify_magic_code(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
     let r = async {
         let body = parse_body(&body)?;
