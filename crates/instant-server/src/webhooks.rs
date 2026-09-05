@@ -59,7 +59,7 @@ impl Isn {
         )
     }
     /// legacy `(format "%X/%s" slot-num (.asString lsn))`
-    pub fn to_string_legacy(&self) -> String {
+    pub fn to_string_legacy(self) -> String {
         format!("{:X}/{}", self.slot, self.lsn_text())
     }
     /// legacy `isn/of-string`
@@ -84,7 +84,7 @@ impl Isn {
         })
     }
     /// legacy `isn/->bytes`: 4-byte slot + 8-byte lsn, big endian
-    pub fn to_bytes(&self) -> [u8; 12] {
+    pub fn to_bytes(self) -> [u8; 12] {
         let mut out = [0u8; 12];
         out[..4].copy_from_slice(&self.slot.to_be_bytes());
         out[4..].copy_from_slice(&self.lsn.to_be_bytes());
@@ -403,7 +403,6 @@ pub async fn assert_valid_url(url: &str) -> Result<()> {
 
 pub struct Webhook {
     pub id: Uuid,
-    pub app_id: Uuid,
     pub id_attr_ids: Vec<Uuid>,
     pub actions: Vec<String>,
     pub status: String,
@@ -420,7 +419,6 @@ fn webhook_from_row(r: &sqlx::postgres::PgRow) -> Webhook {
     let sink: Value = r.get("sink");
     Webhook {
         id: r.get("id"),
-        app_id: r.get("app_id"),
         id_attr_ids: r
             .get::<Option<Vec<Uuid>>, _>("id_attr_ids")
             .unwrap_or_default(),
@@ -781,13 +779,9 @@ pub async fn delete(state: &AppState, app_id: Uuid, webhook_id: Uuid) -> Result<
 // events
 
 pub struct WebhookEvent {
-    pub webhook_id: Uuid,
-    pub app_id: Uuid,
     pub isn: Isn,
     pub status: String,
     pub attempts: Value,
-    pub attempt_count: i64,
-    pub partition_bucket: i32,
     pub next_attempt_after: Option<chrono::DateTime<chrono::Utc>>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -799,13 +793,9 @@ const EVENT_COLUMNS: &str = "webhook_id, app_id, (isn).slot_num AS slot_num, (is
 
 fn event_from_row(r: &sqlx::postgres::PgRow) -> WebhookEvent {
     WebhookEvent {
-        webhook_id: r.get("webhook_id"),
-        app_id: r.get("app_id"),
         isn: Isn::from_row(r.get("slot_num"), &r.get::<String, _>("lsn")).unwrap_or(Isn::of_tx(0)),
         status: r.get("status"),
         attempts: r.get::<Option<Value>, _>("attempts").unwrap_or(Value::Null),
-        attempt_count: r.get::<i32, _>("attempt_count") as i64,
-        partition_bucket: r.get("partition_bucket"),
         next_attempt_after: r.get("next_attempt_after"),
         created_at: r.get("created_at"),
         updated_at: r.get("updated_at"),

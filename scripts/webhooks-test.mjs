@@ -98,7 +98,8 @@ if (first) {
   check("payload idempotency key matches the header", payload.idempotencyKey === first.headers["idempotency-key"], [payload.idempotencyKey, first.headers["idempotency-key"]]);
   check("payload with the admin token", (await fetch(body.payloadUrl, { headers: { Authorization: `Bearer ${adminToken}` } })).status === 200);
   check("payload with a bad token", (await fetch(body.payloadUrl, { headers: { Authorization: "Bearer eyJ.nope.x" } })).status === 400);
-  check("payload cache headers", payloadRes.headers.get("cache-control") === "no-store, private" && payloadRes.headers.get("vary") === "Authorization");
+  // the CORS layer appends its own Vary members, so only the Authorization member is pinned
+  check("payload cache headers", payloadRes.headers.get("cache-control") === "no-store, private" && payloadRes.headers.get("pragma") === "no-cache" && (payloadRes.headers.get("vary") ?? "").split(",").map((s) => s.trim()).includes("Authorization"), Object.fromEntries(payloadRes.headers));
 }
 
 // update event: before/after
@@ -154,7 +155,11 @@ check("enable", (await call("POST", `/dash/apps/${appId}/webhooks/${webhookId}/e
 check("disable with reason", (await call("POST", `/dash/apps/${appId}/webhooks/${webhookId}/disable`, { reason: "paused" })).body.webhook?.disabled_reason === "paused");
 check("update url", (await call("POST", `/dash/apps/${appId}/webhooks/${webhookId}`, { url: receiverUrl + "2" })).body.webhook?.sink?.url === receiverUrl + "2");
 check("delete", (await call("DELETE", `/dash/apps/${appId}/webhooks/${webhookId}`)).body.webhook?.id === webhookId);
-check("gone after delete", (await call("GET", `/dash/apps/${appId}/webhooks/${webhookId}/events`)).status === 400);
+check("gone after delete", !(await call("GET", `/dash/apps/${appId}/webhooks`)).body.webhooks?.some((w) => w.id === webhookId));
+// legacy's events route does not check that the webhook exists: an empty page
+const goneEvents = await call("GET", `/dash/apps/${appId}/webhooks/${webhookId}/events`);
+check("events of a deleted webhook are an empty page", goneEvents.status === 200 && goneEvents.body.events?.length === 0, goneEvents);
+check("resend on a deleted webhook is validation-failed", (await call("POST", `/dash/apps/${appId}/webhooks/${webhookId}/events/${ev?.isn}`)).body.type === "validation-failed");
 
 server.close();
 if (failures) {
