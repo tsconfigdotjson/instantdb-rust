@@ -105,7 +105,7 @@ if (!globalThis.__instantCoverageFetch) {
   globalThis.__instantCoverageFetch = true;
   globalThis.fetch = async function coverageFetch(input, init) {
     const url = typeof input === "string" ? input : input?.url;
-    const method = (init?.method ?? (typeof input === "object" && input?.method) ?? "GET").toUpperCase();
+    const method = String(init?.method || (typeof input === "object" && input?.method) || "GET").toUpperCase();
     if (url) noteHttp(method, url);
     if (init?.body && typeof init.body === "string") {
       try {
