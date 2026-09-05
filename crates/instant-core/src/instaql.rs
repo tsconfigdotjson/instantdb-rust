@@ -342,11 +342,25 @@ fn parse_opts(v: &Value, level: usize, path: &[String], root: &Value) -> Result<
             }
             "before" => opts.before = Some(parse_cursor(v)?),
             "after" => opts.after = Some(parse_cursor(v)?),
-            "beforeInclusive" => {
-                opts.before_inclusive = v.as_bool().unwrap_or(false);
-            }
-            "afterInclusive" => {
-                opts.after_inclusive = v.as_bool().unwrap_or(false);
+            // legacy `(when-some [x (:afterInclusive x)] (assert-boolean! ...))`
+            // (instaql.clj:346-352, :463-470): null is absent, anything but a
+            // boolean is `{expected boolean?}` with no message
+            "beforeInclusive" | "afterInclusive" => {
+                if v.is_null() {
+                    continue;
+                }
+                let b = v.as_bool().ok_or_else(|| {
+                    InstantError::validation_failed_input(
+                        "query",
+                        root.clone(),
+                        json!([{"expected": "boolean?", "in": in_path(path, &["$", k.as_str()])}]),
+                    )
+                })?;
+                if k == "beforeInclusive" {
+                    opts.before_inclusive = b;
+                } else {
+                    opts.after_inclusive = b;
+                }
             }
             "aggregate" => {
                 if v.as_str() != Some("count") {

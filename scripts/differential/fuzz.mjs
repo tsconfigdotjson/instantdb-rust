@@ -181,7 +181,7 @@ function buildScript() {
       const dir = pick(["asc", "desc"]);
       const key = pick(orderKeys);
       const size = 1 + Math.floor(rand() * 3);
-      script.push({ kind: "paginate", ns: NS, key, dir, size, backwards: chance(0.3) });
+      script.push({ kind: "paginate", ns: NS, key, dir, size, backwards: chance(0.3), inclusive: chance(0.3) });
     } else {
       // random query over the where grammar, links, fields, pagination
       const opts = {};
@@ -213,6 +213,9 @@ function buildScript() {
         opts.order = { [pick(orderKeys)]: pick(["asc", "desc"]) };
       }
       if (opts.limit && rand() < 0.3) opts.offset = Math.floor(rand() * 3);
+      // the inclusive flags are validated as booleans whether or not a cursor
+      // is given; null is "absent"
+      if ((opts.first || opts.last) && chance(0.15)) opts[opts.first ? "afterInclusive" : "beforeInclusive"] = pick([true, false, null, "yes", 1]);
       if (chance(0.12)) opts.fields = pick([["p1"], ["tnum", "tstr"], ["id"], ["p3", "owner"]]);
       if (chance(0.04)) opts.aggregate = "count"; // admin-only: rejected alike
       const form = Object.keys(opts).length ? { $: opts } : {};
@@ -289,11 +292,12 @@ async function runOn(serverName, script) {
     } else if (op.kind === "paginate") {
       // walk every page with each server's own cursors; page boundaries may
       // differ on ties, the union and the page count may not
-      const { ns, key, dir, size, backwards } = op;
+      const { ns, key, dir, size, backwards, inclusive } = op;
       const seen = new Map();
       let cursor = null;
       let pages = 0;
       let error = null;
+      let firstCursor = null;
       for (;;) {
         const $ = backwards ? { last: size, order: { [key]: dir } } : { first: size, order: { [key]: dir } };
         if (cursor) $[backwards ? "before" : "after"] = cursor;
@@ -307,10 +311,20 @@ async function runOn(serverName, script) {
         const info = r.raw?.[0]?.data?.["page-info"]?.[ns] ?? r.raw?.[0]?.data?.["page-info"] ?? {};
         const more = backwards ? info["has-previous-page?"] : info["has-next-page?"];
         const next = backwards ? info["start-cursor"] : info["end-cursor"];
+        if (pages === 1) firstCursor = next ?? null;
         if (!more || !next || pages > 50) break;
         cursor = next;
       }
-      queryResults.push({ i, paginate: op, ...(error ? { error } : { pages, union: [...seen.values()].sort((x, y) => (canon(x) < canon(y) ? -1 : 1)) }) });
+      // an inclusive page from the first page's boundary cursor: the boundary
+      // row comes back on both servers (each with its own cursor); compared
+      // as the set of entity ids since cursor values differ by server
+      let inclusivePage;
+      if (inclusive && !error && firstCursor) {
+        const $ = backwards ? { last: size, order: { [key]: dir }, before: firstCursor, beforeInclusive: true } : { first: size, order: { [key]: dir }, after: firstCursor, afterInclusive: true };
+        const r = await query({ [ns]: { $ } });
+        inclusivePage = r.error ? { error: r.error } : { entities: [...new Set(r.result.triples.map((t) => t[0]))].sort(), boundaryIncluded: r.result.triples.some((t) => t[0] === firstCursor[0]) };
+      }
+      queryResults.push({ i, paginate: op, ...(error ? { error } : { pages, union: [...seen.values()].sort((x, y) => (canon(x) < canon(y) ? -1 : 1)), inclusivePage }) });
     }
   }
   if (watermarkLags) {
