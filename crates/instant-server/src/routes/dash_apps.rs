@@ -38,7 +38,7 @@ const EPHEMERAL_CREATOR_EMAILS: [&str; 2] = [
     "hello+ephemeralapps@instantdb.com",
     "hello+ephemeralappsdev@instantdb.com",
 ];
-const GET_A_DB_CREATOR_EMAIL: &str = "hello+getadbapps@instantdb.com";
+pub(crate) const GET_A_DB_CREATOR_EMAIL: &str = "hello+getadbapps@instantdb.com";
 /// legacy `expiration-days`
 const EPHEMERAL_EXPIRATION_DAYS: i64 = 14;
 
@@ -682,7 +682,7 @@ pub async fn ephemeral_get(
     json_or_err(r)
 }
 
-async fn ephemeral_creator_ids(state: &AppState) -> Result<Vec<Uuid>> {
+pub(crate) async fn ephemeral_creator_ids(state: &AppState) -> Result<Vec<Uuid>> {
     let mut out = vec![];
     for email in EPHEMERAL_CREATOR_EMAILS {
         if let Some(id) = user_id_by_email(state, email).await? {
@@ -778,7 +778,7 @@ async fn orgs_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
 
 /// legacy `org-model/get-org-for-user!` + `assert-least-privilege!`
 /// (util/roles.clj:144-156 `org-with-role-for-user!`).
-async fn org_role_for_user(
+pub(crate) async fn org_role_for_user(
     state: &AppState,
     org_id: Uuid,
     user_id: Uuid,

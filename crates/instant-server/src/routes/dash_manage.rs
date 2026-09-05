@@ -52,18 +52,18 @@ fn update_count(n: u64) -> Value {
 
 /// Legacy `req->app-and-user!` (util/http.clj:71-79): the app id param,
 /// then the dashboard user, then `get-app-with-role!`.
-async fn app_and_user(
+pub(crate) async fn app_and_user(
     state: &AppState,
     headers: &HeaderMap,
     app_id_raw: &str,
     least: DashRole,
-) -> Result<(DashUser, Value)> {
+) -> Result<(DashUser, Value, DashRole)> {
     let app_id = path_uuid(app_id_raw, "app_id")?;
     let user = dash_user(state, headers).await?;
     let app = live_app_row(state, app_id).await?;
     let role = app_role_for_user(state, &app, user.id).await?;
     assert_least_privilege(least, role)?;
-    Ok((user, app))
+    Ok((user, app, role.unwrap_or(least)))
 }
 
 fn app_uuid(app: &Value) -> Uuid {
@@ -168,7 +168,7 @@ pub async fn app_rename(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let (_, app) = app_and_user(&state, &headers, &app_id, DashRole::Owner).await?;
+        let (_, app, _) = app_and_user(&state, &headers, &app_id, DashRole::Owner).await?;
         let body = parse_body(&body)?;
         let title = body_str(&body, "title")?;
         sqlx::query("UPDATE apps SET title = $1 WHERE id = $2")
@@ -191,7 +191,7 @@ pub async fn app_clear(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let (_, app) = app_and_user(&state, &headers, &app_id, DashRole::Owner).await?;
+        let (_, app, _) = app_and_user(&state, &headers, &app_id, DashRole::Owner).await?;
         let app_id = app_uuid(&app);
         let attrs = service::load_attrs(&state, app_id).await?;
         let steps: Vec<Value> = attrs
@@ -240,7 +240,7 @@ pub async fn app_status_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let (_, app) = app_and_user(&state, &headers, &app_id, DashRole::Admin).await?;
+        let (_, app, _) = app_and_user(&state, &headers, &app_id, DashRole::Admin).await?;
         let body = parse_body(&body)?;
         let raw = body
             .get("status")
@@ -271,7 +271,7 @@ pub async fn app_tokens_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let (_, app) = app_and_user(&state, &headers, &app_id, DashRole::Admin).await?;
+        let (_, app, _) = app_and_user(&state, &headers, &app_id, DashRole::Admin).await?;
         let body = parse_body(&body)?;
         let token = body_uuid(&body, "admin-token")?;
         let app_id = app_uuid(&app);
@@ -312,7 +312,7 @@ pub async fn app_set_magic_code_expiry(
             .as_f64()
             .map(|f| f.trunc() as i64)
             .ok_or_else(|| param_malformed(&["body", "expiry"], raw.clone()))?;
-        let (_, app) = app_and_user(&state, &headers, &app_id, DashRole::Admin).await?;
+        let (_, app, _) = app_and_user(&state, &headers, &app_id, DashRole::Admin).await?;
         let input = json!({"magic-token-expiry-minutes": expiry});
         if expiry <= 0 {
             return Err(validation_err("app", input, "The magic token expiry must be positive."));
@@ -384,7 +384,7 @@ pub async fn test_users_get(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let (_, app) = app_and_user(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let (_, app, _) = app_and_user(&state, &headers, &app_id, DashRole::Collaborator).await?;
         let rows = sqlx::query(
             "SELECT id, app_id, email, code, created_at FROM app_test_users WHERE app_id = $1",
         )
@@ -406,7 +406,7 @@ pub async fn test_users_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let (_, app) = app_and_user(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let (_, app, _) = app_and_user(&state, &headers, &app_id, DashRole::Collaborator).await?;
         let body = parse_body(&body)?;
         let raw_email = body
             .get("email")
@@ -456,7 +456,7 @@ pub async fn test_users_delete(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let (_, app) = app_and_user(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let (_, app, _) = app_and_user(&state, &headers, &app_id, DashRole::Collaborator).await?;
         let body = parse_body(&body)?;
         let id = body_uuid(&body, "id")?;
         let row = sqlx::query(
@@ -482,7 +482,7 @@ pub async fn app_stats_get(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let (_, app) = app_and_user(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let (_, app, _) = app_and_user(&state, &headers, &app_id, DashRole::Collaborator).await?;
         let sessions = state.sessions_for_app(app_uuid(&app));
         let mut origins: std::collections::BTreeMap<String, u64> = Default::default();
         for s in &sessions {

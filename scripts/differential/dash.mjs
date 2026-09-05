@@ -1001,6 +1001,115 @@ async function runAgainst(name) {
     r36.queryAfterClear = plainView(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { posts: {} } } }));
     raw("36-clear", r36);
     record("36-clear", r36);
+
+    // 37 teams: app + org invites, member roles, org rename, transfer to
+    // org, ephemeral status, get-a-db lookup. A second dashboard user (the
+    // invitee) is signed in through the dashboard magic-code flow.
+    const r37 = {};
+    const inviteeEmail = `invitee-${fixedPrefix}@example.com`;
+    await call(base, "POST", "/dash/auth/send_magic_code", { token: null, body: { email: inviteeEmail } });
+    const inviteeLogin = await call(base, "POST", "/dash/auth/verify_magic_code", { token: null, body: { email: inviteeEmail, code: readDashCode(name, inviteeEmail) } });
+    const inviteeToken = inviteeLogin.body?.token;
+    r37.inviteeLogin = inviteeLogin.status === 200 ? { status: 200 } : errView(inviteeLogin);
+    const invitesOf = async (token) => {
+      const d = await call(base, "GET", "/dash", { token });
+      return (d.body?.apps ?? []).find((a) => a.id === appId) ?? {};
+    };
+    r37.inviteSendAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { body: { "invitee-email": inviteeEmail, role: "admin" } }));
+    r37.inviteSendBadRole = errView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail, role: "creator" } }));
+    r37.inviteSendBadEmail = errView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": "nope", role: "admin" } }));
+    r37.inviteSendMissingRole = errView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail } }));
+    r37.inviteSendByStranger = errView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: inviteeToken, body: { "invitee-email": "x@example.com", role: "admin" } }));
+    r37.inviteSend = plainView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail, role: "admin" } }));
+    r37.inviteSendAgain = plainView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail, role: "collaborator" } }));
+    let appRow = await invitesOf(userToken);
+    r37.invitesOnApp = norm((appRow.invites ?? []).map((i) => ({ email: i.email, role: i.role, status: i.status, expired: i.expired })));
+    const inviteId = appRow.invites?.[0]?.id;
+    r37.acceptWrongUser = errView(await call(base, "POST", "/dash/invites/accept", { token: userToken, body: { "invite-id": inviteId } }));
+    r37.acceptUnknown = errView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: { "invite-id": mk() } }));
+    r37.acceptMissingId = errView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: {} }));
+    r37.acceptNoAuth = errView(await call(base, "POST", "/dash/invites/accept", { token: null, body: { "invite-id": inviteId } }));
+    r37.declineWrongUser = errView(await call(base, "POST", "/dash/invites/decline", { token: userToken, body: { "invite-id": inviteId } }));
+    r37.accept = plainView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: { "invite-id": inviteId } }));
+    r37.acceptAgain = errView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: { "invite-id": inviteId } }));
+    appRow = await invitesOf(userToken);
+    r37.membersAfterAccept = norm((appRow.members ?? []).map((m) => ({ email: m.email, role: m.role })));
+    r37.inviteStatusAfterAccept = norm((appRow.invites ?? []).map((i) => ({ email: i.email, status: i.status })));
+    const memberId = (appRow.members ?? []).find((m) => m.email === inviteeEmail)?.id;
+    r37.inviteeSeesApp = { titles: ((await call(base, "GET", "/dash", { token: inviteeToken })).body?.apps ?? []).map((a) => a.title).sort() };
+    r37.memberUpdateBadRole = errView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: userToken, body: { id: memberId, role: "boss" } }));
+    r37.memberUpdateUnknown = errView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: userToken, body: { id: mk(), role: "admin" } }));
+    r37.memberUpdateMissingId = errView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: userToken, body: { role: "admin" } }));
+    r37.memberUpdateByCollaborator = errView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: inviteeToken, body: { id: memberId, role: "admin" } }));
+    r37.memberUpdate = plainView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: userToken, body: { id: memberId, role: "admin" } }));
+    r37.memberUpdateAboveSelf = errView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: inviteeToken, body: { id: memberId, role: "owner" } }));
+    r37.memberRemoveMissingId = errView(await call(base, "DELETE", `/dash/apps/${appId}/members/remove`, { token: userToken, body: {} }));
+    r37.memberRemoveUnknown = errView(await call(base, "DELETE", `/dash/apps/${appId}/members/remove`, { token: userToken, body: { id: mk() } }));
+    r37.memberRemove = plainView(await call(base, "DELETE", `/dash/apps/${appId}/members/remove`, { token: userToken, body: { id: memberId } }));
+    appRow = await invitesOf(userToken);
+    r37.membersAfterRemove = (appRow.members ?? []).length;
+    r37.inviteeSeesAppAfterRemove = { titles: ((await call(base, "GET", "/dash", { token: inviteeToken })).body?.apps ?? []).map((a) => a.title).sort() };
+    // revoke a fresh invite; decline another; a declined invite can't be accepted
+    await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": "third@example.com", role: "collaborator" } });
+    appRow = await invitesOf(userToken);
+    const thirdInvite = (appRow.invites ?? []).find((i) => i.email === "third@example.com")?.id;
+    r37.revokeMissingId = errView(await call(base, "DELETE", `/dash/apps/${appId}/invite/revoke`, { token: userToken, body: {} }));
+    r37.revokeByStranger = errView(await call(base, "DELETE", `/dash/apps/${appId}/invite/revoke`, { token: inviteeToken, body: { "invite-id": thirdInvite } }));
+    r37.revoke = plainView(await call(base, "DELETE", `/dash/apps/${appId}/invite/revoke`, { token: userToken, body: { "invite-id": thirdInvite } }));
+    appRow = await invitesOf(userToken);
+    r37.invitesAfterRevoke = norm((appRow.invites ?? []).map((i) => ({ email: i.email, status: i.status })).sort((a, b) => (a.email < b.email ? -1 : 1)));
+    await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail, role: "collaborator" } });
+    appRow = await invitesOf(userToken);
+    const declineId = (appRow.invites ?? []).find((i) => i.email === inviteeEmail)?.id;
+    r37.decline = plainView(await call(base, "POST", "/dash/invites/decline", { token: inviteeToken, body: { "invite-id": declineId } }));
+    r37.acceptDeclined = errView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: { "invite-id": declineId } }));
+    // org side
+    const teamOrg = await call(base, "POST", "/dash/orgs", { token: userToken, body: { title: "team org" } });
+    const teamOrgId = teamOrg.body?.org?.id;
+    const orgView = async (token = userToken) => {
+      const g = await call(base, "GET", `/dash/orgs/${teamOrgId}`, { token });
+      return g.status === 200 ? { status: 200, title: g.body.org?.title, members: (g.body.members ?? []).map((m) => ({ email: m.email, role: m.role })).sort((a, b) => (a.email < b.email ? -1 : 1)), invites: (g.body.invites ?? []).map((i) => ({ email: i.email, role: i.role, status: i.status })), apps: (g.body.apps ?? []).map((a) => a.title).sort() } : errView(g);
+    };
+    r37.orgInviteSendByStranger = errView(await call(base, "POST", `/dash/orgs/${teamOrgId}/invite/send`, { token: inviteeToken, body: { "invitee-email": "x@example.com", role: "admin" } }));
+    r37.orgInviteSend = plainView(await call(base, "POST", `/dash/orgs/${teamOrgId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail, role: "admin" } }));
+    let orgGot = await call(base, "GET", `/dash/orgs/${teamOrgId}`, { token: userToken });
+    const orgInviteId = (orgGot.body?.invites ?? []).find((i) => i.email === inviteeEmail)?.id;
+    r37.orgAccept = plainView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: { "invite-id": orgInviteId } }));
+    r37.orgAfterAccept = await orgView();
+    r37.orgRenameMissingTitle = errView(await call(base, "POST", `/dash/orgs/${teamOrgId}/rename`, { token: userToken, body: {} }));
+    r37.orgRenameTooLong = errView(await call(base, "POST", `/dash/orgs/${teamOrgId}/rename`, { token: userToken, body: { title: "x".repeat(141) } }));
+    r37.orgRename = plainView(await call(base, "POST", `/dash/orgs/${teamOrgId}/rename`, { token: userToken, body: { title: "renamed org" } }));
+    r37.orgRenameByAdmin = plainView(await call(base, "POST", `/dash/orgs/${teamOrgId}/rename`, { token: inviteeToken, body: { title: "renamed by admin" } }));
+    orgGot = await call(base, "GET", `/dash/orgs/${teamOrgId}`, { token: userToken });
+    const orgMemberId = (orgGot.body?.members ?? []).find((m) => m.email === inviteeEmail)?.id;
+    const orgOwnerId = (orgGot.body?.members ?? []).find((m) => m.email !== inviteeEmail)?.id;
+    r37.orgMemberUpdateAboveSelf = errView(await call(base, "POST", `/dash/orgs/${teamOrgId}/members/update`, { token: inviteeToken, body: { id: orgMemberId, role: "owner" } }));
+    r37.orgMemberUpdate = plainView(await call(base, "POST", `/dash/orgs/${teamOrgId}/members/update`, { token: userToken, body: { id: orgMemberId, role: "collaborator" } }));
+    r37.orgRenameByCollaborator = errView(await call(base, "POST", `/dash/orgs/${teamOrgId}/rename`, { token: inviteeToken, body: { title: "nope" } }));
+    r37.orgRemoveLastOwner = errView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/members/remove`, { token: userToken, body: { id: orgOwnerId } }));
+    r37.orgRemoveOwnerByCollaborator = errView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/members/remove`, { token: inviteeToken, body: { id: orgOwnerId } }));
+    r37.orgMemberRemove = plainView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/members/remove`, { token: userToken, body: { id: orgMemberId } }));
+    r37.orgAfterRemove = await orgView();
+    // transfer an app into the org
+    const tApp = mk();
+    await call(base, "POST", "/dash/apps", { token: userToken, body: { id: tApp, title: "to transfer", admin_token: mk() } });
+    r37.transferUnknownOrg = errView(await call(base, "POST", `/dash/apps/${tApp}/transfer_to_org/${mk()}`, { token: userToken }));
+    r37.transferNotOwner = errView(await call(base, "POST", `/dash/apps/${tApp}/transfer_to_org/${teamOrgId}`, { token: inviteeToken }));
+    r37.transfer = plainView(await call(base, "POST", `/dash/apps/${tApp}/transfer_to_org/${teamOrgId}`, { token: userToken }));
+    const tGot = await call(base, "GET", `/dash/apps/${tApp}`, { token: userToken });
+    r37.transferred = { orgMatches: tGot.body?.app?.org_id === teamOrgId, creator: tGot.body?.app?.creator_id ?? null };
+    r37.orgAfterTransfer = await orgView();
+    // ephemeral status toggle + get-a-db lookup
+    const eph2 = await call(base, "POST", "/dash/apps/ephemeral", { token: null, body: { title: "eph status" } });
+    const eph2Id = eph2.body?.app?.id;
+    r37.ephStatusBadToken = errView(await call(base, "POST", `/dash/apps/ephemeral/${eph2Id}/status`, { token: null, body: { "admin-token": mk(), status: "read-only" } }));
+    r37.ephStatusBadStatus = errView(await call(base, "POST", `/dash/apps/ephemeral/${eph2Id}/status`, { token: null, body: { "admin-token": eph2.body?.app?.["admin-token"], status: "paused" } }));
+    r37.ephStatus = plainView(await call(base, "POST", `/dash/apps/ephemeral/${eph2Id}/status`, { token: null, body: { "admin-token": eph2.body?.app?.["admin-token"], status: "read-only" } }));
+    r37.ephStatusRegularApp = errView(await call(base, "POST", `/dash/apps/ephemeral/${appId}/status`, { token: null, body: { "admin-token": adminToken, status: "active" } }));
+    r37.getADbRegular = errView(await call(base, "GET", `/dash/apps/get_a_db/${appId}`, { token: null }));
+    r37.getADbUnknown = errView(await call(base, "GET", `/dash/apps/get_a_db/${mk()}`, { token: null }));
+    raw("37-teams", r37);
+    record("37-teams", r37);
   }
 
   return out;
