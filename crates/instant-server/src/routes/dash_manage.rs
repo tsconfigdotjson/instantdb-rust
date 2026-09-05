@@ -38,6 +38,7 @@ use crate::routes::dash_apps::{
     record_not_found, ts_naive, ts_tz,
 };
 use crate::routes::runtime::{coerce_email_pub, json_or_err};
+use crate::routes::superadmin::Scope;
 use crate::service;
 use crate::state::AppState;
 
@@ -171,7 +172,14 @@ pub async fn dash_soft_deleted_attrs(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsRead,
+        )
+        .await?;
         soft_deleted_attrs(&state, app.id).await
     }
     .await;
@@ -377,7 +385,14 @@ pub async fn rule_versions_get(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsRead,
+        )
+        .await?;
         let rows = sqlx::query(
             "SELECT version, edits, created_at FROM rule_versions
               WHERE app_id = $1 ORDER BY version DESC LIMIT 50",
@@ -546,7 +561,14 @@ pub async fn storage_upload(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsRead,
+        )
+        .await?;
         let path = headers
             .get("path")
             .and_then(|v| v.to_str().ok())
@@ -590,7 +612,14 @@ pub async fn storage_files_delete(
             Value::String(s) => s.chars().map(|c| c.to_string()).collect(),
             _ => return Err(param_malformed(&["body", "filenames"], raw.clone())),
         };
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsWrite,
+        )
+        .await?;
         let mut ids = vec![];
         for f in &filenames {
             if let Some(id) = admin::delete_file_by_path(&state, app.id, f).await? {
@@ -612,7 +641,7 @@ pub async fn send_test_email(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsWrite).await?;
         let body = parse_body(&body)?;
         let subject = body_str(&body, "subject")?;
         let html = body_str(&body, "body")?;
