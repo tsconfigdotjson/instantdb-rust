@@ -50,7 +50,10 @@ const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 // normalization: the envelope a client reads, minus server-chosen values
 
 const DROP_KEYS = new Set(["trace-id", "session-id", "client-event-id", "original-event", "debug-uri"]);
+// scheduler bookkeeping legacy echoes in event inputs
+const TIMING_KEYS = new Set(["total-delay-ms", "ws-ping-latency-ms"]);
 function norm(v, key = null) {
+  if (typeof v === "number" && TIMING_KEYS.has(key)) return "<ms>";
   if (typeof v === "string") {
     if (ISO_RE.test(v)) return "<ts>";
     return v.replace(UUID_RE, (m) => (isFixed(m) ? m : "<uuid>"));
