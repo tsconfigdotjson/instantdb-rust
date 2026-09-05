@@ -111,6 +111,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/admin/storage/upload", put(routes::admin::storage_upload))
         .route("/storage/upload", put(routes::admin::client_storage_upload))
         .route(
+            "/dash/apps/{app_id}/storage/upload",
+            put(routes::dash_manage::storage_upload),
+        )
+        .route(
             "/storage/{upload_id}/consume-upload-url",
             put(routes::admin::consume_upload_url),
         )
@@ -298,6 +302,78 @@ async fn main() -> anyhow::Result<()> {
             get(routes::dash_apps::org_get).delete(routes::dash_apps::org_delete),
         )
         .route("/dash/cli/version", get(routes::dash::cli_version))
+        // app management + account routes (dash_manage)
+        .route("/admin/schema", get(routes::dash_manage::admin_schema))
+        .route(
+            "/admin/soft_deleted_attrs",
+            get(routes::dash_manage::admin_soft_deleted_attrs),
+        )
+        .route(
+            "/dash/apps/{app_id}/soft_deleted_attrs",
+            get(routes::dash_manage::dash_soft_deleted_attrs),
+        )
+        .route(
+            "/dash/apps/{app_id}/rename",
+            post(routes::dash_manage::app_rename),
+        )
+        .route(
+            "/dash/apps/{app_id}/clear",
+            post(routes::dash_manage::app_clear),
+        )
+        .route(
+            "/dash/apps/{app_id}/status",
+            post(routes::dash_manage::app_status_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/tokens",
+            post(routes::dash_manage::app_tokens_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/set-magic-code-expiry",
+            post(routes::dash_manage::app_set_magic_code_expiry),
+        )
+        .route(
+            "/dash/apps/{app_id}/rule-versions",
+            get(routes::dash_manage::rule_versions_get),
+        )
+        .route(
+            "/dash/apps/{app_id}/test_users",
+            get(routes::dash_manage::test_users_get)
+                .post(routes::dash_manage::test_users_post)
+                .delete(routes::dash_manage::test_users_delete),
+        )
+        .route(
+            "/dash/apps/{app_id}/stats",
+            get(routes::dash_manage::app_stats_get),
+        )
+        .route(
+            "/dash/apps/{app_id}/storage/files/delete",
+            post(routes::dash_manage::storage_files_delete),
+        )
+        .route(
+            "/dash/apps/{app_id}/send-test-email",
+            post(routes::dash_manage::send_test_email),
+        )
+        .route("/dash/profiles", post(routes::dash_manage::profiles_post))
+        .route("/dash/signout", post(routes::dash_manage::signout))
+        .route("/dash/check-admin", get(routes::dash_manage::check_admin))
+        .route(
+            "/dash/auth/send_magic_code",
+            post(routes::dash_manage::auth_send_magic_code),
+        )
+        .route(
+            "/dash/auth/verify_magic_code",
+            post(routes::dash_manage::auth_verify_magic_code),
+        )
+        .route(
+            "/dash/personal_access_tokens",
+            get(routes::dash_manage::personal_access_tokens_get)
+                .post(routes::dash_manage::personal_access_tokens_post),
+        )
+        .route(
+            "/dash/personal_access_tokens/{id}",
+            delete(routes::dash_manage::personal_access_tokens_delete),
+        )
         .route(
             "/dash/cli/auth/register",
             post(routes::dash::cli_auth_unsupported),

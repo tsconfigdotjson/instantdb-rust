@@ -42,14 +42,14 @@ const GET_A_DB_CREATOR_EMAIL: &str = "hello+getadbapps@instantdb.com";
 /// legacy `expiration-days`
 const EPHEMERAL_EXPIRATION_DAYS: i64 = 14;
 
-fn ts_naive(t: Option<chrono::NaiveDateTime>) -> Value {
+pub(crate) fn ts_naive(t: Option<chrono::NaiveDateTime>) -> Value {
     match t {
         Some(t) => json!(t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         None => Value::Null,
     }
 }
 
-fn ts_tz(t: Option<chrono::DateTime<chrono::Utc>>) -> Value {
+pub(crate) fn ts_tz(t: Option<chrono::DateTime<chrono::Utc>>) -> Value {
     match t {
         Some(t) => json!(t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         None => Value::Null,
@@ -65,7 +65,7 @@ fn ts_ms(ms: Option<i64>) -> Value {
 }
 
 /// `ex/get-param!` with `uuid-util/coerce`.
-fn body_uuid(body: &Value, key: &str) -> Result<Uuid> {
+pub(crate) fn body_uuid(body: &Value, key: &str) -> Result<Uuid> {
     let v = body
         .get(key)
         .filter(|v| !v.is_null())
@@ -76,7 +76,7 @@ fn body_uuid(body: &Value, key: &str) -> Result<Uuid> {
 }
 
 /// `ex/get-param!` with `string-util/coerce-non-blank-str`.
-fn body_str(body: &Value, key: &str) -> Result<String> {
+pub(crate) fn body_str(body: &Value, key: &str) -> Result<String> {
     let v = body
         .get(key)
         .filter(|v| !v.is_null())
@@ -95,11 +95,11 @@ fn body_opt_str(body: &Value, key: &str) -> Result<Option<String>> {
     }
 }
 
-fn path_uuid(raw: &str, name: &str) -> Result<Uuid> {
+pub(crate) fn path_uuid(raw: &str, name: &str) -> Result<Uuid> {
     Uuid::parse_str(raw).map_err(|_| param_malformed(&["params", name], json!(raw)))
 }
 
-fn record_not_found(record_type: &str, hint: Value) -> InstantError {
+pub(crate) fn record_not_found(record_type: &str, hint: Value) -> InstantError {
     let mut h = hint;
     if let Some(m) = h.as_object_mut() {
         m.insert("record-type".into(), json!(record_type));
@@ -157,7 +157,7 @@ fn app_row_json(r: &sqlx::postgres::PgRow) -> Value {
 }
 
 /// legacy `app-model/get-by-id!`: live apps only.
-async fn live_app_row(state: &AppState, app_id: Uuid) -> Result<Value> {
+pub(crate) async fn live_app_row(state: &AppState, app_id: Uuid) -> Result<Value> {
     match app_row(state, app_id).await? {
         Some(app)
             if app
@@ -504,7 +504,7 @@ pub async fn apps_delete(
 
 /// The caller's role on an app (`get-app-with-role!`, util/roles.clj:75-125):
 /// creator is owner, else the `app_members` role, else the org role.
-async fn app_role_for_user(
+pub(crate) async fn app_role_for_user(
     state: &AppState,
     app: &Value,
     user_id: Uuid,
@@ -549,7 +549,7 @@ async fn app_role_for_user(
 }
 
 /// legacy `assert-least-privilege!` (util/roles.clj:43-57).
-fn assert_least_privilege(least: DashRole, role: Option<DashRole>) -> Result<()> {
+pub(crate) fn assert_least_privilege(least: DashRole, role: Option<DashRole>) -> Result<()> {
     let Some(role) = role else {
         let message = format!("User is missing role {}.", least.as_str());
         return Err(InstantError::new(

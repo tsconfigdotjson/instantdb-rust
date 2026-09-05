@@ -396,6 +396,51 @@ probe("ws/validation-failed/mode-create-exists", async (ctx) => {
   return v;
 });
 
+// app status gates: read-only rejects writes, disabled rejects reads too
+async function setStatus(ctx, status) {
+  const res = await call(ctx.url, "POST", `/dash/apps/${appId}/status`, { token: userToken, body: { status } });
+  if (res.status !== 200) throw new Error(`[${ctx.name}] status ${status} failed: ${JSON.stringify(res.body)}`);
+}
+probe("http/app-read-only/transact", async (ctx) => {
+  await setStatus(ctx, "read-only");
+  try {
+    return httpView(await admin(ctx, "/admin/transact", { steps: [["update", "probe", mk(), { name: "ro" }]] }));
+  } finally {
+    await setStatus(ctx, "active");
+  }
+});
+probe("http/app-disabled/query", async (ctx) => {
+  await setStatus(ctx, "disabled");
+  try {
+    return httpView(await admin(ctx, "/admin/query", { query: { probe: {} } }));
+  } finally {
+    await setStatus(ctx, "active");
+  }
+});
+probe("ws/app-read-only/transact", async (ctx) => {
+  await setStatus(ctx, "read-only");
+  try {
+    const c = await session(ctx);
+    const eid = mk();
+    const v = wsView(await wsError(c, { op: "transact", "tx-steps": [["add-triple", eid, FIXED.probeId, eid]] }));
+    c.close();
+    return v;
+  } finally {
+    await setStatus(ctx, "active");
+  }
+});
+probe("ws/app-disabled/add-query", async (ctx) => {
+  await setStatus(ctx, "disabled");
+  try {
+    const c = await session(ctx);
+    const v = wsView(await wsError(c, { op: "add-query", q: { probe: {} } }));
+    c.close();
+    return v;
+  } finally {
+    await setStatus(ctx, "active");
+  }
+});
+
 // ---------------------------------------------------------------------------
 
 async function setup(ctx) {

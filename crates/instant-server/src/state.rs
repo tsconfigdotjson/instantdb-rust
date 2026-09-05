@@ -39,6 +39,15 @@ pub struct Config {
     /// A processing job with no progress for this long is treated as
     /// orphaned by a dead node and reclaimed (`INSTANT_INDEXING_STALE_SECS`).
     pub indexing_stale_secs: u64,
+    /// The self-hosted operator (`INSTANT_SUPERUSER_EMAIL`, legacy
+    /// config/superuser-email): `GET /dash/check-admin` passes for them.
+    pub superuser_email: Option<String>,
+    /// Dashboard signup policy (`INSTANT_DASHBOARD_SIGNUP_MODE`: open |
+    /// restricted | closed; legacy flags/dashboard-signup-mode) and the
+    /// allow-list for `restricted` (`INSTANT_DASHBOARD_ALLOWED_EMAILS`,
+    /// comma-separated).
+    pub dashboard_signup_mode: String,
+    pub dashboard_allowed_emails: Vec<String>,
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -66,6 +75,20 @@ impl Config {
             indexing_batch_size: env_num("INSTANT_INDEXING_BATCH_SIZE", 1000usize).max(1),
             indexing_sweep_secs: env_num("INSTANT_INDEXING_SWEEP_SECS", 60u64).max(1),
             indexing_stale_secs: env_num("INSTANT_INDEXING_STALE_SECS", 600u64).max(30),
+            superuser_email: std::env::var("INSTANT_SUPERUSER_EMAIL")
+                .ok()
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty()),
+            dashboard_signup_mode: std::env::var("INSTANT_DASHBOARD_SIGNUP_MODE")
+                .unwrap_or_else(|_| "open".into())
+                .trim()
+                .to_lowercase(),
+            dashboard_allowed_emails: std::env::var("INSTANT_DASHBOARD_ALLOWED_EMAILS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect(),
         }
     }
 }

@@ -569,6 +569,19 @@ pub async fn get_by_app_id<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid) -> Resu
     Ok(map)
 }
 
+/// Legacy `get-soft-deleted-by-app-id` (attr.clj:963-979): the app's
+/// soft-deleted attrs (branded names, `deletion_marked_at` set), by id.
+pub async fn get_soft_deleted_by_app_id<'e, E: PgExecutor<'e>>(
+    exec: E,
+    app_id: Uuid,
+) -> Result<Vec<Attr>> {
+    let sql = format!(
+        "{ATTR_COLUMNS} WHERE a.app_id = $1 AND a.deletion_marked_at IS NOT NULL ORDER BY a.id ASC"
+    );
+    let rows = sqlx::query(&sql).bind(app_id).fetch_all(exec).await?;
+    rows.iter().map(row_to_attr).collect()
+}
+
 /// Load specific (live) attrs by id.
 pub async fn get_by_ids<'e, E: PgExecutor<'e>>(
     exec: E,

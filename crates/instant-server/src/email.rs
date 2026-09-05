@@ -104,6 +104,94 @@ pub fn deliver_magic_code(
     });
 }
 
+/// Dashboard login code (legacy dash/routes.clj:276-286): logged when no
+/// provider is configured, otherwise sent from the default sender.
+pub fn deliver_dashboard_magic_code(state: &Arc<AppState>, email: &str, code: &str) {
+    if matches!(state.email.provider, EmailProvider::Log) {
+        tracing::info!("INSTANT DASHBOARD LOGIN CODE for {email}: {code}");
+        println!("DASHBOARD LOGIN CODE for {email}: {code}");
+        return;
+    }
+    let state = state.clone();
+    let email = email.to_string();
+    let code = code.to_string();
+    tokio::spawn(async move {
+        let msg = RenderedEmail {
+            sender_name: "Instant".to_string(),
+            sender_email: state.email.default_sender_email.clone(),
+            to: email.clone(),
+            subject: format!("{code} is your Instant verification code"),
+            html: default_body(&[
+                ("code", &code),
+                ("app_title", "Instant"),
+                ("user_email", &email),
+                ("expiration", "10 minutes"),
+            ]),
+        };
+        if let Err(e) = send(&state, &msg).await {
+            tracing::warn!("dashboard magic-code email to {email} failed: {e}");
+        }
+    });
+}
+
+/// Legacy `magic-code-auth/send-test!` (magic_code_auth.clj:138-168): render
+/// the dashboard's draft template with sample params and send it to `to`;
+/// a custom sender is used only when it is verified for the app, else the
+/// default sender.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_test_email(
+    state: &AppState,
+    app_id: Uuid,
+    app_title: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    sender_email: Option<String>,
+    sender_name: Option<String>,
+) -> Result<(), String> {
+    let expiration = friendly_expiration(
+        magic_code_expiry_minutes(state, app_id)
+            .await
+            .map_err(|e| e.to_string())?,
+    );
+    let params: [(&str, &str); 4] = [
+        ("code", "123456"),
+        ("app_title", app_title),
+        ("user_email", to),
+        ("expiration", &expiration),
+    ];
+    let default_sender = state.email.default_sender_email.clone();
+    let sender_email = match sender_email {
+        Some(custom) if custom != default_sender => {
+            let verified = sqlx::query(
+                "SELECT 1 AS x FROM app_email_senders s
+                   JOIN app_email_verifications v ON v.sender_id = s.id AND v.app_id = $1
+                  WHERE s.email = $2 AND v.verified",
+            )
+            .bind(app_id)
+            .bind(&custom)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(|e| e.to_string())?
+            .is_some();
+            if verified {
+                custom
+            } else {
+                default_sender
+            }
+        }
+        _ => default_sender,
+    };
+    let msg = RenderedEmail {
+        sender_name: sender_name.unwrap_or_else(|| app_title.to_string()),
+        sender_email,
+        to: to.to_string(),
+        subject: template_replace(subject, &params, false),
+        html: template_replace(body, &params, true),
+    };
+    send(state, &msg).await
+}
+
 async fn send_magic_code_email(
     state: &AppState,
     app_id: Uuid,

@@ -13,6 +13,7 @@
 //      http://localhost:8888), DUMP=1 prints raw responses, ONLY=legacy|rust
 
 import fs from "node:fs";
+import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,18 @@ const SERVERS = {
   legacy: process.env.LEGACY_URL || "http://localhost:8891",
   rust: process.env.RUST_URL || "http://localhost:8888",
 };
+const DBS = {
+  legacy: process.env.LEGACY_DATABASE_URL || "postgres://instant:instant@localhost:8890/instant",
+  rust: process.env.RUST_DATABASE_URL || "postgres://instant:instant@localhost:5432/instant",
+};
+// the dashboard login code: neither server has a mail provider in the
+// harness, so it is read back from instant_user_magic_codes
+function readDashCode(name, email) {
+  return execSync(
+    `psql "${DBS[name]}" -At -c "SELECT c.code FROM instant_user_magic_codes c JOIN instant_users u ON u.id = c.user_id WHERE u.email = '${email}' ORDER BY c.created_at DESC LIMIT 1"`,
+    { encoding: "utf8" },
+  ).trim();
+}
 
 // ---------------------------------------------------------------------------
 // http helpers (exactly the headers the CLI sends: lib/http.ts)
@@ -834,6 +847,160 @@ async function runAgainst(name) {
     r32.claimAgain = errView(await call(base, "POST", `/dash/apps/${ephId}/claim`, { token: userToken, body: { token: eph.body?.app?.["admin-token"] } }));
     raw("32-ephemeral-and-claim", r32);
     record("32-ephemeral-and-claim", r32);
+
+    // 33 app management (dashboard-only routes: rename / status / admin-token
+    // rotation / magic-code expiry / rule versions / soft-deleted attrs /
+    // test users / stats, plus /admin/schema + /admin/soft_deleted_attrs)
+    const r33 = {};
+    const appHdr = { headers: { "app-id": appId } };
+    r33.renameAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/rename`, { body: { title: "renamed" } }));
+    r33.renameMissingTitle = errView(await call(base, "POST", `/dash/apps/${appId}/rename`, { token: userToken, body: {} }));
+    r33.rename = plainView(await call(base, "POST", `/dash/apps/${appId}/rename`, { token: userToken, body: { title: "renamed app" } }));
+    r33.titleAfterRename = (await call(base, "GET", `/dash/apps/${appId}`, { token: userToken })).body?.app?.title ?? null;
+    r33.statusBad = errView(await call(base, "POST", `/dash/apps/${appId}/status`, { token: userToken, body: { status: "paused" } }));
+    r33.statusMissing = errView(await call(base, "POST", `/dash/apps/${appId}/status`, { token: userToken, body: {} }));
+    r33.statusAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/status`, { body: { status: "active" } }));
+    r33.statusReadOnly = plainView(await call(base, "POST", `/dash/apps/${appId}/status`, { token: userToken, body: { status: "read-only" } }));
+    r33.transactReadOnly = errView(await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["update", "posts", mk(), { title: "ro" }]] } }));
+    r33.queryReadOnly = okKeys(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { posts: {} } } }));
+    r33.statusDisabled = plainView(await call(base, "POST", `/dash/apps/${appId}/status`, { token: userToken, body: { status: "disabled" } }));
+    r33.queryDisabled = errView(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { posts: {} } } }));
+    r33.transactDisabled = errView(await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["update", "posts", mk(), { title: "dis" }]] } }));
+    r33.statusActive = plainView(await call(base, "POST", `/dash/apps/${appId}/status`, { token: userToken, body: { status: "active" } }));
+    r33.queryActive = okKeys(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { posts: {} } } }));
+    r33.statusInAppRow = (await call(base, "GET", `/dash/apps/${appId}`, { token: userToken })).body?.app?.status ?? null;
+    // admin-token rotation: the old token stops working, the new one works
+    const rotated = mk();
+    r33.tokensAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/tokens`, { body: { "admin-token": rotated } }));
+    r33.tokensMissing = errView(await call(base, "POST", `/dash/apps/${appId}/tokens`, { token: userToken, body: {} }));
+    r33.tokensBad = errView(await call(base, "POST", `/dash/apps/${appId}/tokens`, { token: userToken, body: { "admin-token": "nope" } }));
+    r33.tokens = plainView(await call(base, "POST", `/dash/apps/${appId}/tokens`, { token: userToken, body: { "admin-token": rotated } }));
+    r33.oldTokenAfterRotate = errView(await call(base, "GET", `/dash/apps/${appId}/schema/pull`));
+    r33.newTokenAfterRotate = okKeys(await call(base, "GET", `/dash/apps/${appId}/schema/pull`, { token: rotated }));
+    r33.rotateBack = plainView(await call(base, "POST", `/dash/apps/${appId}/tokens`, { token: userToken, body: { "admin-token": adminToken } }));
+    // magic-code expiry
+    r33.expiryMissing = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: {} }));
+    r33.expiryString = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: "x" } }));
+    r33.expiryZero = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: 0 } }));
+    r33.expiryTooLong = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: 2000 } }));
+    r33.expiryAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { body: { expiry: 30 } }));
+    r33.expiry = plainView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: 30.7 } }));
+    r33.expiryAfter = (await call(base, "GET", `/dash/apps/${appId}`, { token: userToken })).body?.app?.magic_code_expiry_minutes ?? null;
+    // rule versions (rules were pushed by earlier sections)
+    const rv = await call(base, "GET", `/dash/apps/${appId}/rule-versions`);
+    r33.ruleVersions = rv.status === 200 ? { status: 200, keys: Object.keys(rv.body).sort(), versions: norm(rv.body.versions) } : errView(rv);
+    r33.ruleVersionsUser = okKeys(await call(base, "GET", `/dash/apps/${appId}/rule-versions`, { token: userToken }));
+    r33.ruleVersionsNoAuth = errView(await call(base, "GET", `/dash/apps/${appId}/rule-versions`, { token: null }));
+    // soft-deleted attrs: add one, delete it, list it (dash + admin)
+    const tmpAttr = mk();
+    await call(base, "POST", `/dash/apps/${appId}/schema/steps/apply`, { body: { steps: [addAttr(tmpAttr, "posts", "tmpdel")] } });
+    await call(base, "POST", `/dash/apps/${appId}/schema/steps/apply`, { body: { steps: [["delete-attr", tmpAttr]] } });
+    const softView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), grace: res.body["grace-period-days"], attrs: (res.body.attrs ?? []).map(attrView) } : errView(res));
+    r33.softDeleted = softView(await call(base, "GET", `/dash/apps/${appId}/soft_deleted_attrs`));
+    r33.softDeletedUser = softView(await call(base, "GET", `/dash/apps/${appId}/soft_deleted_attrs`, { token: userToken }));
+    r33.softDeletedAdmin = softView(await call(base, "GET", "/admin/soft_deleted_attrs", appHdr));
+    r33.softDeletedAdminNoToken = errView(await call(base, "GET", "/admin/soft_deleted_attrs", { token: null, ...appHdr }));
+    const adminSchema = await call(base, "GET", "/admin/schema", appHdr);
+    r33.adminSchema = adminSchema.status === 200 ? { status: 200, keys: Object.keys(adminSchema.body).sort(), schema: schemaView(adminSchema.body.schema) } : errView(adminSchema);
+    r33.adminSchemaNoToken = errView(await call(base, "GET", "/admin/schema", { token: null, ...appHdr }));
+    r33.adminSchemaNoApp = errView(await call(base, "GET", "/admin/schema"));
+    // test users
+    const tuView = (u) => (u ? norm({ email: u.email, code: u.code, app_id: u.app_id, keys: Object.keys(u).sort() }) : null);
+    r33.testUsersEmpty = plainView(await call(base, "GET", `/dash/apps/${appId}/test_users`, { token: userToken }));
+    r33.testUserBadCode = errView(await call(base, "POST", `/dash/apps/${appId}/test_users`, { token: userToken, body: { email: "tester@example.com", code: "12" } }));
+    r33.testUserBadEmail = errView(await call(base, "POST", `/dash/apps/${appId}/test_users`, { token: userToken, body: { email: "nope", code: "123456" } }));
+    r33.testUserMissingCode = errView(await call(base, "POST", `/dash/apps/${appId}/test_users`, { token: userToken, body: { email: "tester@example.com" } }));
+    const tu = await call(base, "POST", `/dash/apps/${appId}/test_users`, { token: userToken, body: { email: "Tester@Example.com", code: "123456" } });
+    r33.testUserCreate = tu.status === 200 ? { status: 200, keys: Object.keys(tu.body).sort(), user: tuView(tu.body["test-user"]) } : errView(tu);
+    r33.testUserDuplicate = errView(await call(base, "POST", `/dash/apps/${appId}/test_users`, { token: userToken, body: { email: "tester@example.com", code: "654321" } }));
+    const tus = await call(base, "GET", `/dash/apps/${appId}/test_users`, { token: userToken });
+    r33.testUsersList = tus.status === 200 ? { status: 200, users: (tus.body["test-users"] ?? []).map(tuView) } : errView(tus);
+    r33.testUserDeleteMissingId = errView(await call(base, "DELETE", `/dash/apps/${appId}/test_users`, { token: userToken, body: {} }));
+    r33.testUserDelete = plainView(await call(base, "DELETE", `/dash/apps/${appId}/test_users`, { token: userToken, body: { id: tu.body?.["test-user"]?.id } }));
+    r33.testUserDeleteAgain = plainView(await call(base, "DELETE", `/dash/apps/${appId}/test_users`, { token: userToken, body: { id: tu.body?.["test-user"]?.id } }));
+    // stats: the shape only (legacy sums cached per-machine session reports)
+    const stats = await call(base, "GET", `/dash/apps/${appId}/stats`, { token: userToken });
+    r33.stats = stats.status === 200 ? { status: 200, keys: Object.keys(stats.body).sort(), countIsNumber: typeof stats.body.count === "number", originsIsObject: typeof stats.body.origins === "object" } : errView(stats);
+    r33.statsAdminToken = errView(await call(base, "GET", `/dash/apps/${appId}/stats`));
+    raw("33-app-management", r33);
+    record("33-app-management", r33);
+
+    // 34 account routes: profiles, check-admin, personal access tokens,
+    // dashboard magic-code login, signout
+    const r34 = {};
+    const patNorm = (v) => JSON.parse(JSON.stringify(norm(v)).replace(/per_[0-9a-f]{64}/g, "<pat>"));
+    r34.profile = plainView(await call(base, "POST", "/dash/profiles", { token: userToken, body: { meta: { role: "dev" } } }));
+    r34.profileMissingMeta = errView(await call(base, "POST", "/dash/profiles", { token: userToken, body: {} }));
+    r34.profileNoAuth = errView(await call(base, "POST", "/dash/profiles", { token: null, body: { meta: {} } }));
+    r34.checkAdmin = errView(await call(base, "GET", "/dash/check-admin", { token: userToken }));
+    r34.checkAdminNoAuth = errView(await call(base, "GET", "/dash/check-admin", { token: null }));
+    r34.patsEmpty = plainView(await call(base, "GET", "/dash/personal_access_tokens", { token: userToken }));
+    r34.patCreateMissingName = errView(await call(base, "POST", "/dash/personal_access_tokens", { token: userToken, body: {} }));
+    const pat = await call(base, "POST", "/dash/personal_access_tokens", { token: userToken, body: { name: "ci token" } });
+    r34.patCreate = pat.status === 200 ? { status: 200, keys: Object.keys(pat.body).sort(), data: patNorm(pat.body.data) } : errView(pat);
+    const pats = await call(base, "GET", "/dash/personal_access_tokens", { token: userToken });
+    r34.pats = pats.status === 200 ? { status: 200, data: (pats.body.data ?? []).map((t) => patNorm({ ...t, keys: Object.keys(t).sort() })) } : errView(pats);
+    r34.patDeleteBadId = errView(await call(base, "DELETE", "/dash/personal_access_tokens/nope", { token: userToken }));
+    r34.patDeleteOther = plainView(await call(base, "DELETE", `/dash/personal_access_tokens/${mk()}`, { token: userToken }));
+    r34.patDelete = plainView(await call(base, "DELETE", `/dash/personal_access_tokens/${pats.body?.data?.[0]?.id}`, { token: userToken }));
+    r34.patsAfterDelete = plainView(await call(base, "GET", "/dash/personal_access_tokens", { token: userToken }));
+    const loginEmail = `login-${fixedPrefix}@example.com`;
+    r34.sendCodeBadEmail = errView(await call(base, "POST", "/dash/auth/send_magic_code", { token: null, body: { email: "nope" } }));
+    r34.sendCodeMissingEmail = errView(await call(base, "POST", "/dash/auth/send_magic_code", { token: null, body: {} }));
+    r34.sendCode = plainView(await call(base, "POST", "/dash/auth/send_magic_code", { token: null, body: { email: loginEmail } }));
+    const loginCode = readDashCode(name, loginEmail);
+    r34.codeShape = /^\d{6}$/.test(loginCode);
+    r34.verifyWrongCode = errView(await call(base, "POST", "/dash/auth/verify_magic_code", { token: null, body: { email: loginEmail, code: "000000" } }));
+    r34.verifyMissingCode = errView(await call(base, "POST", "/dash/auth/verify_magic_code", { token: null, body: { email: loginEmail } }));
+    const verified = await call(base, "POST", "/dash/auth/verify_magic_code", { token: null, body: { email: loginEmail, code: ` ${loginCode} ` } });
+    r34.verify = verified.status === 200 ? { status: 200, keys: Object.keys(verified.body).sort(), userKeys: Object.keys(verified.body.user ?? {}).sort(), email: verified.body.user?.email } : errView(verified);
+    r34.verifyReuse = errView(await call(base, "POST", "/dash/auth/verify_magic_code", { token: null, body: { email: loginEmail, code: loginCode } }));
+    const loginToken = verified.body?.token;
+    r34.meWithLoginToken = okKeys(await call(base, "GET", "/dash/me", { token: loginToken }), (b) => b.user);
+    r34.signoutNoAuth = errView(await call(base, "POST", "/dash/signout", { token: null }));
+    r34.signout = plainView(await call(base, "POST", "/dash/signout", { token: loginToken }));
+    r34.meAfterSignout = errView(await call(base, "GET", "/dash/me", { token: loginToken }));
+    raw("34-account-routes", r34);
+    record("34-account-routes", r34);
+
+    // 35 dashboard storage + test email
+    const r35 = {};
+    const dashUpload = async (token, headers, body = "hello") => {
+      const res = await fetch(base + `/dash/apps/${appId}/storage/upload`, { method: "PUT", headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers }, body });
+      const text = await res.text();
+      let json;
+      try { json = JSON.parse(text); } catch { json = { "<non-json>": text.slice(0, 200) }; }
+      return { status: res.status, body: json };
+    };
+    const upView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), data: norm({ ...res.body.data, keys: Object.keys(res.body.data ?? {}).sort() }) } : errView(res));
+    r35.uploadNoAuth = errView(await dashUpload(null, { path: "dash/hello.txt", "content-type": "text/plain" }));
+    r35.uploadMissingPath = errView(await dashUpload(userToken, { "content-type": "text/plain" }));
+    r35.upload = upView(await dashUpload(userToken, { path: "dash/hello.txt", "content-type": "text/plain" }));
+    r35.uploadAdminToken = upView(await dashUpload(adminToken, { path: "dash/hello2.txt", "content-type": "text/plain" }, "hello again"));
+    r35.filesAfterUpload = plainView(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { $files: { $: { fields: ["path"] } } } } }));
+    r35.filesDeleteMissing = errView(await call(base, "POST", `/dash/apps/${appId}/storage/files/delete`, { token: userToken, body: {} }));
+    r35.filesDeleteNotArray = errView(await call(base, "POST", `/dash/apps/${appId}/storage/files/delete`, { token: userToken, body: { filenames: "x" } }));
+    r35.filesDeleteNoAuth = errView(await call(base, "POST", `/dash/apps/${appId}/storage/files/delete`, { token: null, body: { filenames: ["dash/hello.txt"] } }));
+    r35.filesDelete = plainView(await call(base, "POST", `/dash/apps/${appId}/storage/files/delete`, { token: userToken, body: { filenames: ["dash/hello.txt", "nope.txt"] } }));
+    r35.filesDeleteAdminToken = plainView(await call(base, "POST", `/dash/apps/${appId}/storage/files/delete`, { body: { filenames: ["dash/hello2.txt"] } }));
+    r35.filesAfterDelete = plainView(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { $files: { $: { fields: ["path"] } } } } }));
+    r35.testEmailMissingTo = errView(await call(base, "POST", `/dash/apps/${appId}/send-test-email`, { token: userToken, body: { subject: "s {code}", body: "b {code}" } }));
+    r35.testEmailNonMember = errView(await call(base, "POST", `/dash/apps/${appId}/send-test-email`, { token: userToken, body: { subject: "s {code}", body: "b {code}", to: "stranger@example.com" } }));
+    r35.testEmailAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/send-test-email`, { body: { subject: "s {code}", body: "b {code}", to: me.body?.user?.email } }));
+    r35.testEmail = plainView(await call(base, "POST", `/dash/apps/${appId}/send-test-email`, { token: userToken, body: { subject: "s {code}", body: "b {code}", to: me.body?.user?.email } }));
+    raw("35-dash-storage-and-test-email", r35);
+    record("35-dash-storage-and-test-email", r35);
+
+    // 36 clear: every user attr soft-deleted, rules reset (last: it empties the app)
+    const r36 = {};
+    r36.clearAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/clear`));
+    r36.clear = plainView(await call(base, "POST", `/dash/apps/${appId}/clear`, { token: userToken }));
+    r36.pullAfterClear = pullView(await call(base, "GET", `/dash/apps/${appId}/schema/pull`));
+    r36.permsAfterClear = plainView(await call(base, "GET", `/dash/apps/${appId}/perms/pull`));
+    r36.softDeletedAfterClear = softView(await call(base, "GET", `/dash/apps/${appId}/soft_deleted_attrs`));
+    r36.queryAfterClear = plainView(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { posts: {} } } }));
+    raw("36-clear", r36);
+    record("36-clear", r36);
   }
 
   return out;
