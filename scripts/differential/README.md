@@ -114,6 +114,13 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   keys vs this server's in-order handling is documented in docs/PARITY.md).
 - `dash.mjs` step 39 drives the webhook management routes, the events a
   transaction queues and the payload for them on both servers.
+- `dash.mjs` step 40 drives the dashboard's Google login (`/dash/oauth/start`
+  with legacy's unconfigured client, every callback error path, a real Google
+  rejection, the token errors), the get-a-db creation gates, `track-import`
+  and the active-session stats; step 41 the admin magic-code routes
+  (`send_magic_code` hands the code back, `verify_magic_code` signs in).
+  `scripts/dash-login-test.mjs` (the `cargo test + e2e` job) runs the full
+  Google round trip against a mock token endpoint.
 - `lib.mjs` — capture clients, normalization, folding.
 - `surface.mjs` / `surface.json` — the legacy server's public surface derived
   mechanically from the vendored source (every route table, ws op, tx-step
