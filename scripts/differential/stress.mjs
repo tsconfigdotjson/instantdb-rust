@@ -18,7 +18,10 @@ import { canon, connect, makeIdFactory, projectResult, settle, uuid } from "./li
 const appIdLegacy = process.argv[2];
 const appIdRust = process.argv[3];
 const adminToken = process.argv[4];
-const triples = Number(process.argv[5] ?? 4000);
+// legacy's transact hits Postgres' 100-argument function limit well before
+// 8000 triples (a 54023 sql-exception on the live image), so the burst stays
+// at a size both servers accept; the point is ordering, not volume
+const triples = Number(process.argv[5] ?? 400);
 if (!appIdLegacy || !appIdRust || !adminToken) throw new Error("usage: node stress.mjs <app-id-legacy> <app-id-rust> <admin-token> [triples]");
 
 const SERVERS = {

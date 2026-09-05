@@ -77,7 +77,7 @@ echo "== scheduling stress =="
 STRESS_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
 STRESS_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$STRESS_APP" "$STRESS_TOKEN"
-node stress.mjs "$STRESS_APP" "$STRESS_APP" "$STRESS_TOKEN" "${STRESS_TRIPLES:-4000}"
+node stress.mjs "$STRESS_APP" "$STRESS_APP" "$STRESS_TOKEN" "${STRESS_TRIPLES:-400}"
 
 echo "== fuzz layer =="
 for SEED in ${FUZZ_SEEDS:-42 99}; do
