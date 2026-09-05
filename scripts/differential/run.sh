@@ -66,6 +66,17 @@ STORAGE_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$STORAGE_APP" "$STORAGE_TOKEN"
 node storage.mjs "$STORAGE_APP" "$STORAGE_TOKEN"
 
+echo "== runtime oauth (mock OIDC provider) =="
+for i in $(seq 1 30); do
+  if curl -sf "http://localhost:9377/health" > /dev/null 2>&1; then break; fi
+  if [ "$i" = "30" ]; then echo "mock oidc provider is not reachable on :9377"; docker compose logs mock-oidc | tail -20; exit 1; fi
+  sleep 1
+done
+OAUTH_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+OAUTH_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+./provision.sh "$OAUTH_APP" "$OAUTH_TOKEN"
+node oauth.mjs "$OAUTH_APP" "$OAUTH_TOKEN"
+
 echo "== error matrix =="
 ERR_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
 ERR_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")

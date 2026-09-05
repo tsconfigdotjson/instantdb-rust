@@ -165,7 +165,8 @@ execFileSync("psql", [dbUrl, "-q", "-v", "ON_ERROR_STOP=1", "-c", `
 `]);
 check("get-a-db needs the service user", (await call("POST", "/dash/apps/get_a_db", { token: t1.body.token, body: { title: "x" } })).status === 400);
 const userPat = await call("POST", "/dash/personal_access_tokens", { token: t1.body.token, body: { name: "t" } });
-const denied = await call("POST", "/dash/apps/get_a_db", { token: userPat.body.token, body: { title: "x" } });
+check("a Google-login user can mint a PAT", userPat.status === 200 && typeof userPat.body.data?.token === "string", userPat);
+const denied = await call("POST", "/dash/apps/get_a_db", { token: userPat.body.data?.token, body: { title: "x" } });
 check("get-a-db denies other users", denied.body.type === "permission-denied" && denied.body.hint?.expected === "get-a-db-user?", denied.body);
 check("get-a-db needs a title", (await call("POST", "/dash/apps/get_a_db", { token: pat, body: {} })).body.type === "param-missing");
 check("get-a-db validates rules", (await call("POST", "/dash/apps/get_a_db", { token: pat, body: { title: "x", rules: { code: { posts: { allow: { view: "nope(" } } } } } })).body.type === "validation-failed");
@@ -180,7 +181,8 @@ const adminToken = created.body.app?.["admin-token"];
 const claimable = await call("GET", `/dash/apps/get_a_db/${appId}`);
 check("the app is claimable", claimable.status === 200 && claimable.body.app?.id === appId, claimable.body);
 const schema = await call("GET", "/admin/schema", { token: adminToken, headers: { "app-id": appId } });
-check("schema applied", schema.body?.schema?.blobs?.posts?.title?.["index?"] === true || JSON.stringify(schema.body).includes('"posts"'), schema.body);
+const posts = schema.body?.schema?.blobs?.posts;
+check("schema applied", posts?.title?.["index?"] === true && posts?.title?.["checked-data-type"] === "string", { status: schema.status, keys: Object.keys(schema.body?.schema ?? {}), blobs: Object.keys(schema.body?.schema?.blobs ?? {}), posts });
 const perms = await call("GET", `/dash/apps/${appId}/perms/pull`, { token: adminToken });
 check("rules applied", perms.body?.perms?.posts?.allow?.view === "true", perms.body);
 
