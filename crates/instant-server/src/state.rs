@@ -56,6 +56,17 @@ pub struct Config {
     /// Where the platform OAuth consent screen lives (`INSTANT_DASHBOARD_URL`,
     /// legacy config/dashboard-origin; default the dev dashboard).
     pub dashboard_origin: String,
+    /// The dashboard's Google login (`GET /dash/oauth/start` ...): legacy
+    /// `config/get-google-oauth-client` reads
+    /// `INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET`, which must be
+    /// set together. Unset means the login redirects with an empty client id,
+    /// as legacy does without a configured client.
+    pub google_oauth_client_id: Option<String>,
+    pub google_oauth_client_secret: Option<String>,
+    /// Google's endpoints, overridable for tests
+    /// (`INSTANT_DASHBOARD_GOOGLE_OAUTH_AUTH_URL` / `_TOKEN_URL`).
+    pub google_oauth_auth_url: String,
+    pub google_oauth_token_url: String,
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -106,8 +117,23 @@ impl Config {
                 .map(|s| s.trim().trim_end_matches('/').to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "http://localhost:3000".into()),
+            google_oauth_client_id: env_nonblank("INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID"),
+            google_oauth_client_secret: env_nonblank(
+                "INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET",
+            ),
+            google_oauth_auth_url: env_nonblank("INSTANT_DASHBOARD_GOOGLE_OAUTH_AUTH_URL")
+                .unwrap_or_else(|| "https://accounts.google.com/o/oauth2/v2/auth".into()),
+            google_oauth_token_url: env_nonblank("INSTANT_DASHBOARD_GOOGLE_OAUTH_TOKEN_URL")
+                .unwrap_or_else(|| "https://oauth2.googleapis.com/token".into()),
         }
     }
+}
+
+fn env_nonblank(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Authenticated user attached to a session.
