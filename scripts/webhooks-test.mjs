@@ -156,10 +156,13 @@ check("disable with reason", (await call("POST", `/dash/apps/${appId}/webhooks/$
 check("update url", (await call("POST", `/dash/apps/${appId}/webhooks/${webhookId}`, { url: receiverUrl + "2" })).body.webhook?.sink?.url === receiverUrl + "2");
 check("delete", (await call("DELETE", `/dash/apps/${appId}/webhooks/${webhookId}`)).body.webhook?.id === webhookId);
 check("gone after delete", !(await call("GET", `/dash/apps/${appId}/webhooks`)).body.webhooks?.some((w) => w.id === webhookId));
-// legacy's events route does not check that the webhook exists: an empty page
+// legacy's webhook_events has no foreign key to webhooks (migration 109:
+// "deletes only happen through truncate"), so the events outlive the webhook
+// and the events route, which never checks the webhook, still pages them;
+// resend requeues one as well
 const goneEvents = await call("GET", `/dash/apps/${appId}/webhooks/${webhookId}/events`);
-check("events of a deleted webhook are an empty page", goneEvents.status === 200 && goneEvents.body.events?.length === 0, goneEvents);
-check("resend on a deleted webhook is validation-failed", (await call("POST", `/dash/apps/${appId}/webhooks/${webhookId}/events/${ev?.isn}`)).body.type === "validation-failed");
+check("events outlive the deleted webhook", goneEvents.status === 200 && goneEvents.body.events?.length >= 3, goneEvents);
+check("resend on a deleted webhook still requeues", (await call("POST", `/dash/apps/${appId}/webhooks/${webhookId}/events/${ev?.isn}`)).body.event?.status === "pending");
 
 server.close();
 if (failures) {

@@ -1366,7 +1366,8 @@ async function runAgainst(name) {
     }
     const evView = (e) => ({ isn: typeof e.isn === "string" ? "<isn>" : e.isn, keys: Object.keys(e).sort() });
     r39.events = evs.status === 200 ? { status: 200, keys: Object.keys(evs.body).sort(), count: (evs.body.events ?? []).length, events: (evs.body.events ?? []).map(evView), pageInfo: { keys: Object.keys(evs.body.pageInfo ?? {}).sort(), hasNextPage: evs.body.pageInfo?.hasNextPage, cursors: !!evs.body.pageInfo?.startCursor } } : errView(evs);
-    r39.eventsBadCursor = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events?after=%%%`));
+    r39.eventsBadCursor = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events?after=nope`));
+    r39.eventsEmptyCursor = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events?after=`));
     r39.eventsUnknownHook = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${mk()}/events`));
     const isn = evs.body?.events?.[0]?.isn;
     const one = await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events/${isn}`);

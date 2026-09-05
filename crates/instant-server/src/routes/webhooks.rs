@@ -266,9 +266,10 @@ pub async fn events(
         )
         .await?;
         let webhook_id = path_uuid(&webhook_id, "webhook_id")?;
+        // `get-optional-param!`: present but undecodable (an empty string
+        // included) is param-malformed
         let after = match params.get("after") {
             None => None,
-            Some(s) if s.is_empty() => None,
             Some(s) => Some(
                 decode_cursor(s).ok_or_else(|| param_malformed(&["params", "after"], json!(s)))?,
             ),
