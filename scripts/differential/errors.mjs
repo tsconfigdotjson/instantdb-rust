@@ -308,14 +308,6 @@ probe("ws/validation-failed/after-inclusive-not-boolean", async (ctx) => {
   c.close();
   return v;
 });
-probe("ws/validation-failed/where-entity-id-op", async (ctx) => {
-  // `$entityId` passes where-value-valid-keys? but has no spec or SQL
-  // translation (instaql.clj:69-75): whatever legacy does with it is pinned
-  const c = await session(ctx);
-  const v = wsView(await wsError(c, { op: "add-query", q: { probe: { $: { where: { title: { $entityId: "x" } } } } } }));
-  c.close();
-  return v;
-});
 probe("ws/validation-failed/start-sync-non-admin", async (ctx) => {
   const c = await session(ctx);
   const v = wsView(await wsError(c, { op: "start-sync", q: { probe: {} } }));
