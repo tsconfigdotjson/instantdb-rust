@@ -646,7 +646,7 @@ pub async fn eval_program_full(
 
 /// Legacy `throw-permission-evaluation-failed!` (util/exception.clj:299-323)
 /// for an app admin session (`show-cel-errors?`): the CEL message is echoed.
-pub fn permission_evaluation_failed(program: &Program, cause: &str) -> InstantError {
+pub fn permission_evaluation_failed(program: &Program, cause: &str, code: &str) -> InstantError {
     let (etype, action) = program
         .rule
         .clone()
@@ -660,9 +660,35 @@ pub fn permission_evaluation_failed(program: &Program, cause: &str) -> InstantEr
         message.clone(),
         Some(json!({
             "rule": [etype, action],
-            "error": {"type": "evaluation-error", "message": message, "hint": cause},
+            "error": {"type": code, "message": message, "hint": cause},
         })),
     )
+}
+
+/// The cel-java `CelErrorCode` name legacy puts in `hint.error.type`
+/// (`(keyword (.name (.getErrorCode e)))`), approximated from the cel crate's
+/// evaluation error: conversion failures are BAD_FORMAT, missing keys
+/// ATTRIBUTE_NOT_FOUND, division by zero DIVIDE_BY_ZERO, bad indexes
+/// INDEX_OUT_OF_BOUNDS, everything else INTERNAL.
+fn cel_error_code(e: &cel::ExecutionError) -> &'static str {
+    let text = format!("{e:?}").to_ascii_lowercase();
+    if text.contains("nosuchkey") || text.contains("undeclaredreference") {
+        "ATTRIBUTE_NOT_FOUND"
+    } else if text.contains("divide") || text.contains("division") || text.contains("modulo") {
+        "DIVIDE_BY_ZERO"
+    } else if text.contains("index") && text.contains("bound") {
+        "INDEX_OUT_OF_BOUNDS"
+    } else if text.contains("overflow") {
+        "OVERFLOW"
+    } else if text.contains("functionerror")
+        || text.contains("invalidargument")
+        || text.contains("parse")
+        || text.contains("convert")
+    {
+        "BAD_FORMAT"
+    } else {
+        "INTERNAL"
+    }
 }
 
 /// A `rateLimit.<name>.limit(key[, tokens])` call recorded during evaluation.
@@ -1387,7 +1413,11 @@ pub fn eval_program_pure(
             // (plain admin HTTP calls, which never evaluate rules); every
             // session that reaches here sees "You may have a typo"
             tracing::debug!(rule = ?program.rule, error = %e, "permission rule evaluation failed");
-            return Err(permission_evaluation_failed(program, "You may have a typo"));
+            return Err(permission_evaluation_failed(
+                program,
+                "You may have a typo",
+                cel_error_code(&e),
+            ));
         }
     };
     let calls = std::mem::take(&mut *calls.lock().unwrap());
@@ -2938,7 +2968,13 @@ fn cel_error_message(e: &cel::ParseErrors) -> String {
         .split_once("Syntax error: ")
         .map(|(_, rest)| rest)
         .unwrap_or(full.as_str());
-    core.lines().next().unwrap_or_default().trim().to_string()
+    // legacy's message passes through a Java `format`, which leaves the
+    // `%` token of the expected-token list doubled ("'%%'")
+    core.lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .replace("'%'", "'%%'")
 }
 
 /// expr-validation-errors + with-binds: compile the rule at `path` (with the

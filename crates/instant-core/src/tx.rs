@@ -279,9 +279,15 @@ fn parse_step_eid(steps: &Value, idx: usize, v: &Value, friendly: bool) -> Resul
 /// nil or a map with a known `mode`, `delete-entity` / `rule-params` etypes
 /// are strings, `rule-params` params are a map, and triples carry a value.
 pub fn parse_tx_steps(steps: &Value) -> Result<Vec<TxStep>> {
-    let arr = steps
-        .as_array()
-        .ok_or_else(|| coerce_err("tx-steps must be an array"))?;
+    // legacy coerce! assert-coll! (transaction.clj:126-134): the raw value
+    // is the hint's input
+    let arr = steps.as_array().ok_or_else(|| {
+        InstantError::validation_failed_input(
+            "tx-steps",
+            steps.clone(),
+            json!([{"expected": "coll?", "in": []}]),
+        )
+    })?;
     let mut out = vec![];
     for (idx, step) in arr.iter().enumerate() {
         let step_arr = step.as_array().ok_or_else(|| {

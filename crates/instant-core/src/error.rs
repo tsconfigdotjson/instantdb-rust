@@ -37,6 +37,43 @@ impl InstantError {
         )
     }
 
+    /// Legacy `throw-validation-err!` (util/exception.clj:391-405) with the
+    /// offending `input` in the hint: the message is the bare
+    /// "Validation failed for <type>" when no error carries a `message`,
+    /// else that plus the messages joined with ", ".
+    pub fn validation_failed_input(input_type: &str, input: Value, errors: Value) -> Self {
+        let msgs: Vec<&str> = errors
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let message = if msgs.is_empty() {
+            format!("Validation failed for {input_type}")
+        } else {
+            format!("Validation failed for {input_type}: {}", msgs.join(", "))
+        };
+        Self::new(
+            "validation-failed",
+            400,
+            message,
+            Some(json!({"data-type": input_type, "input": input, "errors": errors})),
+        )
+    }
+
+    /// Legacy `assert-record!` (util/exception.clj:125-135): the lookup
+    /// args ride in the hint next to `record-type`.
+    pub fn record_not_found_args(record_type: &str, args: Value) -> Self {
+        Self::new(
+            "record-not-found",
+            400,
+            format!("Record not found: {record_type}"),
+            Some(json!({"args": [args], "record-type": record_type})),
+        )
+    }
+
     pub fn record_not_found(record_type: &str, message: impl Into<String>) -> Self {
         Self::new(
             "record-not-found",

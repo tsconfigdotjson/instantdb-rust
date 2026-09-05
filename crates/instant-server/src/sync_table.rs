@@ -72,7 +72,7 @@ pub async fn handle_start_sync(
 ) -> std::result::Result<(), InstantError> {
     let (app_id, admin, user_id) = {
         let st = session.state.lock().await;
-        let app_id = st.app_id.ok_or_else(crate::ws::not_initialized)?;
+        let app_id = st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?;
         (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
     let q = msg
@@ -80,17 +80,17 @@ pub async fn handle_start_sync(
         .cloned()
         .filter(|q| !q.is_null())
         .ok_or_else(|| {
-            InstantError::validation_failed(
+            InstantError::validation_failed_input(
                 "start-sync",
-                "Query can not be null.",
+                json!({"q": null}),
                 json!([{"message": "Query can not be null."}]),
             )
         })?;
     if !admin {
         // legacy gates sync tables to admin sessions (session.clj:281-284)
-        return Err(InstantError::validation_failed(
+        return Err(InstantError::validation_failed_input(
             "start-sync",
-            "start-sync is currently supported for admins only.",
+            json!({"q": q}),
             json!([{"message": "start-sync is currently supported for admins only."}]),
         ));
     }
@@ -209,7 +209,7 @@ pub async fn handle_resync_table(
 ) -> std::result::Result<(), InstantError> {
     let (app_id, admin, user_id) = {
         let st = session.state.lock().await;
-        let app_id = st.app_id.ok_or_else(crate::ws::not_initialized)?;
+        let app_id = st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?;
         (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
     let sub_id = msg
@@ -339,7 +339,7 @@ pub async fn handle_remove_sync(
         .unwrap_or(false);
     let (app_id, owned) = {
         let mut st = session.state.lock().await;
-        let app_id = st.app_id.ok_or_else(crate::ws::not_initialized)?;
+        let app_id = st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?;
         (app_id, st.sync_subs.remove(&sub_id).is_some())
     };
     // legacy deletes only `{:id ... :app-id app-id}` and only for a sub this

@@ -28,7 +28,8 @@ pub async fn get_app(state: &AppState, app_id: Uuid) -> Result<AppRow> {
     .fetch_optional(&state.pool)
     .await
     .map_err(InstantError::from)?
-    .ok_or_else(|| InstantError::record_not_found("app", "Could not find app."))?;
+    // legacy app-model/get-by-id! (model/app.clj:107-110)
+    .ok_or_else(|| InstantError::record_not_found_args("app", json!({"id": app_id})))?;
     Ok(AppRow {
         id: row.get("id"),
         title: row.get("title"),

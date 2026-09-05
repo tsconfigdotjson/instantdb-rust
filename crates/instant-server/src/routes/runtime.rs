@@ -90,7 +90,13 @@ pub fn valid_email(email: &str) -> bool {
 fn coerce_email(raw: &str) -> Result<String> {
     let email = raw.to_lowercase().trim().to_string();
     if !valid_email(&email) {
-        return Err(InstantError::param_malformed("Malformed parameter: email"));
+        // legacy get-param! [:body :email] email/coerce (exception.clj:421-428)
+        return Err(InstantError::new(
+            "param-malformed",
+            400,
+            "Malformed parameter: [\"body\" \"email\"]",
+            Some(json!({"in": ["body", "email"], "original-input": raw})),
+        ));
     }
     Ok(email)
 }
@@ -270,9 +276,9 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
                 }
             }
             None => {
-                return Err(InstantError::record_not_found(
+                return Err(InstantError::record_not_found_args(
                     "app-user",
-                    "Record not found: app-user",
+                    json!({"app-id": app_id, "refresh-token": token}),
                 ))
             }
         }
@@ -301,11 +307,11 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
     .fetch_optional(&state.pool)
     .await
     .map_err(InstantError::from)?;
+    // legacy consume! (app_user_magic_code.clj:50-66): the lookup params
+    // are the hint args, for the not-found and the expired case alike
+    let args = json!({"app-id": app_id, "code": code, "email": email});
     let Some(row) = row else {
-        return Err(InstantError::record_not_found(
-            "app-user-magic-code",
-            "Record not found: app-user-magic-code",
-        ));
+        return Err(InstantError::record_not_found_args("app-user-magic-code", args));
     };
     let entity: Uuid = row.get("entity_id");
     let created_at: i64 = row.get::<Option<i64>, _>("created_at").unwrap_or(0);
@@ -354,7 +360,7 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
             "record-expired",
             400,
             "Record expired: app-user-magic-code",
-            Some(json!({"record-type": "app-user-magic-code"})),
+            Some(json!({"args": [args]})),
         ));
     }
 
@@ -412,7 +418,12 @@ async fn verify_refresh_token_impl(state: &AppState, body: &Value) -> Result<Val
     let token = get_str(body, "refresh-token")?;
     let user = auth::user_by_refresh_token(state, app_id, token)
         .await?
-        .ok_or_else(|| InstantError::record_not_found("app-user", "Record not found: app-user"))?;
+        .ok_or_else(|| {
+            InstantError::record_not_found_args(
+                "app-user",
+                json!({"app-id": app_id, "refresh-token": token}),
+            )
+        })?;
     let token_uuid = Uuid::parse_str(token).ok();
     let user = user_json(state, app_id, user.id, token_uuid).await?;
     Ok(json!({"user": user}))

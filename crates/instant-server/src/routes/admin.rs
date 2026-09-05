@@ -53,12 +53,18 @@ pub(crate) fn app_id_param(headers: &HeaderMap, params: &HashMap<String, String>
                 })),
             )
         })?;
+    // get-some-param! malformed hint: the path found, every candidate path,
+    // and the raw input (exception.clj:441-457)
     Uuid::parse_str(&raw).map_err(|_| {
         InstantError::new(
             "param-malformed",
             400,
             format!("Malformed parameter: [\"{}\" \"{}\"]", path[0], path[1]),
-            Some(json!({"in": path, "original-input": raw})),
+            Some(json!({
+                "in": path,
+                "possible-ins": [["headers", "app-id"], ["query-params", "app_id"]],
+                "original-input": raw,
+            })),
         )
     })
 }
@@ -562,6 +568,48 @@ fn eid_to_lookup(
     }
 }
 
+/// `ex/get-param! req [:body :steps] vec` (admin/routes.clj:267,335): absent
+/// is param-missing, present but not an array is param-malformed.
+fn body_steps(body: &Value) -> Result<&Value> {
+    let steps = body.get("steps").filter(|v| !v.is_null()).ok_or_else(|| {
+        InstantError::new(
+            "param-missing",
+            400,
+            "Missing parameter: [\"body\" \"steps\"]",
+            Some(json!({"in": ["body", "steps"]})),
+        )
+    })?;
+    if !steps.is_array() {
+        return Err(InstantError::new(
+            "param-malformed",
+            400,
+            "Malformed parameter: [\"body\" \"steps\"]",
+            Some(json!({"in": ["body", "steps"], "original-input": steps})),
+        ));
+    }
+    Ok(steps)
+}
+
+/// Legacy `throw-validation-err! :steps <steps> [{message, in [idx 2]}]`
+/// (admin/model.clj:423): stamp the whole steps array and the position of
+/// the offending entity id onto an `invalid_eid` error.
+fn at_step(e: InstantError, steps: &Value, idx: usize, pos: usize) -> InstantError {
+    let mut e = e;
+    if let Some(h) = e.hint.as_mut().and_then(|h| h.as_object_mut()) {
+        if h.get("data-type").and_then(|d| d.as_str()) == Some("steps") {
+            h.insert("input".into(), steps.clone());
+            if let Some(errs) = h.get_mut("errors").and_then(|v| v.as_array_mut()) {
+                for err in errs.iter_mut() {
+                    if let Some(m) = err.as_object_mut() {
+                        m.insert("in".into(), json!([idx, pos]));
+                    }
+                }
+            }
+        }
+    }
+    e
+}
+
 fn invalid_eid(x: &str) -> InstantError {
     InstantError::validation_failed(
         "steps",
@@ -771,7 +819,7 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
         .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"steps\"]"))?;
     let mut new_attrs: Vec<Value> = vec![];
     let mut out: Vec<Value> = vec![];
-    for step in arr {
+    for (idx, step) in arr.iter().enumerate() {
         let sarr = step.as_array().ok_or_else(|| {
             InstantError::validation_failed("steps", "step must be an array", json!([]))
         })?;
@@ -786,7 +834,8 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                )?;
+                )
+                .map_err(|e| at_step(e, steps, idx, 2))?;
                 let obj = sarr
                     .get(3)
                     .and_then(|v| v.as_object())
@@ -835,7 +884,8 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                )?;
+                )
+                .map_err(|e| at_step(e, steps, idx, 2))?;
                 let obj = sarr
                     .get(3)
                     .and_then(|v| v.as_object())
@@ -893,7 +943,8 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                )?;
+                )
+                .map_err(|e| at_step(e, steps, idx, 2))?;
                 out.push(json!(["delete-entity", eid, etype]));
             }
             "ruleParams" | "rule-params" => {
@@ -903,7 +954,8 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                )?;
+                )
+                .map_err(|e| at_step(e, steps, idx, 2))?;
                 out.push(json!([
                     "rule-params",
                     eid,
@@ -915,12 +967,14 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
             | "deep-merge-triple" | "retract-triple" | "delete-entity" => {
                 out.push(step.clone());
             }
-            other => {
-                return Err(InstantError::validation_failed(
+            _ => {
+                // legacy spec explain of ::ops (admin/model.clj:503): the
+                // best problem is the last `s/or` branch's op literal
+                return Err(InstantError::validation_failed_input(
                     "steps",
-                    format!("unknown step action {other:?}"),
-                    json!([]),
-                ))
+                    steps.clone(),
+                    json!([{"expected": ["delete-attr"], "in": [idx, 0]}]),
+                ));
             }
         }
     }
@@ -959,9 +1013,7 @@ async fn transact_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed(state, headers, params).await?;
-    let steps = body
-        .get("steps")
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"steps\"]"))?;
+    let steps = body_steps(body)?;
     let throw_missing = body
         .get("throw-on-missing-attrs?")
         .and_then(|v| v.as_bool())
@@ -2140,9 +2192,10 @@ async fn query_perms_check_impl(
 ) -> Result<Value> {
     let ctx = authed_admin_then_impersonating(state, headers, params).await?;
     if ctx.perms.admin {
-        return Err(InstantError::validation_failed(
-            "body",
-            "Cannot test perms as admin",
+        // legacy throw-validation-err! :non-admin :non-admin (routes.clj:222,327)
+        return Err(InstantError::validation_failed_input(
+            "non-admin",
+            json!("non-admin"),
             json!([{"message": "Cannot test perms as admin"}]),
         ));
     }
@@ -2260,15 +2313,14 @@ async fn transact_perms_check_impl(
 ) -> Result<Value> {
     let ctx = authed_admin_then_impersonating(state, headers, params).await?;
     if ctx.perms.admin {
-        return Err(InstantError::validation_failed(
-            "body",
-            "Cannot test perms as admin",
+        // legacy throw-validation-err! :non-admin :non-admin (routes.clj:222,327)
+        return Err(InstantError::validation_failed_input(
+            "non-admin",
+            json!("non-admin"),
             json!([{"message": "Cannot test perms as admin"}]),
         ));
     }
-    let steps = body
-        .get("steps")
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"steps\"]"))?;
+    let steps = body_steps(body)?;
     let throw_missing = body
         .get("throw-on-missing-attrs?")
         .and_then(|v| v.as_bool())

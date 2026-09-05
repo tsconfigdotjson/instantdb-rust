@@ -145,7 +145,7 @@ pub async fn handle_start_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id.ok_or_else(crate::ws::not_initialized)?
+        st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?
     };
     let client_id = msg
         .get("client-id")
@@ -195,9 +195,9 @@ pub async fn handle_start_stream(
             let supplied_hash = Some(crate::auth::hash_string(&reconnect_token));
             if stored.as_ref().and_then(|v| v.as_str()) != supplied_hash.as_deref() {
                 let m = "A stream with that clientId already exists. Reconnect token is invalid.";
-                return Err(InstantError::validation_failed(
+                return Err(InstantError::validation_failed_input(
                     "start-stream",
-                    m,
+                    json!({"sess-id": session.id, "client-id": client_id}),
                     json!([{"message": m}]),
                 ));
             }
@@ -206,9 +206,9 @@ pub async fn handle_start_stream(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
             {
-                return Err(InstantError::validation_failed(
+                return Err(InstantError::validation_failed_input(
                     "start-stream",
-                    "Stream is closed.",
+                    json!({"sess-id": session.id, "client-id": client_id}),
                     json!([{"message": "Stream is closed."}]),
                 ));
             }
@@ -269,23 +269,13 @@ pub async fn handle_append_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id.ok_or_else(crate::ws::not_initialized)?
+        st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?
     };
     let stream_id = msg
         .get("stream-id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| InstantError::param_missing("missing stream-id"))?;
-    {
-        let st = session.state.lock().await;
-        if !st.writing_streams.contains(&stream_id) {
-            return Err(InstantError::validation_failed(
-                "stream",
-                "This session is not the stream's writer.",
-                json!([]),
-            ));
-        }
-    }
     // legacy `ex/get-param!` on chunks (a vector of strings) and offset
     let chunks: Vec<String> = match msg.get("chunks") {
         None | Some(Value::Null) => return Err(param_missing_at(&["chunks"])),
@@ -306,6 +296,19 @@ pub async fn handle_append_stream(
     };
     let done = msg.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
     let abort_reason = msg.get("abort-reason").and_then(|v| v.as_str());
+    // legacy rs/get-stream-object-for-append (session.clj:828-838): only the
+    // session that started the stream holds its append object; anyone else
+    // (and an unknown stream id) is "Stream is missing."
+    {
+        let st = session.state.lock().await;
+        if !st.writing_streams.contains(&stream_id) {
+            return Err(InstantError::validation_failed_input(
+                "append-stream",
+                json!({"sess-id": session.id, "stream-id": stream_id}),
+                json!([{"message": "Stream is missing."}]),
+            ));
+        }
+    }
 
     // legacy app-stream-model/append (app_stream.clj:444-457)
     if stream_field(state, app_id, stream_id, "done")
@@ -313,9 +316,9 @@ pub async fn handle_append_stream(
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
-        return Err(InstantError::validation_failed(
+        return Err(InstantError::validation_failed_input(
             "append-stream",
-            "Stream is completed.",
+            json!({"stream-id": stream_id}),
             json!([{"message": "Stream is completed."}]),
         ));
     }
@@ -323,10 +326,10 @@ pub async fn handle_append_stream(
     let bytes = content.as_bytes();
     let prev_size = crate::storage::blob_size(state, app_id, &stream_key(stream_id)).await;
     if prev_size != offset {
-        return Err(InstantError::validation_failed(
+        return Err(InstantError::validation_failed_input(
             "append-stream",
-            "Invalid offset for stream.",
-            json!([{"message": "Invalid offset for stream.", "expected-offset": offset, "offset": prev_size}]),
+            json!({"stream-id": stream_id, "expected-offset": offset, "offset": prev_size}),
+            json!([{"message": "Invalid offset for stream."}]),
         ));
     }
     let new_size =
@@ -407,14 +410,18 @@ pub async fn handle_subscribe_stream(
 ) -> std::result::Result<(), InstantError> {
     let app_id = {
         let st = session.state.lock().await;
-        st.app_id.ok_or_else(crate::ws::not_initialized)?
+        st.app_id.ok_or_else(|| crate::ws::not_initialized(session.id))?
     };
     // legacy validates params before perms (session.clj:889-896 missing ids,
     // :928-931 missing stream)
     let missing_stream = || {
-        InstantError::validation_failed(
+        InstantError::validation_failed_input(
             "subscribe-stream",
-            "Stream is missing.",
+            json!({
+                "sess-id": session.id,
+                "stream-id": msg.get("stream-id").and_then(|v| v.as_str()),
+                "client-id": msg.get("client-id").and_then(|v| v.as_str()),
+            }),
             json!([{"message": "Stream is missing."}]),
         )
     };
@@ -422,9 +429,9 @@ pub async fn handle_subscribe_stream(
         && msg.get("client-id").and_then(|v| v.as_str()).is_none()
     {
         let m = "Must provide either a stream-id or a client-id";
-        return Err(InstantError::validation_failed(
+        return Err(InstantError::validation_failed_input(
             "subscribe-stream",
-            m,
+            json!({"sess-id": session.id}),
             json!([{"message": m}]),
         ));
     }
@@ -562,9 +569,9 @@ pub async fn handle_unsubscribe_stream(
     });
     state.stream_catchup.remove(&(session.id, target.clone()));
     if !removed {
-        return Err(InstantError::validation_failed(
+        return Err(InstantError::validation_failed_input(
             "unsubscribe-stream",
-            "Stream subscription is missing.",
+            json!({"sess-id": session.id, "subscribe-event-id": target}),
             json!([{"message": "Stream subscription is missing."}]),
         ));
     }
