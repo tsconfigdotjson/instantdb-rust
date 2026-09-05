@@ -1452,6 +1452,22 @@ async function runAgainst(name) {
     r40.activeSessions = active.status === 200 ? { status: 200, keys: Object.keys(active.body).sort() } : errView(active);
     raw("40-dash-login", r40);
     record("40-dash-login", r40);
+
+    // 41 admin magic codes: `POST /admin/send_magic_code` hands the code back
+    // (admin/routes.clj:506-510), `verify_magic_code` signs the user in
+    const r41 = {};
+    const magicEmail = `admin-magic-${appId.slice(0, 8)}@example.com`;
+    const sent = await call(base, "POST", "/admin/send_magic_code", { ...appHdr, body: { email: magicEmail } });
+    r41.send = sent.status === 200 ? { status: 200, keys: Object.keys(sent.body).sort(), codeShape: /^[0-9]{6}$/.test(String(sent.body.code)) } : errView(sent);
+    r41.sendBadEmail = errView(await call(base, "POST", "/admin/send_magic_code", { ...appHdr, body: { email: "nope" } }));
+    r41.sendNoAuth = errView(await call(base, "POST", "/admin/send_magic_code", { token: null, ...appHdr, body: { email: magicEmail } }));
+    r41.verifyWrongCode = errView(await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail, code: "000000" } }));
+    r41.verifyMissingCode = errView(await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail } }));
+    const mverified = await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail, code: String(sent.body?.code) } });
+    r41.verify = mverified.status === 200 ? { status: 200, keys: Object.keys(mverified.body).sort(), user: norm({ ...mverified.body.user, keys: Object.keys(mverified.body.user ?? {}).sort() }) } : errView(mverified);
+    r41.verifyAgain = errView(await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail, code: String(sent.body?.code) } }));
+    raw("41-admin-magic-codes", r41);
+    record("41-admin-magic-codes", r41);
   }
 
   return out;

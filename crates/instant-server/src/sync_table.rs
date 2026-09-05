@@ -216,11 +216,7 @@ pub async fn handle_resync_table(
             .ok_or_else(|| crate::ws::not_initialized(session.id))?;
         (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
-    let sub_id = msg
-        .get("subscription-id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| InstantError::param_missing("missing subscription-id"))?;
+    let sub_id = subscription_id_param(msg)?;
     let from_tx = msg
         .get("tx-id")
         .and_then(|v| v.as_i64())
@@ -327,16 +323,23 @@ pub async fn handle_resync_table(
     Ok(())
 }
 
+/// `ex/get-param! event [:subscription-id] uuid-util/coerce`
+fn subscription_id_param(msg: &Value) -> std::result::Result<Uuid, InstantError> {
+    let raw = msg
+        .get("subscription-id")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| crate::ws::param_missing_at(&["subscription-id"]))?;
+    raw.as_str()
+        .and_then(|s| Uuid::parse_str(s.trim()).ok())
+        .ok_or_else(|| crate::ws::param_malformed_at(&["subscription-id"], raw))
+}
+
 pub async fn handle_remove_sync(
     state: &Arc<AppState>,
     session: &Arc<Session>,
     msg: &Value,
 ) -> std::result::Result<(), InstantError> {
-    let sub_id = msg
-        .get("subscription-id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| InstantError::param_missing("missing subscription-id"))?;
+    let sub_id = subscription_id_param(msg)?;
     let keep = msg
         .get("keep-subscription")
         .and_then(|v| v.as_bool())

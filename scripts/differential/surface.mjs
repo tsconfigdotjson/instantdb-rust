@@ -65,12 +65,14 @@ export function legacySurface() {
   items.push({ id: "tx:mode", group: "tx", source: "db/transaction.clj ::opts" });
   // InstaQL: the `$` options `->forms` dissocs, and every `$` where operator
   const iq = read("db/instaql.clj");
+  // `:$expected` / `:$query` / `:$root` (and `:expected` / `:in` / `:message`
+  // in the error maps next to the dissoc) are error-map keys, not query syntax
+  const NOT_OPTIONS = new Set(["$", "$expected", "$query", "$root", "expected", "in", "message", "query", "root"]);
   const optBlock = iq.slice(iq.indexOf("x (dissoc x"), iq.indexOf("x (dissoc x") + 400);
-  for (const m of optBlock.matchAll(/:([a-zA-Z]+)/g)) {
-    items.push({ id: `iq:$${m[1]}`, group: "instaql", source: "db/instaql.clj options" });
+  for (const m of new Set([...optBlock.matchAll(/:([a-zA-Z]+)/g)].map((x) => x[1]))) {
+    if (NOT_OPTIONS.has(m)) continue;
+    items.push({ id: `iq:$${m}`, group: "instaql", source: "db/instaql.clj options" });
   }
-  // `:$expected` / `:$query` / `:$root` are error-map keys, not query syntax
-  const NOT_OPTIONS = new Set(["$", "$expected", "$query", "$root"]);
   for (const m of new Set([...iq.matchAll(/:(\$[a-zA-Z]+)/g)].map((x) => x[1]))) {
     if (NOT_OPTIONS.has(m)) continue;
     items.push({ id: `iq:${m}`, group: "instaql", source: "db/instaql.clj where" });

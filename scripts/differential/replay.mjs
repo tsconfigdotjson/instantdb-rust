@@ -300,6 +300,19 @@ function buildScenario() {
           "tx-steps": [["add-triple", ids.e2, ids.todosTitle, "two-b"]],
         });
         await env.conns.ADMIN.waitFor((m) => m.op === "sync-update-triples");
+        // remove-sync gets no reply (session.clj handle-remove-sync!); a
+        // second subscription is removed with keep-subscription and errors
+        // are the same for an unknown / malformed id
+        const syncSub = env.conns.ADMIN.frames.find((f) => f.op === "start-sync-ok");
+        msg(env.conns.ADMIN, { op: "remove-sync", "subscription-id": syncSub["subscription-id"] });
+        await expectErr(env.conns.ADMIN, { op: "remove-sync", "subscription-id": "nope" });
+        await expectErr(env.conns.ADMIN, { op: "remove-sync" });
+        msg(env.conns.ADMIN, { op: "start-sync", q: { todos: {} } });
+        await env.conns.ADMIN.waitFor((m) => m.op === "sync-init-finish");
+        const syncSub2 = env.conns.ADMIN.frames.filter((f) => f.op === "start-sync-ok").at(-1);
+        msg(env.conns.ADMIN, { op: "remove-sync", "subscription-id": syncSub2["subscription-id"], "keep-subscription": true });
+        msg(env.conns.ADMIN, { op: "start-sync", q: { todos: {} } });
+        await env.conns.ADMIN.waitFor((m) => m.op === "sync-init-finish");
       },
     },
     {

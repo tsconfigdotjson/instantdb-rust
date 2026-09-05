@@ -1,6 +1,6 @@
 {
  "generatedFrom": "LEGACY/server/src/instant",
- "count": 315,
+ "count": 312,
  "items": [
   {
    "id": "cel:_checked_data_ref",
@@ -1323,11 +1323,6 @@
    "source": "db/instaql.clj where"
   },
   {
-   "id": "iq:$expected",
-   "group": "instaql",
-   "source": "db/instaql.clj options"
-  },
-  {
    "id": "iq:$fields",
    "group": "instaql",
    "source": "db/instaql.clj options"
@@ -1355,7 +1350,7 @@
   {
    "id": "iq:$in",
    "group": "instaql",
-   "source": "db/instaql.clj options"
+   "source": "db/instaql.clj where"
   },
   {
    "id": "iq:$isNull",
@@ -1404,16 +1399,6 @@
   },
   {
    "id": "iq:$order",
-   "group": "instaql",
-   "source": "db/instaql.clj options"
-  },
-  {
-   "id": "iq:$query",
-   "group": "instaql",
-   "source": "db/instaql.clj options"
-  },
-  {
-   "id": "iq:$root",
    "group": "instaql",
    "source": "db/instaql.clj options"
   },
