@@ -53,6 +53,9 @@ pub struct Config {
     /// plan, which does not exist here, so they get legacy's
     /// insufficient-plan error and don't see the app (`INSTANT_PAID_FEATURES_FREE`).
     pub paid_features_free: bool,
+    /// Where the platform OAuth consent screen lives (`INSTANT_DASHBOARD_URL`,
+    /// legacy config/dashboard-origin; default the dev dashboard).
+    pub dashboard_origin: String,
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -98,6 +101,11 @@ impl Config {
                 std::env::var("INSTANT_PAID_FEATURES_FREE").as_deref(),
                 Ok("1") | Ok("true") | Ok("on")
             ),
+            dashboard_origin: std::env::var("INSTANT_DASHBOARD_URL")
+                .ok()
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "http://localhost:3000".into()),
         }
     }
 }

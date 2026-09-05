@@ -828,13 +828,24 @@ fn verify_pkce(
     method: Option<&str>,
     verifier: Option<&str>,
 ) -> Result<()> {
+    verify_pkce_for("app-oauth-code", challenge, method, verifier)
+}
+
+/// `verify-pkce!` (auth/oauth.clj:370-412) with the caller's record type
+/// (`:app-oauth-code` for app sign-in, `:oauth-code` for the platform).
+pub(crate) fn verify_pkce_for(
+    record_type: &str,
+    challenge: Option<&str>,
+    method: Option<&str>,
+    verifier: Option<&str>,
+) -> Result<()> {
     let fail = |message: &str| {
         InstantError::new(
             "validation-failed",
             400,
-            format!("Validation failed for app-oauth-code: {message}"),
+            format!("Validation failed for {record_type}: {message}"),
             Some(json!({
-                "data-type": "app-oauth-code",
+                "data-type": record_type,
                 "input": {"code_verifier": verifier},
                 "errors": [{"message": message}],
             })),

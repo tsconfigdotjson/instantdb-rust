@@ -27,6 +27,7 @@ use crate::routes::dash::{
     parse_body, DashRole,
 };
 use crate::routes::runtime::json_or_err;
+use crate::routes::superadmin::Scope;
 use crate::service;
 use crate::state::AppState;
 
@@ -141,7 +142,7 @@ pub(crate) async fn app_row(state: &AppState, app_id: Uuid) -> Result<Option<Val
     Ok(row.map(|r| app_row_json(&r)))
 }
 
-fn app_row_json(r: &sqlx::postgres::PgRow) -> Value {
+pub(crate) fn app_row_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({
         "id": r.get::<Uuid, _>("id"),
         "creator_id": r.get::<Option<Uuid>, _>("creator_id"),
@@ -322,7 +323,7 @@ pub async fn dash_get(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
 
 /// Create an app with its admin token and return `apps.* + admin-token`
 /// (legacy `app-model/create!`, model/app.clj:66-87).
-async fn create_app(
+pub(crate) async fn create_app(
     state: &AppState,
     id: Uuid,
     title: &str,
@@ -459,7 +460,7 @@ pub async fn apps_get(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsRead).await?;
         let row = live_app_row(&state, app.id).await?;
         Ok(json!({"app": row}))
     }
@@ -836,7 +837,7 @@ pub async fn claim_post(
 // ---------------------------------------------------------------------------
 // orgs
 
-async fn orgs_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
+pub(crate) async fn orgs_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
     let rows = sqlx::query(
         "SELECT o.id, o.title, o.created_at, o.updated_at, m.role
            FROM orgs o JOIN org_members m ON m.org_id = o.id
@@ -946,40 +947,7 @@ pub async fn org_get(
         let user = dash_user(&state, &headers).await?;
         let org_id = path_uuid(&org_id, "org_id")?;
         let org = org_role_for_user(&state, org_id, user.id, DashRole::Collaborator).await?;
-        let apps: Vec<Value> = sqlx::query(
-            "SELECT a.id, a.creator_id, a.org_id, a.title, a.created_at, a.status,
-                    a.deletion_marked_at, a.subscription_id, a.magic_code_expiry_minutes,
-                    a.connection_string, at.token AS admin_token, r.code AS rules,
-                    r.version AS rules_version,
-                    (SELECT m.member_role FROM app_members m WHERE m.app_id = a.id AND m.user_id = $2) AS user_app_role
-               FROM apps a
-               LEFT JOIN app_admin_tokens at ON at.app_id = a.id
-               LEFT JOIN rules r ON r.app_id = a.id
-              WHERE a.org_id = $1 AND a.deletion_marked_at IS NULL
-              ORDER BY a.created_at, a.id",
-        )
-        .bind(org_id)
-        .bind(user.id)
-        .fetch_all(&state.pool)
-        .await?
-        .iter()
-        .map(|r| {
-            let mut app = app_row_json(r);
-            if let Some(m) = app.as_object_mut() {
-                m.insert("admin_token".into(), json!(r.get::<Option<Uuid>, _>("admin_token")));
-                m.insert("rules".into(), r.get::<Option<Value>, _>("rules").unwrap_or(Value::Null));
-                m.insert("rules_version".into(), json!(r.get::<Option<i32>, _>("rules_version")));
-                m.insert("org".into(), json!({"id": org["id"], "title": org["title"]}));
-                m.insert("pro".into(), json!(false));
-                m.insert("user_app_role".into(), json!(r.get::<Option<String>, _>("user_app_role")));
-                m.insert("members".into(), json!([]));
-                m.insert("invites".into(), json!([]));
-                m.insert("webhooks".into(), json!([]));
-                m.insert("effective_status".into(), json!(r.get::<String, _>("status")));
-            }
-            app
-        })
-        .collect();
+        let apps = apps_for_org(&state, org_id, user.id, &org).await?;
         let members: Vec<Value> = sqlx::query(
             "SELECT m.id, u.email, m.role FROM org_members m JOIN instant_users u ON u.id = m.user_id
               WHERE m.org_id = $1 ORDER BY m.created_at, m.id",
@@ -1021,6 +989,53 @@ pub async fn org_get(
     }
     .await;
     json_or_err(r)
+}
+
+
+/// The org's live apps in the dashboard app shape (legacy `apps-for-org`,
+/// model/org.clj:89-123 over `make-apps-q`).
+pub(crate) async fn apps_for_org(
+    state: &AppState,
+    org_id: Uuid,
+    user_id: Uuid,
+    org: &Value,
+) -> Result<Vec<Value>> {
+    let user = user_id;
+    let apps: Vec<Value> = sqlx::query(
+        "SELECT a.id, a.creator_id, a.org_id, a.title, a.created_at, a.status,
+                a.deletion_marked_at, a.subscription_id, a.magic_code_expiry_minutes,
+                a.connection_string, at.token AS admin_token, r.code AS rules,
+                r.version AS rules_version,
+                (SELECT m.member_role FROM app_members m WHERE m.app_id = a.id AND m.user_id = $2) AS user_app_role
+           FROM apps a
+           LEFT JOIN app_admin_tokens at ON at.app_id = a.id
+           LEFT JOIN rules r ON r.app_id = a.id
+          WHERE a.org_id = $1 AND a.deletion_marked_at IS NULL
+          ORDER BY a.created_at, a.id",
+    )
+    .bind(org_id)
+    .bind(user)
+    .fetch_all(&state.pool)
+    .await?
+    .iter()
+    .map(|r| {
+        let mut app = app_row_json(r);
+        if let Some(m) = app.as_object_mut() {
+            m.insert("admin_token".into(), json!(r.get::<Option<Uuid>, _>("admin_token")));
+            m.insert("rules".into(), r.get::<Option<Value>, _>("rules").unwrap_or(Value::Null));
+            m.insert("rules_version".into(), json!(r.get::<Option<i32>, _>("rules_version")));
+            m.insert("org".into(), json!({"id": org["id"], "title": org["title"]}));
+            m.insert("pro".into(), json!(false));
+            m.insert("user_app_role".into(), json!(r.get::<Option<String>, _>("user_app_role")));
+            m.insert("members".into(), json!([]));
+            m.insert("invites".into(), json!([]));
+            m.insert("webhooks".into(), json!([]));
+            m.insert("effective_status".into(), json!(r.get::<String, _>("status")));
+        }
+        app
+    })
+    .collect();
+    Ok(apps)
 }
 
 /// DELETE /dash/orgs/:org_id — legacy orgs-delete: owner only.
@@ -1181,7 +1196,7 @@ pub async fn auth_get(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsRead).await?;
         let providers: Vec<Value> = system_entities(&state, app.id, "$oauthProviders")
             .await?
             .iter()
@@ -1228,7 +1243,7 @@ pub async fn providers_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
         let body = parse_body(&body)?;
         let name = body_str(&body, "provider_name")?;
         let id = Uuid::new_v4();
@@ -1287,6 +1302,12 @@ async fn validate_discovery_endpoint(endpoint: &str) -> Result<()> {
 /// legacy `url-util/redirect-url-validation-errors` (util/url.clj:15-34)
 /// with `allow-localhost? true`.
 fn redirect_url_validation_errors(raw: &str) -> Vec<String> {
+    redirect_url_validation_errors_opt(raw, true)
+}
+
+/// legacy `url/redirect-url-validation-errors` with `:allow-localhost?`
+/// (util/url.clj:15-34)
+pub(crate) fn redirect_url_validation_errors_opt(raw: &str, allow_localhost: bool) -> Vec<String> {
     let mut errors = vec![];
     let Ok(parsed) = url::Url::parse(raw) else {
         errors.push("redirect uri must use the HTTPS scheme".to_string());
@@ -1303,6 +1324,9 @@ fn redirect_url_validation_errors(raw: &str) -> Vec<String> {
     }
     if parsed.fragment().is_some() {
         errors.push("redirect uri may not contain the fragment component".to_string());
+    }
+    if localhost && !allow_localhost {
+        errors.push("redirect uri may not be localhost".to_string());
     }
     if !localhost && parsed.scheme() != "https" {
         errors.push("redirect uri must use the HTTPS scheme".to_string());
@@ -1323,7 +1347,7 @@ pub async fn clients_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
         let body = parse_body(&body)?;
         let provider_id = body_uuid(&body, "provider_id")?;
         let client_name = body_str(&body, "client_name")?;
@@ -1410,7 +1434,7 @@ pub async fn clients_update(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
         let id = path_uuid(&id, "id")?;
         let body = parse_body(&body)?;
         let existing = system_entity(&state, app.id, "$oauthClients", id)
@@ -1495,7 +1519,7 @@ pub async fn clients_delete(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
         let id = path_uuid(&id, "id")?;
         let client = system_entity(&state, app.id, "$oauthClients", id)
             .await?
@@ -1586,7 +1610,7 @@ pub async fn origins_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
         let body = parse_body(&body)?;
         let service_name = body_str(&body, "service")?;
         let params_v = body
@@ -1640,7 +1664,7 @@ pub async fn origins_delete(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
         let id = path_uuid(&id, "id")?;
         let row = sqlx::query(
             "DELETE FROM app_authorized_redirect_origins WHERE id = $1 AND app_id = $2
@@ -1712,7 +1736,7 @@ pub async fn email_status(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsWrite).await?;
         Ok(json!({"info": email_template_info(&state, app.id).await?}))
     }
     .await;
@@ -1731,7 +1755,7 @@ pub async fn email_template_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsWrite).await?;
         let body = parse_body(&body)?;
         let email_type = body_str(&body, "email-type")?;
         let subject = body_str(&body, "subject")?;
@@ -1831,7 +1855,7 @@ pub async fn email_template_delete(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsWrite).await?;
         let id = path_uuid(&id, "id")?;
         sqlx::query("DELETE FROM app_email_templates WHERE id = $1 AND app_id = $2")
             .bind(id)

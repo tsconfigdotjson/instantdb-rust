@@ -411,6 +411,90 @@ async fn main() -> anyhow::Result<()> {
             "/dash/apps/get_a_db/{app_id}",
             get(routes::dash_members::get_a_db_get),
         )
+        // platform API (superadmin) + platform OAuth provider + OAuth-app management
+        .route(
+            "/superadmin/apps",
+            get(routes::superadmin::apps_list).post(routes::superadmin::apps_create),
+        )
+        .route("/superadmin/orgs", get(routes::superadmin::orgs_list))
+        .route(
+            "/superadmin/orgs/{org_id}/apps",
+            get(routes::superadmin::org_apps_list),
+        )
+        .route(
+            "/superadmin/apps/{app_id}",
+            get(routes::superadmin::app_details)
+                .post(routes::superadmin::app_update)
+                .delete(routes::superadmin::app_delete),
+        )
+        .route(
+            "/superadmin/apps/{app_id}/transfers/send",
+            post(routes::superadmin::transfer_send),
+        )
+        .route(
+            "/superadmin/apps/{app_id}/transfers/revoke",
+            post(routes::superadmin::transfer_revoke),
+        )
+        .route(
+            "/superadmin/apps/{app_id}/schema",
+            get(routes::superadmin::schema_get),
+        )
+        .route(
+            "/superadmin/apps/{app_id}/schema/push/plan",
+            post(routes::superadmin::schema_plan),
+        )
+        .route(
+            "/superadmin/apps/{app_id}/schema/push/apply",
+            post(routes::superadmin::schema_apply),
+        )
+        .route(
+            "/superadmin/apps/{app_id}/perms",
+            get(routes::superadmin::perms_get).post(routes::superadmin::perms_post),
+        )
+        .route("/platform/oauth/start", get(routes::platform_oauth::start))
+        .route("/platform/oauth/claim", post(routes::platform_oauth::claim))
+        .route("/platform/oauth/grant", post(routes::platform_oauth::grant))
+        .route("/platform/oauth/deny", post(routes::platform_oauth::deny))
+        .route("/platform/oauth/token", post(routes::platform_oauth::token))
+        .route(
+            "/platform/oauth/token-info",
+            get(routes::platform_oauth::token_info),
+        )
+        .route("/platform/oauth/revoke", post(routes::platform_oauth::revoke))
+        .route(
+            "/dash/apps/{app_id}/oauth-apps",
+            get(routes::platform_oauth::oauth_apps_get).post(routes::platform_oauth::oauth_apps_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/oauth-apps/{oauth_app_id}",
+            post(routes::platform_oauth::oauth_app_update)
+                .delete(routes::platform_oauth::oauth_app_delete),
+        )
+        .route(
+            "/dash/apps/{app_id}/oauth-apps/{oauth_app_id}/clients",
+            post(routes::platform_oauth::oauth_clients_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/oauth-app-clients/{client_id}",
+            post(routes::platform_oauth::oauth_client_update)
+                .delete(routes::platform_oauth::oauth_client_delete),
+        )
+        .route(
+            "/dash/apps/{app_id}/oauth-app-clients/{client_id}/client-secrets",
+            post(routes::platform_oauth::oauth_client_secrets_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/oauth-app-client-secrets/{client_secret_id}",
+            delete(routes::platform_oauth::oauth_client_secret_delete),
+        )
+        .route(
+            "/dash/user/oauth_apps",
+            get(routes::platform_oauth::user_oauth_apps_get),
+        )
+        .route(
+            "/dash/user/oauth_apps/revoke_access",
+            post(routes::platform_oauth::user_oauth_apps_revoke),
+        )
         .route("/dash/profiles", post(routes::dash_manage::profiles_post))
         .route("/dash/signout", post(routes::dash_manage::signout))
         .route("/dash/check-admin", get(routes::dash_manage::check_admin))
