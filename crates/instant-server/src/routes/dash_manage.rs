@@ -301,14 +301,20 @@ pub async fn app_tokens_post(
             .bind(app_id)
             .execute(&mut *dbtx)
             .await?;
-        sqlx::query("INSERT INTO app_admin_tokens (token, app_id) VALUES ($1, $2)")
-            .bind(token)
-            .bind(app_id)
-            .execute(&mut *dbtx)
-            .await?;
+        let row = sqlx::query(
+            "INSERT INTO app_admin_tokens (token, app_id) VALUES ($1, $2) RETURNING token, app_id, created_at",
+        )
+        .bind(token)
+        .bind(app_id)
+        .fetch_one(&mut *dbtx)
+        .await?;
         dbtx.commit().await?;
         // next.jdbc execute-one! returns the inserted row
-        Ok(json!({"token": token, "app_id": app_id}))
+        Ok(json!({
+            "token": row.get::<Uuid, _>("token"),
+            "app_id": row.get::<Uuid, _>("app_id"),
+            "created_at": ts_col(&row, "created_at"),
+        }))
     }
     .await;
     json_or_err(r)

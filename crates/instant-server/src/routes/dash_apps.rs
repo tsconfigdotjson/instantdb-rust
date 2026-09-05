@@ -885,15 +885,9 @@ pub(crate) async fn org_role_for_user(
         )
     })?;
     let role: String = row.get("role");
+    // org-with-role-for-user! (util/roles.clj:144-156) checks the role only;
+    // the plan gate applies to app access through an org membership
     assert_least_privilege(least, DashRole::parse(&role))?;
-    // org-with-role-for-user! plan gate (util/roles.clj:144-156)
-    let created: chrono::DateTime<chrono::Utc> = row.get("member_created_at");
-    if DashRole::parse(&role) != Some(DashRole::Owner)
-        && created >= free_teams_cutoff()
-        && !state.cfg.paid_features_free
-    {
-        return Err(insufficient_plan());
-    }
     Ok(json!({
         "id": row.get::<Uuid, _>("id"),
         "title": row.get::<String, _>("title"),
