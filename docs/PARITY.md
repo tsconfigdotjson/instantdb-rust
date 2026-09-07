@@ -95,7 +95,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 
 | Feature | Status | Notes |
 |---|---|---|
-| magic codes (send/verify, expiry, one-time) | ✅ | email delivery stubbed: code is logged |
+| magic codes (send/verify, expiry, one-time) | ✅ | delivery is a provider seam (`email.rs`): `EMAIL_PROVIDER=log` (default) prints the code to the server log, `EMAIL_PROVIDER=cloudflare` sends through the Cloudflare Email Service API; legacy uses Postmark, so a Postmark provider is one env-selected arm away |
 | guest sign-in + guest→user linking | ✅ | |
 | refresh tokens (sha256-hashed, no expiry) | ✅ | |
 | signout | ✅ | |
@@ -106,7 +106,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | `extra_fields` on signup (`validate-extra-fields!`) | ✅ | `extra-fields` (`extra_fields` on the OAuth routes) is validated against the `$users` schema (unknown / system field → `validation-failed` for `extra-fields`), bound into `data` / `newData` / `auth` for the `$users.allow.create` check, denied when supplied without an explicit create rule, and written with the new row; admin flows validate without the rule check (app_user.clj:22-109; magic code, guest, OAuth, `/admin/refresh_tokens`, `/admin/sign_in_guest`) |
 | authorized redirect origins (generic/custom-scheme/netlify/vercel) | ✅ | nothing is allowed by default: legacy's localhost / `exp://` defaults apply only to shared-credential clients (app_authorized_redirect_origin.clj:77-116), which this server doesn't have; `scripts/create-oauth-client.sh` takes an origin host as its optional 7th argument |
 | shared oauth credentials / Apple secret-JWT / GitHub non-OIDC client | ❌ | bring your own provider credentials; generic OIDC only |
-| custom email templates/senders | ❌ | |
+| custom email templates/senders | 🟡 | `app_email_templates` (`magic-code` type, `{code}` `{app_title}` `{user_email}` `{expiration}` placeholders) and `app_email_senders` are honored on the send path like legacy `magic_code_auth.clj`, and the `/dash/apps/:id/email_templates*` + `send-test-email` routes manage them; a custom sender is used only when its row is marked verified, and the Postmark sender-verification routes that set that flag are hosted-only (out-of-scope.json), so a self-hosted operator verifies a sender by setting the row directly |
 
 ## Admin API
 

@@ -186,8 +186,10 @@ existing clients keep working after a URL switch.
 ### Using `instant-cli`
 
 The official CLI's `push`/`pull` (schema and perms) work against this server
-through the same `/dash/...` routes it uses with hosted Instant. There is no
-dashboard login here, so authenticate with the app's admin token:
+through the same `/dash/...` routes it uses with hosted Instant. `instant-cli
+login` works too (magic-code dashboard login, or Google when
+`INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` are set); the quickest
+path is still the app's admin token:
 
 ```bash
 export INSTANT_CLI_API_URI=http://localhost:8888   # this server
