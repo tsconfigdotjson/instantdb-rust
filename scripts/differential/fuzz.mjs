@@ -241,6 +241,7 @@ async function runOn(serverName, script) {
   const queryResults = [];
   let lastTxId = 0;
   let violations = 0;
+  let txOk = 0;
   let watermarkLags = 0;
 
   const query = async (q) => {
@@ -277,6 +278,7 @@ async function runOn(serverName, script) {
         (m) => ["transact-ok", "error"].includes(m.op) && m["client-event-id"] === ceid,
       );
       if (reply.op === "transact-ok") {
+        txOk++;
         // invariant: tx-ids strictly increase per server
         if (!(reply["tx-id"] > lastTxId)) {
           console.error(`[${serverName}] tx-id not increasing at op ${i}: ${reply["tx-id"]} <= ${lastTxId}`);
@@ -332,7 +334,7 @@ async function runOn(serverName, script) {
   }
   await settle([conn], 500);
   conn.close();
-  return { queryResults, violations };
+  return { queryResults, violations, txOk };
 }
 
 // timestamps differ between servers; compare triples without t and without
@@ -366,7 +368,15 @@ const finalMatch = canon(finalL?.result) === canon(finalR?.result);
 if (!finalMatch) {
   console.error("FINAL full-table results differ between servers");
 }
-if (legacy.violations || rust.violations || !finalMatch || mismatches) {
+// success floor: identical failure on both sides is not parity. Most of the
+// script's transacts must have committed and the final full-table read must
+// hold data, or the comparison compared nothing.
+const txTotal = script.filter((op) => op.kind === "tx").length;
+const floorOk = legacy.txOk > txTotal / 2 && rust.txOk > txTotal / 2 && (finalL?.result?.triples?.length ?? 0) > 0;
+if (!floorOk) {
+  console.error(`FUZZ FLOOR NOT MET: transact-ok legacy=${legacy.txOk} rust=${rust.txOk} of ${txTotal}, final triples=${finalL?.result?.triples?.length ?? 0}`);
+}
+if (legacy.violations || rust.violations || !finalMatch || mismatches || !floorOk) {
   console.error(
     `FUZZ FAILED: ${mismatches} query mismatches, invariant violations legacy=${legacy.violations} rust=${rust.violations}, final match=${finalMatch}`,
   );

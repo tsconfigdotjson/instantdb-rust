@@ -6,7 +6,7 @@
 //   node coverage.mjs --check <file>    also fail if a baseline-covered id is missing
 //   node coverage.mjs --write <file>    rewrite coverage-baseline.json from this run
 //
-// Groups `demo`, `health`, `ws-internal` and `cel-internal` are listed in the
+// Groups `demo`, `health`, `core`, `ws-internal` and `cel-internal` are listed in the
 // manifest but never counted (dev tooling, server-enqueued ops, optimizer
 // internals), and the hosted-only items of out-of-scope.json (billing,
 // backups, sunset, Postmark, the operators' reports) are counted separately.
@@ -21,7 +21,7 @@ const file = process.argv[3];
 if (!mode || !file) throw new Error("usage: node coverage.mjs --report|--check|--write <coverage-file>");
 
 const manifest = JSON.parse(fs.readFileSync(path.join(here, "surface.json"), "utf8"));
-const NOT_COUNTED = new Set(["demo", "health", "ws-internal", "cel-internal"]);
+const NOT_COUNTED = new Set(["demo", "health", "core", "ws-internal", "cel-internal"]);
 const covered = new Set();
 const lines = fs.existsSync(file) ? fs.readFileSync(file, "utf8").split("\n").filter(Boolean) : [];
 for (const l of lines) for (const id of JSON.parse(l).covered) covered.add(id);

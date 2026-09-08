@@ -540,7 +540,10 @@ async fn callback_inner(
     let state_param = params
         .get("state")
         .ok_or_else(|| bad(oauth_err("Missing state param in OAuth redirect.")))?;
+    // byte length + ascii before slicing: a 72-byte state with a multibyte
+    // char across offset 36 must not panic the handler (legacy `subs` can't)
     let valid_state = state_param.len() == 72
+        && state_param.is_ascii()
         && Uuid::parse_str(&state_param[..36]).is_ok()
         && Uuid::parse_str(&state_param[36..]).is_ok();
     if !valid_state {
@@ -692,7 +695,10 @@ async fn exchange_code(state: &AppState, client: &OAuthClient, code: &str) -> Re
         .and_then(|v| v.as_str())
         .ok_or_else(|| oauth_err("Discovery document missing token_endpoint."))?;
     let callback_url = format!("{}/runtime/oauth/callback", state.cfg.base_url);
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| InstantError::internal(format!("http client: {e}")))?;
     let resp = http
         .post(token_endpoint)
         .form(&[

@@ -522,25 +522,30 @@ pub async fn handle_subscribe_stream(
     // is at most the snapshot end, appends are contiguous) or carrying
     // `done` / an abort is delivered
     let snapshot_end = stored.len() as i64;
-    let parked = state
-        .stream_catchup
-        .remove(&sub_key)
-        .map(|(_, v)| v)
-        .unwrap_or_default();
-    for frame in parked {
-        let offset = frame.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
-        let len = frame
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(|c| c.len() as i64)
-            .unwrap_or(0);
-        let frame_done = frame.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
-        if offset + len > snapshot_end
-            || (frame_done && !done)
-            || frame.get("abort-reason").is_some()
-        {
-            session.send(frame);
+    // the parked frames are replayed while the parking entry is still held:
+    // a concurrent deliver_append either parks behind them or waits for the
+    // entry to go, so it can never send a later frame ahead of them
+    // (Stream.ts:565-570 treats a gap as corruption)
+    if let dashmap::mapref::entry::Entry::Occupied(mut slot) =
+        state.stream_catchup.entry(sub_key.clone())
+    {
+        let parked = std::mem::take(slot.get_mut());
+        for frame in parked {
+            let offset = frame.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
+            let len = frame
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|c| c.len() as i64)
+                .unwrap_or(0);
+            let frame_done = frame.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+            if offset + len > snapshot_end
+                || (frame_done && !done)
+                || frame.get("abort-reason").is_some()
+            {
+                session.send(frame);
+            }
         }
+        slot.remove();
     }
 
     if done {

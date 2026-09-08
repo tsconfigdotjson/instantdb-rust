@@ -128,7 +128,12 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `--check` runs in CI so the manifest can't drift from `LEGACY/`.
 - `coverage-hook.mjs` / `coverage.mjs` / `coverage-baseline.json` — the
   capture clients and a wrapped `fetch` record which surface items a run
-  exercised; `run.sh` prints per-group coverage with the uncovered list and
+  exercised. "Covered" means the harness *sent* that route / op / option /
+  operator to a server, or *saw* that error type from one, during a run whose
+  comparisons all passed; it is a reachability count, not a per-item proof
+  that both servers' responses were compared (the replay, dash, storage,
+  error-matrix and fuzz layers are what compare, and every mismatch they find
+  fails the run). `run.sh` prints per-group coverage with the uncovered list and
   fails if an item in the committed baseline is no longer exercised
   (`node coverage.mjs --write <file>` updates the baseline after adding
   coverage). `out-of-scope.json` names the hosted-only items (billing,

@@ -116,7 +116,7 @@ impl Rules {
             _ => return None,
         };
         Some(Program {
-            rule: None,
+            rule: Some((etype.to_string(), "view".to_string())),
             expr,
             binds: self.binds_of(etype),
             path: vec![etype.to_string(), "fields".to_string(), field.to_string()],
@@ -2118,7 +2118,16 @@ pub async fn permissioned_transact_checked(
                         "link"
                     };
                     let fwd_eid = peek_eid(conn, app_id, attrs, eid).await?;
-                    let target = value.as_str().and_then(|s| Uuid::parse_str(s).ok());
+                    // legacy resolves lookup-ref values before the pre-checks
+                    // (permissioned_transaction.clj:173-190
+                    // resolve-lookups-tx-steps), so a link / unlink to
+                    // `[attr, value]` runs the same rules as one to a uuid
+                    let target = match crate::triple::value_lookup(value) {
+                        Some((a, v)) if attrs.get(&a).map(|x| x.is_unique).unwrap_or(false) => {
+                            peek_eid(conn, app_id, attrs, &EidRef::Lookup(a, v)).await?
+                        }
+                        _ => value.as_str().and_then(|s| Uuid::parse_str(s).ok()),
+                    };
                     let retype = attr.reverse_etype.clone().unwrap_or_default();
                     let rlabel = attr.reverse_label.clone().unwrap_or_default();
                     // legacy pre-checks load the link AND unlink programs of
@@ -2297,6 +2306,40 @@ pub async fn permissioned_transact_checked(
             _ => None,
         })
         .collect();
+
+    // ---- pre-tx auth (permissioned_transaction.clj:697-715, cel.clj:556-580) ----
+    // the update / delete / link / unlink checks are legacy's pre-checks: they
+    // bind `auth` (an AuthCelMap whose `ref` walks the same tx conn) before
+    // the steps run, so a tx can't grant itself a role and then use it.
+    // Every `auth.ref(...)` path those programs can read is resolved now;
+    // create and linked-`view` checks keep reading the post-tx graph like
+    // legacy's post-create checks.
+    let pre_auth: Option<Value> = {
+        let mut programs: Vec<Program> = vec![];
+        let mut etypes: HashSet<&str> = HashSet::new();
+        for (_, et) in other_touch.iter().chain(explicit_ref_touch.iter()) {
+            etypes.insert(et.as_str());
+        }
+        for et in &etypes {
+            programs.push(rules.program(et, "update"));
+        }
+        let mut delete_etypes: HashSet<&str> = HashSet::new();
+        for (_, et) in &delete_set {
+            delete_etypes.insert(et.as_str());
+        }
+        for et in &delete_etypes {
+            programs.push(rules.program(et, "delete"));
+        }
+        for spec in &link_specs {
+            programs.push(spec.program.clone());
+        }
+        if programs.is_empty() || auth.user_id.is_none() {
+            None
+        } else {
+            let refs: Vec<&Program> = programs.iter().collect();
+            Some(build_auth_value(conn, app_id, attrs, auth, &refs).await?)
+        }
+    };
 
     // ---- execute ----
     let report = tx::transact(conn, app_id, attrs, steps, &TxOptions::default()).await?;
@@ -2489,7 +2532,11 @@ pub async fn permissioned_transact_checked(
                 let data = Value::Object(data);
                 let new_data = Value::Object(new);
                 let linked = Value::Object(linked);
-                let auth_val = build_auth_value(conn, app_id, attrs, auth, &[program]).await?;
+                // a link that created its entity is a post-create check
+                let auth_val = match (&pre_auth, created_here) {
+                    (Some(v), false) => v.clone(),
+                    _ => build_auth_value(conn, app_id, attrs, auth, &[program]).await?,
+                };
                 // legacy merges the linked side's rule-params under the
                 // entity's own (:360, :372)
                 let mut rp = match rule_params_for(*linked_eid, linked_etype) {
@@ -2595,7 +2642,10 @@ pub async fn permissioned_transact_checked(
             let paths = extract_ref_paths(&sources, "data");
             attach_refs(conn, app_id, attrs, &etype, eid, &paths, m).await?;
         }
-        let auth_val = build_auth_value(conn, app_id, attrs, auth, &[&program]).await?;
+        let auth_val = match (&pre_auth, action) {
+            (Some(v), "update" | "delete") => v.clone(),
+            _ => build_auth_value(conn, app_id, attrs, auth, &[&program]).await?,
+        };
         let env = EvalEnv::new(app_id, rules, &auth.request)
             .with_modified_fields(modified_fields.unwrap_or_default());
         let ok = eval_program(&program, &data, new_data.as_ref(), &auth_val, &rp, &env).await?;

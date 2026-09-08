@@ -537,7 +537,7 @@ pub async fn indexing_jobs_group(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed(&state, &headers, &app_id, Scope::AppsRead).await?;
+        let app = dash_authed(&state, &headers, &app_id, Scope::AppsWrite).await?;
         let group_id = Uuid::parse_str(&group_id)
             .map_err(|_| param_malformed(&["params", "group_id"], json!(group_id)))?;
         let jobs = indexing_jobs::get_by_group_for_client(&state, app.id, group_id).await?;
@@ -671,7 +671,7 @@ pub async fn perms_pull(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed(&state, &headers, &app_id, Scope::AppsRead).await?;
+        let app = dash_authed(&state, &headers, &app_id, Scope::AppsWrite).await?;
         let code: Option<Value> = sqlx::query("SELECT code FROM rules WHERE app_id = $1")
             .bind(app.id)
             .fetch_optional(&state.pool)

@@ -190,13 +190,20 @@ async function pushRules(ctx) {
   });
   if (res.status !== 200) throw new Error(`[${ctx.name}] rules push failed: ${JSON.stringify(res.body)}`);
 }
+async function openRules(ctx) {
+  const res = await call(ctx.url, "POST", `/dash/apps/${appId}/rules`, {
+    token: userToken,
+    body: { code: { probe: { allow: { create: "true", view: "true" } }, probe2: { allow: { view: "int(data.s) > 0" } } } },
+  });
+  if (res.status !== 200) throw new Error(`[${ctx.name}] rules push failed: ${JSON.stringify(res.body)}`);
+}
 probe("http/permission-denied/as-guest-create", async (ctx) => {
   await pushRules(ctx);
   return httpView(await admin(ctx, "/admin/transact", { steps: [["update", "probe", FIXED.entity, { name: "x" }]] }, { "as-guest": "true" }));
 });
 probe("http/permission-evaluation-failed/query", async (ctx) => {
   const seed = await admin(ctx, "/admin/transact", { steps: [["update", "probe2", FIXED.entity2, { s: "abc" }]] });
-  if (seed.status !== 200) return { seedFailed: httpView(seed) };
+  if (seed.status !== 200) throw new Error(`[${ctx.name}] probe seed failed: ${JSON.stringify(seed.body)}`);
   return httpView(await admin(ctx, "/admin/query", { query: { probe2: {} } }, { "as-guest": "true" }));
 });
 probe("http/permission-denied/query-perms-check-as-admin", async (ctx) =>
@@ -356,7 +363,7 @@ probe("ws/record-not-unique/attr-ident", async (ctx) => {
   const first = await wsOk(c, { op: "transact", "tx-steps": [attr(FIXED.dupAttr)] });
   if (first.op !== "transact-ok") {
     c.close();
-    return { firstFailed: wsView(first) };
+    throw new Error(`[${ctx.name}] probe setup step failed: ${JSON.stringify(first)}`);
   }
   const v = wsView(await wsError(c, { op: "transact", "tx-steps": [attr(mk())] }));
   c.close();
@@ -372,7 +379,7 @@ probe("ws/permission-denied/transact", async (ctx) => {
 probe("ws/permission-evaluation-failed/query", async (ctx) => {
   await pushRules(ctx);
   const seed = await admin(ctx, "/admin/transact", { steps: [["update", "probe2", FIXED.entity2, { s: "abc" }]] });
-  if (seed.status !== 200) return { seedFailed: httpView(seed) };
+  if (seed.status !== 200) throw new Error(`[${ctx.name}] probe seed failed: ${JSON.stringify(seed.body)}`);
   const c = await session(ctx);
   const v = wsView(await wsError(c, { op: "add-query", q: { probe2: {} } }));
   c.close();
@@ -391,12 +398,15 @@ probe("ws/validation-failed/aggregate-non-admin", async (ctx) => {
   return v;
 });
 probe("ws/validation-failed/mode-create-exists", async (ctx) => {
+  // an earlier probe left `probe.allow.create = false`; this one needs the
+  // create to succeed so the second write reaches the `mode` check
+  await openRules(ctx);
   const c = await session(ctx, { token: null });
   const eid = mk();
   const first = await wsOk(c, { op: "transact", "tx-steps": [["add-triple", eid, FIXED.probeId, eid]] });
   if (first.op !== "transact-ok") {
     c.close();
-    return { firstFailed: wsView(first) };
+    throw new Error(`[${ctx.name}] probe setup step failed: ${JSON.stringify(first)}`);
   }
   const v = wsView(await wsError(c, { op: "transact", "tx-steps": [["add-triple", eid, FIXED.probeName, "x", { mode: "create" }]] }));
   c.close();
@@ -482,11 +492,26 @@ for (const [name, cfg] of Object.entries(SERVERS)) {
   }
 }
 
+// a probe is named `<transport>/<legacy error type>/<case>`: the legacy server
+// must actually answer with that type, so two servers agreeing on a dead end
+// (a failed seed, a throw, a different error) can't pass the probe
+const NOT_ERROR_TYPES = new Set(["routing", "auth-401"]);
 let failures = 0;
 let allowedHits = 0;
 for (const p of probes) {
   const l = results.legacy[p.name];
   const r = results.rust[p.name];
+  const nominal = p.name.split("/")[1];
+  for (const [server, v] of [["legacy", l], ["rust", r]]) {
+    if (v && typeof v === "object" && "threw" in v) {
+      failures++;
+      console.error(`ERROR MATRIX PROBE THREW on ${server}: ${p.name}: ${v.threw}`);
+    }
+  }
+  if (!NOT_ERROR_TYPES.has(nominal) && l && typeof l === "object" && l.type !== nominal) {
+    failures++;
+    console.error(`ERROR MATRIX PROBE MISSED ITS TYPE ${p.name}: legacy answered ${JSON.stringify(l)}`);
+  }
   if (canon(l) === canon(r)) continue;
   const rule = allowed.find((a) => new RegExp(a.probe).test(p.name));
   if (rule) {

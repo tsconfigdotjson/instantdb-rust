@@ -287,10 +287,9 @@ pub(crate) async fn superadmin_app(
                 .await?
                 .map(|r| r.get("id"));
         if let Some(admin_app) = admin_app {
-            if let Ok(requested) = Uuid::parse_str(app_id_raw) {
-                if requested != admin_app {
-                    return Err(admin_token_mismatch(requested));
-                }
+            let requested = path_uuid(app_id_raw, "app_id")?;
+            if requested != admin_app {
+                return Err(admin_token_mismatch(requested));
             }
             return live_app_row(state, admin_app).await;
         }

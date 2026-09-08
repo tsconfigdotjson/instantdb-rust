@@ -197,7 +197,10 @@ async fn apps_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
           WHERE a.deletion_marked_at IS NULL AND a.org_id IS NULL
             AND (a.creator_id = $1
                  OR EXISTS (SELECT 1 FROM app_members m WHERE m.app_id = a.id AND m.user_id = $1
-                             AND ($2 OR m.created_at < $3 OR m.member_role = 'owner')))
+                             AND ($2 OR m.created_at < $3 OR m.member_role = 'owner'
+                                  OR EXISTS (SELECT 1 FROM instant_subscriptions sub
+                                              WHERE sub.id = a.subscription_id
+                                                AND sub.subscription_type_id IN (2, 3)))))
           ORDER BY a.created_at, a.id",
     )
     .bind(user_id)
@@ -565,6 +568,37 @@ pub(crate) async fn app_role_for_user(
         .unwrap_or_default();
     let cutoff = free_teams_cutoff();
     let free = state.cfg.paid_features_free;
+    let org_id: Option<Uuid> = app
+        .get("org_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
+    // legacy `plan-supports-members?` on the app's latest subscription and on
+    // the org's (instant_subscription.clj:132-138, roles.clj:88-103): a Pro
+    // (2) or Startup (3) plan admits members whatever their join date
+    let app_plan = plan_supports_members(
+        sqlx::query_scalar::<_, Option<i32>>(
+            "SELECT subscription_type_id FROM instant_subscriptions
+              WHERE app_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(app_id)
+        .fetch_optional(&state.pool)
+        .await?
+        .flatten(),
+    );
+    let org_plan = match org_id {
+        Some(org_id) => plan_supports_members(
+            sqlx::query_scalar::<_, Option<i32>>(
+                "SELECT s.subscription_type_id FROM orgs o
+                   JOIN instant_subscriptions s ON s.id = o.subscription_id
+                  WHERE o.id = $1",
+            )
+            .bind(org_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .flatten(),
+        ),
+        None => false,
+    };
     let mut access = AppAccess::default();
     if creator == Some(user_id) {
         access.app = Some(RolePath {
@@ -583,14 +617,14 @@ pub(crate) async fn app_role_for_user(
             let created: chrono::DateTime<chrono::Utc> = r.get("created_at");
             access.app = Some(RolePath {
                 role,
-                plan_ok: role == DashRole::Owner || created < cutoff || free,
+                plan_ok: role == DashRole::Owner
+                    || created < cutoff
+                    || free
+                    || app_plan
+                    || org_plan,
             });
         }
     }
-    let org_id: Option<Uuid> = app
-        .get("org_id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok());
     if let Some(org_id) = org_id {
         if let Some(r) = sqlx::query(
             "SELECT role, created_at FROM org_members WHERE org_id = $1 AND user_id = $2",
@@ -604,12 +638,18 @@ pub(crate) async fn app_role_for_user(
                 let created: chrono::DateTime<chrono::Utc> = r.get("created_at");
                 access.org = Some(RolePath {
                     role,
-                    plan_ok: role == DashRole::Owner || created < cutoff || free,
+                    plan_ok: role == DashRole::Owner || created < cutoff || free || org_plan,
                 });
             }
         }
     }
     Ok(access)
+}
+
+/// legacy `plan-supports-members?` (model/instant_subscription.clj:132-138):
+/// Pro (2) and Startup (3) subscription types; Free (1) and none don't.
+pub(crate) fn plan_supports_members(subscription_type_id: Option<i32>) -> bool {
+    matches!(subscription_type_id, Some(2) | Some(3))
 }
 
 /// legacy `throw-insufficient-plan!` (util/exception.clj)
@@ -1764,7 +1804,7 @@ pub async fn email_status(
 ) -> Response {
     let r = async {
         let app =
-            dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsWrite)
+            dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsRead)
                 .await?;
         Ok(json!({"info": email_template_info(&state, app.id).await?}))
     }
@@ -1784,7 +1824,7 @@ pub async fn email_template_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsWrite).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsRead).await?;
         let body = parse_body(&body)?;
         let email_type = body_str(&body, "email-type")?;
         let subject = body_str(&body, "subject")?;
@@ -1806,8 +1846,8 @@ pub async fn email_template_post(
         let sender_email = body
             .get("sender-email")
             .and_then(|v| v.as_str())
-            .filter(|e| crate::routes::runtime::valid_email(&e.to_lowercase()))
-            .map(|e| e.trim().to_lowercase());
+            .map(|e| e.trim().to_lowercase())
+            .filter(|e| crate::routes::runtime::valid_email(e));
         let sender_name = body
             .get("sender-name")
             .and_then(coerce_non_blank_str)

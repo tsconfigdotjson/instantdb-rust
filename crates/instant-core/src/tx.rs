@@ -428,6 +428,15 @@ pub struct TxReport {
     pub deleted: Vec<(Uuid, String)>,
     /// all touched (eid, etype), for perms/required checks
     pub touched: Vec<(Uuid, String)>,
+    /// entities whose `id` attr triple this tx wrote (add-triple /
+    /// deep-merge-triple on the etype's id attr), with the etype: legacy's
+    /// webhook matcher keys create / update events on writes of the id
+    /// attr's triple (model/webhook.clj `webhook-matches?`), never on ref or
+    /// value attrs alone
+    pub id_written: Vec<(Uuid, String)>,
+    /// entities whose `id` attr triple this tx retracted (retract-triple on
+    /// the id attr): a delete of the id triple for the webhook matcher
+    pub id_retracted: Vec<(Uuid, String)>,
     /// true when the tx changed the attr catalog in any way (flags, idents,
     /// inferred types): attr caches must be reloaded
     pub attrs_changed: bool,
@@ -584,6 +593,8 @@ pub async fn transact(
         created: vec![],
         deleted: vec![],
         touched: vec![],
+        id_written: vec![],
+        id_retracted: vec![],
         attrs_changed: false,
         schema_changed: false,
         changed_attrs: vec![],
@@ -736,6 +747,9 @@ pub async fn transact(
                 .await?;
                 for t in &resolved {
                     report.touched.push((t.entity_id, t.attr.etype.clone()));
+                    if t.attr.label == "id" {
+                        report.id_written.push((t.entity_id, t.attr.etype.clone()));
+                    }
                 }
                 let newly = insert_triples(&mut *conn, app_id, attrs, &resolved).await?;
                 for eid in newly {
@@ -784,6 +798,9 @@ pub async fn transact(
                     )
                     .await?;
                     report.touched.push((eid, attr.etype.clone()));
+                    if attr.label == "id" {
+                        report.id_written.push((eid, attr.etype.clone()));
+                    }
                     let key = (eid, attr.id);
                     match order.get(&key) {
                         Some(&i) => merges[i].2.push(value),
@@ -855,6 +872,9 @@ pub async fn transact(
                         _ => value,
                     };
                     report.touched.push((eid, attr.etype.clone()));
+                    if attr.label == "id" {
+                        report.id_retracted.push((eid, attr.etype.clone()));
+                    }
                     dels.push((eid, attr_id, value));
                 }
                 delete_triples(&mut *conn, app_id, &dels).await?;

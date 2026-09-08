@@ -75,9 +75,13 @@ fn base64_image_url_to_bytes(s: &str) -> std::result::Result<Vec<u8>, &'static s
     if !["jpg", "jpeg", "png", "svg", "webp"].contains(&mime) {
         return Err("Invalid image type");
     }
-    let image = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|_| "Invalid image")?;
+    // Java's Base64.getDecoder() (legacy) accepts unpadded input
+    let engine = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::general_purpose::PAD
+            .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+    );
+    let image = engine.decode(b64).map_err(|_| "Invalid image")?;
     if image.len() > 1024 * 1024 {
         return Err("Image is too large");
     }
@@ -854,7 +858,10 @@ pub async fn start(
 ) -> Response {
     match start_impl(&state, &params).await {
         Ok(resp) => resp,
-        Err(e) => oauth_error_page(&e.message),
+        // legacy maps only its own ExceptionInfo onto the page; anything else
+        // (a database error) is the generic 500, never shown to the user
+        Err(e) if e.status < 500 => oauth_error_page(&e.message),
+        Err(e) => json_or_err(Err(e)),
     }
 }
 
@@ -1151,11 +1158,14 @@ pub async fn grant(
     // outer errors (bad params, unknown redirect) → error page
     let redirect = match grant_outer(&state, &params).await {
         Ok(r) => r,
-        Err(e) => return oauth_error_page(&e.message),
+        Err(e) if e.status < 500 => return oauth_error_page(&e.message),
+        Err(e) => return json_or_err(Err(e)),
     };
-    // inner errors → redirect back with an OAuth error
+    // inner errors → redirect back with an OAuth error (5xx stay generic
+    // like legacy's uncaught exceptions, never forwarded to the client site)
     match grant_inner(&state, &headers, &redirect).await {
         Ok(resp) => resp,
+        Err(e) if e.status >= 500 => json_or_err(Err(e)),
         Err(e) => {
             let code = match e.error_type.as_str() {
                 "param-missing" | "param-malformed" => "invalid_request",
@@ -1368,7 +1378,6 @@ fn pm_uuid(params: &HashMap<String, String>, key: &str) -> Result<Uuid> {
 pub async fn token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Query(query): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> Response {
     let ct = headers
@@ -1380,7 +1389,9 @@ pub async fn token(
     {
         merged_params(&headers, &HashMap::new(), &body)
     } else {
-        query
+        // legacy reads form / JSON params only; credentials in the query
+        // string would land in access logs
+        HashMap::new()
     };
     json_or_err(token_impl(&state, &params).await)
 }
@@ -1545,7 +1556,7 @@ async fn token_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
     }
 }
 
-fn constant_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

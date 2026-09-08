@@ -38,7 +38,12 @@ async function call(method, p, { token, body, headers = {} } = {}) {
 }
 
 // --- the mock Google token endpoint: what it says is scripted per test ---
-const google = { status: 200, claims: { sub: "google-sub-1", email: "Login.User@Example.com", email_verified: true }, lastForm: null };
+// subs are per run: a database that already holds a previous run's sub with
+// another email would make the upsert answer "multiple users" like legacy
+const runId = randomBytes(4).toString("hex");
+const SUB = (n) => `google-sub-${n}-${runId}`;
+const EMAIL = (name) => `${name}-${runId}@example.com`;
+const google = { status: 200, claims: { sub: SUB(1), email: EMAIL("Login.User"), email_verified: true }, lastForm: null };
 const provider = http.createServer((req, res) => {
   if (req.url !== "/token") { res.writeHead(404); res.end(); return; }
   let data = "";
@@ -98,13 +103,13 @@ check("redirect is consumed", (await callback(`?state=${s1.state}&code=mock-code
 
 // --- token ---
 const t1 = await call("POST", "/dash/oauth/token", { body: { code: cb1.params.code } });
-check("token", t1.status === 200 && /^[0-9a-f-]{36}$/.test(t1.body.token) && t1.body.redirect_path === "/apps" && t1.body.user?.email === "login.user@example.com" && typeof t1.body.user.created_at === "string", t1);
+check("token", t1.status === 200 && /^[0-9a-f-]{36}$/.test(t1.body.token) && t1.body.redirect_path === "/apps" && t1.body.user?.email === EMAIL("login.user") && typeof t1.body.user.created_at === "string", t1);
 check("token keys", Object.keys(t1.body).sort().join() === "redirect_path,token,user" && Object.keys(t1.body.user).sort().join() === "created_at,email,id", t1.body);
 check("code is one-use", (await call("POST", "/dash/oauth/token", { body: { code: cb1.params.code } })).body.type === "record-not-found");
 check("token missing code", (await call("POST", "/dash/oauth/token", { body: {} })).body.type === "param-missing");
 check("token malformed code", (await call("POST", "/dash/oauth/token", { body: { code: "nope" } })).body.type === "param-malformed");
 const me = await call("GET", "/dash", { token: t1.body.token });
-check("refresh token works on /dash", me.status === 200 && me.body.user?.email === "login.user@example.com", me.body?.user);
+check("refresh token works on /dash", me.status === 200 && me.body.user?.email === EMAIL("login.user"), me.body?.user);
 const userId = t1.body.user.id;
 
 // --- the CLI side: claim the ticket as the user, then check with the secret ---
@@ -113,7 +118,7 @@ check("cli claim needs a ticket", (await call("POST", "/dash/cli/auth/claim", { 
 const claimed = await call("POST", "/dash/cli/auth/claim", { token: t1.body.token, body: { ticket } });
 check("cli claim", claimed.status === 200 && claimed.body.ticket === ticket, claimed);
 const checked = await call("POST", "/dash/cli/auth/check", { body: { secret: reg.body.secret } });
-check("cli check hands out a token", checked.status === 200 && /^[0-9a-f-]{36}$/.test(checked.body.token) && checked.body.email === "login.user@example.com" && Object.keys(checked.body).sort().join() === "email,token", checked);
+check("cli check hands out a token", checked.status === 200 && /^[0-9a-f-]{36}$/.test(checked.body.token) && checked.body.email === EMAIL("login.user") && Object.keys(checked.body).sort().join() === "email,token", checked);
 check("cli token works", (await call("GET", "/dash", { token: checked.body.token })).status === 200);
 check("cli check is one-use", (await call("POST", "/dash/cli/auth/check", { body: { secret: reg.body.secret } })).body.hint?.errors?.[0]?.issue === "user-already-claimed");
 check("cli check unknown secret", (await call("POST", "/dash/cli/auth/check", { body: { secret: crypto.randomUUID() } })).body.type === "record-not-found");
@@ -123,31 +128,31 @@ check("cli void", (await call("POST", "/dash/cli/auth/void", { token: t1.body.to
 check("cli check after void", (await call("POST", "/dash/cli/auth/check", { body: { secret: reg2.body.secret } })).body.hint?.errors?.[0]?.issue === "user-voided-request");
 
 // --- the same google sub with a new email updates the user ---
-google.claims = { sub: "google-sub-1", email: "renamed@example.com", email_verified: true };
+google.claims = { sub: SUB(1), email: EMAIL("renamed"), email_verified: true };
 const s2 = await start();
 const cb2 = await callback(`?state=${s2.state}&code=mock-code`, s2.cookie);
 const t2 = await call("POST", "/dash/oauth/token", { body: { code: cb2.params?.code } });
-check("same sub, new email → same user with the new email", t2.body.user?.id === userId && t2.body.user.email === "renamed@example.com" && t2.body.redirect_path === "/dash", t2.body);
+check("same sub, new email → same user with the new email", t2.body.user?.id === userId && t2.body.user.email === EMAIL("renamed") && t2.body.redirect_path === "/dash", t2.body);
 
 // --- an existing magic-code user (no sub yet) gets the sub attached ---
 const magicEmail = `magic-${randomBytes(4).toString("hex")}@example.com`;
 await call("POST", "/dash/auth/send_magic_code", { body: { email: magicEmail } });
-google.claims = { sub: "google-sub-2", email: magicEmail, email_verified: true };
+google.claims = { sub: SUB(2), email: magicEmail, email_verified: true };
 const s3 = await start();
 const cb3 = await callback(`?state=${s3.state}&code=mock-code`, s3.cookie);
 const t3 = await call("POST", "/dash/oauth/token", { body: { code: cb3.params?.code } });
 const subRow = execFileSync("psql", [dbUrl, "-tA", "-c", `SELECT google_sub FROM instant_users WHERE email = '${magicEmail}'`]).toString().trim();
-check("existing email gets the google sub", t3.status === 200 && t3.body.user?.email === magicEmail && subRow === "google-sub-2", [t3.body, subRow]);
+check("existing email gets the google sub", t3.status === 200 && t3.body.user?.email === magicEmail && subRow === SUB(2), [t3.body, subRow]);
 
 // --- google failures ---
-google.claims = { sub: "google-sub-3", email: "unverified@example.com", email_verified: false };
+google.claims = { sub: SUB(3), email: EMAIL("unverified"), email_verified: false };
 const s4 = await start();
 check("unverified email", (await callback(`?state=${s4.state}&code=mock-code`, s4.cookie)).params?.error === "Could not verify email.");
 google.status = 400;
 const s5 = await start();
 check("google rejects the code", (await callback(`?state=${s5.state}&code=mock-code`, s5.cookie)).params?.error === "Error fetching user data from Google: Malformed auth code.");
 google.status = 200;
-google.claims = { sub: "google-sub-4", email: "not-an-email", email_verified: true };
+google.claims = { sub: SUB(4), email: "not-an-email", email_verified: true };
 const s6 = await start();
 check("bad email claim", (await callback(`?state=${s6.state}&code=mock-code`, s6.cookie)).params?.error === "Could not determine email.");
 const s7 = await start();
