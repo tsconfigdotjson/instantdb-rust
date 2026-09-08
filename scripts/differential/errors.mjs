@@ -41,6 +41,9 @@ const FIXED = {
   dupAttr: mk(),
   entity: mk(),
   entity2: mk(),
+  // the mode-create probe's entity: a fixed id, since the error echoes it and
+  // the per-server counter behind mk() is not in step across servers by then
+  modeEntity: mk(),
 };
 const isFixed = (s) => typeof s === "string" && s.includes("-0000-4000-8000-");
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
@@ -405,7 +408,7 @@ probe("ws/validation-failed/mode-create-exists", async (ctx) => {
   // create to succeed so the second write reaches the `mode` check
   await openRules(ctx);
   const c = await session(ctx, { token: null });
-  const eid = mk();
+  const eid = FIXED.modeEntity;
   const first = await wsOk(c, { op: "transact", "tx-steps": [["add-triple", eid, FIXED.probeId, eid]] });
   if (first.op !== "transact-ok") {
     c.close();
