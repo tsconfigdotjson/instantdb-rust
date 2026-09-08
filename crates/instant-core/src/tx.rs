@@ -59,6 +59,42 @@ pub enum TxStep {
 impl TxStep {
     /// The step in legacy's `vectorize-tx-step` form (transaction.clj:106-124),
     /// which is what validation errors echo as their `input`.
+    /// Legacy's `mapify-tx-step` (transaction.clj:70-99): the map form
+    /// `{op eid etype aid value rev-etype opts}` its validation errors echo
+    /// as `input`; etype / rev-etype come from the attr catalog and are null
+    /// for an unknown attr, `opts` is null when the step carries none.
+    pub fn mapify(&self, attrs: &AttrMap) -> Value {
+        let v = self.vectorize();
+        let arr = v.as_array().cloned().unwrap_or_default();
+        let at = |i: usize| arr.get(i).cloned().unwrap_or(Value::Null);
+        let op = at(0);
+        match self {
+            TxStep::AddAttr(_) | TxStep::UpdateAttr(_) => json!({"op": op, "value": at(1)}),
+            TxStep::DeleteAttr(_) | TxStep::RestoreAttr(_) => json!({"op": op, "aid": at(1)}),
+            TxStep::AddTriple { attr_id, .. }
+            | TxStep::DeepMergeTriple { attr_id, .. }
+            | TxStep::RetractTriple { attr_id, .. } => {
+                let attr = attrs.get(attr_id);
+                json!({
+                    "op": op,
+                    "eid": at(1),
+                    "etype": attr.map(|a| json!(a.etype)).unwrap_or(Value::Null),
+                    "aid": at(2),
+                    "value": at(3),
+                    "rev-etype": attr
+                        .and_then(|a| a.reverse_etype.clone())
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                    "opts": at(4),
+                })
+            }
+            TxStep::DeleteEntity { .. } => json!({"op": op, "eid": at(1), "etype": at(2)}),
+            TxStep::RuleParams { .. } => {
+                json!({"op": op, "eid": at(1), "etype": at(2), "value": at(3)})
+            }
+        }
+    }
+
     pub fn vectorize(&self) -> Value {
         let eid = |e: &EidRef| match e {
             EidRef::Id(id) => json!(id),
@@ -1197,7 +1233,7 @@ async fn validate_modes(
             format!("Validation failed for tx-step: {message}"),
             Some(json!({
                 "data-type": "tx-step",
-                "input": offenders.iter().map(|(s, _)| s.vectorize()).collect::<Vec<_>>(),
+                "input": offenders.iter().map(|(s, _)| s.mapify(attrs)).collect::<Vec<_>>(),
                 "errors": [{"message": message}],
             })),
         )

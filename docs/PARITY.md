@@ -246,8 +246,7 @@ unchanged result; any queued frames coalesce; `stream-append` always inlines
 `content`; rate limits are always on and rule buckets are shared through
 Postgres; webhook ISNs are tx ids, not WAL LSNs; `remove-sync` keeps the
 `sync_subs` row (as legacy does by accident); nothing is allowed as a redirect
-origin by default; per-node session stats; the `validate-mode` hint `input`
-carries the offending steps as vectors, legacy as `mapify-tx-step` maps.
+origin by default; per-node session stats.
 
 ### Cosmetic differences
 
