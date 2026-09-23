@@ -797,14 +797,7 @@ pub fn rate_limit_names(expr: &cel::IdedExpr) -> Vec<String> {
 /// `linkedData`). `math` is the math extension's namespace (cel-java
 /// 0.11's strings extension has no namespaced function).
 fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
-    const BASE: [&str; 6] = [
-        "data",
-        "auth",
-        "ruleParams",
-        "request",
-        "rateLimit",
-        "math",
-    ];
+    const BASE: [&str; 6] = ["data", "auth", "ruleParams", "request", "rateLimit", "math"];
     const VIEW: &[&str] = &BASE;
     const CREATE: &[&str] = &[
         "data",
