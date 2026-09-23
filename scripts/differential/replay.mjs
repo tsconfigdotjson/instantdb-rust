@@ -300,6 +300,23 @@ function buildScenario() {
           "tx-steps": [["add-triple", ids.e2, ids.todosTitle, "two-b"]],
         });
         await env.conns.ADMIN.waitFor((m) => m.op === "sync-update-triples");
+        // remove-sync gets no reply (session.clj handle-remove-sync!); a
+        // second subscription is removed with keep-subscription and errors
+        // are the same for an unknown / malformed id
+        const syncSub = env.conns.ADMIN.frames.find((f) => f.op === "start-sync-ok");
+        msg(env.conns.ADMIN, { op: "remove-sync", "subscription-id": syncSub["subscription-id"] });
+        const syncErr = async (m) => {
+          const ceid = msg(env.conns.ADMIN, m);
+          await env.conns.ADMIN.waitFor((x) => x.op === "error" && x["client-event-id"] === ceid);
+        };
+        await syncErr({ op: "remove-sync", "subscription-id": "nope" });
+        await syncErr({ op: "remove-sync" });
+        msg(env.conns.ADMIN, { op: "start-sync", q: { todos: {} } });
+        await env.conns.ADMIN.waitFor((m) => m.op === "sync-init-finish");
+        const syncSub2 = env.conns.ADMIN.frames.filter((f) => f.op === "start-sync-ok").at(-1);
+        msg(env.conns.ADMIN, { op: "remove-sync", "subscription-id": syncSub2["subscription-id"], "keep-subscription": true });
+        msg(env.conns.ADMIN, { op: "start-sync", q: { todos: {} } });
+        await env.conns.ADMIN.waitFor((m) => m.op === "sync-init-finish");
       },
     },
     {
@@ -1010,6 +1027,9 @@ function buildScenario() {
         await env.conns.A.waitFor((m) => (m.op === "refresh-presence" || m.op === "patch-presence") && m["room-id"] === "rejoin" && JSON.stringify(m).includes('"x"'));
         msg(env.conns.B, { op: "join-room", "room-type": "diff", "room-id": "rejoin" });
         await env.conns.B.waitFor((m) => m.op === "join-room-ok" && m["room-id"] === "rejoin" && env.conns.B.frames.filter((f) => f.op === "join-room-ok" && f["room-id"] === "rejoin").length >= 2);
+        // the rejoin's presence snapshot (A's data) reaches B after the ok;
+        // don't let the final rooms state depend on that race
+        await env.conns.B.waitFor((m) => (m.op === "refresh-presence" || m.op === "patch-presence") && m["room-id"] === "rejoin" && JSON.stringify(m).includes('"who":"A"'), 5000).catch(() => {});
         // streams
         await expectErr(env.conns.A, { op: "start-stream", "client-id": "diff-stream-2" });
         msg(env.conns.A, { op: "start-stream", "client-id": "diff-stream-2", "reconnect-token": ids.stream2Token });
@@ -1231,6 +1251,17 @@ function buildScenario() {
           "timestamp('01/02/2020').getDate() == 2",
           "timestamp('2020-01-01T10:20:30Z').getHours() == 10",
           "size(newData.title) == 6 && newData.title.contains('k o')",
+          // the rest of the extension surface: sqrt / bitNot and the
+          // cel.bind macro (cel.clj:489-491) work on legacy; reverse /
+          // strings.quote / format postdate cel-java 0.11 and are
+          // compile-time undeclared references there
+          "newData.title.reverse() == 'eno ko'",
+          "strings.quote(newData.title) == '\"ok one\"'",
+          "'%s-%d'.format(['a', 1]) == 'a-1'",
+          "math.sqrt(16) == 4.0 && math.sqrt(2.25) == 1.5",
+          "math.bitNot(0) == -1",
+          "cel.bind(t, newData.title, t.size() == 6 && t.startsWith('ok'))",
+          "cel.bind(n, newData.score, cel.bind(m, n + 1, m == 6))",
         ];
         const pName = (i) => `p${String(i + 1).padStart(2, "0")}`;
         const probeRules = Object.fromEntries(clauses.map((c, i) => [pName(i), { allow: { create: c } }]));

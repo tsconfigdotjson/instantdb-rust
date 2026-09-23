@@ -1402,6 +1402,96 @@ async function runAgainst(name) {
     r39.jwks = jwksRes.status === 200 ? { status: 200, keys: Object.keys(jwksRes.body).sort(), key: norm({ ...jwksRes.body.keys?.[0], x: "<x>", kid: "<kid>", keys: Object.keys(jwksRes.body.keys?.[0] ?? {}).sort() }) } : errView(jwksRes);
     raw("39-webhooks", r39);
     record("39-webhooks", r39);
+
+    // 40 the dashboard's Google login (start + the callback's error paths +
+    // token), get-a-db creation gate, track-import, active-session stats.
+    // Neither server has a Google client configured, so `start` redirects
+    // with an empty client_id on both; the callback with a code and a live
+    // redirect asks Google for real (an unconfigured client is rejected).
+    const r40 = {};
+    const loginStart = async (qs = "") => {
+      const res = await fetch(base + "/dash/oauth/start" + qs, { redirect: "manual" });
+      const text = await res.text();
+      const loc = res.headers.get("location") ? new URL(res.headers.get("location")) : null;
+      const cookie = res.headers.get("set-cookie") ?? "";
+      const attrs = cookie.split(";").map((a) => a.trim().toLowerCase()).filter(Boolean).map((a) => (a.startsWith("__session=") ? "__session=<cookie>" : a.startsWith("expires=") ? "expires=<date>" : a)).filter((a) => a !== "secure").sort();
+      const params = loc ? Object.fromEntries([...loc.searchParams.entries()].map(([k, v]) => [k, k === "state" ? "<uuid>" : k === "redirect_uri" ? v.replace(base, "<server>") : v])) : null;
+      return { status: res.status, contentType: (res.headers.get("content-type") ?? "").split(";")[0], location: loc ? loc.origin + loc.pathname : null, rawQueryShape: loc ? loc.search.replace(/state=[0-9a-f-]{36}/, "state=<uuid>").replace(/redirect_uri=[^&]*/, "redirect_uri=<server>") : null, params, cookieAttrs: attrs, body: text === "" ? null : (() => { try { return errView({ status: res.status, body: JSON.parse(text) }); } catch { return "<non-json>"; } })(), state: loc?.searchParams.get("state"), cookie: /__session=([^;]+)/.exec(cookie)?.[1] };
+    };
+    const strip = ({ state, cookie, ...rest }) => rest;
+    r40.start = strip(await loginStart());
+    r40.startWithPath = strip(await loginStart("?redirect_path=apps&redirect_to_dev=true"));
+    // a ticket that is not a registered CLI login violates the foreign key on both servers
+    r40.startUnknownTicket = strip(await loginStart("?ticket=" + mk()));
+    const loginCallback = async (qs, cookie) => {
+      const res = await fetch(base + "/dash/oauth/callback" + qs, { redirect: "manual", headers: cookie ? { cookie: `__session=${cookie}` } : {} });
+      const text = await res.text();
+      const loc = res.headers.get("location") ? new URL(res.headers.get("location")) : null;
+      return { status: res.status, contentType: (res.headers.get("content-type") ?? "").split(";")[0], location: loc ? loc.origin + loc.pathname : null, params: loc ? Object.fromEntries([...loc.searchParams.entries()].map(([k, v]) => [k, k === "code" ? "<uuid>" : v])) : null, body: text === "" ? null : (() => { try { return errView({ status: res.status, body: JSON.parse(text) }); } catch { return "<non-json>"; } })() };
+    };
+    r40.cbNoParams = await loginCallback("");
+    r40.cbErrorParam = await loginCallback("?error=access_denied");
+    r40.cbNoCookie = await loginCallback("?state=" + mk());
+    r40.cbBadState = await loginCallback("?state=nope", mk());
+    r40.cbBadCookie = await loginCallback("?state=" + mk(), "nope");
+    r40.cbNoCode = await loginCallback("?state=" + mk(), mk());
+    r40.cbUnknownRedirect = await loginCallback("?state=" + mk() + "&code=abc", mk());
+    // a callback with a valid state + cookie consumes the redirect before the
+    // code check; a later callback then can't find it. A callback that carries
+    // a code AND a live redirect is left to the mock-provider e2e, since it
+    // makes a real outbound token request that isn't comparable here.
+    const l1 = await loginStart();
+    r40.cbConsumesRedirect = await loginCallback(`?state=${l1.state}`, l1.cookie);
+    r40.cbConsumed = await loginCallback(`?state=${l1.state}&code=abc`, l1.cookie);
+    r40.tokenMissing = errView(await call(base, "POST", "/dash/oauth/token", { token: null, body: {} }));
+    r40.tokenMalformed = errView(await call(base, "POST", "/dash/oauth/token", { token: null, body: { code: "nope" } }));
+    r40.tokenUnknown = errView(await call(base, "POST", "/dash/oauth/token", { token: null, body: { code: mk() } }));
+    r40.trackImport = plainView(await call(base, "POST", `/dash/apps/${appId}/track-import`, { token: null }));
+    r40.trackImportBadId = errView(await call(base, "POST", "/dash/apps/nope/track-import", { token: null }));
+    r40.getADbNoAuth = errView(await call(base, "POST", "/dash/apps/get_a_db", { token: null, body: { title: "x" } }));
+    r40.getADbAdminToken = errView(await call(base, "POST", "/dash/apps/get_a_db", { body: { title: "x" } }));
+    const gpat = await call(base, "POST", "/dash/personal_access_tokens", { token: userToken, body: { name: "get-a-db probe" } });
+    r40.getADbNotServiceUser = errView(await call(base, "POST", "/dash/apps/get_a_db", { token: gpat.body?.token, body: { title: "x" } }));
+    // the CLI login: register, the dashboard user claims / voids, check
+    const creg = await call(base, "POST", "/dash/cli/auth/register", { token: null });
+    r40.cliRegister = creg.status === 200 ? { status: 200, keys: Object.keys(creg.body).sort(), shapes: [creg.body.ticket, creg.body.secret].map((v) => /^[0-9a-f-]{36}$/.test(String(v))) } : errView(creg);
+    r40.cliCheckWaiting = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg.body?.secret } }));
+    r40.cliCheckUnknown = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: mk() } }));
+    r40.cliCheckMalformed = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: "nope" } }));
+    r40.cliCheckMissing = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: {} }));
+    r40.cliClaimNoAuth = errView(await call(base, "POST", "/dash/cli/auth/claim", { token: null, body: { ticket: creg.body?.ticket } }));
+    r40.cliClaimMissing = errView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: {} }));
+    r40.cliClaimUnknown = plainView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: { ticket: mk() } }));
+    r40.cliClaim = plainView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: { ticket: creg.body?.ticket } }));
+    const cchecked = await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg.body?.secret } });
+    r40.cliCheck = cchecked.status === 200 ? { status: 200, keys: Object.keys(cchecked.body).sort(), email: cchecked.body.email } : errView(cchecked);
+    r40.cliCheckAgain = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg.body?.secret } }));
+    const creg2 = await call(base, "POST", "/dash/cli/auth/register", { token: null });
+    r40.cliVoid = plainView(await call(base, "POST", "/dash/cli/auth/void", { token: userToken, body: { ticket: creg2.body?.ticket } }));
+    r40.cliVoidNoAuth = errView(await call(base, "POST", "/dash/cli/auth/void", { token: null, body: { ticket: creg2.body?.ticket } }));
+    r40.cliCheckVoided = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg2.body?.secret } }));
+    // start with a registered ticket: the callback hands it back to the dashboard
+    r40.startWithTicket = strip(await loginStart("?ticket=" + creg2.body?.ticket));
+    const active = await call(base, "GET", "/dash/stats/active_sessions", { token: null });
+    r40.activeSessions = active.status === 200 ? { status: 200, keys: Object.keys(active.body).sort() } : errView(active);
+    raw("40-dash-login", r40);
+    record("40-dash-login", r40);
+
+    // 41 admin magic codes: `POST /admin/send_magic_code` hands the code back
+    // (admin/routes.clj:506-510), `verify_magic_code` signs the user in
+    const r41 = {};
+    const magicEmail = `admin-magic-${appId.slice(0, 8)}@example.com`;
+    const sent = await call(base, "POST", "/admin/send_magic_code", { ...appHdr, body: { email: magicEmail } });
+    r41.send = sent.status === 200 ? { status: 200, keys: Object.keys(sent.body).sort(), codeShape: /^[0-9]{6}$/.test(String(sent.body.code)) } : errView(sent);
+    r41.sendBadEmail = errView(await call(base, "POST", "/admin/send_magic_code", { ...appHdr, body: { email: "nope" } }));
+    r41.sendNoAuth = errView(await call(base, "POST", "/admin/send_magic_code", { token: null, ...appHdr, body: { email: magicEmail } }));
+    r41.verifyWrongCode = errView(await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail, code: "000000" } }));
+    r41.verifyMissingCode = errView(await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail } }));
+    const mverified = await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail, code: String(sent.body?.code) } });
+    r41.verify = mverified.status === 200 ? { status: 200, keys: Object.keys(mverified.body).sort(), user: norm({ ...mverified.body.user, keys: Object.keys(mverified.body.user ?? {}).sort() }) } : errView(mverified);
+    r41.verifyAgain = errView(await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail, code: String(sent.body?.code) } }));
+    raw("41-admin-magic-codes", r41);
+    record("41-admin-magic-codes", r41);
   }
 
   return out;

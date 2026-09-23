@@ -337,7 +337,16 @@ fn webhook_validation(input: Value, message: &str) -> InstantError {
 /// localhost, parseable, resolvable to a public address.
 /// `INSTANT_WEBHOOK_ALLOW_INSECURE=1` lets test receivers on http://localhost
 /// through (never set it in production).
-pub async fn assert_valid_url(url: &str) -> Result<()> {
+/// Validated destination of a webhook URL: the host and every address it
+/// resolved to (all public), so the delivery can be pinned to exactly those
+/// (`ClientBuilder::resolve_to_addrs`) and a DNS answer that changes between
+/// validation and connect can't reach a private network.
+pub struct ValidatedUrl {
+    pub host: String,
+    pub addrs: Vec<std::net::SocketAddr>,
+}
+
+pub async fn assert_valid_url(url: &str) -> Result<ValidatedUrl> {
     let insecure_ok = matches!(
         std::env::var("INSTANT_WEBHOOK_ALLOW_INSECURE").as_deref(),
         Ok("1") | Ok("true")
@@ -367,8 +376,13 @@ pub async fn assert_valid_url(url: &str) -> Result<()> {
     if !matches!(parsed.scheme(), "http" | "https") || host.is_empty() {
         return Err(webhook_validation(json!({"url": url}), "Invalid URL."));
     }
+    let port = parsed.port_or_known_default().unwrap_or(443);
     if insecure_ok {
-        return Ok(());
+        // test receivers: no address vetting, reqwest resolves as usual
+        return Ok(ValidatedUrl {
+            host,
+            addrs: vec![],
+        });
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
         if bad_ip(ip) {
@@ -377,30 +391,39 @@ pub async fn assert_valid_url(url: &str) -> Result<()> {
                 "Could not resolve URL.",
             ));
         }
-        return Ok(());
+        return Ok(ValidatedUrl {
+            host,
+            addrs: vec![std::net::SocketAddr::new(ip, port)],
+        });
     }
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let resolved: Vec<IpAddr> = match tokio::time::timeout(
+    let resolved: Vec<std::net::SocketAddr> = match tokio::time::timeout(
         Duration::from_secs(10),
         tokio::net::lookup_host((host.as_str(), port)),
     )
     .await
     {
-        Ok(Ok(addrs)) => addrs.map(|a| a.ip()).filter(|ip| !bad_ip(*ip)).collect(),
+        Ok(Ok(addrs)) => addrs.collect(),
         _ => vec![],
     };
-    if resolved.is_empty() {
+    // legacy's resolver (webhook_sender.clj `validate-url` / smokescreen
+    // `bad-ip?`) refuses the host when any answer is private, and so does
+    // the delivery client it wires the same resolver into
+    if resolved.is_empty() || resolved.iter().any(|a| bad_ip(a.ip())) {
         return Err(webhook_validation(
             json!({"url": url}),
             "Could not resolve URL.",
         ));
     }
-    Ok(())
+    Ok(ValidatedUrl {
+        host,
+        addrs: resolved,
+    })
 }
 
 // ---------------------------------------------------------------------------
 // model
 
+#[derive(Clone)]
 pub struct Webhook {
     pub id: Uuid,
     pub id_attr_ids: Vec<Uuid>,
@@ -492,14 +515,36 @@ pub async fn get_all(state: &AppState, app_id: Uuid) -> Result<Vec<Webhook>> {
     Ok(rows.iter().map(webhook_from_row).collect())
 }
 
-async fn active_webhooks(state: &AppState, app_id: Uuid) -> Result<Vec<Webhook>> {
+/// How long a node trusts its cached view of an app's active webhooks
+/// without a NOTIFY (the `webhooks` trigger evicts on every change, so this
+/// is only the safety net for a missed notification).
+const WEBHOOK_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// The app's active webhooks, cached per node so the transaction path pays a
+/// map lookup instead of a query (legacy: model/webhook.clj's cache fed by
+/// the WAL). Management writes evict locally, the `webhooks` row trigger
+/// evicts every node through `instant_webhooks`.
+async fn active_webhooks(state: &AppState, app_id: Uuid) -> Result<Arc<Vec<Webhook>>> {
+    if let Some(entry) = state.webhook_cache.get(&app_id) {
+        if entry.0.elapsed() < WEBHOOK_CACHE_TTL {
+            return Ok(entry.1.clone());
+        }
+    }
     let rows = sqlx::query(&format!(
         "SELECT {WEBHOOK_COLUMNS} FROM webhooks WHERE app_id = $1 AND status = 'active'"
     ))
     .bind(app_id)
     .fetch_all(&state.pool)
     .await?;
-    Ok(rows.iter().map(webhook_from_row).collect())
+    let hooks: Arc<Vec<Webhook>> = Arc::new(rows.iter().map(webhook_from_row).collect());
+    state
+        .webhook_cache
+        .insert(app_id, (std::time::Instant::now(), hooks.clone()));
+    Ok(hooks)
+}
+
+pub fn invalidate_cache(state: &AppState, app_id: Uuid) {
+    state.webhook_cache.remove(&app_id);
 }
 
 /// `maximum-active-webhooks` flag default
@@ -666,6 +711,7 @@ pub async fn create(
     .await
     .map_err(translate_pg)?;
     dbtx.commit().await?;
+    invalidate_cache(state, app_id);
     Ok(id)
 }
 
@@ -722,6 +768,7 @@ pub async fn update(
     .await
     .map_err(translate_pg)?;
     dbtx.commit().await?;
+    invalidate_cache(state, app_id);
     Ok(())
 }
 
@@ -737,6 +784,7 @@ pub async fn disable(
         .bind(reason)
         .execute(&state.pool)
         .await?;
+    invalidate_cache(state, app_id);
     Ok(())
 }
 
@@ -763,6 +811,7 @@ pub async fn enable(state: &AppState, app_id: Uuid, webhook_id: Uuid) -> Result<
         .execute(&mut *dbtx)
         .await?;
     dbtx.commit().await?;
+    invalidate_cache(state, app_id);
     Ok(())
 }
 
@@ -772,6 +821,7 @@ pub async fn delete(state: &AppState, app_id: Uuid, webhook_id: Uuid) -> Result<
         .bind(webhook_id)
         .execute(&state.pool)
         .await?;
+    invalidate_cache(state, app_id);
     Ok(())
 }
 
@@ -918,6 +968,29 @@ pub async fn requeue(
 // event production (the transaction-path stand-in for legacy's WAL matching)
 
 pub async fn ensure_tables(pool: &sqlx::PgPool) -> Result<()> {
+    // every node caches an app's active webhooks (active_webhooks); a row
+    // trigger evicts them all on any change, including psql edits
+    sqlx::query(
+        r#"
+        CREATE OR REPLACE FUNCTION rust_notify_webhooks_changed() RETURNS trigger AS $fn$
+        BEGIN
+          PERFORM pg_notify('instant_webhooks',
+                            json_build_object('app_id', coalesce(NEW.app_id, OLD.app_id))::text);
+          RETURN NULL;
+        END $fn$ LANGUAGE plpgsql
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("DROP TRIGGER IF EXISTS rust_webhooks_changed_trigger ON webhooks")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "CREATE TRIGGER rust_webhooks_changed_trigger AFTER INSERT OR UPDATE OR DELETE ON webhooks
+         FOR EACH ROW EXECUTE FUNCTION rust_notify_webhooks_changed()",
+    )
+    .execute(pool)
+    .await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS rust_webhook_history (
            app_id uuid NOT NULL,
@@ -932,53 +1005,63 @@ pub async fn ensure_tables(pool: &sqlx::PgPool) -> Result<()> {
     Ok(())
 }
 
-/// Called after every committed transaction: queue events for the app's
-/// active webhooks whose namespaces and actions the tx touched, and snapshot
-/// what the payload needs.
-pub async fn after_transact(state: &AppState, app_id: Uuid, report: &TxReport) {
-    if report.touched.is_empty() && report.created.is_empty() && report.deleted.is_empty() {
-        return;
+/// Runs inside the transaction, after the steps and before commit (the
+/// stand-in for legacy's WAL matching, model/webhook.clj `webhook-matches?`):
+/// an event is queued for each active webhook whose namespaces had their id
+/// attr's triple inserted (`create`), written again (`update`) or deleted
+/// (`delete`) by this tx — never for ref / value attrs alone, so a link or
+/// unlink step and the referrers of a deleted entity produce nothing, like
+/// legacy. The snapshot the payload needs (cardinality-one triples of the
+/// touched entities as this tx leaves them, plus the tx's triple changes)
+/// is taken on the same connection, so a later tx can't leak into `after`,
+/// and the history + event rows commit or roll back with the data. Returns
+/// true when events were queued (the caller wakes the delivery loop after
+/// the commit).
+pub async fn queue_events(
+    state: &AppState,
+    conn: &mut sqlx::PgConnection,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    report: &TxReport,
+) -> Result<bool> {
+    if report.id_written.is_empty() && report.deleted.is_empty() && report.id_retracted.is_empty() {
+        return Ok(false);
     }
-    if let Err(e) = after_transact_inner(state, app_id, report).await {
-        tracing::warn!(
-            "webhook event production failed for app {app_id} tx {}: {e}",
-            report.tx_id
-        );
-    }
-}
-
-async fn after_transact_inner(state: &AppState, app_id: Uuid, report: &TxReport) -> Result<()> {
     let hooks = active_webhooks(state, app_id).await?;
     if hooks.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
-    let attrs = service::load_attrs(state, app_id).await?;
     let created: HashSet<Uuid> = report.created.iter().map(|(e, _)| *e).collect();
     let deleted: HashSet<Uuid> = report.deleted.iter().map(|(e, _)| *e).collect();
-    // (etype -> action -> entity ids) touched by this tx
+    // (etype -> [(entity id, action)]) from the id-attr writes of this tx
     let mut by_etype: HashMap<String, Vec<(Uuid, &'static str)>> = HashMap::new();
-    for (e, etype) in report
-        .created
-        .iter()
-        .chain(report.touched.iter())
-        .chain(report.deleted.iter())
-    {
-        let action = if deleted.contains(e) {
-            "delete"
-        } else if created.contains(e) {
-            "create"
-        } else {
-            "update"
-        };
-        let list = by_etype.entry(etype.clone()).or_default();
-        if !list.iter().any(|(x, _)| x == e) {
-            list.push((*e, action));
+    let mut push = |etype: &str, e: Uuid, action: &'static str| {
+        let list = by_etype.entry(etype.to_string()).or_default();
+        if !list.iter().any(|(x, _)| *x == e) {
+            list.push((e, action));
         }
+    };
+    for (e, etype) in report.deleted.iter().chain(report.id_retracted.iter()) {
+        push(etype, *e, "delete");
+    }
+    for (e, etype) in &report.id_written {
+        if deleted.contains(e) {
+            continue;
+        }
+        push(
+            etype,
+            *e,
+            if created.contains(e) {
+                "create"
+            } else {
+                "update"
+            },
+        );
     }
     let mut matched: Vec<&Webhook> = vec![];
     let mut wanted_etypes: HashSet<String> = HashSet::new();
-    for w in &hooks {
-        let ns = namespaces(&attrs, w);
+    for w in hooks.iter() {
+        let ns = namespaces(attrs, w);
         let hit = ns.iter().any(|n| {
             by_etype
                 .get(n)
@@ -991,7 +1074,7 @@ async fn after_transact_inner(state: &AppState, app_id: Uuid, report: &TxReport)
         }
     }
     if matched.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     // snapshot: the touched entities of the matched namespaces (cardinality-one
     // attrs, like legacy's entity log) plus this tx's triple changes
@@ -1013,7 +1096,7 @@ async fn after_transact_inner(state: &AppState, app_id: Uuid, report: &TxReport)
     .bind(app_id)
     .bind(&entity_ids)
     .bind(&one_attr_ids)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *conn)
     .await?;
     // {etype: {eid: {attr_id: value}}}
     let mut entities: Map<String, Value> = Map::new();
@@ -1033,12 +1116,16 @@ async fn after_transact_inner(state: &AppState, app_id: Uuid, report: &TxReport)
             .unwrap()
             .insert(a.to_string(), v);
     }
+    // the change log is written by the triples trigger inside this tx, so
+    // the rows are visible here in insertion order (the same physical order
+    // legacy's `(reverse triple-changes)` walk relies on)
     let changes: Vec<Value> = sqlx::query(
-        "SELECT entity_id, attr_id, value, action FROM rust_tx_changes WHERE app_id = $1 AND tx_id = $2",
+        "SELECT entity_id, attr_id, value, action FROM rust_tx_changes
+          WHERE app_id = $1 AND tx_id = $2 ORDER BY ctid",
     )
     .bind(app_id)
     .bind(report.tx_id)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *conn)
     .await?
     .iter()
     .map(|r| {
@@ -1058,7 +1145,7 @@ async fn after_transact_inner(state: &AppState, app_id: Uuid, report: &TxReport)
     .bind(report.tx_id)
     .bind(Value::Object(entities))
     .bind(Value::Array(changes))
-    .execute(&state.pool)
+    .execute(&mut *conn)
     .await?;
     let isn = Isn::of_tx(report.tx_id);
     let bucket = partition_bucket(chrono::Utc::now());
@@ -1073,10 +1160,19 @@ async fn after_transact_inner(state: &AppState, app_id: Uuid, report: &TxReport)
         .bind(isn.lsn_text())
         .bind(app_id)
         .bind(bucket)
-        .execute(&state.pool)
+        .execute(&mut *conn)
         .await?;
     }
-    state.webhook_notify.notify_one();
+    Ok(true)
+}
+
+/// `rust_webhook_history` keeps the payload inputs for the events' 60-day
+/// window; legacy truncates its bucketed history the same way
+/// (webhooks/history.clj).
+pub async fn prune_history(pool: &sqlx::PgPool) -> Result<()> {
+    sqlx::query("DELETE FROM rust_webhook_history WHERE created_at < now() - interval '60 days'")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -1335,13 +1431,32 @@ fn retry_after(previous_attempts: i64) -> chrono::Duration {
     }
 }
 
-fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+/// Legacy peeks at most 256 bytes of the receiver's reply
+/// (webhook_sender.clj); read no more than that plus a little slack, so a
+/// hostile endpoint can't make the sender buffer an unbounded body.
+const MAX_RESPONSE_BYTES: usize = 4096;
+
+fn http_client(target: &ValidatedUrl) -> Option<reqwest::Client> {
+    let mut b = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(20))
-        .user_agent("InstantDB Webhook Sender")
-        .build()
-        .expect("reqwest client")
+        .user_agent("InstantDB Webhook Sender");
+    if !target.addrs.is_empty() {
+        b = b.resolve_to_addrs(&target.host, &target.addrs);
+    }
+    b.build().ok()
+}
+
+async fn read_capped(resp: &mut reqwest::Response) -> String {
+    let mut buf: Vec<u8> = vec![];
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        buf.extend_from_slice(&chunk);
+        if buf.len() >= MAX_RESPONSE_BYTES {
+            break;
+        }
+    }
+    buf.truncate(MAX_RESPONSE_BYTES);
+    String::from_utf8_lossy(&buf).chars().take(256).collect()
 }
 
 async fn send_webhook(
@@ -1361,13 +1476,17 @@ async fn send_webhook(
         error_type: Some(error_type.to_string()),
         error_message: Some(error_message.to_string()),
     };
-    if let Err(e) = assert_valid_url(url).await {
-        return fail("unknown_host", &e.message);
-    }
+    let target = match assert_valid_url(url).await {
+        Ok(t) => t,
+        Err(e) => return fail("unknown_host", &e.message),
+    };
     let Ok((t, kid, sig)) = sign_body(state, &body) else {
         return fail("unknown", "Unknown error.");
     };
-    let res = http_client()
+    let Some(client) = http_client(&target) else {
+        return fail("unknown", "Unknown error.");
+    };
+    let res = client
         .post(url)
         .header("Content-Type", "application/json; charset=utf-8")
         .header("Instant-Signature", format!("t={t},kid={kid},v1={sig}"))
@@ -1376,11 +1495,10 @@ async fn send_webhook(
         .send()
         .await;
     match res {
-        Ok(resp) => {
+        Ok(mut resp) => {
             let status = resp.status().as_u16() as i32;
             let success = resp.status().is_success();
-            let text = resp.text().await.unwrap_or_default();
-            let text: String = text.chars().take(256).collect();
+            let text = read_capped(&mut resp).await;
             Attempt {
                 at: start,
                 duration_ms: started.elapsed().as_millis() as i32,
@@ -1567,6 +1685,43 @@ async fn free_stuck(state: &AppState) -> Result<()> {
     Ok(())
 }
 
+/// How many deliveries a node runs at once, and how long one claim batch may
+/// take before the rest is left for the next pass (legacy
+/// webhook_processor.clj: `invokeAll` bounded to a minute, so `free_stuck`'s
+/// one-minute rule can't re-hand a batch this node is still sending).
+const DELIVERY_CONCURRENCY: usize = 20;
+const BATCH_DEADLINE: Duration = Duration::from_secs(55);
+
+async fn deliver_batch(state: &Arc<AppState>, events: Vec<ClaimedEvent>, what: &'static str) {
+    let sem = Arc::new(tokio::sync::Semaphore::new(DELIVERY_CONCURRENCY));
+    let mut tasks = vec![];
+    for ev in events {
+        let st = state.clone();
+        let sem = sem.clone();
+        tasks.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await;
+            if let Err(e) = handle_event(&st, ev).await {
+                tracing::warn!("webhook {what} failed: {e}");
+            }
+        }));
+    }
+    let aborts: Vec<_> = tasks.iter().map(|t| t.abort_handle()).collect();
+    let all = async {
+        for t in tasks {
+            let _ = t.await;
+        }
+    };
+    if tokio::time::timeout(BATCH_DEADLINE, all).await.is_err() {
+        // like invokeAll's timeout, cancel what's still running or waiting on
+        // a permit: a detached send could otherwise land after free_stuck
+        // has handed the event to another claim (a double delivery)
+        for a in aborts {
+            a.abort();
+        }
+        tracing::warn!("webhook {what} batch exceeded {BATCH_DEADLINE:?}; the rest is freed later");
+    }
+}
+
 async fn work(state: &Arc<AppState>) {
     loop {
         let events = match claim_pending(state).await {
@@ -1577,18 +1732,7 @@ async fn work(state: &Arc<AppState>) {
             }
         };
         let n = events.len();
-        let mut tasks = vec![];
-        for ev in events {
-            let st = state.clone();
-            tasks.push(tokio::spawn(async move {
-                if let Err(e) = handle_event(&st, ev).await {
-                    tracing::warn!("webhook delivery failed: {e}");
-                }
-            }));
-        }
-        for t in tasks {
-            let _ = t.await;
-        }
+        deliver_batch(state, events, "delivery").await;
         if n < 10 {
             break;
         }
@@ -1602,29 +1746,41 @@ async fn work(state: &Arc<AppState>) {
             }
         };
         let n = events.len();
-        for ev in events {
-            if let Err(e) = handle_event(state, ev).await {
-                tracing::warn!("webhook retry failed: {e}");
-            }
-        }
+        deliver_batch(state, events, "retry").await;
         if n < 100 {
             break;
         }
     }
 }
 
-/// The delivery loop: wakes on local event production, and every two
-/// minutes frees stuck events and looks for work queued by other nodes.
+/// The delivery loop: wakes on local event production and every two minutes
+/// (work queued by other nodes). A separate ticker frees stuck events and
+/// prunes the payload history, so a busy node's steady stream of wake-ups
+/// can't starve the sweep (legacy runs its kicker on its own schedule).
 pub async fn run(state: Arc<AppState>) {
-    loop {
-        tokio::select! {
-            _ = state.webhook_notify.notified() => {}
-            _ = tokio::time::sleep(Duration::from_secs(120)) => {
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(120));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut n: u64 = 0;
+            loop {
+                tick.tick().await;
                 if let Err(e) = free_stuck(&state).await {
                     tracing::warn!("webhook free-stuck failed: {e}");
                 }
+                n += 1;
+                if n.is_multiple_of(30) {
+                    if let Err(e) = prune_history(&state.pool).await {
+                        tracing::warn!("webhook history prune failed: {e}");
+                    }
+                }
+                state.webhook_notify.notify_one();
             }
-        }
+        });
+    }
+    loop {
+        state.webhook_notify.notified().await;
         work(&state).await;
     }
 }

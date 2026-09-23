@@ -353,6 +353,11 @@
    "source": "superadmin/routes.clj"
   },
   {
+   "id": "http:GET /",
+   "group": "core",
+   "source": "core.clj"
+  },
+  {
    "id": "http:GET /.well-known/webhooks/jwks.json",
    "group": "webhooks",
    "source": "webhook_routes.clj"
@@ -1148,6 +1153,16 @@
    "source": "mma_example.clj"
   },
   {
+   "id": "http:POST /hooks/honeycomb/exceptions",
+   "group": "core",
+   "source": "core.clj"
+  },
+  {
+   "id": "http:POST /hooks/stripe",
+   "group": "core",
+   "source": "core.clj"
+  },
+  {
    "id": "http:POST /platform/oauth/claim",
    "group": "platform",
    "source": "oauth_apps/routes.clj"
@@ -1323,11 +1338,6 @@
    "source": "db/instaql.clj where"
   },
   {
-   "id": "iq:$expected",
-   "group": "instaql",
-   "source": "db/instaql.clj options"
-  },
-  {
    "id": "iq:$fields",
    "group": "instaql",
    "source": "db/instaql.clj options"
@@ -1355,7 +1365,7 @@
   {
    "id": "iq:$in",
    "group": "instaql",
-   "source": "db/instaql.clj options"
+   "source": "db/instaql.clj where"
   },
   {
    "id": "iq:$isNull",
@@ -1404,16 +1414,6 @@
   },
   {
    "id": "iq:$order",
-   "group": "instaql",
-   "source": "db/instaql.clj options"
-  },
-  {
-   "id": "iq:$query",
-   "group": "instaql",
-   "source": "db/instaql.clj options"
-  },
-  {
-   "id": "iq:$root",
    "group": "instaql",
    "source": "db/instaql.clj options"
   },
@@ -1549,7 +1549,7 @@
   },
   {
    "id": "ws:sse-init",
-   "group": "ws",
+   "group": "ws-internal",
    "source": "reactive/session.clj"
   },
   {

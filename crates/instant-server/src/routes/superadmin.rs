@@ -287,10 +287,9 @@ pub(crate) async fn superadmin_app(
                 .await?
                 .map(|r| r.get("id"));
         if let Some(admin_app) = admin_app {
-            if let Ok(requested) = Uuid::parse_str(app_id_raw) {
-                if requested != admin_app {
-                    return Err(admin_token_mismatch(requested));
-                }
+            let requested = path_uuid(app_id_raw, "app_id")?;
+            if requested != admin_app {
+                return Err(admin_token_mismatch(requested));
             }
             return live_app_row(state, admin_app).await;
         }
@@ -593,8 +592,9 @@ fn body_email(body: &Value, key: &str) -> Result<String> {
 
 /// POST /superadmin/apps/:app_id/transfers/send — legacy
 /// app-transfer-send-invite-post (:218-233): PAT only (the `apps-transfer`
-/// scope exists for no OAuth app); a `creator` invite is upserted; the
-/// invite email is log-only here; the upserted invite's id is returned.
+/// scope exists for no OAuth app); a `creator` invite is upserted, the
+/// transfer email goes out through the configured provider, and the
+/// upserted invite's id is returned.
 pub async fn transfer_send(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
@@ -620,7 +620,12 @@ pub async fn transfer_send(
         .bind(&email)
         .fetch_one(&state.pool)
         .await?;
-        tracing::info!("app transfer invite (log-only mail): {email} asked to own app {id}");
+        crate::email::deliver_transfer_invite(
+            &state,
+            &email,
+            &user.email,
+            app.get("title").and_then(|v| v.as_str()).unwrap_or_default(),
+        );
         Ok(json!({"id": row.get::<Uuid, _>("id")}))
     }
     .await;

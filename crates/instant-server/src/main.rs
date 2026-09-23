@@ -420,6 +420,25 @@ async fn main() -> anyhow::Result<()> {
             "/dash/apps/get_a_db/{app_id}",
             get(routes::dash_members::get_a_db_get),
         )
+        .route(
+            "/dash/apps/get_a_db",
+            post(routes::dash_login::get_a_db_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/track-import",
+            post(routes::dash_login::track_import),
+        )
+        // the dashboard's Google login + node stats
+        .route("/dash/oauth/start", get(routes::dash_login::oauth_start))
+        .route(
+            "/dash/oauth/callback",
+            get(routes::dash_login::oauth_callback),
+        )
+        .route("/dash/oauth/token", post(routes::dash_login::oauth_token))
+        .route(
+            "/dash/stats/active_sessions",
+            get(routes::dash_login::active_sessions),
+        )
         // platform API (superadmin) + platform OAuth provider + OAuth-app management
         .route(
             "/superadmin/apps",
@@ -561,21 +580,22 @@ async fn main() -> anyhow::Result<()> {
             "/dash/personal_access_tokens/{id}",
             delete(routes::dash_manage::personal_access_tokens_delete),
         )
+        // instant-cli login: register a ticket, the dashboard login claims it
         .route(
             "/dash/cli/auth/register",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_register),
         )
         .route(
             "/dash/cli/auth/check",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_check),
         )
         .route(
             "/dash/cli/auth/claim",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_claim),
         )
         .route(
             "/dash/cli/auth/void",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_void),
         )
         .route(
             "/admin/query_perms_check",

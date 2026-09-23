@@ -808,7 +808,7 @@ fn rand_code() -> String {
 
 /// legacy `flags/dashboard-signup-allowed?` (flags.clj:332-338) with the
 /// mode from `INSTANT_DASHBOARD_SIGNUP_MODE` (open | restricted | closed).
-fn signup_allowed(state: &AppState, email: &str) -> bool {
+pub(crate) fn signup_allowed(state: &AppState, email: &str) -> bool {
     match state.cfg.dashboard_signup_mode.as_str() {
         "closed" => false,
         "restricted" => state
@@ -918,42 +918,58 @@ pub async fn auth_verify_magic_code(State(state): State<Arc<AppState>>, body: By
                 Some(json!({"args": [args]})),
             ));
         }
-        let disabled = sqlx::query(
-            "SELECT 1 AS x FROM user_flags WHERE user_id = $1 AND flag_name = 'dashboard-login-disabled'",
-        )
-        .bind(user_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .is_some();
-        if disabled {
-            return Err(InstantError::new(
-                "permission-denied",
-                400,
-                "Permission denied: not dashboard-login-enabled",
-                Some(json!({"input": user_id, "expected": "dashboard-login-enabled"})),
-            ));
-        }
-        let token = Uuid::new_v4();
-        sqlx::query("INSERT INTO instant_user_refresh_tokens (id, user_id) VALUES ($1, $2)")
-            .bind(token)
-            .bind(user_id)
-            .execute(&state.pool)
-            .await?;
-        let user = sqlx::query("SELECT id, email, created_at FROM instant_users WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(&state.pool)
-            .await?;
+        let token = create_dashboard_refresh_token(&state, user_id).await?;
         Ok(json!({
             "token": token,
-            "user": {
-                "id": user.get::<Uuid, _>("id"),
-                "email": user.get::<String, _>("email"),
-                "created_at": ts_col(&user, "created_at"),
-            }
+            "user": dashboard_login_user(&state, user_id).await?,
         }))
     }
     .await;
     json_or_err(r)
+}
+
+/// `instant-user-refresh-token-model/create!` (instant_user_refresh_token.clj:9-23):
+/// the `dashboard-login-disabled` user flag is a permission-denied, then a
+/// fresh token row.
+pub(crate) async fn create_dashboard_refresh_token(
+    state: &AppState,
+    user_id: Uuid,
+) -> Result<Uuid> {
+    let disabled = sqlx::query(
+        "SELECT 1 AS x FROM user_flags WHERE user_id = $1 AND flag_name = 'dashboard-login-disabled'",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .is_some();
+    if disabled {
+        return Err(InstantError::new(
+            "permission-denied",
+            400,
+            "Permission denied: not dashboard-login-enabled",
+            Some(json!({"input": user_id, "expected": "dashboard-login-enabled"})),
+        ));
+    }
+    let token = Uuid::new_v4();
+    sqlx::query("INSERT INTO instant_user_refresh_tokens (id, user_id) VALUES ($1, $2)")
+        .bind(token)
+        .bind(user_id)
+        .execute(&state.pool)
+        .await?;
+    Ok(token)
+}
+
+/// The `{id, email, created_at}` user the login routes answer with.
+pub(crate) async fn dashboard_login_user(state: &AppState, user_id: Uuid) -> Result<Value> {
+    let user = sqlx::query("SELECT id, email, created_at FROM instant_users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.pool)
+        .await?;
+    Ok(json!({
+        "id": user.get::<Uuid, _>("id"),
+        "email": user.get::<String, _>("email"),
+        "created_at": ts_col(&user, "created_at"),
+    }))
 }
 
 fn pat_json(r: &sqlx::postgres::PgRow) -> Value {
