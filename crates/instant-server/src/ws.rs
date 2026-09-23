@@ -169,7 +169,7 @@ fn handle_receive_timeout_ms() -> u64 {
 }
 
 /// Legacy `ex/get-param!` error shapes (util/exception.clj:410-428).
-fn param_missing_at(path: &[&str]) -> InstantError {
+pub(crate) fn param_missing_at(path: &[&str]) -> InstantError {
     InstantError::new(
         "param-missing",
         400,
@@ -177,7 +177,7 @@ fn param_missing_at(path: &[&str]) -> InstantError {
         Some(json!({"in": path})),
     )
 }
-fn param_malformed_at(path: &[&str], input: &Value) -> InstantError {
+pub(crate) fn param_malformed_at(path: &[&str], input: &Value) -> InstantError {
     InstantError::new(
         "param-malformed",
         400,

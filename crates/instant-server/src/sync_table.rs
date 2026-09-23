@@ -216,11 +216,7 @@ pub async fn handle_resync_table(
             .ok_or_else(|| crate::ws::not_initialized(session.id))?;
         (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
-    let sub_id = msg
-        .get("subscription-id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| InstantError::param_missing("missing subscription-id"))?;
+    let sub_id = subscription_id_param(msg)?;
     let from_tx = msg
         .get("tx-id")
         .and_then(|v| v.as_i64())
@@ -327,36 +323,39 @@ pub async fn handle_resync_table(
     Ok(())
 }
 
+/// `ex/get-param! event [:subscription-id] uuid-util/coerce`
+fn subscription_id_param(msg: &Value) -> std::result::Result<Uuid, InstantError> {
+    let raw = msg
+        .get("subscription-id")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| crate::ws::param_missing_at(&["subscription-id"]))?;
+    raw.as_str()
+        .and_then(|s| Uuid::parse_str(s.trim()).ok())
+        .ok_or_else(|| crate::ws::param_malformed_at(&["subscription-id"], raw))
+}
+
 pub async fn handle_remove_sync(
     state: &Arc<AppState>,
     session: &Arc<Session>,
     msg: &Value,
 ) -> std::result::Result<(), InstantError> {
-    let sub_id = msg
-        .get("subscription-id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| InstantError::param_missing("missing subscription-id"))?;
+    let sub_id = subscription_id_param(msg)?;
     let keep = msg
         .get("keep-subscription")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let (app_id, owned) = {
+    {
         let mut st = session.state.lock().await;
-        let app_id = st
-            .app_id
+        st.app_id
             .ok_or_else(|| crate::ws::not_initialized(session.id))?;
-        (app_id, st.sync_subs.remove(&sub_id).is_some())
-    };
-    // legacy deletes only `{:id ... :app-id app-id}` and only for a sub this
-    // session holds; a foreign id is a silent no-op
-    if !keep && owned {
-        let _ = sqlx::query("DELETE FROM sync_subs WHERE id = $1 AND app_id = $2")
-            .bind(sub_id)
-            .bind(app_id)
-            .execute(&state.pool)
-            .await;
+        st.sync_subs.remove(&sub_id);
     }
+    // legacy (session.clj:373-381) drops the in-memory query and, without
+    // `keep-subscription`, calls `sync-sub-model/delete!` with
+    // `(:sync/subscription-id sync-ent)` -- an attribute nothing ever sets, so
+    // the row survives and a later `resync-table` on the same id still
+    // resumes it. Matched on the wire: the row is kept either way.
+    let _ = (keep, state);
     // legacy sends no reply to remove-sync (session.clj handle-remove-sync!)
     Ok(())
 }

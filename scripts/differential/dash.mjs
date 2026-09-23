@@ -13,6 +13,7 @@
 //      http://localhost:8888), DUMP=1 prints raw responses, ONLY=legacy|rust
 
 import fs from "node:fs";
+import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,18 @@ const SERVERS = {
   legacy: process.env.LEGACY_URL || "http://localhost:8891",
   rust: process.env.RUST_URL || "http://localhost:8888",
 };
+const DBS = {
+  legacy: process.env.LEGACY_DATABASE_URL || "postgres://instant:instant@localhost:8890/instant",
+  rust: process.env.RUST_DATABASE_URL || "postgres://instant:instant@localhost:5432/instant",
+};
+// the dashboard login code: neither server has a mail provider in the
+// harness, so it is read back from instant_user_magic_codes
+function readDashCode(name, email) {
+  return execSync(
+    `psql "${DBS[name]}" -At -c "SELECT c.code FROM instant_user_magic_codes c JOIN instant_users u ON u.id = c.user_id WHERE u.email = '${email}' ORDER BY c.created_at DESC LIMIT 1"`,
+    { encoding: "utf8" },
+  ).trim();
+}
 
 // ---------------------------------------------------------------------------
 // http helpers (exactly the headers the CLI sends: lib/http.ts)
@@ -137,6 +150,8 @@ function pullView(res) {
 function errView(res) {
   const b = res.body ?? {};
   const view = norm({ status: res.status, type: b.type, message: b.message, hint: b.hint ?? null, keys: Object.keys(b).sort() });
+  // magic codes are random per server; legacy echoes them in hint args
+  if (view.hint?.args?.[0]?.code) view.hint.args[0].code = "<code>";
   // rule validation walks the rules map in key order, which differs between
   // Clojure hash maps and ours for larger maps; the CLI prints the joined
   // message, so compare the error set instead
@@ -834,6 +849,649 @@ async function runAgainst(name) {
     r32.claimAgain = errView(await call(base, "POST", `/dash/apps/${ephId}/claim`, { token: userToken, body: { token: eph.body?.app?.["admin-token"] } }));
     raw("32-ephemeral-and-claim", r32);
     record("32-ephemeral-and-claim", r32);
+
+    // 33 app management (dashboard-only routes: rename / status / admin-token
+    // rotation / magic-code expiry / rule versions / soft-deleted attrs /
+    // test users / stats, plus /admin/schema + /admin/soft_deleted_attrs)
+    const r33 = {};
+    const appHdr = { headers: { "app-id": appId } };
+    r33.renameAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/rename`, { body: { title: "renamed" } }));
+    r33.renameMissingTitle = errView(await call(base, "POST", `/dash/apps/${appId}/rename`, { token: userToken, body: {} }));
+    r33.rename = plainView(await call(base, "POST", `/dash/apps/${appId}/rename`, { token: userToken, body: { title: "renamed app" } }));
+    r33.titleAfterRename = (await call(base, "GET", `/dash/apps/${appId}`, { token: userToken })).body?.app?.title ?? null;
+    r33.statusBad = errView(await call(base, "POST", `/dash/apps/${appId}/status`, { token: userToken, body: { status: "paused" } }));
+    r33.statusMissing = errView(await call(base, "POST", `/dash/apps/${appId}/status`, { token: userToken, body: {} }));
+    r33.statusAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/status`, { body: { status: "active" } }));
+    r33.statusReadOnly = plainView(await call(base, "POST", `/dash/apps/${appId}/status`, { token: userToken, body: { status: "read-only" } }));
+    r33.transactReadOnly = errView(await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["update", "posts", mk(), { title: "ro" }]] } }));
+    r33.queryReadOnly = okKeys(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { posts: {} } } }));
+    r33.statusDisabled = plainView(await call(base, "POST", `/dash/apps/${appId}/status`, { token: userToken, body: { status: "disabled" } }));
+    r33.queryDisabled = errView(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { posts: {} } } }));
+    r33.transactDisabled = errView(await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["update", "posts", mk(), { title: "dis" }]] } }));
+    r33.statusActive = plainView(await call(base, "POST", `/dash/apps/${appId}/status`, { token: userToken, body: { status: "active" } }));
+    r33.queryActive = okKeys(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { posts: {} } } }));
+    r33.statusInAppRow = (await call(base, "GET", `/dash/apps/${appId}`, { token: userToken })).body?.app?.status ?? null;
+    // admin-token rotation: the old token stops working, the new one works
+    const rotated = mk();
+    r33.tokensAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/tokens`, { body: { "admin-token": rotated } }));
+    r33.tokensMissing = errView(await call(base, "POST", `/dash/apps/${appId}/tokens`, { token: userToken, body: {} }));
+    r33.tokensBad = errView(await call(base, "POST", `/dash/apps/${appId}/tokens`, { token: userToken, body: { "admin-token": "nope" } }));
+    r33.tokens = plainView(await call(base, "POST", `/dash/apps/${appId}/tokens`, { token: userToken, body: { "admin-token": rotated } }));
+    r33.oldTokenAfterRotate = errView(await call(base, "GET", `/dash/apps/${appId}/schema/pull`));
+    r33.newTokenAfterRotate = okKeys(await call(base, "GET", `/dash/apps/${appId}/schema/pull`, { token: rotated }));
+    r33.rotateBack = plainView(await call(base, "POST", `/dash/apps/${appId}/tokens`, { token: userToken, body: { "admin-token": adminToken } }));
+    // magic-code expiry
+    r33.expiryMissing = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: {} }));
+    r33.expiryString = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: "x" } }));
+    r33.expiryZero = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: 0 } }));
+    r33.expiryTooLong = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: 2000 } }));
+    r33.expiryAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { body: { expiry: 30 } }));
+    const expiryRes = await call(base, "POST", `/dash/apps/${appId}/set-magic-code-expiry`, { token: userToken, body: { expiry: 30.7 } });
+    r33.expiry = expiryRes.status === 200 ? { status: 200, keys: Object.keys(expiryRes.body).sort(), app: norm({ id: expiryRes.body.app?.id, magic_code_expiry_minutes: expiryRes.body.app?.magic_code_expiry_minutes, title: expiryRes.body.app?.title }) } : errView(expiryRes);
+    r33.expiryAfter = (await call(base, "GET", `/dash/apps/${appId}`, { token: userToken })).body?.app?.magic_code_expiry_minutes ?? null;
+    // rule versions (rules were pushed by earlier sections)
+    const rv = await call(base, "GET", `/dash/apps/${appId}/rule-versions`);
+    r33.ruleVersions = rv.status === 200 ? { status: 200, keys: Object.keys(rv.body).sort(), versions: norm(rv.body.versions) } : errView(rv);
+    r33.ruleVersionsUser = okKeys(await call(base, "GET", `/dash/apps/${appId}/rule-versions`, { token: userToken }));
+    r33.ruleVersionsNoAuth = errView(await call(base, "GET", `/dash/apps/${appId}/rule-versions`, { token: null }));
+    // soft-deleted attrs: add one, delete it, list it (dash + admin)
+    const tmpAttr = mk();
+    await call(base, "POST", `/dash/apps/${appId}/schema/steps/apply`, { body: { steps: [addAttr(tmpAttr, "posts", "tmpdel")] } });
+    await call(base, "POST", `/dash/apps/${appId}/schema/steps/apply`, { body: { steps: [["delete-attr", tmpAttr]] } });
+    const softView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), grace: res.body["grace-period-days"], attrs: (res.body.attrs ?? []).map((a) => ({ ...attrView(a), "deletion-marked-at": norm(a["deletion-marked-at"] ?? null) })).sort((a, c) => (canon(a["forward-identity"]) < canon(c["forward-identity"]) ? -1 : 1)) } : errView(res));
+    r33.softDeleted = softView(await call(base, "GET", `/dash/apps/${appId}/soft_deleted_attrs`));
+    r33.softDeletedUser = softView(await call(base, "GET", `/dash/apps/${appId}/soft_deleted_attrs`, { token: userToken }));
+    r33.softDeletedAdmin = softView(await call(base, "GET", "/admin/soft_deleted_attrs", appHdr));
+    r33.softDeletedAdminNoToken = errView(await call(base, "GET", "/admin/soft_deleted_attrs", { token: null, ...appHdr }));
+    const adminSchema = await call(base, "GET", "/admin/schema", appHdr);
+    r33.adminSchema = adminSchema.status === 200 ? { status: 200, keys: Object.keys(adminSchema.body).sort(), schema: schemaView(adminSchema.body.schema) } : errView(adminSchema);
+    r33.adminSchemaNoToken = errView(await call(base, "GET", "/admin/schema", { token: null, ...appHdr }));
+    r33.adminSchemaNoApp = errView(await call(base, "GET", "/admin/schema"));
+    // test users
+    const tuView = (u) => (u ? norm({ email: u.email, code: u.code, app_id: u.app_id, keys: Object.keys(u).sort() }) : null);
+    r33.testUsersEmpty = plainView(await call(base, "GET", `/dash/apps/${appId}/test_users`, { token: userToken }));
+    r33.testUserBadCode = errView(await call(base, "POST", `/dash/apps/${appId}/test_users`, { token: userToken, body: { email: "tester@example.com", code: "12" } }));
+    r33.testUserBadEmail = errView(await call(base, "POST", `/dash/apps/${appId}/test_users`, { token: userToken, body: { email: "nope", code: "123456" } }));
+    r33.testUserMissingCode = errView(await call(base, "POST", `/dash/apps/${appId}/test_users`, { token: userToken, body: { email: "tester@example.com" } }));
+    const tu = await call(base, "POST", `/dash/apps/${appId}/test_users`, { token: userToken, body: { email: "Tester@Example.com", code: "123456" } });
+    r33.testUserCreate = tu.status === 200 ? { status: 200, keys: Object.keys(tu.body).sort(), user: tuView(tu.body["test-user"]) } : errView(tu);
+    r33.testUserDuplicate = errView(await call(base, "POST", `/dash/apps/${appId}/test_users`, { token: userToken, body: { email: "tester@example.com", code: "654321" } }));
+    const tus = await call(base, "GET", `/dash/apps/${appId}/test_users`, { token: userToken });
+    r33.testUsersList = tus.status === 200 ? { status: 200, users: (tus.body["test-users"] ?? []).map(tuView) } : errView(tus);
+    r33.testUserDeleteMissingId = errView(await call(base, "DELETE", `/dash/apps/${appId}/test_users`, { token: userToken, body: {} }));
+    r33.testUserDelete = plainView(await call(base, "DELETE", `/dash/apps/${appId}/test_users`, { token: userToken, body: { id: tu.body?.["test-user"]?.id } }));
+    r33.testUserDeleteAgain = plainView(await call(base, "DELETE", `/dash/apps/${appId}/test_users`, { token: userToken, body: { id: tu.body?.["test-user"]?.id } }));
+    // stats: the shape only (legacy sums cached per-machine session reports)
+    const stats = await call(base, "GET", `/dash/apps/${appId}/stats`, { token: userToken });
+    r33.stats = stats.status === 200 ? { status: 200, keys: Object.keys(stats.body).sort(), countIsNumber: typeof stats.body.count === "number", originsIsObject: typeof stats.body.origins === "object" } : errView(stats);
+    r33.statsAdminToken = errView(await call(base, "GET", `/dash/apps/${appId}/stats`));
+    raw("33-app-management", r33);
+    record("33-app-management", r33);
+
+    // 34 account routes: profiles, check-admin, personal access tokens,
+    // dashboard magic-code login, signout
+    const r34 = {};
+    const patNorm = (v) => JSON.parse(JSON.stringify(norm(v)).replace(/per_[0-9a-f]{64}/g, "<pat>"));
+    r34.profile = plainView(await call(base, "POST", "/dash/profiles", { token: userToken, body: { meta: { role: "dev" } } }));
+    r34.profileMissingMeta = errView(await call(base, "POST", "/dash/profiles", { token: userToken, body: {} }));
+    r34.profileNoAuth = errView(await call(base, "POST", "/dash/profiles", { token: null, body: { meta: {} } }));
+    r34.checkAdmin = errView(await call(base, "GET", "/dash/check-admin", { token: userToken }));
+    r34.checkAdminNoAuth = errView(await call(base, "GET", "/dash/check-admin", { token: null }));
+    r34.patsEmpty = plainView(await call(base, "GET", "/dash/personal_access_tokens", { token: userToken }));
+    r34.patCreateMissingName = errView(await call(base, "POST", "/dash/personal_access_tokens", { token: userToken, body: {} }));
+    const pat = await call(base, "POST", "/dash/personal_access_tokens", { token: userToken, body: { name: "ci token" } });
+    r34.patCreate = pat.status === 200 ? { status: 200, keys: Object.keys(pat.body).sort(), data: patNorm(pat.body.data) } : errView(pat);
+    const pats = await call(base, "GET", "/dash/personal_access_tokens", { token: userToken });
+    r34.pats = pats.status === 200 ? { status: 200, data: (pats.body.data ?? []).map((t) => patNorm({ ...t, keys: Object.keys(t).sort() })) } : errView(pats);
+    r34.patDeleteBadId = errView(await call(base, "DELETE", "/dash/personal_access_tokens/nope", { token: userToken }));
+    r34.patDeleteOther = plainView(await call(base, "DELETE", `/dash/personal_access_tokens/${mk()}`, { token: userToken }));
+    r34.patDelete = plainView(await call(base, "DELETE", `/dash/personal_access_tokens/${pats.body?.data?.[0]?.id}`, { token: userToken }));
+    r34.patsAfterDelete = plainView(await call(base, "GET", "/dash/personal_access_tokens", { token: userToken }));
+    const loginEmail = `login-${fixedPrefix}@example.com`;
+    r34.sendCodeBadEmail = errView(await call(base, "POST", "/dash/auth/send_magic_code", { token: null, body: { email: "nope" } }));
+    r34.sendCodeMissingEmail = errView(await call(base, "POST", "/dash/auth/send_magic_code", { token: null, body: {} }));
+    r34.sendCode = plainView(await call(base, "POST", "/dash/auth/send_magic_code", { token: null, body: { email: loginEmail } }));
+    const loginCode = readDashCode(name, loginEmail);
+    r34.codeShape = /^\d{6}$/.test(loginCode);
+    r34.verifyWrongCode = errView(await call(base, "POST", "/dash/auth/verify_magic_code", { token: null, body: { email: loginEmail, code: "000000" } }));
+    r34.verifyMissingCode = errView(await call(base, "POST", "/dash/auth/verify_magic_code", { token: null, body: { email: loginEmail } }));
+    const verified = await call(base, "POST", "/dash/auth/verify_magic_code", { token: null, body: { email: loginEmail, code: ` ${loginCode} ` } });
+    r34.verify = verified.status === 200 ? { status: 200, keys: Object.keys(verified.body).sort(), userKeys: Object.keys(verified.body.user ?? {}).sort(), email: verified.body.user?.email } : errView(verified);
+    r34.verifyReuse = errView(await call(base, "POST", "/dash/auth/verify_magic_code", { token: null, body: { email: loginEmail, code: loginCode } }));
+    const loginToken = verified.body?.token;
+    r34.meWithLoginToken = okKeys(await call(base, "GET", "/dash/me", { token: loginToken }), (b) => b.user);
+    r34.signoutNoAuth = errView(await call(base, "POST", "/dash/signout", { token: null }));
+    r34.signout = plainView(await call(base, "POST", "/dash/signout", { token: loginToken }));
+    r34.meAfterSignout = errView(await call(base, "GET", "/dash/me", { token: loginToken }));
+    raw("34-account-routes", r34);
+    record("34-account-routes", r34);
+
+    // 35 dashboard storage + test email
+    const r35 = {};
+    const dashUpload = async (token, headers, body = "hello") => {
+      const res = await fetch(base + `/dash/apps/${appId}/storage/upload`, { method: "PUT", headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers }, body });
+      const text = await res.text();
+      let json;
+      try { json = JSON.parse(text); } catch { json = { "<non-json>": text.slice(0, 200) }; }
+      return { status: res.status, body: json };
+    };
+    const upView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), data: norm({ ...res.body.data, keys: Object.keys(res.body.data ?? {}).sort() }) } : errView(res));
+    r35.uploadNoAuth = errView(await dashUpload(null, { path: "dash/hello.txt", "content-type": "text/plain" }));
+    r35.uploadMissingPath = errView(await dashUpload(userToken, { "content-type": "text/plain" }));
+    r35.upload = upView(await dashUpload(userToken, { path: "dash/hello.txt", "content-type": "text/plain" }));
+    r35.uploadAdminToken = upView(await dashUpload(adminToken, { path: "dash/hello2.txt", "content-type": "text/plain" }, "hello again"));
+    r35.filesAfterUpload = plainView(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { $files: { $: { fields: ["path"] } } } } }));
+    r35.filesDeleteMissing = errView(await call(base, "POST", `/dash/apps/${appId}/storage/files/delete`, { token: userToken, body: {} }));
+    r35.filesDeleteNotArray = errView(await call(base, "POST", `/dash/apps/${appId}/storage/files/delete`, { token: userToken, body: { filenames: "x" } }));
+    r35.filesDeleteNoAuth = errView(await call(base, "POST", `/dash/apps/${appId}/storage/files/delete`, { token: null, body: { filenames: ["dash/hello.txt"] } }));
+    r35.filesDelete = plainView(await call(base, "POST", `/dash/apps/${appId}/storage/files/delete`, { token: userToken, body: { filenames: ["dash/hello.txt", "nope.txt"] } }));
+    r35.filesDeleteAdminToken = plainView(await call(base, "POST", `/dash/apps/${appId}/storage/files/delete`, { body: { filenames: ["dash/hello2.txt"] } }));
+    r35.filesAfterDelete = plainView(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { $files: { $: { fields: ["path"] } } } } }));
+    r35.testEmailMissingTo = errView(await call(base, "POST", `/dash/apps/${appId}/send-test-email`, { token: userToken, body: { subject: "s {code}", body: "b {code}" } }));
+    r35.testEmailNonMember = errView(await call(base, "POST", `/dash/apps/${appId}/send-test-email`, { token: userToken, body: { subject: "s {code}", body: "b {code}", to: "stranger@example.com" } }));
+    r35.testEmailAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/send-test-email`, { body: { subject: "s {code}", body: "b {code}", to: me.body?.user?.email } }));
+    r35.testEmail = plainView(await call(base, "POST", `/dash/apps/${appId}/send-test-email`, { token: userToken, body: { subject: "s {code}", body: "b {code}", to: me.body?.user?.email } }));
+    raw("35-dash-storage-and-test-email", r35);
+    record("35-dash-storage-and-test-email", r35);
+
+    // 36 clear: every user attr soft-deleted, rules reset (last: it empties the app)
+    const r36 = {};
+    r36.clearAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/clear`));
+    r36.clear = plainView(await call(base, "POST", `/dash/apps/${appId}/clear`, { token: userToken }));
+    r36.pullAfterClear = pullView(await call(base, "GET", `/dash/apps/${appId}/schema/pull`));
+    r36.permsAfterClear = plainView(await call(base, "GET", `/dash/apps/${appId}/perms/pull`));
+    r36.softDeletedAfterClear = softView(await call(base, "GET", `/dash/apps/${appId}/soft_deleted_attrs`));
+    r36.queryAfterClear = plainView(await call(base, "POST", "/admin/query", { ...appHdr, body: { query: { posts: {} } } }));
+    raw("36-clear", r36);
+    record("36-clear", r36);
+
+    // 37 teams: app + org invites, member roles, org rename, transfer to
+    // org, ephemeral status, get-a-db lookup. A second dashboard user (the
+    // invitee) is signed in through the dashboard magic-code flow.
+    const r37 = {};
+    const inviteeEmail = `invitee-${fixedPrefix}@example.com`;
+    await call(base, "POST", "/dash/auth/send_magic_code", { token: null, body: { email: inviteeEmail } });
+    const inviteeLogin = await call(base, "POST", "/dash/auth/verify_magic_code", { token: null, body: { email: inviteeEmail, code: readDashCode(name, inviteeEmail) } });
+    const inviteeToken = inviteeLogin.body?.token;
+    r37.inviteeLogin = inviteeLogin.status === 200 ? { status: 200 } : errView(inviteeLogin);
+    const invitesOf = async (token) => {
+      const d = await call(base, "GET", "/dash", { token });
+      return (d.body?.apps ?? []).find((a) => a.id === appId) ?? {};
+    };
+    r37.inviteSendAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { body: { "invitee-email": inviteeEmail, role: "admin" } }));
+    r37.inviteSendBadRole = errView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail, role: "creator" } }));
+    r37.inviteSendBadEmail = errView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": "nope", role: "admin" } }));
+    r37.inviteSendMissingRole = errView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail } }));
+    r37.inviteSendByStranger = errView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: inviteeToken, body: { "invitee-email": "x@example.com", role: "admin" } }));
+    r37.inviteSend = plainView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail, role: "admin" } }));
+    r37.inviteSendAgain = plainView(await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail, role: "collaborator" } }));
+    let appRow = await invitesOf(userToken);
+    r37.invitesOnApp = norm((appRow.invites ?? []).map((i) => ({ email: i.email, role: i.role, status: i.status, expired: i.expired })));
+    const inviteId = appRow.invites?.[0]?.id;
+    r37.acceptWrongUser = errView(await call(base, "POST", "/dash/invites/accept", { token: userToken, body: { "invite-id": inviteId } }));
+    r37.acceptUnknown = errView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: { "invite-id": mk() } }));
+    r37.acceptMissingId = errView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: {} }));
+    r37.acceptNoAuth = errView(await call(base, "POST", "/dash/invites/accept", { token: null, body: { "invite-id": inviteId } }));
+    r37.declineWrongUser = errView(await call(base, "POST", "/dash/invites/decline", { token: userToken, body: { "invite-id": inviteId } }));
+    r37.accept = plainView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: { "invite-id": inviteId } }));
+    r37.acceptAgain = errView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: { "invite-id": inviteId } }));
+    appRow = await invitesOf(userToken);
+    r37.membersAfterAccept = norm((appRow.members ?? []).map((m) => ({ email: m.email, role: m.role })));
+    r37.inviteStatusAfterAccept = norm((appRow.invites ?? []).map((i) => ({ email: i.email, status: i.status })));
+    const memberId = (appRow.members ?? []).find((m) => m.email === inviteeEmail)?.id;
+    r37.inviteeSeesApp = { titles: ((await call(base, "GET", "/dash", { token: inviteeToken })).body?.apps ?? []).map((a) => a.title).sort() };
+    r37.memberUpdateBadRole = errView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: userToken, body: { id: memberId, role: "boss" } }));
+    r37.memberUpdateUnknown = errView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: userToken, body: { id: mk(), role: "admin" } }));
+    r37.memberUpdateMissingId = errView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: userToken, body: { role: "admin" } }));
+    r37.memberUpdateByCollaborator = errView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: inviteeToken, body: { id: memberId, role: "admin" } }));
+    r37.memberUpdate = plainView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: userToken, body: { id: memberId, role: "admin" } }));
+    r37.memberUpdateAboveSelf = errView(await call(base, "POST", `/dash/apps/${appId}/members/update`, { token: inviteeToken, body: { id: memberId, role: "owner" } }));
+    r37.memberRemoveMissingId = errView(await call(base, "DELETE", `/dash/apps/${appId}/members/remove`, { token: userToken, body: {} }));
+    r37.memberRemoveUnknown = errView(await call(base, "DELETE", `/dash/apps/${appId}/members/remove`, { token: userToken, body: { id: mk() } }));
+    r37.memberRemove = plainView(await call(base, "DELETE", `/dash/apps/${appId}/members/remove`, { token: userToken, body: { id: memberId } }));
+    appRow = await invitesOf(userToken);
+    r37.membersAfterRemove = (appRow.members ?? []).length;
+    r37.inviteeSeesAppAfterRemove = { titles: ((await call(base, "GET", "/dash", { token: inviteeToken })).body?.apps ?? []).map((a) => a.title).sort() };
+    // revoke a fresh invite; decline another; a declined invite can't be accepted
+    await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": "third@example.com", role: "collaborator" } });
+    appRow = await invitesOf(userToken);
+    const thirdInvite = (appRow.invites ?? []).find((i) => i.email === "third@example.com")?.id;
+    r37.revokeMissingId = errView(await call(base, "DELETE", `/dash/apps/${appId}/invite/revoke`, { token: userToken, body: {} }));
+    r37.revokeByStranger = errView(await call(base, "DELETE", `/dash/apps/${appId}/invite/revoke`, { token: inviteeToken, body: { "invite-id": thirdInvite } }));
+    r37.revoke = plainView(await call(base, "DELETE", `/dash/apps/${appId}/invite/revoke`, { token: userToken, body: { "invite-id": thirdInvite } }));
+    appRow = await invitesOf(userToken);
+    r37.invitesAfterRevoke = norm((appRow.invites ?? []).map((i) => ({ email: i.email, status: i.status })).sort((a, b) => (a.email < b.email ? -1 : 1)));
+    await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail, role: "collaborator" } });
+    appRow = await invitesOf(userToken);
+    const declineId = (appRow.invites ?? []).find((i) => i.email === inviteeEmail)?.id;
+    r37.decline = plainView(await call(base, "POST", "/dash/invites/decline", { token: inviteeToken, body: { "invite-id": declineId } }));
+    r37.acceptDeclined = errView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: { "invite-id": declineId } }));
+    // org side
+    const teamOrg = await call(base, "POST", "/dash/orgs", { token: userToken, body: { title: "team org" } });
+    const teamOrgId = teamOrg.body?.org?.id;
+    const orgView = async (token = userToken) => {
+      const g = await call(base, "GET", `/dash/orgs/${teamOrgId}`, { token });
+      return g.status === 200 ? { status: 200, title: g.body.org?.title, members: (g.body.members ?? []).map((m) => ({ email: m.email, role: m.role })).sort((a, b) => (a.email < b.email ? -1 : 1)), invites: (g.body.invites ?? []).map((i) => ({ email: i.email, role: i.role, status: i.status })), apps: (g.body.apps ?? []).map((a) => a.title).sort() } : errView(g);
+    };
+    r37.orgInviteSendByStranger = errView(await call(base, "POST", `/dash/orgs/${teamOrgId}/invite/send`, { token: inviteeToken, body: { "invitee-email": "x@example.com", role: "admin" } }));
+    r37.orgInviteSend = plainView(await call(base, "POST", `/dash/orgs/${teamOrgId}/invite/send`, { token: userToken, body: { "invitee-email": inviteeEmail, role: "admin" } }));
+    let orgGot = await call(base, "GET", `/dash/orgs/${teamOrgId}`, { token: userToken });
+    const orgInviteId = (orgGot.body?.invites ?? []).find((i) => i.email === inviteeEmail)?.id;
+    r37.orgAccept = plainView(await call(base, "POST", "/dash/invites/accept", { token: inviteeToken, body: { "invite-id": orgInviteId } }));
+    r37.orgAfterAccept = await orgView();
+    r37.orgRenameMissingTitle = errView(await call(base, "POST", `/dash/orgs/${teamOrgId}/rename`, { token: userToken, body: {} }));
+    r37.orgRenameTooLong = errView(await call(base, "POST", `/dash/orgs/${teamOrgId}/rename`, { token: userToken, body: { title: "x".repeat(141) } }));
+    r37.orgRename = plainView(await call(base, "POST", `/dash/orgs/${teamOrgId}/rename`, { token: userToken, body: { title: "renamed org" } }));
+    r37.orgRenameByAdmin = plainView(await call(base, "POST", `/dash/orgs/${teamOrgId}/rename`, { token: inviteeToken, body: { title: "renamed by admin" } }));
+    orgGot = await call(base, "GET", `/dash/orgs/${teamOrgId}`, { token: userToken });
+    const orgMemberId = (orgGot.body?.members ?? []).find((m) => m.email === inviteeEmail)?.id;
+    const orgOwnerId = (orgGot.body?.members ?? []).find((m) => m.email !== inviteeEmail)?.id;
+    r37.orgMemberUpdateAboveSelf = errView(await call(base, "POST", `/dash/orgs/${teamOrgId}/members/update`, { token: inviteeToken, body: { id: orgMemberId, role: "owner" } }));
+    r37.orgMemberUpdate = plainView(await call(base, "POST", `/dash/orgs/${teamOrgId}/members/update`, { token: userToken, body: { id: orgMemberId, role: "collaborator" } }));
+    r37.orgRenameByCollaborator = errView(await call(base, "POST", `/dash/orgs/${teamOrgId}/rename`, { token: inviteeToken, body: { title: "nope" } }));
+    r37.orgRemoveLastOwner = errView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/members/remove`, { token: userToken, body: { id: orgOwnerId } }));
+    r37.orgRemoveOwnerByCollaborator = errView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/members/remove`, { token: inviteeToken, body: { id: orgOwnerId } }));
+    r37.orgMemberRemove = plainView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/members/remove`, { token: userToken, body: { id: orgMemberId } }));
+    r37.orgAfterRemove = await orgView();
+    // transfer an app into the org
+    const tApp = mk();
+    await call(base, "POST", "/dash/apps", { token: userToken, body: { id: tApp, title: "to transfer", admin_token: mk() } });
+    r37.transferUnknownOrg = errView(await call(base, "POST", `/dash/apps/${tApp}/transfer_to_org/${mk()}`, { token: userToken }));
+    r37.transferNotOwner = errView(await call(base, "POST", `/dash/apps/${tApp}/transfer_to_org/${teamOrgId}`, { token: inviteeToken }));
+    r37.transfer = plainView(await call(base, "POST", `/dash/apps/${tApp}/transfer_to_org/${teamOrgId}`, { token: userToken }));
+    const tGot = await call(base, "GET", `/dash/apps/${tApp}`, { token: userToken });
+    r37.transferred = { orgMatches: tGot.body?.app?.org_id === teamOrgId, creator: tGot.body?.app?.creator_id ?? null };
+    r37.orgAfterTransfer = await orgView();
+    // ephemeral status toggle + get-a-db lookup
+    const eph2 = await call(base, "POST", "/dash/apps/ephemeral", { token: null, body: { title: "eph status" } });
+    const eph2Id = eph2.body?.app?.id;
+    r37.ephStatusBadToken = errView(await call(base, "POST", `/dash/apps/ephemeral/${eph2Id}/status`, { token: null, body: { "admin-token": mk(), status: "read-only" } }));
+    r37.ephStatusBadStatus = errView(await call(base, "POST", `/dash/apps/ephemeral/${eph2Id}/status`, { token: null, body: { "admin-token": eph2.body?.app?.["admin-token"], status: "paused" } }));
+    r37.ephStatus = plainView(await call(base, "POST", `/dash/apps/ephemeral/${eph2Id}/status`, { token: null, body: { "admin-token": eph2.body?.app?.["admin-token"], status: "read-only" } }));
+    r37.ephStatusRegularApp = errView(await call(base, "POST", `/dash/apps/ephemeral/${appId}/status`, { token: null, body: { "admin-token": adminToken, status: "active" } }));
+    r37.getADbRegular = errView(await call(base, "GET", `/dash/apps/get_a_db/${appId}`, { token: null }));
+    r37.getADbUnknown = errView(await call(base, "GET", `/dash/apps/get_a_db/${mk()}`, { token: null }));
+    raw("37-teams", r37);
+    record("37-teams", r37);
+
+    // 38 platform API (/superadmin, personal access tokens), OAuth-app
+    // management and the platform OAuth provider round trip
+    const r38 = {};
+    const patRes = await call(base, "POST", "/dash/personal_access_tokens", { token: userToken, body: { name: "platform" } });
+    const patTok = patRes.body?.data?.token;
+    const sa = (method, p, opts = {}) => call(base, method, p, { token: patTok, ...opts });
+    const saApp = (a) => norm({ id: a?.id, title: a?.title, creator_id: a?.creator_id, org_id: a?.org_id, status: a?.status });
+    const appsView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), apps: (res.body.apps ?? []).map(saApp).sort((a, c) => (canon(a) < canon(c) ? -1 : 1)) } : errView(res));
+    r38.appsNoAuth = errView(await call(base, "GET", "/superadmin/apps", { token: null }));
+    r38.appsBadPat = errView(await call(base, "GET", "/superadmin/apps", { token: "per_" + "0".repeat(64) }));
+    r38.appsRefreshToken = errView(await call(base, "GET", "/superadmin/apps", { token: userToken }));
+    r38.apps = appsView(await sa("GET", "/superadmin/apps"));
+    const inc = await sa("GET", "/superadmin/apps?include=schema,perms");
+    r38.appsInclude = inc.status === 200 ? { status: 200, apps: (inc.body.apps ?? []).map((a) => ({ title: a.title, hasSchema: "schema" in a, hasPerms: "perms" in a, schemaKeys: Object.keys(a.schema ?? {}).sort() })).sort((a, c) => (a.title < c.title ? -1 : 1)) } : errView(inc);
+    const orgs = await sa("GET", "/superadmin/orgs");
+    r38.orgs = orgs.status === 200 ? { status: 200, orgs: (orgs.body.orgs ?? []).map((o) => ({ title: o.title, role: o.role, keys: Object.keys(o).sort() })).sort((a, c) => (a.title < c.title ? -1 : 1)) } : errView(orgs);
+    r38.orgAppsUnknown = errView(await sa("GET", `/superadmin/orgs/${mk()}/apps`));
+    const orgApps = await sa("GET", `/superadmin/orgs/${teamOrgId}/apps`);
+    r38.orgApps = orgApps.status === 200 ? { status: 200, titles: (orgApps.body.apps ?? []).map((a) => a.title).sort() } : errView(orgApps);
+    r38.createMissingTitle = errView(await sa("POST", "/superadmin/apps", { body: {} }));
+    r38.createBadPerms = errView(await sa("POST", "/superadmin/apps", { body: { title: "x", perms: { posts: { allow: { view: "auth.id ==" } } } } }));
+    r38.createUnknownOrg = errView(await sa("POST", "/superadmin/apps", { body: { title: "x", org_id: mk() } }));
+    const pcreated = await sa("POST", "/superadmin/apps", { body: { title: "platform app", perms: { posts: { allow: { view: "true" } } }, schema: { entities: { posts: { title: { valueType: "string", config: { indexed: false, unique: false } } } }, links: {} } } });
+    r38.create = pcreated.status === 200 ? { status: 200, keys: Object.keys(pcreated.body).sort(), app: norm({ title: pcreated.body.app?.title, perms: pcreated.body.app?.perms, schema: schemaView(pcreated.body.app?.schema), hasAdminToken: typeof pcreated.body.app?.["admin-token"] === "string", creatorIsUser: pcreated.body.app?.creator_id === me.body?.user?.id }) } : errView(pcreated);
+    const pApp = pcreated.body?.app?.id;
+    const pAdminToken = pcreated.body?.app?.["admin-token"];
+    const detailsView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), app: saApp(res.body.app) } : errView(res));
+    r38.details = detailsView(await sa("GET", `/superadmin/apps/${pApp}`));
+    r38.detailsAdminToken = detailsView(await call(base, "GET", `/superadmin/apps/${pApp}`, { token: pAdminToken }));
+    r38.detailsAdminTokenMismatch = errView(await call(base, "GET", `/superadmin/apps/${appId}`, { token: pAdminToken }));
+    r38.detailsUserToken = detailsView(await call(base, "GET", `/superadmin/apps/${pApp}`, { token: userToken }));
+    r38.detailsStranger = errView(await call(base, "GET", `/superadmin/apps/${pApp}`, { token: inviteeToken }));
+    r38.detailsUnknown = errView(await sa("GET", `/superadmin/apps/${mk()}`));
+    const saUpView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), app: saApp(res.body.app), deleted: res.body.app?.deletion_marked_at != null } : errView(res));
+    r38.update = saUpView(await sa("POST", `/superadmin/apps/${pApp}`, { body: { title: "renamed platform app" } }));
+    r38.updateMissingTitle = errView(await sa("POST", `/superadmin/apps/${pApp}`, { body: {} }));
+    const sg = await sa("GET", `/superadmin/apps/${pApp}/schema`);
+    r38.schemaGet = sg.status === 200 ? { status: 200, schema: schemaView(sg.body.schema) } : errView(sg);
+    const planBody = { schema: { entities: { posts: { title: { valueType: "string", config: { indexed: false, unique: false } }, views: { valueType: "number", config: { indexed: true, unique: false } } }, tags: { name: { valueType: "string", config: { indexed: false, unique: true } } } }, links: {} }, check_types: true, supports_background_updates: false };
+    r38.schemaPlan = planView(await sa("POST", `/superadmin/apps/${pApp}/schema/push/plan`, { body: planBody }));
+    r38.schemaApply = applyView(await sa("POST", `/superadmin/apps/${pApp}/schema/push/apply`, { body: planBody }));
+    r38.permsGet = plainView(await sa("GET", `/superadmin/apps/${pApp}/perms`));
+    r38.permsPost = plainView(await sa("POST", `/superadmin/apps/${pApp}/perms`, { body: { code: { posts: { allow: { view: "false" } } } } }));
+    r38.permsPostSame = plainView(await sa("POST", `/superadmin/apps/${pApp}/perms`, { body: { code: { posts: { allow: { view: "false" } } } } }));
+    r38.permsPostBad = errView(await sa("POST", `/superadmin/apps/${pApp}/perms`, { body: { code: { posts: { allow: { view: "nope nope" } } } } }));
+    r38.permsPostMissing = errView(await sa("POST", `/superadmin/apps/${pApp}/perms`, { body: {} }));
+    r38.transferSendMissingEmail = errView(await sa("POST", `/superadmin/apps/${pApp}/transfers/send`, { body: {} }));
+    r38.transferSend = okKeys(await sa("POST", `/superadmin/apps/${pApp}/transfers/send`, { body: { dest_email: inviteeEmail } }));
+    r38.transferRevoke = plainView(await sa("POST", `/superadmin/apps/${pApp}/transfers/revoke`, { body: { dest_email: inviteeEmail } }));
+    r38.transferRevokeAgain = plainView(await sa("POST", `/superadmin/apps/${pApp}/transfers/revoke`, { body: { dest_email: inviteeEmail } }));
+    r38.deleteStranger = errView(await call(base, "DELETE", `/superadmin/apps/${pApp}`, { token: inviteeToken }));
+    r38.delete = saUpView(await sa("DELETE", `/superadmin/apps/${pApp}`));
+    r38.detailsAfterDelete = errView(await sa("GET", `/superadmin/apps/${pApp}`));
+    // OAuth-app management
+    const oaView = (a) => norm({ appName: a?.appName, isPublic: a?.isPublic, grantedScopes: a?.grantedScopes, supportEmail: a?.supportEmail, appHomePage: a?.appHomePage, appLogo: a?.appLogo, keys: Object.keys(a ?? {}).sort() });
+    const poa = await call(base, "POST", `/dash/apps/${appId}/oauth-apps`, { token: userToken, body: { app_name: "My Platform App", support_email: "support@example.com", app_home_page: "https://example.com" } });
+    r38.oauthAppCreate = poa.status === 200 ? { status: 200, keys: Object.keys(poa.body).sort(), app: oaView(poa.body.app) } : errView(poa);
+    r38.oauthAppCreateMissingName = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps`, { token: userToken, body: {} }));
+    r38.oauthAppCreateBadLogo = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps`, { token: userToken, body: { app_name: "x", app_logo: "data:image/gif;base64,AAAA" } }));
+    r38.oauthAppCreateBadLogoUrl = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps`, { token: userToken, body: { app_name: "x", app_logo: "nope" } }));
+    r38.oauthAppCreateBadUrl = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps`, { token: userToken, body: { app_name: "x", app_home_page: "ftp://x" } }));
+    r38.oauthAppCreateDuplicateName = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps`, { token: userToken, body: { app_name: "My Platform App" } }));
+    const oaLogo = await call(base, "POST", `/dash/apps/${appId}/oauth-apps`, { token: userToken, body: { app_name: "With Logo", app_logo: "data:image/png;base64,iVBORw0KGgo=" } });
+    r38.oauthAppCreateWithLogo = oaLogo.status === 200 ? { status: 200, app: oaView(oaLogo.body.app) } : errView(oaLogo);
+    r38.oauthAppAdminToken = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps`, { body: { app_name: "y" } }));
+    const oaId = poa.body?.app?.id;
+    const oaUpd = await call(base, "POST", `/dash/apps/${appId}/oauth-apps/${oaId}`, { token: userToken, body: { app_name: "Renamed Platform App", app_tos_link: "https://example.com/tos" } });
+    r38.oauthAppUpdate = oaUpd.status === 200 ? { status: 200, app: oaView(oaUpd.body.app), tos: oaUpd.body.app?.appTosLink } : errView(oaUpd);
+    r38.oauthAppUpdateUnknown = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps/${mk()}`, { token: userToken, body: { app_name: "z" } }));
+    const pclient = await call(base, "POST", `/dash/apps/${appId}/oauth-apps/${oaId}/clients`, { token: userToken, body: { client_name: "web", authorized_redirect_urls: ["https://example.com/callback", "http://localhost:3000/callback"] } });
+    r38.clientCreate = pclient.status === 200 ? { status: 200, keys: Object.keys(pclient.body).sort(), client: norm({ clientName: pclient.body.client?.clientName, authorizedRedirectUrls: pclient.body.client?.authorizedRedirectUrls, keys: Object.keys(pclient.body.client ?? {}).sort() }), secretKeys: Object.keys(pclient.body.clientSecret ?? {}).sort(), secretShape: /^[0-9a-f]{68}$/.test(pclient.body.secretValue), firstFourMatches: pclient.body.secretValue?.slice(0, 4) === pclient.body.clientSecret?.firstFour } : errView(pclient);
+    r38.clientCreateBadRedirect = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps/${oaId}/clients`, { token: userToken, body: { client_name: "bad", authorized_redirect_urls: ["http://example.com/x"] } }));
+    r38.clientCreateMissingName = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps/${oaId}/clients`, { token: userToken, body: {} }));
+    r38.clientCreateUnknownApp = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-apps/${mk()}/clients`, { token: userToken, body: { client_name: "x" } }));
+    const pclientId = pclient.body?.client?.clientId;
+    const secretValue = pclient.body?.secretValue;
+    const cupd = await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${pclientId}`, { token: userToken, body: { client_name: "web2", add_redirect_url: "https://example.com/cb2", remove_redirect_url: "http://localhost:3000/callback" } });
+    r38.clientUpdate = cupd.status === 200 ? { status: 200, client: norm({ clientName: cupd.body.client?.clientName, authorizedRedirectUrls: cupd.body.client?.authorizedRedirectUrls }) } : errView(cupd);
+    r38.clientUpdateBadUrl = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${pclientId}`, { token: userToken, body: { add_redirect_url: "http://bad.example.com" } }));
+    r38.clientUpdateUnknown = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${mk()}`, { token: userToken, body: { client_name: "x" } }));
+    const sec2 = await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${pclientId}/client-secrets`, { token: userToken });
+    r38.secretCreate = sec2.status === 200 ? { status: 200, keys: Object.keys(sec2.body).sort(), secretKeys: Object.keys(sec2.body.clientSecret ?? {}).sort(), shape: /^[0-9a-f]{68}$/.test(sec2.body.secretValue) } : errView(sec2);
+    r38.secretCreateUnknownClient = errView(await call(base, "POST", `/dash/apps/${appId}/oauth-app-clients/${mk()}/client-secrets`, { token: userToken }));
+    r38.secretDelete = okKeys(await call(base, "DELETE", `/dash/apps/${appId}/oauth-app-client-secrets/${sec2.body?.clientSecret?.id}`, { token: userToken }), (b) => b.clientSecret);
+    r38.secretDeleteUnknown = errView(await call(base, "DELETE", `/dash/apps/${appId}/oauth-app-client-secrets/${mk()}`, { token: userToken }));
+    const oaList = await call(base, "GET", `/dash/apps/${appId}/oauth-apps`, { token: userToken });
+    r38.oauthAppsList = oaList.status === 200 ? { status: 200, keys: Object.keys(oaList.body).sort(), apps: (oaList.body.apps ?? []).map((a) => ({ appName: a.appName, keys: Object.keys(a).sort(), clients: (a.clients ?? []).map((c) => ({ clientName: c.clientName, keys: Object.keys(c).sort(), secrets: (c.clientSecrets ?? []).length, secretKeys: Object.keys(c.clientSecrets?.[0] ?? {}).sort() })) })).sort((a, c) => (a.appName < c.appName ? -1 : 1)) } : errView(oaList);
+    // the OAuth flow
+    const startUrl = (over = {}) => base + "/platform/oauth/start?" + new URLSearchParams({ client_id: pclientId, redirect_uri: "https://example.com/callback", response_type: "code", scope: "apps-read apps-write", state: "xyz", ...over });
+    const startView = async (over) => {
+      const res = await fetch(startUrl(over), { redirect: "manual" });
+      const text = await res.text();
+      const loc = res.headers.get("location") ?? "";
+      const cookie = res.headers.get("set-cookie") ?? "";
+      const attrs = cookie.split(";").map((a) => a.trim().toLowerCase()).filter(Boolean).map((a) => (a.startsWith("__session=") ? "__session=<cookie>" : a.startsWith("expires=") ? "expires=<date>" : a)).filter((a) => a !== "secure").sort();
+      return { status: res.status, contentType: (res.headers.get("content-type") ?? "").split(";")[0], locationPath: loc ? new URL(loc).pathname : null, locationParams: loc ? [...new URL(loc).searchParams.keys()].sort() : null, cookieAttrs: attrs, bodyHint: res.status === 400 ? text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<uuid>").match(/<p>[^<]*<\/p><p>([^<]*)<\/p>/)?.[1] ?? null : null };
+    };
+    r38.start = await startView();
+    r38.startBadClient = await startView({ client_id: mk() });
+    r38.startBadScope = await startView({ scope: "nope" });
+    r38.startBadRedirect = await startView({ redirect_uri: "https://evil.example.com/cb" });
+    r38.startMissingState = await startView({ state: "" });
+    r38.startBadResponseType = await startView({ response_type: "token" });
+    r38.startChallengeWithoutMethod = await startView({ code_challenge: "abc" });
+    const startAndClaim = async (over = {}) => {
+      const res = await fetch(startUrl(over), { redirect: "manual" });
+      const loc = res.headers.get("location") ?? "";
+      const redirectId = loc ? new URL(loc).searchParams.get("redirect-id") : null;
+      const cookie = /__session=([^;]+)/.exec(res.headers.get("set-cookie") ?? "")?.[1];
+      const claimed = await call(base, "POST", "/platform/oauth/claim", { token: userToken, body: { redirect: redirectId } });
+      return { redirectId, cookie, claimed, grantToken: claimed.body?.grantToken };
+    };
+    const grantView = async ({ redirectId, cookie, grantToken }, over = {}) => {
+      const res = await fetch(base + "/platform/oauth/grant", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...(cookie ? { cookie: `__session=${cookie}` } : {}) }, body: new URLSearchParams({ redirect_id: redirectId, grant_token: grantToken, ...over }), redirect: "manual" });
+      const text = await res.text();
+      const loc = res.headers.get("location");
+      const u = loc ? new URL(loc) : null;
+      return { status: res.status, contentType: (res.headers.get("content-type") ?? "").split(";")[0], origin: u ? u.origin + u.pathname : null, params: u ? Object.fromEntries([...u.searchParams.entries()].map(([k, v]) => [k, k === "code" ? "<uuid>" : v])) : null, bodyHint: res.status === 400 ? text.match(/<p>[^<]*<\/p><p>([^<]*)<\/p>/)?.[1]?.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<uuid>") ?? null : null, code: u?.searchParams.get("code") };
+    };
+    r38.claimNoAuth = errView(await call(base, "POST", "/platform/oauth/claim", { token: null, body: { redirect: mk() } }));
+    r38.claimUnknown = errView(await call(base, "POST", "/platform/oauth/claim", { token: userToken, body: { redirect: mk() } }));
+    r38.claimMissing = errView(await call(base, "POST", "/platform/oauth/claim", { token: userToken, body: {} }));
+    const a = await startAndClaim();
+    r38.claim = a.claimed.status === 200 ? { status: 200, keys: Object.keys(a.claimed.body).sort(), appName: a.claimed.body.appName, userEmail: a.claimed.body.userEmail, redirectOrigin: a.claimed.body.redirectOrigin, scopes: a.claimed.body.scopes, hasGrantToken: !!a.claimed.body.grantToken } : errView(a.claimed);
+    r38.claimAgain = errView(await call(base, "POST", "/platform/oauth/claim", { token: userToken, body: { redirect: a.redirectId } }));
+    r38.claimStranger = errView((await startAndClaim()).claimed.status === 200 ? { status: 200, body: {} } : { status: 0, body: {} });
+    const strangerRound = await (async () => {
+      const res = await fetch(startUrl(), { redirect: "manual" });
+      const redirectId = new URL(res.headers.get("location") ?? "http://x/").searchParams.get("redirect-id");
+      return await call(base, "POST", "/platform/oauth/claim", { token: inviteeToken, body: { redirect: redirectId } });
+    })();
+    r38.claimNonMember = errView(strangerRound);
+    r38.grantWrongToken = await grantView({ ...a, grantToken: mk() });
+    const b = await startAndClaim();
+    r38.grantNoCookie = await grantView({ ...b, cookie: null });
+    const c = await startAndClaim();
+    r38.grantWrongCookie = await grantView({ ...c, cookie: `instantdb_${mk()}` });
+    const d = await startAndClaim();
+    const denyRes = await fetch(base + "/platform/oauth/deny", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", cookie: `__session=${d.cookie}` }, body: new URLSearchParams({ redirect_id: d.redirectId, grant_token: d.grantToken }), redirect: "manual" });
+    const denyLoc = denyRes.headers.get("location");
+    r38.deny = { status: denyRes.status, params: denyLoc ? Object.fromEntries(new URL(denyLoc).searchParams.entries()) : null };
+    r38.denyAgain = errView(await (async () => { const res = await fetch(base + "/platform/oauth/deny", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", cookie: `__session=${d.cookie}` }, body: new URLSearchParams({ redirect_id: d.redirectId, grant_token: d.grantToken }), redirect: "manual" }); const text = await res.text(); let json; try { json = JSON.parse(text); } catch { json = { "<non-json>": text.slice(0, 80) }; } return { status: res.status, body: json }; })());
+    const e = await startAndClaim();
+    const grant1 = await grantView(e);
+    const code1 = grant1.code;
+    r38.grant = { ...grant1, code: code1 ? "<uuid>" : null };
+    const tokenCall = async (form) => {
+      const res = await fetch(base + "/platform/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(form) });
+      const text = await res.text();
+      let json;
+      try { json = JSON.parse(text); } catch { json = { "<non-json>": text.slice(0, 200) }; }
+      return { status: res.status, body: json };
+    };
+    const tokenView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), token_type: res.body.token_type, scopes: res.body.scopes ?? res.body.scope, accessShape: /^pat_[0-9a-f]{64}$/.test(res.body.access_token), refreshShape: res.body.refresh_token ? /^prt_[0-9a-f]{64}$/.test(res.body.refresh_token) : null, expiresDays: Math.round(res.body.expires_in / 86400) } : errView(res));
+    r38.tokenWrongRedirect = tokenView(await tokenCall({ grant_type: "authorization_code", client_id: pclientId, client_secret: secretValue, code: code1, redirect_uri: "https://example.com/other" }));
+    const f = await startAndClaim();
+    const code2 = (await grantView(f)).code;
+    r38.tokenBadSecret = tokenView(await tokenCall({ grant_type: "authorization_code", client_id: pclientId, client_secret: "nope", code: code2, redirect_uri: "https://example.com/callback" }));
+    r38.tokenBadGrantType = tokenView(await tokenCall({ grant_type: "password", client_id: pclientId, client_secret: secretValue, code: code2, redirect_uri: "https://example.com/callback" }));
+    r38.tokenMissingClientId = tokenView(await tokenCall({ grant_type: "authorization_code", client_secret: secretValue, code: code2, redirect_uri: "https://example.com/callback" }));
+    const tok = await tokenCall({ grant_type: "authorization_code", client_id: pclientId, client_secret: secretValue, code: code2, redirect_uri: "https://example.com/callback" });
+    r38.token = tokenView(tok);
+    r38.tokenCodeReuse = tokenView(await tokenCall({ grant_type: "authorization_code", client_id: pclientId, client_secret: secretValue, code: code2, redirect_uri: "https://example.com/callback" }));
+    const access = tok.body?.access_token;
+    const refresh = tok.body?.refresh_token;
+    r38.superadminWithAccessToken = appsView(await call(base, "GET", "/superadmin/apps", { token: access }));
+    r38.dashWithAccessToken = okKeys(await call(base, "GET", `/dash/apps/${appId}/schema/pull`, { token: access }));
+    r38.transferWithAccessToken = errView(await call(base, "POST", `/superadmin/apps/${appId}/transfers/send`, { token: access, body: { dest_email: inviteeEmail } }));
+    const ti = await call(base, "GET", `/platform/oauth/token-info?access_token=${access}`, { token: null });
+    r38.tokenInfo = ti.status === 200 ? { status: 200, keys: Object.keys(ti.body).sort(), token_type: ti.body.token_type, scopes: ti.body.scopes, expiresDays: Math.round(ti.body.expires_in / 86400) } : errView(ti);
+    r38.tokenInfoBad = errView(await call(base, "GET", "/platform/oauth/token-info?access_token=nope", { token: null }));
+    r38.tokenInfoUnknown = errView(await call(base, "GET", `/platform/oauth/token-info?access_token=pat_${"0".repeat(64)}`, { token: null }));
+    r38.refresh = tokenView(await tokenCall({ grant_type: "refresh_token", client_id: pclientId, client_secret: secretValue, refresh_token: refresh }));
+    r38.refreshBad = tokenView(await tokenCall({ grant_type: "refresh_token", client_id: pclientId, client_secret: secretValue, refresh_token: "prt_" + "0".repeat(64) }));
+    const revokeCall = async (token) => { const res = await fetch(base + "/platform/oauth/revoke", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token }) }); const text = await res.text(); let json; try { json = JSON.parse(text); } catch { json = { "<non-json>": text.slice(0, 80) }; } return { status: res.status, body: json }; };
+    r38.revokeBad = errView(await revokeCall("nope"));
+    r38.revoke = plainView(await revokeCall(access));
+    r38.tokenInfoAfterRevoke = errView(await call(base, "GET", `/platform/oauth/token-info?access_token=${access}`, { token: null }));
+    r38.revokeRefresh = plainView(await revokeCall(refresh));
+    r38.refreshAfterRevoke = tokenView(await tokenCall({ grant_type: "refresh_token", client_id: pclientId, client_secret: secretValue, refresh_token: refresh }));
+    // a read-only scoped token can't write
+    const g = await startAndClaim({ scope: "apps-read" });
+    const code3 = (await grantView(g)).code;
+    const ro = await tokenCall({ grant_type: "authorization_code", client_id: pclientId, client_secret: secretValue, code: code3, redirect_uri: "https://example.com/callback" });
+    r38.readOnlyScopeWrite = errView(await call(base, "POST", "/superadmin/apps", { token: ro.body?.access_token, body: { title: "nope" } }));
+    r38.readOnlyScopeRead = appsView(await call(base, "GET", "/superadmin/apps", { token: ro.body?.access_token }));
+    // PKCE
+    const verifier = "pkce-verifier-" + fixedPrefix + "-0123456789abcdef";
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const h = await startAndClaim({ code_challenge: challenge, code_challenge_method: "S256" });
+    const code4 = (await grantView(h)).code;
+    r38.pkceWrongVerifier = tokenView(await tokenCall({ grant_type: "authorization_code", client_id: pclientId, code: code4, redirect_uri: "https://example.com/callback", code_verifier: "wrong" }));
+    const i = await startAndClaim({ code_challenge: challenge, code_challenge_method: "S256" });
+    const code5 = (await grantView(i)).code;
+    r38.pkceRefreshGrant = tokenView(await tokenCall({ grant_type: "refresh_token", client_id: pclientId, refresh_token: "x" }));
+    r38.pkce = tokenView(await tokenCall({ grant_type: "authorization_code", client_id: pclientId, code: code5, redirect_uri: "https://example.com/callback", code_verifier: verifier }));
+    const j = await startAndClaim();
+    const code6 = (await grantView(j)).code;
+    r38.pkceWithoutChallenge = tokenView(await tokenCall({ grant_type: "authorization_code", client_id: pclientId, code: code6, redirect_uri: "https://example.com/callback", code_verifier: verifier }));
+    // the user's authorized apps + revoking one
+    const ua = await call(base, "GET", "/dash/user/oauth_apps", { token: userToken });
+    r38.userOauthApps = ua.status === 200 ? { status: 200, apps: (ua.body.oauthApps ?? []).map((x) => ({ name: x.name, keys: Object.keys(x).sort() })) } : errView(ua);
+    r38.userOauthAppsRevoke = plainView(await call(base, "POST", "/dash/user/oauth_apps/revoke_access", { token: userToken, body: { oauthAppId: oaId } }));
+    r38.userOauthAppsRevokeMissing = errView(await call(base, "POST", "/dash/user/oauth_apps/revoke_access", { token: userToken, body: {} }));
+    r38.clientDelete = okKeys(await call(base, "DELETE", `/dash/apps/${appId}/oauth-app-clients/${pclientId}`, { token: userToken }), (b) => b.client);
+    r38.clientDeleteAgain = errView(await call(base, "DELETE", `/dash/apps/${appId}/oauth-app-clients/${pclientId}`, { token: userToken }));
+    r38.oauthAppDeleteCollaborator = errView(await call(base, "DELETE", `/dash/apps/${appId}/oauth-apps/${oaId}`, { token: inviteeToken }));
+    r38.oauthAppDelete = okKeys(await call(base, "DELETE", `/dash/apps/${appId}/oauth-apps/${oaId}`, { token: userToken }), (b) => b.app);
+    r38.oauthAppDeleteAgain = errView(await call(base, "DELETE", `/dash/apps/${appId}/oauth-apps/${oaId}`, { token: userToken }));
+    raw("38-platform", r38);
+    record("38-platform", r38);
+
+    // 39 webhooks: management routes, the events queued by a transaction,
+    // the payload for one event (fetched with the admin token), resend
+    const r39 = {};
+    const hookNs = "orders";
+    await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["update", hookNs, mk(), { total: 1 }]] } });
+    const hookView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort(), webhook: norm({ ...res.body.webhook, id: undefined, keys: Object.keys(res.body.webhook ?? {}).sort() }) } : errView(res));
+    const wh = (p, opts) => call(base, "POST", `/dash/apps/${appId}/webhooks${p}`, opts);
+    r39.createHttp = errView(await wh("", { body: { url: "http://example.com/hook", namespaces: [hookNs], actions: ["create"] } }));
+    r39.createLocalhost = errView(await wh("", { body: { url: "https://localhost/hook", namespaces: [hookNs], actions: ["create"] } }));
+    r39.createUnknownNamespace = errView(await wh("", { body: { url: "https://example.com/hook", namespaces: ["nope"], actions: ["create"] } }));
+    r39.createNoNamespaces = errView(await wh("", { body: { url: "https://example.com/hook", namespaces: [], actions: ["create"] } }));
+    r39.createNoActions = errView(await wh("", { body: { url: "https://example.com/hook", namespaces: [hookNs], actions: [] } }));
+    r39.createMissingUrl = errView(await wh("", { body: { namespaces: [hookNs], actions: ["create"] } }));
+    r39.createBadNamespaces = errView(await wh("", { body: { url: "https://example.com/hook", namespaces: "orders", actions: ["create"] } }));
+    r39.createNoAuth = errView(await wh("", { token: null, body: { url: "https://example.com/hook", namespaces: [hookNs], actions: ["create"] } }));
+    const hookCreated = await wh("", { body: { url: "https://example.com/hook", namespaces: [hookNs], actions: ["create", "update", "delete"] } });
+    r39.create = hookView(hookCreated);
+    const hookId = hookCreated.body?.webhook?.id;
+    r39.createDuplicate = errView(await wh("", { body: { url: "https://example.com/hook", namespaces: [hookNs], actions: ["delete", "update", "create"] } }));
+    r39.createUser = hookView(await wh("", { token: userToken, body: { url: "https://example.com/hook2", namespaces: [hookNs], actions: ["create"] } }));
+    const listed = await call(base, "GET", `/dash/apps/${appId}/webhooks`);
+    r39.list = listed.status === 200 ? { status: 200, hooks: (listed.body.webhooks ?? []).map((w) => norm({ url: w.sink?.url, namespaces: w.namespaces, actions: w.actions, status: w.status, keys: Object.keys(w).sort() })).sort((a, c) => (a.url < c.url ? -1 : 1)) } : errView(listed);
+    r39.update = hookView(await wh(`/${hookId}`, { body: { url: "https://example.com/hook3", actions: ["create"] } }));
+    r39.updateBadUrl = errView(await wh(`/${hookId}`, { body: { url: "nope" } }));
+    r39.updateEmptyActions = errView(await wh(`/${hookId}`, { body: { actions: [] } }));
+    r39.updateUnknown = errView(await wh(`/${mk()}`, { body: { url: "https://example.com/x" } }));
+    r39.disable = hookView(await wh(`/${hookId}/disable`, { body: { reason: "paused" } }));
+    r39.enable = hookView(await wh(`/${hookId}/enable`, {}));
+    r39.updateBack = hookView(await wh(`/${hookId}`, { body: { actions: ["create", "update", "delete"] } }));
+    // a transaction the webhook matches → an event on both servers
+    const orderId = mk();
+    await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["update", hookNs, orderId, { total: 42, note: "n" }]] } });
+    let evs;
+    for (let i = 0; i < 100; i++) {
+      evs = await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events`);
+      if ((evs.body?.events ?? []).length >= 1) break;
+      await sleep(100);
+    }
+    const evView = (e) => ({ isn: typeof e.isn === "string" ? "<isn>" : e.isn, keys: Object.keys(e).sort() });
+    r39.events = evs.status === 200 ? { status: 200, keys: Object.keys(evs.body).sort(), count: (evs.body.events ?? []).length, events: (evs.body.events ?? []).map(evView), pageInfo: { keys: Object.keys(evs.body.pageInfo ?? {}).sort(), hasNextPage: evs.body.pageInfo?.hasNextPage, cursors: !!evs.body.pageInfo?.startCursor } } : errView(evs);
+    r39.eventsBadCursor = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events?after=nope`));
+    r39.eventsEmptyCursor = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events?after=`));
+    r39.eventsUnknownHook = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${mk()}/events`));
+    const isn = evs.body?.events?.[0]?.isn;
+    const one = await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events/${isn}`);
+    r39.event = one.status === 200 ? { status: 200, event: evView(one.body.event) } : errView(one);
+    r39.eventUnknownIsn = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events/0/0/1`));
+    r39.eventBadIsn = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events/nope`));
+    const payload = await call(base, "GET", `/webhooks/payload/${appId}/${hookId}/${isn}`);
+    r39.payload = payload.status === 200 ? { status: 200, keys: Object.keys(payload.body).sort(), data: norm((payload.body.data ?? []).map((d) => ({ ...d, keys: Object.keys(d).sort() }))) } : errView(payload);
+    r39.payloadNoAuth = errView(await call(base, "GET", `/webhooks/payload/${appId}/${hookId}/${isn}`, { token: null }));
+    r39.payloadBadJwt = errView(await call(base, "GET", `/webhooks/payload/${appId}/${hookId}/${isn}`, { token: "eyJhbGciOiJFZERTQSJ9.e30.AAAA" }));
+    r39.payloadUser = okKeys(await call(base, "GET", `/webhooks/payload/${appId}/${hookId}/${isn}`, { token: userToken }));
+    // an update and a delete of the same entity: before/after in the payload
+    await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["update", hookNs, orderId, { total: 43 }]] } });
+    await call(base, "POST", "/admin/transact", { ...appHdr, body: { steps: [["delete", hookNs, orderId]] } });
+    for (let i = 0; i < 100; i++) {
+      evs = await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events`);
+      if ((evs.body?.events ?? []).length >= 3) break;
+      await sleep(100);
+    }
+    const isns = (evs.body?.events ?? []).map((e) => e.isn).reverse();
+    const payloads = [];
+    for (const i of isns) {
+      const p = await call(base, "GET", `/webhooks/payload/${appId}/${hookId}/${i}`);
+      payloads.push(p.status === 200 ? norm((p.body.data ?? []).map((d) => ({ namespace: d.namespace, action: d.action, id: d.id, before: d.before, after: d.after }))) : errView(p));
+    }
+    r39.payloadSequence = payloads;
+    r39.resendUnknown = errView(await wh(`/${hookId}/events/0/0/1`, {}));
+    r39.delete = hookView(await call(base, "DELETE", `/dash/apps/${appId}/webhooks/${hookId}`));
+    r39.deleteAgain = errView(await call(base, "DELETE", `/dash/apps/${appId}/webhooks/${hookId}`));
+    r39.eventsAfterDelete = errView(await call(base, "GET", `/dash/apps/${appId}/webhooks/${hookId}/events`));
+    const jwksRes = await call(base, "GET", "/.well-known/webhooks/jwks.json", { token: null });
+    r39.jwks = jwksRes.status === 200 ? { status: 200, keys: Object.keys(jwksRes.body).sort(), key: norm({ ...jwksRes.body.keys?.[0], x: "<x>", kid: "<kid>", keys: Object.keys(jwksRes.body.keys?.[0] ?? {}).sort() }) } : errView(jwksRes);
+    raw("39-webhooks", r39);
+    record("39-webhooks", r39);
+
+    // 40 the dashboard's Google login (start + the callback's error paths +
+    // token), get-a-db creation gate, track-import, active-session stats.
+    // Neither server has a Google client configured, so `start` redirects
+    // with an empty client_id on both; the callback with a code and a live
+    // redirect asks Google for real (an unconfigured client is rejected).
+    const r40 = {};
+    const loginStart = async (qs = "") => {
+      const res = await fetch(base + "/dash/oauth/start" + qs, { redirect: "manual" });
+      const text = await res.text();
+      const loc = res.headers.get("location") ? new URL(res.headers.get("location")) : null;
+      const cookie = res.headers.get("set-cookie") ?? "";
+      const attrs = cookie.split(";").map((a) => a.trim().toLowerCase()).filter(Boolean).map((a) => (a.startsWith("__session=") ? "__session=<cookie>" : a.startsWith("expires=") ? "expires=<date>" : a)).filter((a) => a !== "secure").sort();
+      const params = loc ? Object.fromEntries([...loc.searchParams.entries()].map(([k, v]) => [k, k === "state" ? "<uuid>" : k === "redirect_uri" ? v.replace(base, "<server>") : v])) : null;
+      return { status: res.status, contentType: (res.headers.get("content-type") ?? "").split(";")[0], location: loc ? loc.origin + loc.pathname : null, rawQueryShape: loc ? loc.search.replace(/state=[0-9a-f-]{36}/, "state=<uuid>").replace(/redirect_uri=[^&]*/, "redirect_uri=<server>") : null, params, cookieAttrs: attrs, body: text === "" ? null : (() => { try { return errView({ status: res.status, body: JSON.parse(text) }); } catch { return "<non-json>"; } })(), state: loc?.searchParams.get("state"), cookie: /__session=([^;]+)/.exec(cookie)?.[1] };
+    };
+    const strip = ({ state, cookie, ...rest }) => rest;
+    r40.start = strip(await loginStart());
+    r40.startWithPath = strip(await loginStart("?redirect_path=apps&redirect_to_dev=true"));
+    // a ticket that is not a registered CLI login violates the foreign key on both servers
+    r40.startUnknownTicket = strip(await loginStart("?ticket=" + mk()));
+    const loginCallback = async (qs, cookie) => {
+      const res = await fetch(base + "/dash/oauth/callback" + qs, { redirect: "manual", headers: cookie ? { cookie: `__session=${cookie}` } : {} });
+      const text = await res.text();
+      const loc = res.headers.get("location") ? new URL(res.headers.get("location")) : null;
+      return { status: res.status, contentType: (res.headers.get("content-type") ?? "").split(";")[0], location: loc ? loc.origin + loc.pathname : null, params: loc ? Object.fromEntries([...loc.searchParams.entries()].map(([k, v]) => [k, k === "code" ? "<uuid>" : v])) : null, body: text === "" ? null : (() => { try { return errView({ status: res.status, body: JSON.parse(text) }); } catch { return "<non-json>"; } })() };
+    };
+    r40.cbNoParams = await loginCallback("");
+    r40.cbErrorParam = await loginCallback("?error=access_denied");
+    r40.cbNoCookie = await loginCallback("?state=" + mk());
+    r40.cbBadState = await loginCallback("?state=nope", mk());
+    r40.cbBadCookie = await loginCallback("?state=" + mk(), "nope");
+    r40.cbNoCode = await loginCallback("?state=" + mk(), mk());
+    r40.cbUnknownRedirect = await loginCallback("?state=" + mk() + "&code=abc", mk());
+    // a callback with a valid state + cookie consumes the redirect before the
+    // code check; a later callback then can't find it. A callback that carries
+    // a code AND a live redirect is left to the mock-provider e2e, since it
+    // makes a real outbound token request that isn't comparable here.
+    const l1 = await loginStart();
+    r40.cbConsumesRedirect = await loginCallback(`?state=${l1.state}`, l1.cookie);
+    r40.cbConsumed = await loginCallback(`?state=${l1.state}&code=abc`, l1.cookie);
+    r40.tokenMissing = errView(await call(base, "POST", "/dash/oauth/token", { token: null, body: {} }));
+    r40.tokenMalformed = errView(await call(base, "POST", "/dash/oauth/token", { token: null, body: { code: "nope" } }));
+    r40.tokenUnknown = errView(await call(base, "POST", "/dash/oauth/token", { token: null, body: { code: mk() } }));
+    r40.trackImport = plainView(await call(base, "POST", `/dash/apps/${appId}/track-import`, { token: null }));
+    r40.trackImportBadId = errView(await call(base, "POST", "/dash/apps/nope/track-import", { token: null }));
+    r40.getADbNoAuth = errView(await call(base, "POST", "/dash/apps/get_a_db", { token: null, body: { title: "x" } }));
+    r40.getADbAdminToken = errView(await call(base, "POST", "/dash/apps/get_a_db", { body: { title: "x" } }));
+    const gpat = await call(base, "POST", "/dash/personal_access_tokens", { token: userToken, body: { name: "get-a-db probe" } });
+    r40.getADbNotServiceUser = errView(await call(base, "POST", "/dash/apps/get_a_db", { token: gpat.body?.token, body: { title: "x" } }));
+    // the CLI login: register, the dashboard user claims / voids, check
+    const creg = await call(base, "POST", "/dash/cli/auth/register", { token: null });
+    r40.cliRegister = creg.status === 200 ? { status: 200, keys: Object.keys(creg.body).sort(), shapes: [creg.body.ticket, creg.body.secret].map((v) => /^[0-9a-f-]{36}$/.test(String(v))) } : errView(creg);
+    r40.cliCheckWaiting = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg.body?.secret } }));
+    r40.cliCheckUnknown = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: mk() } }));
+    r40.cliCheckMalformed = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: "nope" } }));
+    r40.cliCheckMissing = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: {} }));
+    r40.cliClaimNoAuth = errView(await call(base, "POST", "/dash/cli/auth/claim", { token: null, body: { ticket: creg.body?.ticket } }));
+    r40.cliClaimMissing = errView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: {} }));
+    r40.cliClaimUnknown = plainView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: { ticket: mk() } }));
+    r40.cliClaim = plainView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: { ticket: creg.body?.ticket } }));
+    const cchecked = await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg.body?.secret } });
+    r40.cliCheck = cchecked.status === 200 ? { status: 200, keys: Object.keys(cchecked.body).sort(), email: cchecked.body.email } : errView(cchecked);
+    r40.cliCheckAgain = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg.body?.secret } }));
+    const creg2 = await call(base, "POST", "/dash/cli/auth/register", { token: null });
+    r40.cliVoid = plainView(await call(base, "POST", "/dash/cli/auth/void", { token: userToken, body: { ticket: creg2.body?.ticket } }));
+    r40.cliVoidNoAuth = errView(await call(base, "POST", "/dash/cli/auth/void", { token: null, body: { ticket: creg2.body?.ticket } }));
+    r40.cliCheckVoided = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg2.body?.secret } }));
+    // start with a registered ticket: the callback hands it back to the dashboard
+    r40.startWithTicket = strip(await loginStart("?ticket=" + creg2.body?.ticket));
+    const active = await call(base, "GET", "/dash/stats/active_sessions", { token: null });
+    r40.activeSessions = active.status === 200 ? { status: 200, keys: Object.keys(active.body).sort() } : errView(active);
+    raw("40-dash-login", r40);
+    record("40-dash-login", r40);
+
+    // 41 admin magic codes: `POST /admin/send_magic_code` hands the code back
+    // (admin/routes.clj:506-510), `verify_magic_code` signs the user in
+    const r41 = {};
+    const magicEmail = `admin-magic-${appId.slice(0, 8)}@example.com`;
+    const sent = await call(base, "POST", "/admin/send_magic_code", { ...appHdr, body: { email: magicEmail } });
+    r41.send = sent.status === 200 ? { status: 200, keys: Object.keys(sent.body).sort(), codeShape: /^[0-9]{6}$/.test(String(sent.body.code)) } : errView(sent);
+    r41.sendBadEmail = errView(await call(base, "POST", "/admin/send_magic_code", { ...appHdr, body: { email: "nope" } }));
+    r41.sendNoAuth = errView(await call(base, "POST", "/admin/send_magic_code", { token: null, ...appHdr, body: { email: magicEmail } }));
+    r41.verifyWrongCode = errView(await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail, code: "000000" } }));
+    r41.verifyMissingCode = errView(await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail } }));
+    const mverified = await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail, code: String(sent.body?.code) } });
+    r41.verify = mverified.status === 200 ? { status: 200, keys: Object.keys(mverified.body).sort(), user: norm({ ...mverified.body.user, keys: Object.keys(mverified.body.user ?? {}).sort() }) } : errView(mverified);
+    r41.verifyAgain = errView(await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail, code: String(sent.body?.code) } }));
+    raw("41-admin-magic-codes", r41);
+    record("41-admin-magic-codes", r41);
   }
 
   return out;

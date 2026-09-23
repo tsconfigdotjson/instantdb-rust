@@ -27,6 +27,7 @@ use crate::routes::dash::{
     parse_body, DashRole,
 };
 use crate::routes::runtime::json_or_err;
+use crate::routes::superadmin::Scope;
 use crate::service;
 use crate::state::AppState;
 
@@ -38,18 +39,18 @@ const EPHEMERAL_CREATOR_EMAILS: [&str; 2] = [
     "hello+ephemeralapps@instantdb.com",
     "hello+ephemeralappsdev@instantdb.com",
 ];
-const GET_A_DB_CREATOR_EMAIL: &str = "hello+getadbapps@instantdb.com";
+pub(crate) const GET_A_DB_CREATOR_EMAIL: &str = "hello+getadbapps@instantdb.com";
 /// legacy `expiration-days`
 const EPHEMERAL_EXPIRATION_DAYS: i64 = 14;
 
-fn ts_naive(t: Option<chrono::NaiveDateTime>) -> Value {
+pub(crate) fn ts_naive(t: Option<chrono::NaiveDateTime>) -> Value {
     match t {
         Some(t) => json!(t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         None => Value::Null,
     }
 }
 
-fn ts_tz(t: Option<chrono::DateTime<chrono::Utc>>) -> Value {
+pub(crate) fn ts_tz(t: Option<chrono::DateTime<chrono::Utc>>) -> Value {
     match t {
         Some(t) => json!(t.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         None => Value::Null,
@@ -65,7 +66,7 @@ fn ts_ms(ms: Option<i64>) -> Value {
 }
 
 /// `ex/get-param!` with `uuid-util/coerce`.
-fn body_uuid(body: &Value, key: &str) -> Result<Uuid> {
+pub(crate) fn body_uuid(body: &Value, key: &str) -> Result<Uuid> {
     let v = body
         .get(key)
         .filter(|v| !v.is_null())
@@ -76,7 +77,7 @@ fn body_uuid(body: &Value, key: &str) -> Result<Uuid> {
 }
 
 /// `ex/get-param!` with `string-util/coerce-non-blank-str`.
-fn body_str(body: &Value, key: &str) -> Result<String> {
+pub(crate) fn body_str(body: &Value, key: &str) -> Result<String> {
     let v = body
         .get(key)
         .filter(|v| !v.is_null())
@@ -95,11 +96,11 @@ fn body_opt_str(body: &Value, key: &str) -> Result<Option<String>> {
     }
 }
 
-fn path_uuid(raw: &str, name: &str) -> Result<Uuid> {
+pub(crate) fn path_uuid(raw: &str, name: &str) -> Result<Uuid> {
     Uuid::parse_str(raw).map_err(|_| param_malformed(&["params", name], json!(raw)))
 }
 
-fn record_not_found(record_type: &str, hint: Value) -> InstantError {
+pub(crate) fn record_not_found(record_type: &str, hint: Value) -> InstantError {
     let mut h = hint;
     if let Some(m) = h.as_object_mut() {
         m.insert("record-type".into(), json!(record_type));
@@ -129,7 +130,7 @@ fn assert_valid(data_type: &str, input: Value, errors: Vec<String>) -> Result<()
 // apps
 
 /// The `apps` row as legacy returns it (`apps.*`).
-async fn app_row(state: &AppState, app_id: Uuid) -> Result<Option<Value>> {
+pub(crate) async fn app_row(state: &AppState, app_id: Uuid) -> Result<Option<Value>> {
     let row = sqlx::query(
         "SELECT id, creator_id, org_id, title, created_at, status, deletion_marked_at,
                 subscription_id, magic_code_expiry_minutes, connection_string
@@ -141,7 +142,7 @@ async fn app_row(state: &AppState, app_id: Uuid) -> Result<Option<Value>> {
     Ok(row.map(|r| app_row_json(&r)))
 }
 
-fn app_row_json(r: &sqlx::postgres::PgRow) -> Value {
+pub(crate) fn app_row_json(r: &sqlx::postgres::PgRow) -> Value {
     json!({
         "id": r.get::<Uuid, _>("id"),
         "creator_id": r.get::<Option<Uuid>, _>("creator_id"),
@@ -157,7 +158,7 @@ fn app_row_json(r: &sqlx::postgres::PgRow) -> Value {
 }
 
 /// legacy `app-model/get-by-id!`: live apps only.
-async fn live_app_row(state: &AppState, app_id: Uuid) -> Result<Value> {
+pub(crate) async fn live_app_row(state: &AppState, app_id: Uuid) -> Result<Value> {
     match app_row(state, app_id).await? {
         Some(app)
             if app
@@ -195,10 +196,17 @@ async fn apps_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
            LEFT JOIN rules r ON r.app_id = a.id
           WHERE a.deletion_marked_at IS NULL AND a.org_id IS NULL
             AND (a.creator_id = $1
-                 OR EXISTS (SELECT 1 FROM app_members m WHERE m.app_id = a.id AND m.user_id = $1))
+                 OR EXISTS (SELECT 1 FROM app_members m WHERE m.app_id = a.id AND m.user_id = $1
+                             AND ($2 OR m.created_at < $3 OR m.member_role = 'owner'
+                                  -- all-for-user-q (app.clj:290-296) admits Pro (2) only
+                                  OR EXISTS (SELECT 1 FROM instant_subscriptions sub
+                                              WHERE sub.id = a.subscription_id
+                                                AND sub.subscription_type_id = 2))))
           ORDER BY a.created_at, a.id",
     )
     .bind(user_id)
+    .bind(state.cfg.paid_features_free)
+    .bind(free_teams_cutoff())
     .fetch_all(&state.pool)
     .await?;
     Ok(rows
@@ -319,7 +327,7 @@ pub async fn dash_get(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
 
 /// Create an app with its admin token and return `apps.* + admin-token`
 /// (legacy `app-model/create!`, model/app.clj:66-87).
-async fn create_app(
+pub(crate) async fn create_app(
     state: &AppState,
     id: Uuid,
     title: &str,
@@ -456,7 +464,14 @@ pub async fn apps_get(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsRead,
+        )
+        .await?;
         let row = live_app_row(&state, app.id).await?;
         Ok(json!({"app": row}))
     }
@@ -475,8 +490,8 @@ pub async fn apps_delete(
         let user = dash_user(&state, &headers).await?;
         let app_id = path_uuid(&app_id, "app_id")?;
         let row = live_app_row(&state, app_id).await?;
-        let role = app_role_for_user(&state, &row, user.id).await?;
-        assert_least_privilege(DashRole::Admin, role)?;
+        let access = app_role_for_user(&state, &row, user.id).await?;
+        assert_app_access(DashRole::Admin, access)?;
         let creator: Option<Uuid> = row
             .get("creator_id")
             .and_then(|v| v.as_str())
@@ -502,54 +517,173 @@ pub async fn apps_delete(
     json_or_err(r)
 }
 
-/// The caller's role on an app (`get-app-with-role!`, util/roles.clj:75-125):
-/// creator is owner, else the `app_members` role, else the org role.
-async fn app_role_for_user(
+/// legacy `config/free-teams-cutoff`: 2026-03-01 in Etc/GMT+12 (UTC-12);
+/// members created before it are grandfathered into team features.
+pub(crate) fn free_teams_cutoff() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-03-01T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+/// One membership path of legacy `get-app-with-role!`: the role and whether
+/// the plan lets it count (owner, grandfathered, or paid features free).
+#[derive(Clone, Copy)]
+pub(crate) struct RolePath {
+    pub role: DashRole,
+    pub plan_ok: bool,
+}
+
+/// Both membership paths of `get-app-with-role!` (util/roles.clj:75-125).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct AppAccess {
+    pub app: Option<RolePath>,
+    pub org: Option<RolePath>,
+}
+
+impl AppAccess {
+    pub(crate) fn any_role(&self) -> Option<DashRole> {
+        match (self.app, self.org) {
+            (Some(a), Some(o)) => Some(a.role.max(o.role)),
+            (Some(a), None) => Some(a.role),
+            (None, Some(o)) => Some(o.role),
+            (None, None) => None,
+        }
+    }
+}
+
+/// The caller's access to an app (`get-app-with-role!`): creator is owner,
+/// else the `app_members` row, plus the org membership.
+pub(crate) async fn app_role_for_user(
     state: &AppState,
     app: &Value,
     user_id: Uuid,
-) -> Result<Option<DashRole>> {
+) -> Result<AppAccess> {
     let creator: Option<Uuid> = app
         .get("creator_id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
-    if creator == Some(user_id) {
-        return Ok(Some(DashRole::Owner));
-    }
     let app_id: Uuid = app
         .get("id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok())
         .unwrap_or_default();
-    let member: Option<String> =
-        sqlx::query("SELECT member_role FROM app_members WHERE app_id = $1 AND user_id = $2")
-            .bind(app_id)
-            .bind(user_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .map(|r| r.get("member_role"));
-    if let Some(role) = member.and_then(|r| DashRole::parse(&r)) {
-        return Ok(Some(role));
-    }
+    let cutoff = free_teams_cutoff();
+    let free = state.cfg.paid_features_free;
     let org_id: Option<Uuid> = app
         .get("org_id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
-    if let Some(org_id) = org_id {
-        let role: Option<String> =
-            sqlx::query("SELECT role FROM org_members WHERE org_id = $1 AND user_id = $2")
-                .bind(org_id)
-                .bind(user_id)
-                .fetch_optional(&state.pool)
-                .await?
-                .map(|r| r.get("role"));
-        return Ok(role.and_then(|r| DashRole::parse(&r)));
+    // legacy `plan-supports-members?` on the app's latest subscription and on
+    // the org's (instant_subscription.clj:132-138, roles.clj:88-103): a Pro
+    // (2) or Startup (3) plan admits members whatever their join date
+    let app_plan = plan_supports_members(
+        sqlx::query_scalar::<_, Option<i32>>(
+            "SELECT subscription_type_id FROM instant_subscriptions
+              WHERE app_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(app_id)
+        .fetch_optional(&state.pool)
+        .await?
+        .flatten(),
+    );
+    let org_plan = match org_id {
+        Some(org_id) => plan_supports_members(
+            sqlx::query_scalar::<_, Option<i32>>(
+                "SELECT s.subscription_type_id FROM orgs o
+                   JOIN instant_subscriptions s ON s.id = o.subscription_id
+                  WHERE o.id = $1",
+            )
+            .bind(org_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .flatten(),
+        ),
+        None => false,
+    };
+    let mut access = AppAccess::default();
+    if creator == Some(user_id) {
+        access.app = Some(RolePath {
+            role: DashRole::Owner,
+            plan_ok: true,
+        });
+    } else if let Some(r) = sqlx::query(
+        "SELECT member_role, created_at FROM app_members WHERE app_id = $1 AND user_id = $2",
+    )
+    .bind(app_id)
+    .bind(user_id)
+    .fetch_optional(&state.pool)
+    .await?
+    {
+        if let Some(role) = DashRole::parse(&r.get::<String, _>("member_role")) {
+            let created: chrono::DateTime<chrono::Utc> = r.get("created_at");
+            access.app = Some(RolePath {
+                role,
+                plan_ok: role == DashRole::Owner
+                    || created < cutoff
+                    || free
+                    || app_plan
+                    || org_plan,
+            });
+        }
     }
-    Ok(None)
+    if let Some(org_id) = org_id {
+        if let Some(r) = sqlx::query(
+            "SELECT role, created_at FROM org_members WHERE org_id = $1 AND user_id = $2",
+        )
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_optional(&state.pool)
+        .await?
+        {
+            if let Some(role) = DashRole::parse(&r.get::<String, _>("role")) {
+                let created: chrono::DateTime<chrono::Utc> = r.get("created_at");
+                access.org = Some(RolePath {
+                    role,
+                    plan_ok: role == DashRole::Owner || created < cutoff || free || org_plan,
+                });
+            }
+        }
+    }
+    Ok(access)
+}
+
+/// legacy `plan-supports-members?` (model/instant_subscription.clj:132-138):
+/// Pro (2) and Startup (3) subscription types; Free (1) and none don't.
+pub(crate) fn plan_supports_members(subscription_type_id: Option<i32>) -> bool {
+    matches!(subscription_type_id, Some(2) | Some(3))
+}
+
+/// legacy `throw-insufficient-plan!` (util/exception.clj)
+pub(crate) fn insufficient_plan() -> InstantError {
+    InstantError::new(
+        "permission-denied",
+        400,
+        "The plan for your app or organization does not support multiple members.",
+        None,
+    )
+}
+
+/// The decision of `get-app-with-role!` (util/roles.clj:98-125): a path
+/// with a good enough role whose plan allows it wins; else missing role /
+/// insufficient role / insufficient plan, in that order. Returns the
+/// caller's effective role (the max over both paths).
+pub(crate) fn assert_app_access(least: DashRole, access: AppAccess) -> Result<DashRole> {
+    let good = |p: Option<RolePath>| p.map(|p| p.role >= least).unwrap_or(false);
+    let ok = |p: Option<RolePath>| p.map(|p| p.role >= least && p.plan_ok).unwrap_or(false);
+    if ok(access.app) || ok(access.org) {
+        return Ok(access.any_role().unwrap_or(least));
+    }
+    if access.app.is_none() && access.org.is_none() {
+        return assert_least_privilege(least, None).map(|_| least);
+    }
+    if !good(access.app) && !good(access.org) {
+        return assert_least_privilege(least, access.any_role()).map(|_| least);
+    }
+    Err(insufficient_plan())
 }
 
 /// legacy `assert-least-privilege!` (util/roles.clj:43-57).
-fn assert_least_privilege(least: DashRole, role: Option<DashRole>) -> Result<()> {
+pub(crate) fn assert_least_privilege(least: DashRole, role: Option<DashRole>) -> Result<()> {
     let Some(role) = role else {
         let message = format!("User is missing role {}.", least.as_str());
         return Err(InstantError::new(
@@ -682,7 +816,7 @@ pub async fn ephemeral_get(
     json_or_err(r)
 }
 
-async fn ephemeral_creator_ids(state: &AppState) -> Result<Vec<Uuid>> {
+pub(crate) async fn ephemeral_creator_ids(state: &AppState) -> Result<Vec<Uuid>> {
     let mut out = vec![];
     for email in EPHEMERAL_CREATOR_EMAILS {
         if let Some(id) = user_id_by_email(state, email).await? {
@@ -751,7 +885,7 @@ pub async fn claim_post(
 // ---------------------------------------------------------------------------
 // orgs
 
-async fn orgs_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
+pub(crate) async fn orgs_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
     let rows = sqlx::query(
         "SELECT o.id, o.title, o.created_at, o.updated_at, m.role
            FROM orgs o JOIN org_members m ON m.org_id = o.id
@@ -778,14 +912,14 @@ async fn orgs_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
 
 /// legacy `org-model/get-org-for-user!` + `assert-least-privilege!`
 /// (util/roles.clj:144-156 `org-with-role-for-user!`).
-async fn org_role_for_user(
+pub(crate) async fn org_role_for_user(
     state: &AppState,
     org_id: Uuid,
     user_id: Uuid,
     least: DashRole,
 ) -> Result<Value> {
     let row = sqlx::query(
-        "SELECT o.id, o.title, o.created_at, o.updated_at, m.role
+        "SELECT o.id, o.title, o.created_at, o.updated_at, m.role, m.created_at AS member_created_at
            FROM orgs o JOIN org_members m ON m.org_id = o.id
           WHERE o.id = $1 AND m.user_id = $2",
     )
@@ -800,6 +934,8 @@ async fn org_role_for_user(
         )
     })?;
     let role: String = row.get("role");
+    // org-with-role-for-user! (util/roles.clj:144-156) checks the role only;
+    // the plan gate applies to app access through an org membership
     assert_least_privilege(least, DashRole::parse(&role))?;
     Ok(json!({
         "id": row.get::<Uuid, _>("id"),
@@ -859,40 +995,7 @@ pub async fn org_get(
         let user = dash_user(&state, &headers).await?;
         let org_id = path_uuid(&org_id, "org_id")?;
         let org = org_role_for_user(&state, org_id, user.id, DashRole::Collaborator).await?;
-        let apps: Vec<Value> = sqlx::query(
-            "SELECT a.id, a.creator_id, a.org_id, a.title, a.created_at, a.status,
-                    a.deletion_marked_at, a.subscription_id, a.magic_code_expiry_minutes,
-                    a.connection_string, at.token AS admin_token, r.code AS rules,
-                    r.version AS rules_version,
-                    (SELECT m.member_role FROM app_members m WHERE m.app_id = a.id AND m.user_id = $2) AS user_app_role
-               FROM apps a
-               LEFT JOIN app_admin_tokens at ON at.app_id = a.id
-               LEFT JOIN rules r ON r.app_id = a.id
-              WHERE a.org_id = $1 AND a.deletion_marked_at IS NULL
-              ORDER BY a.created_at, a.id",
-        )
-        .bind(org_id)
-        .bind(user.id)
-        .fetch_all(&state.pool)
-        .await?
-        .iter()
-        .map(|r| {
-            let mut app = app_row_json(r);
-            if let Some(m) = app.as_object_mut() {
-                m.insert("admin_token".into(), json!(r.get::<Option<Uuid>, _>("admin_token")));
-                m.insert("rules".into(), r.get::<Option<Value>, _>("rules").unwrap_or(Value::Null));
-                m.insert("rules_version".into(), json!(r.get::<Option<i32>, _>("rules_version")));
-                m.insert("org".into(), json!({"id": org["id"], "title": org["title"]}));
-                m.insert("pro".into(), json!(false));
-                m.insert("user_app_role".into(), json!(r.get::<Option<String>, _>("user_app_role")));
-                m.insert("members".into(), json!([]));
-                m.insert("invites".into(), json!([]));
-                m.insert("webhooks".into(), json!([]));
-                m.insert("effective_status".into(), json!(r.get::<String, _>("status")));
-            }
-            app
-        })
-        .collect();
+        let apps = apps_for_org(&state, org_id, user.id, &org).await?;
         let members: Vec<Value> = sqlx::query(
             "SELECT m.id, u.email, m.role FROM org_members m JOIN instant_users u ON u.id = m.user_id
               WHERE m.org_id = $1 ORDER BY m.created_at, m.id",
@@ -934,6 +1037,52 @@ pub async fn org_get(
     }
     .await;
     json_or_err(r)
+}
+
+/// The org's live apps in the dashboard app shape (legacy `apps-for-org`,
+/// model/org.clj:89-123 over `make-apps-q`).
+pub(crate) async fn apps_for_org(
+    state: &AppState,
+    org_id: Uuid,
+    user_id: Uuid,
+    org: &Value,
+) -> Result<Vec<Value>> {
+    let user = user_id;
+    let apps: Vec<Value> = sqlx::query(
+        "SELECT a.id, a.creator_id, a.org_id, a.title, a.created_at, a.status,
+                a.deletion_marked_at, a.subscription_id, a.magic_code_expiry_minutes,
+                a.connection_string, at.token AS admin_token, r.code AS rules,
+                r.version AS rules_version,
+                (SELECT m.member_role FROM app_members m WHERE m.app_id = a.id AND m.user_id = $2) AS user_app_role
+           FROM apps a
+           LEFT JOIN app_admin_tokens at ON at.app_id = a.id
+           LEFT JOIN rules r ON r.app_id = a.id
+          WHERE a.org_id = $1 AND a.deletion_marked_at IS NULL
+          ORDER BY a.created_at, a.id",
+    )
+    .bind(org_id)
+    .bind(user)
+    .fetch_all(&state.pool)
+    .await?
+    .iter()
+    .map(|r| {
+        let mut app = app_row_json(r);
+        if let Some(m) = app.as_object_mut() {
+            m.insert("admin_token".into(), json!(r.get::<Option<Uuid>, _>("admin_token")));
+            m.insert("rules".into(), r.get::<Option<Value>, _>("rules").unwrap_or(Value::Null));
+            m.insert("rules_version".into(), json!(r.get::<Option<i32>, _>("rules_version")));
+            m.insert("org".into(), json!({"id": org["id"], "title": org["title"]}));
+            m.insert("pro".into(), json!(false));
+            m.insert("user_app_role".into(), json!(r.get::<Option<String>, _>("user_app_role")));
+            m.insert("members".into(), json!([]));
+            m.insert("invites".into(), json!([]));
+            m.insert("webhooks".into(), json!([]));
+            m.insert("effective_status".into(), json!(r.get::<String, _>("status")));
+        }
+        app
+    })
+    .collect();
+    Ok(apps)
 }
 
 /// DELETE /dash/orgs/:org_id — legacy orgs-delete: owner only.
@@ -1094,7 +1243,7 @@ pub async fn auth_get(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsRead).await?;
         let providers: Vec<Value> = system_entities(&state, app.id, "$oauthProviders")
             .await?
             .iter()
@@ -1141,7 +1290,14 @@ pub async fn providers_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsWrite,
+        )
+        .await?;
         let body = parse_body(&body)?;
         let name = body_str(&body, "provider_name")?;
         let id = Uuid::new_v4();
@@ -1200,6 +1356,12 @@ async fn validate_discovery_endpoint(endpoint: &str) -> Result<()> {
 /// legacy `url-util/redirect-url-validation-errors` (util/url.clj:15-34)
 /// with `allow-localhost? true`.
 fn redirect_url_validation_errors(raw: &str) -> Vec<String> {
+    redirect_url_validation_errors_opt(raw, true)
+}
+
+/// legacy `url/redirect-url-validation-errors` with `:allow-localhost?`
+/// (util/url.clj:15-34)
+pub(crate) fn redirect_url_validation_errors_opt(raw: &str, allow_localhost: bool) -> Vec<String> {
     let mut errors = vec![];
     let Ok(parsed) = url::Url::parse(raw) else {
         errors.push("redirect uri must use the HTTPS scheme".to_string());
@@ -1216,6 +1378,9 @@ fn redirect_url_validation_errors(raw: &str) -> Vec<String> {
     }
     if parsed.fragment().is_some() {
         errors.push("redirect uri may not contain the fragment component".to_string());
+    }
+    if localhost && !allow_localhost {
+        errors.push("redirect uri may not be localhost".to_string());
     }
     if !localhost && parsed.scheme() != "https" {
         errors.push("redirect uri must use the HTTPS scheme".to_string());
@@ -1236,7 +1401,7 @@ pub async fn clients_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
         let body = parse_body(&body)?;
         let provider_id = body_uuid(&body, "provider_id")?;
         let client_name = body_str(&body, "client_name")?;
@@ -1323,7 +1488,7 @@ pub async fn clients_update(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
         let id = path_uuid(&id, "id")?;
         let body = parse_body(&body)?;
         let existing = system_entity(&state, app.id, "$oauthClients", id)
@@ -1408,7 +1573,7 @@ pub async fn clients_delete(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator, Scope::AppsWrite).await?;
         let id = path_uuid(&id, "id")?;
         let client = system_entity(&state, app.id, "$oauthClients", id)
             .await?
@@ -1499,7 +1664,14 @@ pub async fn origins_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsWrite,
+        )
+        .await?;
         let body = parse_body(&body)?;
         let service_name = body_str(&body, "service")?;
         let params_v = body
@@ -1553,7 +1725,14 @@ pub async fn origins_delete(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Collaborator).await?;
+        let app = dash_authed_with_role(
+            &state,
+            &headers,
+            &app_id,
+            DashRole::Collaborator,
+            Scope::AppsWrite,
+        )
+        .await?;
         let id = path_uuid(&id, "id")?;
         let row = sqlx::query(
             "DELETE FROM app_authorized_redirect_origins WHERE id = $1 AND app_id = $2
@@ -1625,7 +1804,9 @@ pub async fn email_status(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin).await?;
+        let app =
+            dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsRead)
+                .await?;
         Ok(json!({"info": email_template_info(&state, app.id).await?}))
     }
     .await;
@@ -1644,7 +1825,7 @@ pub async fn email_template_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin).await?;
+        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsRead).await?;
         let body = parse_body(&body)?;
         let email_type = body_str(&body, "email-type")?;
         let subject = body_str(&body, "subject")?;
@@ -1666,8 +1847,8 @@ pub async fn email_template_post(
         let sender_email = body
             .get("sender-email")
             .and_then(|v| v.as_str())
-            .filter(|e| crate::routes::runtime::valid_email(&e.to_lowercase()))
-            .map(|e| e.trim().to_lowercase());
+            .map(|e| e.trim().to_lowercase())
+            .filter(|e| crate::routes::runtime::valid_email(e));
         let sender_name = body
             .get("sender-name")
             .and_then(coerce_non_blank_str)
@@ -1744,7 +1925,9 @@ pub async fn email_template_delete(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin).await?;
+        let app =
+            dash_authed_with_role(&state, &headers, &app_id, DashRole::Admin, Scope::AppsWrite)
+                .await?;
         let id = path_uuid(&id, "id")?;
         sqlx::query("DELETE FROM app_email_templates WHERE id = $1 AND app_id = $2")
             .bind(id)

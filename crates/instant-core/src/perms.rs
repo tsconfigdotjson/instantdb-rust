@@ -116,7 +116,7 @@ impl Rules {
             _ => return None,
         };
         Some(Program {
-            rule: None,
+            rule: Some((etype.to_string(), "view".to_string())),
             expr,
             binds: self.binds_of(etype),
             path: vec![etype.to_string(), "fields".to_string(), field.to_string()],
@@ -794,17 +794,10 @@ pub fn rate_limit_names(expr: &cel::IdedExpr) -> Vec<String> {
 /// The variables each action's compiler declares (cel.clj:459-497:
 /// view / delete see the base set, create / update add `newData`, `link`
 /// adds `newData` / `linkedData` / `actions`, `unlink` `newData` /
-/// `linkedData`). `math` and `strings` are the extension namespaces.
+/// `linkedData`). `math` is the math extension's namespace (cel-java
+/// 0.11's strings extension has no namespaced function).
 fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
-    const BASE: [&str; 7] = [
-        "data",
-        "auth",
-        "ruleParams",
-        "request",
-        "rateLimit",
-        "math",
-        "strings",
-    ];
+    const BASE: [&str; 6] = ["data", "auth", "ruleParams", "request", "rateLimit", "math"];
     const VIEW: &[&str] = &BASE;
     const CREATE: &[&str] = &[
         "data",
@@ -813,7 +806,6 @@ fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
         "request",
         "rateLimit",
         "math",
-        "strings",
         "newData",
     ];
     const LINK: &[&str] = &[
@@ -823,7 +815,6 @@ fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
         "request",
         "rateLimit",
         "math",
-        "strings",
         "newData",
         "linkedData",
         "actions",
@@ -835,7 +826,6 @@ fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
         "request",
         "rateLimit",
         "math",
-        "strings",
         "newData",
         "linkedData",
     ];
@@ -851,7 +841,7 @@ fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
 /// cel-java strings / math extensions and Instant's own overloads. A call
 /// to anything else is a compile-time `undeclared reference` like an
 /// unknown variable.
-const KNOWN_FUNCTIONS: [&str; 61] = [
+const KNOWN_FUNCTIONS: [&str; 58] = [
     "size",
     "contains",
     "startsWith",
@@ -896,9 +886,6 @@ const KNOWN_FUNCTIONS: [&str; 61] = [
     "substring",
     "trim",
     "join",
-    "reverse",
-    "quote",
-    "format",
     "greatest",
     "least",
     "abs",
@@ -1002,8 +989,10 @@ pub fn undeclared_reference(program: &Program) -> Option<InstantError> {
     let declared = declared_vars(action);
     let bind_names: HashSet<&str> = program.binds.iter().map(|(n, _)| n.as_str()).collect();
     let compiled = cel::Program::compile(&program.expr).ok()?;
+    let mut expr = compiled.expression().clone();
+    crate::cel_ext::expand_bind_macros(&mut expr);
     let mut idents: Vec<String> = vec![];
-    collect_free_idents(compiled.expression(), &mut vec![], &mut idents);
+    collect_free_idents(&expr, &mut vec![], &mut idents);
     let mut queue: Vec<String> = idents
         .iter()
         .filter(|i| bind_names.contains(i.as_str()))
@@ -1020,8 +1009,10 @@ pub fn undeclared_reference(program: &Program) -> Option<InstantError> {
         let Ok(p) = cel::Program::compile(expr) else {
             continue;
         };
+        let mut bind_expr = p.expression().clone();
+        crate::cel_ext::expand_bind_macros(&mut bind_expr);
         let mut inner = vec![];
-        collect_free_idents(p.expression(), &mut vec![], &mut inner);
+        collect_free_idents(&bind_expr, &mut vec![], &mut inner);
         for i in inner {
             if bind_names.contains(i.as_str()) {
                 queue.push(i.clone());
@@ -1031,18 +1022,24 @@ pub fn undeclared_reference(program: &Program) -> Option<InstantError> {
             }
         }
     }
-    let bad = idents
+    // cel-java reports one issue per undeclared reference, in source order;
+    // throw-validation-err! joins their messages
+    let messages: Vec<String> = idents
         .into_iter()
-        .find(|i| !declared.contains(&i.as_str()) && !bind_names.contains(i.as_str()))?;
-    let message = format!("undeclared reference to '{bad}' (in container '')");
+        .filter(|i| !declared.contains(&i.as_str()) && !bind_names.contains(i.as_str()))
+        .map(|bad| format!("undeclared reference to '{bad}' (in container '')"))
+        .collect();
+    if messages.is_empty() {
+        return None;
+    }
     Some(InstantError::new(
         "validation-failed",
         400,
-        format!("Validation failed for permission: {message}"),
+        format!("Validation failed for permission: {}", messages.join(", ")),
         Some(json!({
             "data-type": "permission",
             "input": program.path,
-            "errors": [{"message": message}],
+            "errors": messages.iter().map(|m| json!({"message": m})).collect::<Vec<_>>(),
         })),
     ))
 }
@@ -1366,7 +1363,7 @@ pub fn eval_program_pure(
     let fold = |p: &cel::Program| {
         let mut e = p.expression().clone();
         fold_request_has(&mut e, &present);
-        crate::cel_ext::rewrite_timestamp_calls(&mut e);
+        crate::cel_ext::rewrite(&mut e);
         e
     };
 
@@ -2118,7 +2115,16 @@ pub async fn permissioned_transact_checked(
                         "link"
                     };
                     let fwd_eid = peek_eid(conn, app_id, attrs, eid).await?;
-                    let target = value.as_str().and_then(|s| Uuid::parse_str(s).ok());
+                    // legacy resolves lookup-ref values before the pre-checks
+                    // (permissioned_transaction.clj:173-190
+                    // resolve-lookups-tx-steps), so a link / unlink to
+                    // `[attr, value]` runs the same rules as one to a uuid
+                    let target = match crate::triple::value_lookup(value) {
+                        Some((a, v)) if attrs.get(&a).map(|x| x.is_unique).unwrap_or(false) => {
+                            peek_eid(conn, app_id, attrs, &EidRef::Lookup(a, v)).await?
+                        }
+                        _ => value.as_str().and_then(|s| Uuid::parse_str(s).ok()),
+                    };
                     let retype = attr.reverse_etype.clone().unwrap_or_default();
                     let rlabel = attr.reverse_label.clone().unwrap_or_default();
                     // legacy pre-checks load the link AND unlink programs of
@@ -2297,6 +2303,40 @@ pub async fn permissioned_transact_checked(
             _ => None,
         })
         .collect();
+
+    // ---- pre-tx auth (permissioned_transaction.clj:697-715, cel.clj:556-580) ----
+    // the update / delete / link / unlink checks are legacy's pre-checks: they
+    // bind `auth` (an AuthCelMap whose `ref` walks the same tx conn) before
+    // the steps run, so a tx can't grant itself a role and then use it.
+    // Every `auth.ref(...)` path those programs can read is resolved now;
+    // create and linked-`view` checks keep reading the post-tx graph like
+    // legacy's post-create checks.
+    let pre_auth: Option<Value> = {
+        let mut programs: Vec<Program> = vec![];
+        let mut etypes: HashSet<&str> = HashSet::new();
+        for (_, et) in other_touch.iter().chain(explicit_ref_touch.iter()) {
+            etypes.insert(et.as_str());
+        }
+        for et in &etypes {
+            programs.push(rules.program(et, "update"));
+        }
+        let mut delete_etypes: HashSet<&str> = HashSet::new();
+        for (_, et) in &delete_set {
+            delete_etypes.insert(et.as_str());
+        }
+        for et in &delete_etypes {
+            programs.push(rules.program(et, "delete"));
+        }
+        for spec in &link_specs {
+            programs.push(spec.program.clone());
+        }
+        if programs.is_empty() || auth.user_id.is_none() {
+            None
+        } else {
+            let refs: Vec<&Program> = programs.iter().collect();
+            Some(build_auth_value(conn, app_id, attrs, auth, &refs).await?)
+        }
+    };
 
     // ---- execute ----
     let report = tx::transact(conn, app_id, attrs, steps, &TxOptions::default()).await?;
@@ -2489,7 +2529,11 @@ pub async fn permissioned_transact_checked(
                 let data = Value::Object(data);
                 let new_data = Value::Object(new);
                 let linked = Value::Object(linked);
-                let auth_val = build_auth_value(conn, app_id, attrs, auth, &[program]).await?;
+                // a link that created its entity is a post-create check
+                let auth_val = match (&pre_auth, created_here) {
+                    (Some(v), false) => v.clone(),
+                    _ => build_auth_value(conn, app_id, attrs, auth, &[program]).await?,
+                };
                 // legacy merges the linked side's rule-params under the
                 // entity's own (:360, :372)
                 let mut rp = match rule_params_for(*linked_eid, linked_etype) {
@@ -2595,7 +2639,10 @@ pub async fn permissioned_transact_checked(
             let paths = extract_ref_paths(&sources, "data");
             attach_refs(conn, app_id, attrs, &etype, eid, &paths, m).await?;
         }
-        let auth_val = build_auth_value(conn, app_id, attrs, auth, &[&program]).await?;
+        let auth_val = match (&pre_auth, action) {
+            (Some(v), "update" | "delete") => v.clone(),
+            _ => build_auth_value(conn, app_id, attrs, auth, &[&program]).await?,
+        };
         let env = EvalEnv::new(app_id, rules, &auth.request)
             .with_modified_fields(modified_fields.unwrap_or_default());
         let ok = eval_program(&program, &data, new_data.as_ref(), &auth_val, &rp, &env).await?;
@@ -3032,13 +3079,17 @@ fn expr_validation_errors(rules: &Value, etype: &str, path: &[&str]) -> Vec<Valu
             path: path.iter().map(|s| s.to_string()).collect(),
         };
         if let Some(e) = undeclared_reference(&program) {
-            let message = e
+            // format-cel-errors (rule.clj:360-364): one entry per CEL issue
+            return e
                 .hint
                 .as_ref()
-                .and_then(|h| h["errors"][0]["message"].as_str())
-                .unwrap_or_default()
-                .to_string();
-            return err(message);
+                .and_then(|h| h["errors"].as_array())
+                .map(|errs| {
+                    errs.iter()
+                        .map(|x| json!({"message": x["message"], "in": path}))
+                        .collect()
+                })
+                .unwrap_or_default();
         }
     }
     // legacy rate-limit-validator (cel.clj:1850-1872)

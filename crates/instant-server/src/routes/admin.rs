@@ -765,7 +765,9 @@ fn resolve_obj_attr(
         "id": id,
         "forward-identity": [Uuid::new_v4(), etype, label],
         "value-type": "blob", "cardinality": "one",
-        "unique?": is_id, "index?": is_id
+        // legacy create-object-attr (admin/model.clj:280-284): the auto-created
+        // `id` attr is unique but not indexed
+        "unique?": is_id, "index?": false
     }]));
     Ok(id)
 }
@@ -1052,11 +1054,11 @@ async fn refresh_tokens_impl(
     // with skip-perm-check? validates extra-fields against the $users schema
     let extra_fields = auth::extra_fields_of(body, "extra-fields");
     let attrs = service::load_attrs(state, ctx.app_id).await?;
-    auth::validate_extra_fields(&attrs, extra_fields)?;
     let (user_id, created) = match (email, id) {
         (Some(email), _) => match auth::user_by_email(state, ctx.app_id, email).await? {
             Some(u) => (u.id, false),
             None => {
+                auth::validate_extra_fields(&attrs, extra_fields)?;
                 let uid = Uuid::new_v4();
                 let mut steps = vec![
                     json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
@@ -1070,6 +1072,7 @@ async fn refresh_tokens_impl(
         (None, Some(id)) => match auth::user_by_id(state, ctx.app_id, id).await? {
             Some(u) => (u.id, false),
             None => {
+                auth::validate_extra_fields(&attrs, extra_fields)?;
                 let mut steps = vec![json!(["add-triple", id, sc::attr_id("$users", "id"), id])];
                 steps.extend(auth::extra_field_steps(&attrs, id, extra_fields));
                 service::run_system_transact(state, ctx.app_id, &Value::Array(steps)).await?;
@@ -1866,12 +1869,8 @@ async fn admin_send_magic_code_impl(
         )
     })?;
     let email = crate::routes::runtime::coerce_email_pub(email)?;
-    state
-        .limiters
-        .magic_code_send
-        .check((ctx.app_id, email.clone()), 1.0)
-        .map_err(crate::rate_limit::email_rate_limited_err)?;
-    crate::routes::runtime::send_magic_code_for(state, ctx.app_id, &email).await
+    let code = crate::routes::runtime::send_magic_code_for(state, ctx.app_id, &email).await?;
+    Ok(json!({"code": code}))
 }
 
 pub async fn admin_verify_magic_code(
@@ -1894,6 +1893,30 @@ async fn verify_magic_code_admin_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
+    // legacy `ex/get-param!` shapes for the two required body params
+    for key in ["email", "code"] {
+        match body.get(key) {
+            None | Some(Value::Null) => {
+                return Err(InstantError::new(
+                    "param-missing",
+                    400,
+                    format!("Missing parameter: [\"body\" \"{key}\"]"),
+                    Some(json!({"in": ["body", key]})),
+                ))
+            }
+            Some(v) if !v.is_string() => {
+                // legacy's coercer (email/coerce, safe-trim) returns nil for a
+                // non-string, which get-param! reports as malformed
+                return Err(InstantError::new(
+                    "param-malformed",
+                    400,
+                    format!("Malformed parameter: [\"body\" \"{key}\"]"),
+                    Some(json!({"in": ["body", key], "original-input": v})),
+                ));
+            }
+            _ => {}
+        }
+    }
     let mut rt_body = body.clone();
     rt_body["app-id"] = json!(ctx.app_id);
     crate::routes::runtime::verify_magic_code_shared(state, &rt_body).await
