@@ -49,6 +49,7 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
             "instant_stream",
             "instant_app_status",
             "instant_rules",
+            "instant_webhooks",
         ])
         .await?;
     loop {
@@ -172,6 +173,15 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                     continue;
                 };
                 state.query_cache.retain(|k, _| k.0 != app_id);
+            }
+            "instant_webhooks" => {
+                if let Some(app_id) = payload
+                    .get("app_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                {
+                    crate::webhooks::invalidate_cache(state, app_id);
+                }
             }
             "instant_app_status" => {
                 let (Some(app_id), Some(status)) = (

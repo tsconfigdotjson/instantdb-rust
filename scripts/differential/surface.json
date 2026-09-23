@@ -1,6 +1,6 @@
 {
  "generatedFrom": "LEGACY/server/src/instant",
- "count": 316,
+ "count": 315,
  "items": [
   {
    "id": "cel:_checked_data_ref",
@@ -134,11 +134,6 @@
   },
   {
    "id": "err:member-missing",
-   "group": "errors",
-   "source": "util/exception.clj"
-  },
-  {
-   "id": "err:message",
    "group": "errors",
    "source": "util/exception.clj"
   },
@@ -356,6 +351,11 @@
    "id": "http:DELETE /superadmin/apps/:app_id",
    "group": "superadmin",
    "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:GET /",
+   "group": "core",
+   "source": "core.clj"
   },
   {
    "id": "http:GET /.well-known/webhooks/jwks.json",
@@ -1153,6 +1153,16 @@
    "source": "mma_example.clj"
   },
   {
+   "id": "http:POST /hooks/honeycomb/exceptions",
+   "group": "core",
+   "source": "core.clj"
+  },
+  {
+   "id": "http:POST /hooks/stripe",
+   "group": "core",
+   "source": "core.clj"
+  },
+  {
    "id": "http:POST /platform/oauth/claim",
    "group": "platform",
    "source": "oauth_apps/routes.clj"
@@ -1328,11 +1338,6 @@
    "source": "db/instaql.clj where"
   },
   {
-   "id": "iq:$expected",
-   "group": "instaql",
-   "source": "db/instaql.clj options"
-  },
-  {
    "id": "iq:$fields",
    "group": "instaql",
    "source": "db/instaql.clj options"
@@ -1360,7 +1365,7 @@
   {
    "id": "iq:$in",
    "group": "instaql",
-   "source": "db/instaql.clj options"
+   "source": "db/instaql.clj where"
   },
   {
    "id": "iq:$isNull",
@@ -1409,16 +1414,6 @@
   },
   {
    "id": "iq:$order",
-   "group": "instaql",
-   "source": "db/instaql.clj options"
-  },
-  {
-   "id": "iq:$query",
-   "group": "instaql",
-   "source": "db/instaql.clj options"
-  },
-  {
-   "id": "iq:$root",
    "group": "instaql",
    "source": "db/instaql.clj options"
   },
@@ -1554,7 +1549,7 @@
   },
   {
    "id": "ws:sse-init",
-   "group": "ws",
+   "group": "ws-internal",
    "source": "reactive/session.clj"
   },
   {

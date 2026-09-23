@@ -42,6 +42,9 @@ APP_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
 TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$APP_ID" "$TOKEN"
 
+echo "== schema parity =="
+node schema.mjs
+
 echo "== differential replay =="
 node replay.mjs "$APP_ID" "$APP_ID" "$TOKEN"
 
@@ -62,6 +65,19 @@ STORAGE_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
 STORAGE_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$STORAGE_APP" "$STORAGE_TOKEN"
 node storage.mjs "$STORAGE_APP" "$STORAGE_TOKEN"
+
+echo "== error matrix =="
+ERR_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+ERR_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+ERR_USER_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+./provision.sh "$ERR_APP" "$ERR_TOKEN" "$ERR_USER_TOKEN"
+node errors.mjs "$ERR_APP" "$ERR_TOKEN" "$ERR_USER_TOKEN"
+
+echo "== scheduling stress =="
+STRESS_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+STRESS_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+./provision.sh "$STRESS_APP" "$STRESS_TOKEN"
+node stress.mjs "$STRESS_APP" "$STRESS_APP" "$STRESS_TOKEN" "${STRESS_TRIPLES:-400}"
 
 echo "== fuzz layer =="
 for SEED in ${FUZZ_SEEDS:-42 99}; do

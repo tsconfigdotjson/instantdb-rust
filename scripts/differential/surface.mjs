@@ -24,8 +24,10 @@ const read = (rel) => fs.readFileSync(path.join(legacy, rel), "utf8");
 
 // routes: every file with a `defroutes` table that core.clj mounts (core.clj:196-208);
 // demo/mma/stripe/health are dev or hosted-billing routes and are listed but
-// tagged so coverage can exclude them
+// tagged so coverage can exclude them; core.clj's own three routes (`GET /`,
+// the Stripe and Honeycomb receivers) are tagged `core` for the same reason
 const ROUTE_FILES = {
+  "core.clj": "core",
   "dash/routes.clj": "dash",
   "runtime/routes.clj": "runtime",
   "admin/routes.clj": "admin",
@@ -51,8 +53,10 @@ export function legacySurface() {
   const caseStart = session.indexOf("(case op");
   const caseBody = session.slice(caseStart, caseStart + 4000);
   // refresh / refresh-presence / refresh-sync-table / server-broadcast /
-  // error are enqueued by the server itself, never sent by a client
-  const SERVER_INTERNAL_OPS = new Set(["refresh", "refresh-presence", "refresh-sync-table", "server-broadcast", "error"]);
+  // error are enqueued by the server itself, never sent by a client, and
+  // sse-init is the frame the server emits to open an SSE session
+  // (`POST /admin/sse` is the client-side act, counted as its route)
+  const SERVER_INTERNAL_OPS = new Set(["refresh", "refresh-presence", "refresh-sync-table", "server-broadcast", "error", "sse-init"]);
   for (const m of caseBody.matchAll(/^\s+:([a-z-]+)\s+\(handle-/gm)) {
     items.push({ id: `ws:${m[1]}`, group: SERVER_INTERNAL_OPS.has(m[1]) ? "ws-internal" : "ws", source: "reactive/session.clj" });
   }
@@ -65,12 +69,14 @@ export function legacySurface() {
   items.push({ id: "tx:mode", group: "tx", source: "db/transaction.clj ::opts" });
   // InstaQL: the `$` options `->forms` dissocs, and every `$` where operator
   const iq = read("db/instaql.clj");
+  // `:$expected` / `:$query` / `:$root` (and `:expected` / `:in` / `:message`
+  // in the error maps next to the dissoc) are error-map keys, not query syntax
+  const NOT_OPTIONS = new Set(["$", "$expected", "$query", "$root", "expected", "in", "message", "query", "root"]);
   const optBlock = iq.slice(iq.indexOf("x (dissoc x"), iq.indexOf("x (dissoc x") + 400);
-  for (const m of optBlock.matchAll(/:([a-zA-Z]+)/g)) {
-    items.push({ id: `iq:$${m[1]}`, group: "instaql", source: "db/instaql.clj options" });
+  for (const m of new Set([...optBlock.matchAll(/:([a-zA-Z]+)/g)].map((x) => x[1]))) {
+    if (NOT_OPTIONS.has(m)) continue;
+    items.push({ id: `iq:$${m}`, group: "instaql", source: "db/instaql.clj options" });
   }
-  // `:$expected` / `:$query` / `:$root` are error-map keys, not query syntax
-  const NOT_OPTIONS = new Set(["$", "$expected", "$query", "$root"]);
   for (const m of new Set([...iq.matchAll(/:(\$[a-zA-Z]+)/g)].map((x) => x[1]))) {
     if (NOT_OPTIONS.has(m)) continue;
     items.push({ id: `iq:${m}`, group: "instaql", source: "db/instaql.clj where" });
@@ -94,7 +100,10 @@ export function legacySurface() {
   }
   // error types: every `::type ::x` thrown by util/exception.clj
   const ex = read("util/exception.clj");
+  // `(s/keys :req [::type ::message ...])` mentions ::message next to ::type
+  const NOT_TYPES = new Set(["message"]);
   for (const m of new Set([...ex.matchAll(/::type ::([a-z-]+)/g)].map((x) => x[1]))) {
+    if (NOT_TYPES.has(m)) continue;
     items.push({ id: `err:${m}`, group: "errors", source: "util/exception.clj" });
   }
   // dedupe, stable order

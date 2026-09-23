@@ -23,7 +23,8 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use crate::indexing_jobs::{self, NewJob};
-use crate::routes::runtime::{err_response, json_or_err};
+use crate::routes::runtime::json_or_err;
+use crate::routes::superadmin::Scope;
 use crate::service::{self, AppRow, PermsCtx};
 use crate::state::AppState;
 
@@ -183,8 +184,13 @@ pub(crate) async fn dash_user(state: &AppState, headers: &HeaderMap) -> Result<D
 
 /// Resolve the app for a `/dash/apps/:app_id/*` request (collaborator role
 /// or the app's admin token).
-async fn dash_authed(state: &AppState, headers: &HeaderMap, app_id_raw: &str) -> Result<AppRow> {
-    dash_authed_with_role(state, headers, app_id_raw, DashRole::Collaborator).await
+async fn dash_authed(
+    state: &AppState,
+    headers: &HeaderMap,
+    app_id_raw: &str,
+    scope: Scope,
+) -> Result<AppRow> {
+    dash_authed_with_role(state, headers, app_id_raw, DashRole::Collaborator, scope).await
 }
 
 /// Legacy `req->app-accepting-superadmin-or-ref-token!` (dash/routes.clj
@@ -196,7 +202,23 @@ pub(crate) async fn dash_authed_with_role(
     headers: &HeaderMap,
     app_id_raw: &str,
     least: DashRole,
+    scope: Scope,
 ) -> Result<AppRow> {
+    // superadmin path first (a personal access token or a scoped platform
+    // token resolves the user, then `get-app-with-role!`)
+    let raw = crate::routes::superadmin::bearer_string(headers)?;
+    if crate::routes::superadmin::is_superadmin_token(state, &raw).await? {
+        let (_, app, _) = crate::routes::superadmin::superadmin_user_and_app(
+            state, headers, scope, least, app_id_raw,
+        )
+        .await?;
+        let id = app
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .unwrap_or_default();
+        return app_or_not_found(state, id).await;
+    }
     let token = bearer_uuid(headers)?;
 
     // app admin token (superadmin path)
@@ -226,43 +248,10 @@ pub(crate) async fn dash_authed_with_role(
     let Some(user) = user_by_refresh_token(state, token).await? else {
         return Err(unauthorized());
     };
-    let app = app_or_not_found(state, app_id).await?;
-    let role: Option<String> = sqlx::query(
-        "SELECT CASE WHEN a.creator_id = $2 THEN 'owner'
-                     ELSE coalesce(m.member_role, om.role) END AS role
-           FROM apps a
-           LEFT JOIN app_members m ON m.app_id = a.id AND m.user_id = $2
-           LEFT JOIN org_members om ON om.org_id = a.org_id AND om.user_id = $2
-          WHERE a.id = $1",
-    )
-    .bind(app_id)
-    .bind(user.id)
-    .fetch_optional(&state.pool)
-    .await?
-    .and_then(|r| r.get::<Option<String>, _>("role"));
-    let role = role.as_deref().and_then(DashRole::parse);
-    match role {
-        None => Err(InstantError::new(
-            "validation-failed",
-            400,
-            format!(
-                "Validation failed for user-role: User is missing role {}.",
-                least.as_str()
-            ),
-            Some(json!({
-                "data-type": "user-role",
-                "input": null,
-                "errors": [{"message": format!("User is missing role {}.", least.as_str())}],
-            })),
-        )),
-        Some(r) if r < least => Err(InstantError::new(
-            "permission-denied",
-            400,
-            "Permission denied: not allowed-member-role?",
-            Some(json!({"input": r.as_str(), "expected": "allowed-member-role?"})),
-        )),
-        Some(_) => Ok(app),
-    }
+    let row = crate::routes::dash_apps::live_app_row(state, app_id).await?;
+    let access = crate::routes::dash_apps::app_role_for_user(state, &row, user.id).await?;
+    crate::routes::dash_apps::assert_app_access(least, access)?;
+    app_or_not_found(state, app_id).await
 }
 
 pub(crate) fn parse_body(body: &Bytes) -> Result<Value> {
@@ -292,7 +281,7 @@ pub async fn schema_pull(
 }
 
 async fn schema_pull_impl(state: &AppState, headers: &HeaderMap, app_id: &str) -> Result<Value> {
-    let app = dash_authed(state, headers, app_id).await?;
+    let app = dash_authed(state, headers, app_id, Scope::AppsRead).await?;
     let attrs = service::load_attrs(state, app.id).await?;
     Ok(json!({
         "schema": schema::attrs_to_schema(&attrs).to_wire(),
@@ -302,7 +291,7 @@ async fn schema_pull_impl(state: &AppState, headers: &HeaderMap, app_id: &str) -
 }
 
 /// Result of applying planned steps (model/schema.clj apply-plan!).
-async fn apply_steps(
+pub(crate) async fn apply_steps(
     state: &Arc<AppState>,
     app_id: Uuid,
     steps: Vec<Value>,
@@ -431,7 +420,7 @@ async fn schema_steps_apply_impl(
     app_id: &str,
     body: &Bytes,
 ) -> Result<Value> {
-    let app = dash_authed(state, headers, app_id).await?;
+    let app = dash_authed(state, headers, app_id, Scope::AppsWrite).await?;
     let body = parse_body(body)?;
     let steps = body
         .get("steps")
@@ -444,12 +433,12 @@ async fn schema_steps_apply_impl(
     apply_steps(state, app.id, steps, true).await
 }
 
-struct Plan {
-    steps: Vec<Value>,
-    wire: Value,
+pub(crate) struct Plan {
+    pub(crate) steps: Vec<Value>,
+    pub(crate) wire: Value,
 }
 
-async fn plan(state: &AppState, app_id: Uuid, body: &Value) -> Result<Plan> {
+pub(crate) async fn plan(state: &AppState, app_id: Uuid, body: &Value) -> Result<Plan> {
     let client_defs = body.get("schema").cloned().unwrap_or(Value::Null);
     let opts = schema::PlanOpts {
         check_types: truthy(body.get("check_types")),
@@ -495,7 +484,7 @@ pub async fn schema_push_plan(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed(&state, &headers, &app_id).await?;
+        let app = dash_authed(&state, &headers, &app_id, Scope::AppsRead).await?;
         let body = parse_body(&body)?;
         Ok(plan(&state, app.id, &body).await?.wire)
     }
@@ -522,7 +511,7 @@ pub async fn schema_push_apply(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed(&state, &headers, &app_id).await?;
+        let app = dash_authed(&state, &headers, &app_id, Scope::AppsWrite).await?;
         let body = parse_body(&body)?;
         let plan = plan(&state, app.id, &body).await?;
         let applied = apply_steps(&state, app.id, plan.steps, false).await?;
@@ -548,7 +537,7 @@ pub async fn indexing_jobs_group(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed(&state, &headers, &app_id).await?;
+        let app = dash_authed(&state, &headers, &app_id, Scope::AppsWrite).await?;
         let group_id = Uuid::parse_str(&group_id)
             .map_err(|_| param_malformed(&["params", "group_id"], json!(group_id)))?;
         let jobs = indexing_jobs::get_by_group_for_client(&state, app.id, group_id).await?;
@@ -565,7 +554,7 @@ pub async fn indexing_job_get(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed(&state, &headers, &app_id).await?;
+        let app = dash_authed(&state, &headers, &app_id, Scope::AppsRead).await?;
         let job_id = Uuid::parse_str(&job_id)
             .map_err(|_| param_malformed(&["params", "job_id"], json!(job_id)))?;
         // legacy: (job->client-format nil) => {} — no 404 for unknown ids
@@ -591,7 +580,7 @@ pub async fn indexing_job_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed(&state, &headers, &app_id).await?;
+        let app = dash_authed(&state, &headers, &app_id, Scope::AppsWrite).await?;
         let body = parse_body(&body)?;
         let attr_id = body
             .get("attr-id")
@@ -682,7 +671,7 @@ pub async fn perms_pull(
     headers: HeaderMap,
 ) -> Response {
     let r = async {
-        let app = dash_authed(&state, &headers, &app_id).await?;
+        let app = dash_authed(&state, &headers, &app_id, Scope::AppsWrite).await?;
         let code: Option<Value> = sqlx::query("SELECT code FROM rules WHERE app_id = $1")
             .bind(app.id)
             .fetch_optional(&state.pool)
@@ -702,7 +691,7 @@ pub async fn rules_post(
     body: Bytes,
 ) -> Response {
     let r = async {
-        let app = dash_authed(&state, &headers, &app_id).await?;
+        let app = dash_authed(&state, &headers, &app_id, Scope::AppsWrite).await?;
         let body = parse_body(&body)?;
         let code = body
             .get("code")
@@ -755,16 +744,4 @@ pub async fn cli_version() -> Response {
     json_or_err(Ok(json!({
         "min-version": {"major": 0, "minor": 19, "patch": 0, "dev?": false}
     })))
-}
-
-/// POST /dash/cli/auth/{register,check,claim,void}: the browser login flow
-/// needs the hosted dashboard. Point users at the admin token instead of a
-/// bare 404.
-pub async fn cli_auth_unsupported() -> Response {
-    err_response(&InstantError::new(
-        "validation-failed",
-        400,
-        "Dashboard login is not available on this server. Authenticate instant-cli with your app's admin token instead: set INSTANT_APP_ADMIN_TOKEN (or pass --token) alongside INSTANT_APP_ID.",
-        Some(json!({"data-type": "instant-cli-login", "errors": [{"issue": "unsupported", "message": "Dashboard login is not available on this server."}]})),
-    ))
 }

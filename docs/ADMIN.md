@@ -443,10 +443,12 @@ Experimental (only external consumer noted is “Kosmik”; the SDK/CLI don't us
 Requires admin token (scope `apps/read` for platform tokens). Returns
 **200** `{"schema": {"blobs": {etype: {label: attr}}, "refs": {"comments-post-posts-comments": attr}}}`
 — i.e. `schema-model/attrs->schema` with ref keys (4-tuples) joined by `-`.
+Served (`routes/dash_manage.rs`, differential dash step 33).
 
 ### 4.12 `GET /admin/soft_deleted_attrs` (`admin/routes.clj:771-776`)
 
-**200** `{"attrs": [...], "grace-period-days": N}`. Not used by SDK/CLI; skip.
+**200** `{"attrs": [...], "grace-period-days": N}`. Not used by SDK/CLI.
+Served (`routes/dash_manage.rs`, differential dash step 33).
 
 ### 4.13 SSE endpoints (subscribeQuery / streams)
 
