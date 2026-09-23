@@ -174,16 +174,20 @@ async fn send_magic_code_impl(state: &Arc<AppState>, body: &Value) -> Result<Val
     let app_id = get_app_id(body, "app-id")?;
     check_auth_limit(state, app_id)?;
     let email = coerce_email(get_str(body, "email")?)?;
-    send_magic_code_for(state, app_id, &email).await
+    send_magic_code_for(state, app_id, &email).await?;
+    Ok(json!({"sent": true}))
 }
 
 /// Generate, store and deliver a magic code (legacy magic-code-auth/send!);
 /// shared by `/runtime/auth/send_magic_code` and `/admin/send_magic_code`.
+/// Generates, stores and delivers a magic code, returning the plaintext code.
+/// The runtime route answers `{sent: true}`; the admin route answers the code
+/// itself (admin/routes.clj:506-511).
 pub async fn send_magic_code_for(
     state: &Arc<AppState>,
     app_id: Uuid,
     email: &str,
-) -> Result<Value> {
+) -> Result<String> {
     let app = service::get_app(state, app_id).await?;
     let email = email.to_string();
     // per-(app, email) budget, matching legacy's 20/hour default
@@ -226,7 +230,7 @@ pub async fn send_magic_code_for(
     // Fire-and-forget delivery (log-only by default); the response never
     // depends on whether the email actually goes out.
     crate::email::deliver_magic_code(state, app_id, &app.title, &email, &code);
-    Ok(json!({"sent": true}))
+    Ok(code)
 }
 
 pub async fn verify_magic_code(

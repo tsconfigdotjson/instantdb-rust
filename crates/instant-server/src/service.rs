@@ -370,8 +370,12 @@ pub async fn run_transact(
         .await?
     };
 
+    let queued = crate::webhooks::queue_events(state, &mut dbtx, app_id, &attrs, &report).await?;
     dbtx.commit().await.map_err(InstantError::from)?;
     notify_tx(state, app_id, &TxNotice::from(&report)).await;
+    if queued {
+        state.webhook_notify.notify_one();
+    }
     crate::metrics::METRICS
         .transact_seconds
         .observe_since(started);
@@ -398,8 +402,12 @@ pub async fn run_system_transact(
         },
     )
     .await?;
+    let queued = crate::webhooks::queue_events(state, &mut dbtx, app_id, &attrs, &report).await?;
     dbtx.commit().await.map_err(InstantError::from)?;
     notify_tx(state, app_id, &TxNotice::from(&report)).await;
+    if queued {
+        state.webhook_notify.notify_one();
+    }
     Ok(report)
 }
 

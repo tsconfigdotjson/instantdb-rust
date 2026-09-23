@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod dash;
 pub mod dash_apps;
+pub mod dash_login;
 pub mod dash_manage;
 pub mod dash_members;
 pub mod oauth;
@@ -8,3 +9,4 @@ pub mod platform_oauth;
 pub mod runtime;
 pub mod sse;
 pub mod superadmin;
+pub mod webhooks;

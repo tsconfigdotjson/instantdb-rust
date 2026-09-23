@@ -12,6 +12,7 @@ mod state;
 mod storage;
 mod streams;
 mod sync_table;
+mod webhooks;
 mod ws;
 
 use axum::routing::{delete, get, post, put};
@@ -102,6 +103,14 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::new(cfg.clone(), pool);
 
+    webhooks::ensure_tables(&state.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("webhook tables: {e}"))?;
+    let webhook_key = webhooks::load_or_generate_key(&state.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("webhook signing key: {e}"))?;
+    let _ = state.webhook_key.set(webhook_key);
+    tokio::spawn(webhooks::run(state.clone()));
     tokio::spawn(invalidator::run(state.clone()));
     tokio::spawn(presence::heartbeat_loop(state.clone()));
     tokio::spawn(indexing_jobs::sweep_loop(state.clone()));
@@ -411,6 +420,25 @@ async fn main() -> anyhow::Result<()> {
             "/dash/apps/get_a_db/{app_id}",
             get(routes::dash_members::get_a_db_get),
         )
+        .route(
+            "/dash/apps/get_a_db",
+            post(routes::dash_login::get_a_db_post),
+        )
+        .route(
+            "/dash/apps/{app_id}/track-import",
+            post(routes::dash_login::track_import),
+        )
+        // the dashboard's Google login + node stats
+        .route("/dash/oauth/start", get(routes::dash_login::oauth_start))
+        .route(
+            "/dash/oauth/callback",
+            get(routes::dash_login::oauth_callback),
+        )
+        .route("/dash/oauth/token", post(routes::dash_login::oauth_token))
+        .route(
+            "/dash/stats/active_sessions",
+            get(routes::dash_login::active_sessions),
+        )
         // platform API (superadmin) + platform OAuth provider + OAuth-app management
         .route(
             "/superadmin/apps",
@@ -499,6 +527,39 @@ async fn main() -> anyhow::Result<()> {
             "/dash/user/oauth_apps/revoke_access",
             post(routes::platform_oauth::user_oauth_apps_revoke),
         )
+        // webhooks (dashboard management + receiver-facing routes)
+        .route(
+            "/dash/apps/{app_id}/webhooks",
+            get(routes::webhooks::list).post(routes::webhooks::create),
+        )
+        .route(
+            "/dash/apps/{app_id}/webhooks/{webhook_id}",
+            post(routes::webhooks::update).delete(routes::webhooks::delete),
+        )
+        .route(
+            "/dash/apps/{app_id}/webhooks/{webhook_id}/enable",
+            post(routes::webhooks::enable),
+        )
+        .route(
+            "/dash/apps/{app_id}/webhooks/{webhook_id}/disable",
+            post(routes::webhooks::disable),
+        )
+        .route(
+            "/dash/apps/{app_id}/webhooks/{webhook_id}/events",
+            get(routes::webhooks::events),
+        )
+        .route(
+            "/dash/apps/{app_id}/webhooks/{webhook_id}/events/{*isn}",
+            get(routes::webhooks::event).post(routes::webhooks::resend),
+        )
+        .route(
+            "/.well-known/webhooks/jwks.json",
+            get(routes::webhooks::jwks),
+        )
+        .route(
+            "/webhooks/payload/{app_id}/{webhook_id}/{*isn}",
+            get(routes::webhooks::payload),
+        )
         .route("/dash/profiles", post(routes::dash_manage::profiles_post))
         .route("/dash/signout", post(routes::dash_manage::signout))
         .route("/dash/check-admin", get(routes::dash_manage::check_admin))
@@ -519,21 +580,22 @@ async fn main() -> anyhow::Result<()> {
             "/dash/personal_access_tokens/{id}",
             delete(routes::dash_manage::personal_access_tokens_delete),
         )
+        // instant-cli login: register a ticket, the dashboard login claims it
         .route(
             "/dash/cli/auth/register",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_register),
         )
         .route(
             "/dash/cli/auth/check",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_check),
         )
         .route(
             "/dash/cli/auth/claim",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_claim),
         )
         .route(
             "/dash/cli/auth/void",
-            post(routes::dash::cli_auth_unsupported),
+            post(routes::dash_login::cli_auth_void),
         )
         .route(
             "/admin/query_perms_check",

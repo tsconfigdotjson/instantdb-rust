@@ -104,6 +104,13 @@ works exactly as with the hosted service. A complete example lives in
 | `INSTANT_REFRESH_CONCURRENCY` | `8` | concurrent query recomputations per app refresh batch |
 | `INSTANT_MAX_QUEUED_MESSAGES` | `10000` | outgoing messages a session may queue before it is disconnected as a slow consumer |
 | `INSTANT_RATE_LIMITS` | on | `off` disables the per-app token buckets (load testing) |
+| `INSTANT_SUPERUSER_EMAIL` | — | the dashboard user `GET /dash/check-admin` treats as the operator (legacy's superuser flag) |
+| `INSTANT_DASHBOARD_SIGNUP_MODE` | `open` | dashboard signup policy for magic-code / Google login: `open` (anyone), `restricted` (existing users plus the allow-list), `closed` (existing users only); legacy's dashboard-signup flag |
+| `INSTANT_DASHBOARD_ALLOWED_EMAILS` | — | comma-separated emails admitted under `restricted` |
+| `INSTANT_PAID_FEATURES_FREE` | `false` | `true` admits every app / org member without a Pro or Startup row in `instant_subscriptions` (legacy's `paid-features-free` flag; members who joined before the free-teams cutoff and owners are always admitted) |
+| `INSTANT_DASHBOARD_URL` | — | the self-hosted dashboard's origin: the platform OAuth consent screen and the Google login redirect target |
+| `INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` | — | Google OAuth client for the dashboard's Google login (legacy's names); unset leaves the login unconfigured like legacy |
+| `INSTANT_WEBHOOK_ALLOW_INSECURE` | `false` | lets webhooks target `http://` and private hosts (test receivers only; never in production) |
 | `INSTANT_INDEXING_BATCH_SIZE` | `1000` | triples an indexing job (index / unique / type check / required) rewrites per step; the job is released between steps so large attrs never hold a long lock |
 | `INSTANT_INDEXING_SWEEP_SECS` | `60` | how often each node picks up indexing jobs nobody is driving (created by a node that died, or blocked by a conflicting job) |
 | `INSTANT_INDEXING_STALE_SECS` | `600` | a processing indexing job with no progress for this long is treated as orphaned and reclaimed |
@@ -186,8 +193,10 @@ existing clients keep working after a URL switch.
 ### Using `instant-cli`
 
 The official CLI's `push`/`pull` (schema and perms) work against this server
-through the same `/dash/...` routes it uses with hosted Instant. There is no
-dashboard login here, so authenticate with the app's admin token:
+through the same `/dash/...` routes it uses with hosted Instant. `instant-cli
+login` works too (magic-code dashboard login, or Google when
+`INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET` are set); the quickest
+path is still the app's admin token:
 
 ```bash
 export INSTANT_CLI_API_URI=http://localhost:8888   # this server

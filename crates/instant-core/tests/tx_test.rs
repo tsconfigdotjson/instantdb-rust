@@ -408,12 +408,13 @@ async fn mode_prepass_matches_legacy() {
         format!("Validation failed for tx-step: Creating entities that exist: {e1}")
     );
     assert_eq!(err.hint.as_ref().unwrap()["data-type"], json!("tx-step"));
+    // legacy echoes the offending steps in `mapify-tx-step` form
+    let input = err.hint.as_ref().unwrap()["input"].clone();
+    assert_eq!(input.as_array().unwrap().len(), 1);
     assert_eq!(
-        err.hint.as_ref().unwrap()["input"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
+        input[0],
+        json!({"op": "add-triple", "eid": e1, "etype": "todos", "aid": ids.todos_id,
+               "value": e1, "rev-etype": null, "opts": {"mode": "create"}})
     );
 
     // the same uuid under another etype does not exist there (PR #1555)

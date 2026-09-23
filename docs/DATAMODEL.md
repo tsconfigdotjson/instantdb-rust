@@ -138,7 +138,8 @@ ea, eav, av, ave, vae, checked_data_type` (+ `created_at`, `pg_size` maintained 
   `(app_id, attr_id, triples_extract_<t>_value(value) NULLS FIRST)`
   (`40_checked_indexes.up.sql`, `45_…`, `56_nulls_first_indexes.up.sql`).
 - `triples_created_at_idx` on `(created_at)` (`51_add_triples_created_at_index.up.sql`).
-- `triples_app_id`, `triples_attr_id` (`01_bootstrap.up.sql:124-126`).
+- `triples_attr_id` (`01_bootstrap.up.sql:124-126`); the bootstrap's `triples_app_id`
+  was dropped upstream as unused (`125_drop_triples_app_id_index.up.sql`).
 
 **Check constraints**:
 

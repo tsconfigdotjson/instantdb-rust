@@ -367,11 +367,90 @@ fn default_body(params: &[(&str, &str)]) -> String {
         params,
         true,
     );
+    standard_body(&inner)
+}
+
+/// Legacy `postmark/standard-body`: the shared email frame.
+fn standard_body(inner: &str) -> String {
     format!(
         "<div style='background:#f6f6f6;font-family:Helvetica,Arial,sans-serif;\
          line-height:1.6;font-size:18px'>\
          <div style='max-width:650px;margin:0 auto;background:white;padding:20px'>{inner}</div></div>"
     )
+}
+
+/// Legacy `team-member-invite-email` (dash/routes.clj:1274-1301), sent after
+/// an app / org invite is recorded.
+pub fn deliver_team_invite(
+    state: &Arc<AppState>,
+    invitee_email: &str,
+    inviter_email: &str,
+    kind: &str,
+    title: &str,
+) {
+    deliver_invite(
+        state,
+        invitee_email,
+        format!("[Instant] You've been invited to collaborate on {title}"),
+        format!(
+            "{} invited you to collaborate on their {kind} {}.",
+            html_escape(inviter_email),
+            html_escape(title)
+        ),
+    );
+}
+
+/// Legacy `transfer-app-invite-email` (superadmin/routes.clj:213-230), sent
+/// after an app transfer (`creator`) invite is recorded.
+pub fn deliver_transfer_invite(
+    state: &Arc<AppState>,
+    invitee_email: &str,
+    inviter_email: &str,
+    app_title: &str,
+) {
+    deliver_invite(
+        state,
+        invitee_email,
+        format!("[Instant] You've been asked to take ownership of {app_title}"),
+        format!(
+            "{} invited you to become the new owner of {}.",
+            html_escape(inviter_email),
+            html_escape(app_title)
+        ),
+    );
+}
+
+/// The invite emails' shared shape: from the default sender, pointing the
+/// invitee at the dashboard's invites tab (`INSTANT_DASHBOARD_URL`). Logged
+/// when no provider is configured; like the magic codes it never fails the
+/// request.
+fn deliver_invite(state: &Arc<AppState>, to: &str, subject: String, message_html: String) {
+    if matches!(state.email.provider, EmailProvider::Log) {
+        tracing::info!("invite email for {to} (log-only mail): {subject}");
+        return;
+    }
+    let invite_url = format!("{}/dash?s=invites", state.cfg.dashboard_origin);
+    let inner = format!(
+        "<p><strong>Hey there!</strong></p>\
+         <p>{message_html}</p>\
+         <p>Navigate to <a href=\"{}\">Instant</a> to accept the invite.</p>\
+         <p>Note: this invite will expire in 3 days. If you don't know the user inviting you, \
+         please reply to this email.</p>",
+        html_escape(&invite_url),
+    );
+    let msg = RenderedEmail {
+        sender_name: "Instant".to_string(),
+        sender_email: state.email.default_sender_email.clone(),
+        to: to.to_string(),
+        subject,
+        html: standard_body(&inner),
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = send(&state, &msg).await {
+            tracing::warn!("invite email to {} failed: {e}", msg.to);
+        }
+    });
 }
 
 async fn send(state: &AppState, msg: &RenderedEmail) -> Result<(), String> {
