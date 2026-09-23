@@ -169,7 +169,7 @@ fn handle_receive_timeout_ms() -> u64 {
 }
 
 /// Legacy `ex/get-param!` error shapes (util/exception.clj:410-428).
-fn param_missing_at(path: &[&str]) -> InstantError {
+pub(crate) fn param_missing_at(path: &[&str]) -> InstantError {
     InstantError::new(
         "param-missing",
         400,
@@ -177,7 +177,7 @@ fn param_missing_at(path: &[&str]) -> InstantError {
         Some(json!({"in": path})),
     )
 }
-fn param_malformed_at(path: &[&str], input: &Value) -> InstantError {
+pub(crate) fn param_malformed_at(path: &[&str], input: &Value) -> InstantError {
     InstantError::new(
         "param-malformed",
         400,
@@ -324,9 +324,9 @@ async fn handle_init(state: &Arc<AppState>, session: &Arc<Session>, msg: &Value)
         // legacy rejects a second init on the same session (session.clj:158-159)
         let st = session.state.lock().await;
         if st.app_id.is_some() {
-            return Err(InstantError::validation_failed(
+            return Err(InstantError::validation_failed_input(
                 "init",
-                "`init` has already run for this session.",
+                legacy_event_input(msg),
                 json!([{"message": "`init` has already run for this session."}]),
             ));
         }
@@ -351,9 +351,9 @@ async fn handle_init(state: &Arc<AppState>, session: &Arc<Session>, msg: &Value)
             }
             None => {
                 // legacy app-user-model/get-by-refresh-token! (exception.clj:130-135)
-                return Err(InstantError::record_not_found(
+                return Err(InstantError::record_not_found_args(
                     "app-user",
-                    "Record not found: app-user",
+                    json!({"app-id": app_id, "refresh-token": token}),
                 ));
             }
         }
@@ -402,20 +402,35 @@ async fn handle_init(state: &Arc<AppState>, session: &Arc<Session>, msg: &Value)
     Ok(())
 }
 
-/// Legacy `get-auth!` (session.clj:198-202).
-pub(crate) fn not_initialized() -> InstantError {
-    InstantError::validation_failed(
+/// Legacy `get-auth!` (session.clj:198-202): the hint's input is the
+/// session id.
+pub(crate) fn not_initialized(session_id: Uuid) -> InstantError {
+    InstantError::validation_failed_input(
         "init",
-        "`init` has not run for this session.",
+        json!({"sess-id": session_id}),
         json!([{"message": "`init` has not run for this session."}]),
     )
+}
+
+/// A client event as legacy echoes it in validation hints: the event map
+/// plus the grouped-queue bookkeeping keys it carries by then
+/// (session.clj:158-159 passes the whole event as the input).
+pub(crate) fn legacy_event_input(msg: &Value) -> Value {
+    let mut m = msg.as_object().cloned().unwrap_or_default();
+    m.insert(
+        "instant.grouped-queue/put-at".into(),
+        json!(chrono::Utc::now().timestamp_millis()),
+    );
+    m.insert("total-delay-ms".into(), json!(0));
+    m.insert("ws-ping-latency-ms".into(), json!(0));
+    Value::Object(m)
 }
 
 async fn session_ctx(
     session: &Arc<Session>,
 ) -> std::result::Result<(Uuid, PermsCtx), InstantError> {
     let st = session.state.lock().await;
-    let app_id = st.app_id.ok_or_else(not_initialized)?;
+    let app_id = st.app_id.ok_or_else(|| not_initialized(session.id))?;
     Ok((
         app_id,
         PermsCtx {
@@ -459,9 +474,9 @@ async fn handle_add_query(
     let (app_id, perms) = session_ctx(session).await?;
     let q = match msg.get("q") {
         None | Some(Value::Null) => {
-            return Err(InstantError::validation_failed(
+            return Err(InstantError::validation_failed_input(
                 "add-query",
-                "Query can not be null.",
+                json!({"q": null}),
                 json!([{"message": "Query can not be null."}]),
             ))
         }
@@ -622,11 +637,10 @@ async fn handle_transact(
 ) -> HandlerResult {
     let (app_id, perms) = session_ctx(session).await?;
     let steps = msg.get("tx-steps").ok_or_else(|| {
-        InstantError::new(
-            "validation-failed",
-            400,
-            "Validation failed for tx-steps",
-            Some(json!({"data-type": "tx-steps", "errors": [{"expected": "coll?", "in": []}]})),
+        InstantError::validation_failed_input(
+            "tx-steps",
+            Value::Null,
+            json!([{"expected": "coll?", "in": []}]),
         )
     })?;
     let report = service::run_transact(state, app_id, &perms, steps).await?;
@@ -725,9 +739,9 @@ async fn handle_set_presence(
 async fn assert_in_room(session: &Arc<Session>, room_id: &str) -> HandlerResult {
     let st = session.state.lock().await;
     if !st.rooms.contains(room_id) {
-        return Err(InstantError::validation_failed(
+        return Err(InstantError::validation_failed_input(
             "room",
-            "You have not entered this room yet.",
+            json!({"app-id": st.app_id, "room-id": room_id}),
             json!([{"message": "You have not entered this room yet."}]),
         ));
     }

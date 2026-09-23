@@ -4,6 +4,7 @@
 //! them to join-rows, the admin layer builds object trees.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
 use sqlx::{PgConnection, Postgres, QueryBuilder, Row};
@@ -91,6 +92,12 @@ pub struct Form {
     pub etype: String,
     pub opts: Opts,
     pub children: Vec<Form>,
+    /// the form keys from the root down to this form: legacy's `(:in state)`
+    /// prefix for validation-error hints
+    pub path: Vec<String>,
+    /// the whole query, legacy's `(:root state)`: the `input` of every
+    /// query validation error
+    pub root: Arc<Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -218,32 +225,70 @@ fn verr(message: impl Into<String>) -> InstantError {
     InstantError::validation_failed("query", message, json!([]))
 }
 
+/// Legacy `throw-validation-err! :query (:root state) [{expected in message}]`:
+/// the whole query as the input and the path of the offending option.
+fn qerr(
+    root: &Value,
+    expected_key: &str,
+    expected: &str,
+    path: Vec<Value>,
+    message: String,
+) -> InstantError {
+    let mut err = Map::new();
+    err.insert(expected_key.to_string(), json!(expected));
+    err.insert("in".to_string(), Value::Array(path));
+    err.insert("message".to_string(), json!(message));
+    InstantError::validation_failed_input(
+        "query",
+        root.clone(),
+        Value::Array(vec![Value::Object(err)]),
+    )
+}
+
+fn in_path(prefix: &[String], rest: &[&str]) -> Vec<Value> {
+    prefix
+        .iter()
+        .map(|s| json!(s))
+        .chain(rest.iter().map(|s| json!(s)))
+        .collect()
+}
+
 pub fn parse_query(q: &Value) -> Result<Vec<Form>> {
     let obj = q
         .as_object()
         .ok_or_else(|| verr("InstaQL queries must be objects."))?;
     let mut forms = vec![];
+    let root = Arc::new(q.clone());
     for (k, v) in obj {
         if k == "$$ruleParams" {
             continue;
         }
-        forms.push(parse_form(k, k, v, 0)?);
+        forms.push(parse_form(k, k, v, 0, &[], &root)?);
     }
     Ok(forms)
 }
 
-fn parse_form(k: &str, etype: &str, v: &Value, level: usize) -> Result<Form> {
+fn parse_form(
+    k: &str,
+    etype: &str,
+    v: &Value,
+    level: usize,
+    parent_path: &[String],
+    root: &Arc<Value>,
+) -> Result<Form> {
     let obj = v
         .as_object()
         .ok_or_else(|| verr(format!("Expected an object for `{k}`.")))?;
+    let mut path = parent_path.to_vec();
+    path.push(k.to_string());
     let mut opts = Opts::default();
     let mut children = vec![];
     for (ck, cv) in obj {
         if ck == "$" {
-            opts = parse_opts(cv, level)?;
+            opts = parse_opts(cv, level, &path, root)?;
         } else {
             // etype is resolved later against attrs; store the key for now
-            children.push(parse_form(ck, ck, cv, level + 1)?);
+            children.push(parse_form(ck, ck, cv, level + 1, &path, root)?);
         }
     }
     if opts.aggregate && !children.is_empty() {
@@ -256,17 +301,19 @@ fn parse_form(k: &str, etype: &str, v: &Value, level: usize) -> Result<Form> {
         etype: etype.to_string(),
         opts,
         children,
+        path,
+        root: root.clone(),
     })
 }
 
-fn parse_opts(v: &Value, level: usize) -> Result<Opts> {
+fn parse_opts(v: &Value, level: usize, path: &[String], root: &Value) -> Result<Opts> {
     let obj = v
         .as_object()
         .ok_or_else(|| verr("`$` must be an object."))?;
     let mut opts = Opts::default();
     for (k, v) in obj {
         match k.as_str() {
-            "where" => opts.where_conds = Some(parse_where(v)?),
+            "where" => opts.where_conds = Some(parse_where(v, path, root)?),
             "order" => {
                 let m = v.as_object().ok_or_else(|| verr("`order` must be an object."))?;
                 if m.is_empty() {
@@ -295,11 +342,25 @@ fn parse_opts(v: &Value, level: usize) -> Result<Opts> {
             }
             "before" => opts.before = Some(parse_cursor(v)?),
             "after" => opts.after = Some(parse_cursor(v)?),
-            "beforeInclusive" => {
-                opts.before_inclusive = v.as_bool().unwrap_or(false);
-            }
-            "afterInclusive" => {
-                opts.after_inclusive = v.as_bool().unwrap_or(false);
+            // legacy `(when-some [x (:afterInclusive x)] (assert-boolean! ...))`
+            // (instaql.clj:346-352, :463-470): null is absent, anything but a
+            // boolean is `{expected boolean?}` with no message
+            "beforeInclusive" | "afterInclusive" => {
+                if v.is_null() {
+                    continue;
+                }
+                let b = v.as_bool().ok_or_else(|| {
+                    InstantError::validation_failed_input(
+                        "query",
+                        root.clone(),
+                        json!([{"expected": "boolean?", "in": in_path(path, &["$", k.as_str()])}]),
+                    )
+                })?;
+                if k == "beforeInclusive" {
+                    opts.before_inclusive = b;
+                } else {
+                    opts.after_inclusive = b;
+                }
             }
             "aggregate" => {
                 if v.as_str() != Some("count") {
@@ -369,7 +430,7 @@ fn parse_cursor(v: &Value) -> Result<Cursor> {
     })
 }
 
-fn parse_where(v: &Value) -> Result<WhereCond> {
+fn parse_where(v: &Value, path: &[String], root: &Value) -> Result<WhereCond> {
     let obj = v
         .as_object()
         .ok_or_else(|| verr("`where` must be an object."))?;
@@ -381,10 +442,19 @@ fn parse_where(v: &Value) -> Result<WhereCond> {
                     .as_array()
                     .ok_or_else(|| verr("`or` must be an array."))?;
                 if arr.is_empty() {
-                    return Err(verr("The `or` operation expects a non-empty list."));
+                    // legacy coerce-where-cond (instaql.clj:258-268)
+                    return Err(qerr(
+                        root,
+                        "expected",
+                        "non-empty-list?",
+                        in_path(path, &["$", "or"]),
+                        "The list of `or` conditions can't be empty.".to_string(),
+                    ));
                 }
                 conds.push(WhereCond::Or(
-                    arr.iter().map(parse_where).collect::<Result<Vec<_>>>()?,
+                    arr.iter()
+                        .map(|c| parse_where(c, path, root))
+                        .collect::<Result<Vec<_>>>()?,
                 ));
             }
             "and" => {
@@ -392,10 +462,18 @@ fn parse_where(v: &Value) -> Result<WhereCond> {
                     .as_array()
                     .ok_or_else(|| verr("`and` must be an array."))?;
                 if arr.is_empty() {
-                    return Err(verr("The `and` operation expects a non-empty list."));
+                    return Err(qerr(
+                        root,
+                        "expected",
+                        "non-empty-list?",
+                        in_path(path, &["$", "and"]),
+                        "The list of `and` conditions can't be empty.".to_string(),
+                    ));
                 }
                 conds.push(WhereCond::And(
-                    arr.iter().map(parse_where).collect::<Result<Vec<_>>>()?,
+                    arr.iter()
+                        .map(|c| parse_where(c, path, root))
+                        .collect::<Result<Vec<_>>>()?,
                 ));
             }
             path => {
@@ -463,6 +541,28 @@ fn parse_where_value(v: &Value) -> Result<Vec<WhereOp>> {
 struct SqlCtx<'a> {
     app_id: Uuid,
     attrs: &'a AttrMap,
+    /// the form's whole query + key path, for validation-error hints
+    root: &'a Value,
+    path: &'a [String],
+    /// the where path currently being compiled (set by push_leaf; a Mutex
+    /// only so the ctx stays Sync inside the query futures)
+    cur_where: std::sync::Mutex<Vec<String>>,
+}
+
+impl SqlCtx<'_> {
+    /// legacy attr_pat.clj assert-checked-attr-data-type! & co: `:query`
+    /// validation error with the root query as input and
+    /// `[form.. "$" "where" <path>]` as `in`
+    fn where_err(&self, expected: &str, message: String) -> InstantError {
+        let joined = self.cur_where.lock().unwrap().join(".");
+        qerr(
+            self.root,
+            "expected?",
+            expected,
+            in_path(self.path, &["$", "where", joined.as_str()]),
+            message,
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -707,6 +807,7 @@ impl<'a> SqlCtx<'a> {
         op: &WhereOp,
         depth: usize,
     ) -> std::result::Result<Result<()>, MissingAttr> {
+        *self.cur_where.lock().unwrap() = path.to_vec();
         // $entityIdStartsWith special label
         if path.len() == 1 && path[0] == "$entityIdStartsWith" {
             if let WhereOp::Eq(Value::String(prefix)) = op {
@@ -1020,13 +1121,16 @@ impl<'a> SqlCtx<'a> {
                 // legacy assert-like-is-string! (attr_pat.clj:307-317), after
                 // the attr checks; the message says `$like` for `$ilike` too
                 let pattern = pattern.as_str().ok_or_else(|| {
-                    verr(format!(
-                        "The $like value for `{}.{}` must be a string, but the query got the value `{}` of type `{}`.",
-                        attr.etype,
-                        attr.label,
-                        pattern,
-                        json_type_name(pattern)
-                    ))
+                    self.where_err(
+                        "string?",
+                        format!(
+                            "The $like value for `{}.{}` must be a string, but the query got the value `{}` of type `{}`.",
+                            attr.etype,
+                            attr.label,
+                            pattern,
+                            json_type_name(pattern)
+                        ),
+                    )
                 })?;
                 base(qb, false);
                 qb.push(format!(
@@ -1045,30 +1149,43 @@ impl<'a> SqlCtx<'a> {
     }
 
     fn require_indexed_checked(&self, attr: &Attr) -> Result<CheckedDataType> {
-        // legacy assert-checked-attr-data-type! (attr_pat.clj), in its order
+        // legacy assert-checked-attr-data-type! (attr_pat.clj:183-224), in
+        // its order, with its `expected?` keys
         if attr.checking_data_type {
-            return Err(verr(format!(
-                "The `{}.{}` attribute is still in the process of checking its data type. It must finish before using comparison operators.",
-                attr.etype, attr.label
-            )));
+            return Err(self.where_err(
+                "checked-data-type?",
+                format!(
+                    "The `{}.{}` attribute is still in the process of checking its data type. It must finish before using comparison operators.",
+                    attr.etype, attr.label
+                ),
+            ));
         }
         if attr.indexing {
-            return Err(verr(format!(
-                "The `{}.{}` attribute is still in the process of indexing. It must finish before using comparison operators.",
-                attr.etype, attr.label
-            )));
+            return Err(self.where_err(
+                "indexed?",
+                format!(
+                    "The `{}.{}` attribute is still in the process of indexing. It must finish before using comparison operators.",
+                    attr.etype, attr.label
+                ),
+            ));
         }
         if !attr.is_indexed {
-            return Err(verr(format!(
-                "The `{}.{}` attribute must be indexed to use comparison operators.",
-                attr.etype, attr.label
-            )));
+            return Err(self.where_err(
+                "indexed?",
+                format!(
+                    "The `{}.{}` attribute must be indexed to use comparison operators.",
+                    attr.etype, attr.label
+                ),
+            ));
         }
         attr.checked_data_type.ok_or_else(|| {
-            verr(format!(
-                "The `{}.{}` attribute must have an enforced type to use comparison operators.",
-                attr.etype, attr.label
-            ))
+            self.where_err(
+                "checked-data-type?",
+                format!(
+                    "The `{}.{}` attribute must have an enforced type to use comparison operators.",
+                    attr.etype, attr.label
+                ),
+            )
         })
     }
 
@@ -1211,13 +1328,21 @@ struct MatchedRow {
 
 async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) -> Result<FormOut> {
     if form.opts.aggregate && !ctx.admin {
-        return Err(verr(
-            "Aggregates are currently only available for admin queries.",
+        // legacy instaql.clj:1183-1190
+        return Err(qerr(
+            &form.root,
+            "expected",
+            "admin?",
+            in_path(&form.path, &["$", "aggregate"]),
+            "Aggregates are currently only available for admin queries.".to_string(),
         ));
     }
     let sql_ctx = SqlCtx {
         app_id: ctx.app_id,
         attrs: ctx.attrs,
+        root: &form.root,
+        path: &form.path,
+        cur_where: Default::default(),
     };
     let id_attr = match ctx.attrs.id_attr_of(&form.etype) {
         Some(a) => a.clone(),
@@ -1749,8 +1874,16 @@ async fn fetch_entities(
             continue;
         }
         if let Some(fields) = &form.opts.fields {
+            // legacy keeps the order attr in a fields projection (the client
+            // orders by it): instaql.clj fields + order handling
             let keep = a.label == "id"
                 || fields.contains(&a.label)
+                || form
+                    .opts
+                    .order
+                    .as_ref()
+                    .map(|o| o.key == a.label)
+                    .unwrap_or(false)
                 || (form.etype == "$files"
                     && a.label == "location-id"
                     && fields.contains(&"url".to_string()));
@@ -1898,6 +2031,9 @@ fn attach_children<'a>(
             let sql_ctx = SqlCtx {
                 app_id: ctx.app_id,
                 attrs: ctx.attrs,
+                root: &child_form.root,
+                path: &child_form.path,
+                cur_where: Default::default(),
             };
             let candidates: Vec<Uuid> = all_children.iter().cloned().collect();
             if candidates.is_empty() {
@@ -1948,6 +2084,8 @@ fn attach_children<'a>(
             etype: child_etype.clone(),
             opts: child_form.opts.clone(),
             children: child_form.children.clone(),
+            path: child_form.path.clone(),
+            root: child_form.root.clone(),
         };
         let child_nodes = fetch_entities(conn, ctx, &child_form_resolved, &kept_vec).await?;
         let node_by_id: HashMap<Uuid, EntityNode> =

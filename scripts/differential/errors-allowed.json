@@ -1,0 +1,12 @@
+[
+  {
+    "probe": "^http/routing/(not-found|method-not-allowed)$",
+    "reason": "Unmatched /admin paths and wrong methods: the self-hosted legacy image answers with HTTP 200 and a non-JSON body (its core.clj not-found handler with the JSON `Oops! We couldn't match this route.` body is not what the image serves). This server returns that JSON 404, which is what the CLI's error path parses.",
+    "citation": "LEGACY/server/src/instant/core.clj:189-190; LEGACY/client/packages/cli/src/lib/http.ts:71-90"
+  },
+  {
+    "probe": "^(http|ws)/validation-failed/query-bad-op$",
+    "reason": "An unknown where operator fails legacy's `::forms` spec after coercion, so its message is `Validation failed for coerced-query` and the hint carries legacy's internal coerced form (`{k etype option-map child-forms}`) as input with a clojure.spec predicate name as `expected`. This server answers `Validation failed for query: Unsupported where operator ...` with the operator in the hint. Both the message and the hint differ; docs/PARITY.md (wire-level divergences: unknown where operator) records it. No client reads the coerced form and the client surfaces both as an event error.",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:563 (assert-valid! :coerced-query); LEGACY/client/packages/core/src/Reactor.js reads type/message only"
+  }
+]

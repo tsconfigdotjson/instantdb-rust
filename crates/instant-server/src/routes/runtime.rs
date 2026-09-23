@@ -90,7 +90,13 @@ pub fn valid_email(email: &str) -> bool {
 fn coerce_email(raw: &str) -> Result<String> {
     let email = raw.to_lowercase().trim().to_string();
     if !valid_email(&email) {
-        return Err(InstantError::param_malformed("Malformed parameter: email"));
+        // legacy get-param! [:body :email] email/coerce (exception.clj:421-428)
+        return Err(InstantError::new(
+            "param-malformed",
+            400,
+            "Malformed parameter: [\"body\" \"email\"]",
+            Some(json!({"in": ["body", "email"], "original-input": raw})),
+        ));
     }
     Ok(email)
 }
@@ -168,16 +174,20 @@ async fn send_magic_code_impl(state: &Arc<AppState>, body: &Value) -> Result<Val
     let app_id = get_app_id(body, "app-id")?;
     check_auth_limit(state, app_id)?;
     let email = coerce_email(get_str(body, "email")?)?;
-    send_magic_code_for(state, app_id, &email).await
+    send_magic_code_for(state, app_id, &email).await?;
+    Ok(json!({"sent": true}))
 }
 
 /// Generate, store and deliver a magic code (legacy magic-code-auth/send!);
 /// shared by `/runtime/auth/send_magic_code` and `/admin/send_magic_code`.
+/// Generates, stores and delivers a magic code, returning the plaintext code.
+/// The runtime route answers `{sent: true}`; the admin route answers the code
+/// itself (admin/routes.clj:506-511).
 pub async fn send_magic_code_for(
     state: &Arc<AppState>,
     app_id: Uuid,
     email: &str,
-) -> Result<Value> {
+) -> Result<String> {
     let app = service::get_app(state, app_id).await?;
     let email = email.to_string();
     // per-(app, email) budget, matching legacy's 20/hour default
@@ -220,7 +230,7 @@ pub async fn send_magic_code_for(
     // Fire-and-forget delivery (log-only by default); the response never
     // depends on whether the email actually goes out.
     crate::email::deliver_magic_code(state, app_id, &app.title, &email, &code);
-    Ok(json!({"sent": true}))
+    Ok(code)
 }
 
 pub async fn verify_magic_code(
@@ -270,9 +280,9 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
                 }
             }
             None => {
-                return Err(InstantError::record_not_found(
+                return Err(InstantError::record_not_found_args(
                     "app-user",
-                    "Record not found: app-user",
+                    json!({"app-id": app_id, "refresh-token": token}),
                 ))
             }
         }
@@ -301,10 +311,13 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
     .fetch_optional(&state.pool)
     .await
     .map_err(InstantError::from)?;
+    // legacy consume! (app_user_magic_code.clj:50-66): the lookup params
+    // are the hint args, for the not-found and the expired case alike
+    let args = json!({"app-id": app_id, "code": code, "email": email});
     let Some(row) = row else {
-        return Err(InstantError::record_not_found(
+        return Err(InstantError::record_not_found_args(
             "app-user-magic-code",
-            "Record not found: app-user-magic-code",
+            args,
         ));
     };
     let entity: Uuid = row.get("entity_id");
@@ -354,7 +367,7 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
             "record-expired",
             400,
             "Record expired: app-user-magic-code",
-            Some(json!({"record-type": "app-user-magic-code"})),
+            Some(json!({"args": [args]})),
         ));
     }
 
@@ -412,7 +425,12 @@ async fn verify_refresh_token_impl(state: &AppState, body: &Value) -> Result<Val
     let token = get_str(body, "refresh-token")?;
     let user = auth::user_by_refresh_token(state, app_id, token)
         .await?
-        .ok_or_else(|| InstantError::record_not_found("app-user", "Record not found: app-user"))?;
+        .ok_or_else(|| {
+            InstantError::record_not_found_args(
+                "app-user",
+                json!({"app-id": app_id, "refresh-token": token}),
+            )
+        })?;
     let token_uuid = Uuid::parse_str(token).ok();
     let user = user_json(state, app_id, user.id, token_uuid).await?;
     Ok(json!({"user": user}))
