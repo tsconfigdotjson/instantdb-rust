@@ -1220,7 +1220,8 @@ async fn grant_inner(
     client_and_app(state, redirect.client_id).await?;
     let cookie = cookie_value(headers)
         .ok_or_else(|| InstantError::new("param-missing", 400, "Missing cookie.", None))?;
-    if cookie != redirect.cookie {
+    // legacy crypt-util/constant-uuid=
+    if !constant_eq(cookie.as_bytes(), redirect.cookie.as_bytes()) {
         return Err(InstantError::new(
             "param-missing",
             400,
@@ -1274,7 +1275,7 @@ pub async fn deny(
         .ok_or_else(|| record_not_found("oauth-app-redirect", json!({"args": [{"redirect-id": redirect_id}]})))?;
         let redirect = redirect_from_row(&row);
         let cookie = cookie_value(&headers).ok_or_else(|| InstantError::new("param-missing", 400, "Missing cookie.", None))?;
-        if cookie != redirect.cookie {
+        if !constant_eq(cookie.as_bytes(), redirect.cookie.as_bytes()) {
             return Err(InstantError::new("param-missing", 400, "Invalid cookie.", None));
         }
         Ok(found(&add_query_params(
