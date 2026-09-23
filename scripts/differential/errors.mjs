@@ -41,6 +41,9 @@ const FIXED = {
   dupAttr: mk(),
   entity: mk(),
   entity2: mk(),
+  // the mode-create probe's entity: a fixed id, since the error echoes it and
+  // the per-server counter behind mk() is not in step across servers by then
+  modeEntity: mk(),
 };
 const isFixed = (s) => typeof s === "string" && s.includes("-0000-4000-8000-");
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
@@ -164,13 +167,13 @@ probe("http/validation-failed/bogus-step", async (ctx) =>
   httpView(await admin(ctx, "/admin/transact", { steps: [["frobnicate", "probe", FIXED.entity, {}]] })));
 probe("http/validation-failed/bad-entity-id", async (ctx) =>
   httpView(await admin(ctx, "/admin/transact", { steps: [["update", "probe", "not-a-uuid", { name: "x" }]] })));
-probe("http/validation-failed/steps-not-array", async (ctx) =>
+probe("http/param-malformed/steps-not-array", async (ctx) =>
   httpView(await admin(ctx, "/admin/transact", { steps: "nope" })));
 probe("http/validation-failed/bad-lookup", async (ctx) =>
   httpView(await admin(ctx, "/admin/transact", { steps: [["update", "probe", "lookup__name__42", { name: "x" }]] })));
 probe("http/validation-failed/query-bad-op", async (ctx) =>
   httpView(await admin(ctx, "/admin/query", { query: { probe: { $: { where: { name: { $frob: 1 } } } } } })));
-probe("http/validation-failed/query-where-not-indexed-isnull", async (ctx) =>
+probe("http/no-error/query-where-not-indexed-isnull", async (ctx) =>
   httpView(await admin(ctx, "/admin/query", { query: { probe: { $: { where: { name: { $isNull: true } } } } } })));
 probe("http/validation-failed/query-like-on-number", async (ctx) =>
   httpView(await admin(ctx, "/admin/query", { query: { probe: { $: { where: { name: { $like: 3 } } } } } })));
@@ -190,16 +193,23 @@ async function pushRules(ctx) {
   });
   if (res.status !== 200) throw new Error(`[${ctx.name}] rules push failed: ${JSON.stringify(res.body)}`);
 }
+async function openRules(ctx) {
+  const res = await call(ctx.url, "POST", `/dash/apps/${appId}/rules`, {
+    token: userToken,
+    body: { code: { probe: { allow: { create: "true", view: "true" } }, probe2: { allow: { view: "int(data.s) > 0" } } } },
+  });
+  if (res.status !== 200) throw new Error(`[${ctx.name}] rules push failed: ${JSON.stringify(res.body)}`);
+}
 probe("http/permission-denied/as-guest-create", async (ctx) => {
   await pushRules(ctx);
   return httpView(await admin(ctx, "/admin/transact", { steps: [["update", "probe", FIXED.entity, { name: "x" }]] }, { "as-guest": "true" }));
 });
 probe("http/permission-evaluation-failed/query", async (ctx) => {
   const seed = await admin(ctx, "/admin/transact", { steps: [["update", "probe2", FIXED.entity2, { s: "abc" }]] });
-  if (seed.status !== 200) return { seedFailed: httpView(seed) };
+  if (seed.status !== 200) throw new Error(`[${ctx.name}] probe seed failed: ${JSON.stringify(seed.body)}`);
   return httpView(await admin(ctx, "/admin/query", { query: { probe2: {} } }, { "as-guest": "true" }));
 });
-probe("http/permission-denied/query-perms-check-as-admin", async (ctx) =>
+probe("http/validation-failed/query-perms-check-as-admin", async (ctx) =>
   httpView(await admin(ctx, "/admin/query_perms_check", { query: { probe: {} } })));
 
 // HTTP: oauth-error and record-expired
@@ -225,8 +235,11 @@ probe("http/record-not-found/magic-code", async (ctx) =>
 probe("http/record-not-found/refresh-token", async (ctx) =>
   httpView(await call(ctx.url, "POST", "/runtime/auth/verify_refresh_token", { token: null, body: { "app-id": appId, "refresh-token": uuid() } })));
 
-// HTTP: rate-limited (magic codes per email); records the first error seen
-probe("http/rate-limited/magic-codes", async (ctx) => {
+// HTTP: magic codes per email. Legacy's per-email limit is flag-driven and
+// off on the self-hosted image, and this server's bucket is larger than a
+// dozen sends, so twelve requests succeed on both; the probe records the
+// first error seen if one ever appears
+probe("http/no-error/magic-codes-under-limit", async (ctx) => {
   const email = `flood-${ctx.name}@example.com`;
   for (let i = 0; i < 12; i++) {
     const res = await call(ctx.url, "POST", "/runtime/auth/send_magic_code", { token: null, body: { "app-id": appId, email } });
@@ -301,6 +314,13 @@ probe("ws/validation-failed/add-query-null", async (ctx) => {
   c.close();
   return v;
 });
+probe("ws/validation-failed/after-inclusive-not-boolean", async (ctx) => {
+  // instaql.clj assert-boolean!: `{expected boolean?}` with no message
+  const c = await session(ctx);
+  const v = wsView(await wsError(c, { op: "add-query", q: { probe: { $: { afterInclusive: "yes" } } } }));
+  c.close();
+  return v;
+});
 probe("ws/validation-failed/start-sync-non-admin", async (ctx) => {
   const c = await session(ctx);
   const v = wsView(await wsError(c, { op: "start-sync", q: { probe: {} } }));
@@ -313,7 +333,7 @@ probe("ws/validation-failed/tx-steps-not-coll", async (ctx) => {
   c.close();
   return v;
 });
-probe("ws/param-missing/transact-no-steps", async (ctx) => {
+probe("ws/validation-failed/transact-no-steps", async (ctx) => {
   const c = await session(ctx);
   const v = wsView(await wsError(c, { op: "transact" }));
   c.close();
@@ -349,7 +369,7 @@ probe("ws/record-not-unique/attr-ident", async (ctx) => {
   const first = await wsOk(c, { op: "transact", "tx-steps": [attr(FIXED.dupAttr)] });
   if (first.op !== "transact-ok") {
     c.close();
-    return { firstFailed: wsView(first) };
+    throw new Error(`[${ctx.name}] probe setup step failed: ${JSON.stringify(first)}`);
   }
   const v = wsView(await wsError(c, { op: "transact", "tx-steps": [attr(mk())] }));
   c.close();
@@ -365,7 +385,7 @@ probe("ws/permission-denied/transact", async (ctx) => {
 probe("ws/permission-evaluation-failed/query", async (ctx) => {
   await pushRules(ctx);
   const seed = await admin(ctx, "/admin/transact", { steps: [["update", "probe2", FIXED.entity2, { s: "abc" }]] });
-  if (seed.status !== 200) return { seedFailed: httpView(seed) };
+  if (seed.status !== 200) throw new Error(`[${ctx.name}] probe seed failed: ${JSON.stringify(seed.body)}`);
   const c = await session(ctx);
   const v = wsView(await wsError(c, { op: "add-query", q: { probe2: {} } }));
   c.close();
@@ -384,12 +404,15 @@ probe("ws/validation-failed/aggregate-non-admin", async (ctx) => {
   return v;
 });
 probe("ws/validation-failed/mode-create-exists", async (ctx) => {
+  // an earlier probe left `probe.allow.create = false`; this one needs the
+  // create to succeed so the second write reaches the `mode` check
+  await openRules(ctx);
   const c = await session(ctx, { token: null });
-  const eid = mk();
+  const eid = FIXED.modeEntity;
   const first = await wsOk(c, { op: "transact", "tx-steps": [["add-triple", eid, FIXED.probeId, eid]] });
   if (first.op !== "transact-ok") {
     c.close();
-    return { firstFailed: wsView(first) };
+    throw new Error(`[${ctx.name}] probe setup step failed: ${JSON.stringify(first)}`);
   }
   const v = wsView(await wsError(c, { op: "transact", "tx-steps": [["add-triple", eid, FIXED.probeName, "x", { mode: "create" }]] }));
   c.close();
@@ -475,11 +498,31 @@ for (const [name, cfg] of Object.entries(SERVERS)) {
   }
 }
 
+// a probe is named `<transport>/<legacy error type>/<case>`: the legacy server
+// must actually answer with that type, so two servers agreeing on a dead end
+// (a failed seed, a throw, a different error) can't pass the probe
+// `no-error` names a probe both servers answer 200 (legacy raises nothing)
+const NOT_ERROR_TYPES = new Set(["routing", "auth-401", "no-error"]);
 let failures = 0;
 let allowedHits = 0;
 for (const p of probes) {
   const l = results.legacy[p.name];
   const r = results.rust[p.name];
+  const nominal = p.name.split("/")[1];
+  for (const [server, v] of [["legacy", l], ["rust", r]]) {
+    if (v && typeof v === "object" && "threw" in v) {
+      failures++;
+      console.error(`ERROR MATRIX PROBE THREW on ${server}: ${p.name}: ${v.threw}`);
+    }
+  }
+  if (nominal === "no-error" && l && typeof l === "object" && l.status !== 200 && l.type !== "<none>") {
+    failures++;
+    console.error(`ERROR MATRIX PROBE EXPECTED NO ERROR ${p.name}: legacy answered ${JSON.stringify(l)}`);
+  }
+  if (!NOT_ERROR_TYPES.has(nominal) && l && typeof l === "object" && l.type !== nominal) {
+    failures++;
+    console.error(`ERROR MATRIX PROBE MISSED ITS TYPE ${p.name}: legacy answered ${JSON.stringify(l)}`);
+  }
   if (canon(l) === canon(r)) continue;
   const rule = allowed.find((a) => new RegExp(a.probe).test(p.name));
   if (rule) {

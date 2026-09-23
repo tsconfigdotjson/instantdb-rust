@@ -229,7 +229,9 @@ Consequences the Rust impl must reproduce:
 **This server:** `crates/instant-core/src/cel_ext.rs` registers the strings and
 math extensions plus `getTime()` / `timestamp(int|string)` on every rule
 context; `timestamp(...)` calls are renamed in the AST before evaluation so
-the lenient overloads win over the `cel` crate's strict RFC 3339 one.
+the lenient overloads win over the `cel` crate's strict RFC 3339 one, and
+`cel.bind(var, init, body)` is expanded into the empty-range comprehension
+cel-java's bindings macro produces.
 `data.ref` / `linkedData.ref` / `auth.ref` are prefetched per literal path
 (`extract_ref_paths`); for update / delete / link / unlink checks the paths
 are resolved before the transaction's steps run, so those rules see the
