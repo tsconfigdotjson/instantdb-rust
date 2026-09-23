@@ -1251,9 +1251,10 @@ function buildScenario() {
           "timestamp('01/02/2020').getDate() == 2",
           "timestamp('2020-01-01T10:20:30Z').getHours() == 10",
           "size(newData.title) == 6 && newData.title.contains('k o')",
-          // the rest of the extension surface: reverse / quote / format are
-          // newer cel-java string functions, sqrt / bitNot the remaining
-          // math ones, and cel.bind the bindings macro (cel.clj:489-491)
+          // the rest of the extension surface: sqrt / bitNot and the
+          // cel.bind macro (cel.clj:489-491) work on legacy; reverse /
+          // strings.quote / format postdate cel-java 0.11 and are
+          // compile-time undeclared references there
           "newData.title.reverse() == 'eno ko'",
           "strings.quote(newData.title) == '\"ok one\"'",
           "'%s-%d'.format(['a', 1]) == 'a-1'",

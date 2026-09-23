@@ -794,16 +794,16 @@ pub fn rate_limit_names(expr: &cel::IdedExpr) -> Vec<String> {
 /// The variables each action's compiler declares (cel.clj:459-497:
 /// view / delete see the base set, create / update add `newData`, `link`
 /// adds `newData` / `linkedData` / `actions`, `unlink` `newData` /
-/// `linkedData`). `math` and `strings` are the extension namespaces.
+/// `linkedData`). `math` is the math extension's namespace (cel-java
+/// 0.11's strings extension has no namespaced function).
 fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
-    const BASE: [&str; 7] = [
+    const BASE: [&str; 6] = [
         "data",
         "auth",
         "ruleParams",
         "request",
         "rateLimit",
         "math",
-        "strings",
     ];
     const VIEW: &[&str] = &BASE;
     const CREATE: &[&str] = &[
@@ -813,7 +813,6 @@ fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
         "request",
         "rateLimit",
         "math",
-        "strings",
         "newData",
     ];
     const LINK: &[&str] = &[
@@ -823,7 +822,6 @@ fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
         "request",
         "rateLimit",
         "math",
-        "strings",
         "newData",
         "linkedData",
         "actions",
@@ -835,7 +833,6 @@ fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
         "request",
         "rateLimit",
         "math",
-        "strings",
         "newData",
         "linkedData",
     ];
@@ -851,7 +848,7 @@ fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
 /// cel-java strings / math extensions and Instant's own overloads. A call
 /// to anything else is a compile-time `undeclared reference` like an
 /// unknown variable.
-const KNOWN_FUNCTIONS: [&str; 61] = [
+const KNOWN_FUNCTIONS: [&str; 58] = [
     "size",
     "contains",
     "startsWith",
@@ -896,9 +893,6 @@ const KNOWN_FUNCTIONS: [&str; 61] = [
     "substring",
     "trim",
     "join",
-    "reverse",
-    "quote",
-    "format",
     "greatest",
     "least",
     "abs",
@@ -1035,18 +1029,24 @@ pub fn undeclared_reference(program: &Program) -> Option<InstantError> {
             }
         }
     }
-    let bad = idents
+    // cel-java reports one issue per undeclared reference, in source order;
+    // throw-validation-err! joins their messages
+    let messages: Vec<String> = idents
         .into_iter()
-        .find(|i| !declared.contains(&i.as_str()) && !bind_names.contains(i.as_str()))?;
-    let message = format!("undeclared reference to '{bad}' (in container '')");
+        .filter(|i| !declared.contains(&i.as_str()) && !bind_names.contains(i.as_str()))
+        .map(|bad| format!("undeclared reference to '{bad}' (in container '')"))
+        .collect();
+    if messages.is_empty() {
+        return None;
+    }
     Some(InstantError::new(
         "validation-failed",
         400,
-        format!("Validation failed for permission: {message}"),
+        format!("Validation failed for permission: {}", messages.join(", ")),
         Some(json!({
             "data-type": "permission",
             "input": program.path,
-            "errors": [{"message": message}],
+            "errors": messages.iter().map(|m| json!({"message": m})).collect::<Vec<_>>(),
         })),
     ))
 }
@@ -3086,13 +3086,17 @@ fn expr_validation_errors(rules: &Value, etype: &str, path: &[&str]) -> Vec<Valu
             path: path.iter().map(|s| s.to_string()).collect(),
         };
         if let Some(e) = undeclared_reference(&program) {
-            let message = e
+            // format-cel-errors (rule.clj:360-364): one entry per CEL issue
+            return e
                 .hint
                 .as_ref()
-                .and_then(|h| h["errors"][0]["message"].as_str())
-                .unwrap_or_default()
-                .to_string();
-            return err(message);
+                .and_then(|h| h["errors"].as_array())
+                .map(|errs| {
+                    errs.iter()
+                        .map(|x| json!({"message": x["message"], "in": path}))
+                        .collect()
+                })
+                .unwrap_or_default();
         }
     }
     // legacy rate-limit-validator (cel.clj:1850-1872)

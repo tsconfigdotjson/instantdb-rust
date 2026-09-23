@@ -1,9 +1,11 @@
 //! CEL extension functions the legacy rule runtime registers beyond the CEL
 //! standard library (LEGACY db/cel.clj:387-414, :426-429, :439-454, :479-488):
 //!
-//! - cel-java `CelExtensions/strings`: `charAt`, `indexOf`, `lastIndexOf`,
-//!   `lowerAscii`, `upperAscii`, `replace`, `split`, `substring`, `trim`,
-//!   `join`, `reverse`, `strings.quote`;
+//! - cel-java 0.11's `CelExtensions/strings`: `charAt`, `indexOf`,
+//!   `lastIndexOf`, `lowerAscii`, `upperAscii`, `replace`, `split`,
+//!   `substring`, `trim`, `join` (the newer `reverse`, `strings.quote` and
+//!   `format` are undeclared references on the legacy server, verified by
+//!   differential step 29, so they are not registered);
 //! - cel-java `CelExtensions/math`: `math.greatest`, `math.least`, `math.abs`,
 //!   `math.sign`, `math.ceil`, `math.floor`, `math.round` (half to even, like
 //!   cel-java), `math.trunc`,
@@ -587,16 +589,6 @@ pub fn register(ctx: &mut cel::Context) {
         },
     );
     ctx.add_function(
-        "reverse",
-        |This(this): This<Value>, Arguments(args): Arguments| -> R {
-            if !args.is_empty() {
-                return Err(no_overload("reverse"));
-            }
-            let s = as_str("reverse", &this)?;
-            Ok(string(s.chars().rev().collect()))
-        },
-    );
-    ctx.add_function(
         "join",
         |This(this): This<Value>, Arguments(args): Arguments| -> R {
             let list = match &this {
@@ -615,31 +607,6 @@ pub fn register(ctx: &mut cel::Context) {
             Ok(string(parts.join(sep.as_str())))
         },
     );
-    ctx.add_function("strings.quote", |Arguments(args): Arguments| -> R {
-        let [v] = args.as_slice() else {
-            return Err(no_overload("strings.quote"));
-        };
-        let s = as_str("strings.quote", v)?;
-        let mut out = String::with_capacity(s.len() + 2);
-        out.push('"');
-        for c in s.chars() {
-            match c {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                '\u{7}' => out.push_str("\\a"),
-                '\u{8}' => out.push_str("\\b"),
-                '\u{c}' => out.push_str("\\f"),
-                '\u{b}' => out.push_str("\\v"),
-                other => out.push(other),
-            }
-        }
-        out.push('"');
-        Ok(string(out))
-    });
-
     // ---- math ------------------------------------------------------------
     ctx.add_function("math.greatest", |Arguments(args): Arguments| -> R {
         extreme("math.greatest", &args, true)
@@ -854,8 +821,6 @@ mod tests {
         assert_eq!(eval("'  \\ttrim\\n    '.trim()"), s("trim"));
         assert_eq!(eval("['x', 'y'].join()"), s("xy"));
         assert_eq!(eval("['x', 'y'].join('-')"), s("x-y"));
-        assert_eq!(eval("'gums'.reverse()"), s("smug"));
-        assert_eq!(eval("strings.quote('a\"b')"), s("\"a\\\"b\""));
         // out-of-range indexes are evaluation errors like cel-java
         assert!(matches!(
             eval_err("'abc'.charAt(7)"),
