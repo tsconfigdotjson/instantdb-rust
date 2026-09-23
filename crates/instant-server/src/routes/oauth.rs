@@ -50,6 +50,9 @@ pub struct OAuthClient {
     pub discovery_endpoint: Option<String>,
     pub provider_id: Option<Uuid>,
     pub meta: Value,
+    /// the client's custom callback URL (`redirect_to`), sent to the
+    /// provider as `redirect_uri` instead of this server's callback
+    pub redirect_to: Option<String>,
 }
 
 pub async fn client_by_name(
@@ -85,6 +88,7 @@ pub async fn client_by_name(
         discovery_endpoint: None,
         provider_id: None,
         meta: json!({}),
+        redirect_to: None,
     };
     for row in rows {
         let attr_id: Uuid = row.get("attr_id");
@@ -99,6 +103,8 @@ pub async fn client_by_name(
             client.provider_id = v.as_str().and_then(|s| Uuid::parse_str(s).ok());
         } else if attr_id == sc::attr_id("$oauthClients", "meta") {
             client.meta = v;
+        } else if attr_id == sc::attr_id("$oauthClients", "redirectTo") {
+            client.redirect_to = v.as_str().map(|s| s.to_string());
         }
     }
     Ok(Some(client))
@@ -272,7 +278,13 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
     let cookie_uuid = Uuid::new_v4();
     let state_uuid = Uuid::new_v4();
     let entity = Uuid::new_v4();
-    let callback_url = format!("{}/runtime/oauth/callback", state.cfg.base_url);
+    // legacy `(or (:redirect_to client) oauth-redirect-url)` (runtime/routes.clj
+    // :249-263): the provider's redirect_uri, remembered on the redirect
+    // record for the code exchange
+    let callback_url = client
+        .redirect_to
+        .clone()
+        .unwrap_or_else(|| default_callback_url(state));
     let mut steps = vec![
         json!([
             "add-triple",
@@ -383,8 +395,13 @@ pub async fn callback_post(
     callback_impl(&state, &headers, params).await
 }
 
+fn default_callback_url(state: &AppState) -> String {
+    format!("{}/runtime/oauth/callback", state.cfg.base_url)
+}
+
 struct RedirectEntity {
     redirect_url: String,
+    redirect_to: Option<String>,
     client_id_entity: Option<Uuid>,
     code_challenge: Option<String>,
     code_challenge_method: Option<String>,
@@ -392,8 +409,12 @@ struct RedirectEntity {
     cookie_hash: Option<String>,
 }
 
+/// Legacy `app-oauth-redirect-model/consume!` looks the record up by the app
+/// id AND the state the `state` param carries; a record of another app is
+/// not found (and not consumed).
 async fn consume_redirect(
     state: &AppState,
+    expected_app_id: Uuid,
     state_uuid_str: &str,
 ) -> Result<Option<(Uuid, RedirectEntity)>> {
     let state_hash = auth::hash_string(state_uuid_str);
@@ -409,6 +430,9 @@ async fn consume_redirect(
     .map_err(InstantError::from)?;
     let Some(row) = row else { return Ok(None) };
     let app_id: Uuid = row.get("app_id");
+    if app_id != expected_app_id {
+        return Ok(None);
+    }
     let eid: Uuid = row.get("entity_id");
     let rows = sqlx::query(
         "SELECT attr_id, value, created_at FROM triples WHERE app_id = $1 AND entity_id = $2",
@@ -420,6 +444,7 @@ async fn consume_redirect(
     .map_err(InstantError::from)?;
     let mut ent = RedirectEntity {
         redirect_url: String::new(),
+        redirect_to: None,
         client_id_entity: None,
         code_challenge: None,
         code_challenge_method: None,
@@ -431,6 +456,8 @@ async fn consume_redirect(
         let v: Value = r.get("value");
         if attr_id == sc::attr_id("$oauthRedirects", "redirectUrl") {
             ent.redirect_url = v.as_str().unwrap_or_default().to_string();
+        } else if attr_id == sc::attr_id("$oauthRedirects", "redirectTo") {
+            ent.redirect_to = v.as_str().map(|s| s.to_string());
         } else if attr_id == sc::attr_id("$oauthRedirects", "$oauthClient") {
             ent.client_id_entity = v.as_str().and_then(|s| Uuid::parse_str(s).ok());
         } else if attr_id == sc::attr_id("$oauthRedirects", "codeChallenge") {
@@ -549,6 +576,7 @@ async fn callback_inner(
     if !valid_state {
         return Err(bad(oauth_err("Invalid state param in OAuth redirect.")));
     }
+    let state_app_id = Uuid::parse_str(&state_param[..36]).expect("validated above");
     let state_uuid_str = &state_param[36..];
     let cookie_val = headers
         .get(header::COOKIE)
@@ -563,7 +591,7 @@ async fn callback_inner(
         })
         .filter(|v| Uuid::parse_str(v).is_ok())
         .ok_or_else(|| bad(oauth_err("Missing cookie.")))?;
-    let (app_id, ent) = consume_redirect(state, state_uuid_str)
+    let (app_id, ent) = consume_redirect(state, state_app_id, state_uuid_str)
         .await
         .map_err(bad)?
         .ok_or_else(|| bad(oauth_err("Could not find OAuth request.")))?;
@@ -589,7 +617,14 @@ async fn callback_inner(
     // from here on failures ride back to the app
     let redirect_url = ent.redirect_url.clone();
     let fail = |e: InstantError| (Some(redirect_url.clone()), e);
-    let user_info = exchange_code(state, &client, code).await.map_err(&fail)?;
+    // the redirect_uri the authorization request used (routes.clj:554-557)
+    let redirect_to = ent
+        .redirect_to
+        .clone()
+        .unwrap_or_else(|| default_callback_url(state));
+    let user_info = exchange_code(state, &client, code, &redirect_to)
+        .await
+        .map_err(&fail)?;
     if user_info.get("sub").and_then(|v| v.as_str()).is_none() {
         return Err(fail(oauth_err("Missing sub.")));
     }
@@ -688,13 +723,17 @@ async fn load_client_by_id(
 }
 
 /// Exchange provider code -> user info {email, sub, imageURL}.
-async fn exchange_code(state: &AppState, client: &OAuthClient, code: &str) -> Result<Value> {
+async fn exchange_code(
+    state: &AppState,
+    client: &OAuthClient,
+    code: &str,
+    callback_url: &str,
+) -> Result<Value> {
     let disc = discovery(state, client).await?;
     let token_endpoint = disc
         .get("token_endpoint")
         .and_then(|v| v.as_str())
         .ok_or_else(|| oauth_err("Discovery document missing token_endpoint."))?;
-    let callback_url = format!("{}/runtime/oauth/callback", state.cfg.base_url);
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -709,7 +748,7 @@ async fn exchange_code(state: &AppState, client: &OAuthClient, code: &str) -> Re
             ),
             ("code", code),
             ("grant_type", "authorization_code"),
-            ("redirect_uri", &callback_url),
+            ("redirect_uri", callback_url),
         ])
         .send()
         .await

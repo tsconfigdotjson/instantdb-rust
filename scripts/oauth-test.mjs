@@ -36,7 +36,7 @@ const assert = (cond, msg) => {
 };
 
 // --- mock OIDC provider ---
-const issued = { code: "mock-code-123" };
+const issued = { code: "mock-code-123", redirectUri: null };
 const provider = http.createServer((req, res) => {
   const url = new URL(req.url, `http://localhost:${PROVIDER_PORT}`);
   if (url.pathname === "/.well-known/openid-configuration") {
@@ -61,6 +61,10 @@ const provider = http.createServer((req, res) => {
       assert(params.get("code") === issued.code, "provider got the code");
       assert(params.get("client_id") === "mock-client-id", "provider got client_id");
       assert(params.get("client_secret") === "mock-secret", "provider got secret");
+      // the code exchange repeats the authorization request's redirect_uri
+      if (issued.redirectUri) {
+        assert(params.get("redirect_uri") === issued.redirectUri, `exchange redirect_uri is ${issued.redirectUri}`);
+      }
       // unsigned id_token is fine: the code-exchange path only decodes the payload
       const payload = Buffer.from(
         JSON.stringify({
@@ -92,6 +96,8 @@ assert(authUrl.pathname === "/authorize", "redirects to provider authorize");
 assert(authUrl.searchParams.get("client_id") === "mock-client-id", "client_id in auth url");
 const state = authUrl.searchParams.get("state");
 assert(state.length === 72, "state is appid+uuid");
+issued.redirectUri = authUrl.searchParams.get("redirect_uri");
+assert(issued.redirectUri.endsWith("/runtime/oauth/callback"), "default redirect_uri is this server's callback");
 const cookie = startRes.headers.get("set-cookie").split(";")[0];
 assert(cookie.startsWith("__session=instantdb_"), "session cookie set");
 
@@ -304,6 +310,46 @@ assert(verify.user.email === "oauth-user@example.com", "oauth refresh token veri
   const c8 = await mint(`&code_challenge=%2A%2Anot-base64%2A%2A&code_challenge_method=S256`);
   const r8 = await exchange(c8, { code_verifier: verifier });
   assert(r8.status === 400 && pkceMsg(r8) === "Invalid code_verifier. Expected a url-safe Base64 string.", "undecodable S256 challenge");
+}
+// --- a client's custom redirect_to is the provider redirect_uri on both
+// hops (runtime/routes.clj:249-263, :554-557) ---
+if (adminToken) {
+  const dash = async (method, path, body) => {
+    const r = await fetch(`${SERVER}${path}`, {
+      method,
+      headers: { authorization: `Bearer ${adminToken}`, "content-type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return { status: r.status, body: await r.json() };
+  };
+  const authCfg = await dash("GET", `/dash/apps/${appId}/auth`);
+  const mock = authCfg.body.oauth_clients?.find((c) => c.client_name === "mock");
+  assert(mock?.id, "the mock client is listed on /dash/apps/:id/auth");
+  const custom = "http://localhost:4001/custom/callback";
+  const upd = await dash("POST", `/dash/apps/${appId}/oauth_clients/${mock.id}`, { redirect_to: custom });
+  assert(upd.status === 200 && upd.body.client?.redirect_to === custom, "redirect_to set on the client");
+  const s = await fetch(startUrl, { redirect: "manual" });
+  const au = new URL(s.headers.get("location"));
+  assert(au.searchParams.get("redirect_uri") === custom, "start sends the client's redirect_to");
+  issued.redirectUri = custom;
+  const cb = await fetch(`${SERVER}/runtime/oauth/callback?state=${au.searchParams.get("state")}&code=${issued.code}`, {
+    redirect: "manual",
+    headers: { cookie: s.headers.get("set-cookie").split(";")[0] },
+  });
+  const back = new URL(cb.headers.get("location"));
+  assert(back.searchParams.get("code") && !back.searchParams.get("error"), "callback exchanges with the custom redirect_uri");
+  const cleared = await dash("POST", `/dash/apps/${appId}/oauth_clients/${mock.id}`, { redirect_to: null });
+  assert(cleared.status === 200 && cleared.body.client?.redirect_to == null, "redirect_to cleared");
+  // a state whose app id isn't the redirect's app finds no request
+  const s2 = await fetch(startUrl, { redirect: "manual" });
+  const st2 = new URL(s2.headers.get("location")).searchParams.get("state");
+  const forged = `${crypto.randomUUID()}${st2.slice(36)}`;
+  const cbForged = await fetch(`${SERVER}/runtime/oauth/callback?state=${forged}&code=${issued.code}`, {
+    redirect: "manual",
+    headers: { cookie: s2.headers.get("set-cookie").split(";")[0] },
+  });
+  const forgedBody = await cbForged.json();
+  assert(cbForged.status === 400 && forgedBody.message === "Could not find OAuth request.", "a state of another app finds no request");
 }
 provider.close();
 console.log("OAUTH TEST PASSED");

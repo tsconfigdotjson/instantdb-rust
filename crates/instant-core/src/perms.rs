@@ -1002,8 +1002,10 @@ pub fn undeclared_reference(program: &Program) -> Option<InstantError> {
     let declared = declared_vars(action);
     let bind_names: HashSet<&str> = program.binds.iter().map(|(n, _)| n.as_str()).collect();
     let compiled = cel::Program::compile(&program.expr).ok()?;
+    let mut expr = compiled.expression().clone();
+    crate::cel_ext::expand_bind_macros(&mut expr);
     let mut idents: Vec<String> = vec![];
-    collect_free_idents(compiled.expression(), &mut vec![], &mut idents);
+    collect_free_idents(&expr, &mut vec![], &mut idents);
     let mut queue: Vec<String> = idents
         .iter()
         .filter(|i| bind_names.contains(i.as_str()))
@@ -1020,8 +1022,10 @@ pub fn undeclared_reference(program: &Program) -> Option<InstantError> {
         let Ok(p) = cel::Program::compile(expr) else {
             continue;
         };
+        let mut bind_expr = p.expression().clone();
+        crate::cel_ext::expand_bind_macros(&mut bind_expr);
         let mut inner = vec![];
-        collect_free_idents(p.expression(), &mut vec![], &mut inner);
+        collect_free_idents(&bind_expr, &mut vec![], &mut inner);
         for i in inner {
             if bind_names.contains(i.as_str()) {
                 queue.push(i.clone());
@@ -1366,7 +1370,7 @@ pub fn eval_program_pure(
     let fold = |p: &cel::Program| {
         let mut e = p.expression().clone();
         fold_request_has(&mut e, &present);
-        crate::cel_ext::rewrite_timestamp_calls(&mut e);
+        crate::cel_ext::rewrite(&mut e);
         e
     };
 
