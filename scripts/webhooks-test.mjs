@@ -113,6 +113,17 @@ if (received[0]) {
   check("update record has before/after", rec && rec.action === "update" && rec.before?.total === 42 && rec.after?.total === 43, payload.data);
 }
 
+// a link / unlink step alone writes no id triple, so legacy's WAL matcher
+// (webhook-matches? keys on the namespace's id attr) queues nothing; neither
+// does this server. The linked customer's create is outside the hooked
+// namespace and produces nothing either.
+received.length = 0;
+const customerId = crypto.randomUUID();
+await call("POST", "/admin/transact", { steps: [["update", "customers", customerId, { name: "c" }], ["link", "orders", orderId, { customer: customerId }]] });
+await call("POST", "/admin/transact", { steps: [["unlink", "orders", orderId, { customer: customerId }]] });
+await sleep(1500);
+check("link / unlink steps deliver no event", received.length === 0, received.map((r) => r.body));
+
 // delete event
 received.length = 0;
 await call("POST", "/admin/transact", { steps: [["delete", "orders", orderId]] });

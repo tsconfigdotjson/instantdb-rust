@@ -26,6 +26,7 @@ use crate::routes::dash_apps::{
 use crate::routes::dash_manage::{
     create_dashboard_refresh_token, dashboard_login_user, signup_allowed,
 };
+use crate::routes::platform_oauth::constant_eq;
 use crate::routes::runtime::{coerce_email_pub, json_or_err};
 use crate::routes::superadmin::{superadmin_user, Scope};
 use crate::state::AppState;
@@ -237,7 +238,10 @@ struct GoogleTokenResponse {
 /// and `:coerce :always` (error bodies are JSON too).
 async fn exchange_google_code(state: &AppState, code: &str) -> Result<GoogleTokenResponse> {
     let (client_id, client_secret) = google_client(state)?;
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| InstantError::internal(format!("http client: {e}")))?;
     let resp = http
         .post(&state.cfg.google_oauth_token_url)
         .form(&[
@@ -450,7 +454,7 @@ pub async fn oauth_callback(
             Some("Missing code param in OAuth redirect.".into())
         } else if redirect.is_none() {
             Some("Could not find OAuth request.".into())
-        } else if cookie != redirect.as_ref().map(|r| r.cookie) {
+        } else if !uuid_opt_eq(cookie, redirect.as_ref().map(|r| r.cookie)) {
             Some("Mismatch in OAuth request cookie.".into())
         } else if let Some(e) = user_info_error {
             Some(e)
@@ -779,4 +783,13 @@ pub async fn cli_auth_check(State(state): State<Arc<AppState>>, body: Bytes) -> 
     }
     .await;
     json_or_err(r)
+}
+
+/// legacy `crypt-util/constant-uuid=`: both present and equal, compared in
+/// constant time.
+fn uuid_opt_eq(a: Option<Uuid>, b: Option<Uuid>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => constant_eq(a.as_bytes(), b.as_bytes()),
+        _ => false,
+    }
 }

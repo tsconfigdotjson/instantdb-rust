@@ -10,7 +10,7 @@ on:
     - cron: "17 3 * * *"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -164,24 +164,22 @@ jobs:
       - name: "e2e: multinode storage"
         run: node scripts/multinode-storage-test.mjs "$APP_ID" "$ADMIN_TOKEN"
 
-      # S3 storage backend (issue #9): a MinIO binary stands in for
-      # S3/R2; two presigning nodes + one proxying node run beside the
-      # postgres-backed pair above.
+      # S3 storage backend (issue #9): MinIO stands in for S3/R2; two
+      # presigning nodes + one proxying node run beside the postgres-backed
+      # pair above. dl.min.io and Docker Hub no longer serve MinIO, so the
+      # pinned Quay images run it.
       - name: Boot MinIO
         run: |
-          curl -sSfL -o /tmp/minio https://dl.min.io/server/minio/release/linux-amd64/minio
-          chmod +x /tmp/minio
-          mkdir -p /tmp/minio-data
-          MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
-            /tmp/minio server /tmp/minio-data --address ":9000" > /tmp/minio.log 2>&1 &
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data --address ":9000"
           for i in $(seq 1 30); do
             curl -sf http://localhost:9000/minio/health/live >/dev/null && break
             sleep 1
           done
-          curl -sSfL -o /tmp/mc https://dl.min.io/client/mc/release/linux-amd64/mc
-          chmod +x /tmp/mc
-          /tmp/mc alias set local http://localhost:9000 minioadmin minioadmin
-          /tmp/mc mb --ignore-existing local/instant-rust-bucket
+          docker run --rm --network host --entrypoint /bin/sh \
+            quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
+            "mc alias set local http://localhost:9000 minioadmin minioadmin && mc mb --ignore-existing local/instant-rust-bucket"
       - name: Boot S3-backed nodes
         env:
           STORAGE_BACKEND: s3
@@ -222,7 +220,7 @@ jobs:
           echo "=== s3 node 1 (:8898) ==="; cat /tmp/server-s3-1.log || true
           echo "=== s3 node 2 (:8899) ==="; cat /tmp/server-s3-2.log || true
           echo "=== s3 proxy node (:8897) ==="; cat /tmp/server-s3-proxy.log || true
-          echo "=== minio ==="; cat /tmp/minio.log || true
+          echo "=== minio ==="; docker logs minio 2>&1 | tail -100 || true
 
   differential:
     name: differential vs legacy server

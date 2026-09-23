@@ -1251,6 +1251,17 @@ function buildScenario() {
           "timestamp('01/02/2020').getDate() == 2",
           "timestamp('2020-01-01T10:20:30Z').getHours() == 10",
           "size(newData.title) == 6 && newData.title.contains('k o')",
+          // the rest of the extension surface: sqrt / bitNot and the
+          // cel.bind macro (cel.clj:489-491) work on legacy; reverse /
+          // strings.quote / format postdate cel-java 0.11 and are
+          // compile-time undeclared references there
+          "newData.title.reverse() == 'eno ko'",
+          "strings.quote(newData.title) == '\"ok one\"'",
+          "'%s-%d'.format(['a', 1]) == 'a-1'",
+          "math.sqrt(16) == 4.0 && math.sqrt(2.25) == 1.5",
+          "math.bitNot(0) == -1",
+          "cel.bind(t, newData.title, t.size() == 6 && t.startsWith('ok'))",
+          "cel.bind(n, newData.score, cel.bind(m, n + 1, m == 6))",
         ];
         const pName = (i) => `p${String(i + 1).padStart(2, "0")}`;
         const probeRules = Object.fromEntries(clauses.map((c, i) => [pName(i), { allow: { create: c } }]));

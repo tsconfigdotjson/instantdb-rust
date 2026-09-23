@@ -370,6 +370,10 @@ pub struct AppState {
     pub webhook_key: std::sync::OnceLock<crate::webhooks::WebhookKey>,
     /// wakes this node's webhook delivery loop after events are queued
     pub webhook_notify: tokio::sync::Notify,
+    /// per-app active webhooks read on the transaction path
+    /// (webhooks::active_webhooks), evicted by the `instant_webhooks` NOTIFY
+    /// and a TTL
+    pub webhook_cache: DashMap<Uuid, (std::time::Instant, Arc<Vec<crate::webhooks::Webhook>>)>,
 }
 
 impl AppState {
@@ -394,6 +398,7 @@ impl AppState {
             app_status_cache: DashMap::new(),
             webhook_key: std::sync::OnceLock::new(),
             webhook_notify: tokio::sync::Notify::new(),
+            webhook_cache: DashMap::new(),
         })
     }
 

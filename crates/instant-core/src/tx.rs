@@ -59,6 +59,42 @@ pub enum TxStep {
 impl TxStep {
     /// The step in legacy's `vectorize-tx-step` form (transaction.clj:106-124),
     /// which is what validation errors echo as their `input`.
+    /// Legacy's `mapify-tx-step` (transaction.clj:70-99): the map form
+    /// `{op eid etype aid value rev-etype opts}` its validation errors echo
+    /// as `input`; etype / rev-etype come from the attr catalog and are null
+    /// for an unknown attr, `opts` is null when the step carries none.
+    pub fn mapify(&self, attrs: &AttrMap) -> Value {
+        let v = self.vectorize();
+        let arr = v.as_array().cloned().unwrap_or_default();
+        let at = |i: usize| arr.get(i).cloned().unwrap_or(Value::Null);
+        let op = at(0);
+        match self {
+            TxStep::AddAttr(_) | TxStep::UpdateAttr(_) => json!({"op": op, "value": at(1)}),
+            TxStep::DeleteAttr(_) | TxStep::RestoreAttr(_) => json!({"op": op, "aid": at(1)}),
+            TxStep::AddTriple { attr_id, .. }
+            | TxStep::DeepMergeTriple { attr_id, .. }
+            | TxStep::RetractTriple { attr_id, .. } => {
+                let attr = attrs.get(attr_id);
+                json!({
+                    "op": op,
+                    "eid": at(1),
+                    "etype": attr.map(|a| json!(a.etype)).unwrap_or(Value::Null),
+                    "aid": at(2),
+                    "value": at(3),
+                    "rev-etype": attr
+                        .and_then(|a| a.reverse_etype.clone())
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                    "opts": at(4),
+                })
+            }
+            TxStep::DeleteEntity { .. } => json!({"op": op, "eid": at(1), "etype": at(2)}),
+            TxStep::RuleParams { .. } => {
+                json!({"op": op, "eid": at(1), "etype": at(2), "value": at(3)})
+            }
+        }
+    }
+
     pub fn vectorize(&self) -> Value {
         let eid = |e: &EidRef| match e {
             EidRef::Id(id) => json!(id),
@@ -428,6 +464,15 @@ pub struct TxReport {
     pub deleted: Vec<(Uuid, String)>,
     /// all touched (eid, etype), for perms/required checks
     pub touched: Vec<(Uuid, String)>,
+    /// entities whose `id` attr triple this tx wrote (add-triple /
+    /// deep-merge-triple on the etype's id attr), with the etype: legacy's
+    /// webhook matcher keys create / update events on writes of the id
+    /// attr's triple (model/webhook.clj `webhook-matches?`), never on ref or
+    /// value attrs alone
+    pub id_written: Vec<(Uuid, String)>,
+    /// entities whose `id` attr triple this tx retracted (retract-triple on
+    /// the id attr): a delete of the id triple for the webhook matcher
+    pub id_retracted: Vec<(Uuid, String)>,
     /// true when the tx changed the attr catalog in any way (flags, idents,
     /// inferred types): attr caches must be reloaded
     pub attrs_changed: bool,
@@ -584,6 +629,8 @@ pub async fn transact(
         created: vec![],
         deleted: vec![],
         touched: vec![],
+        id_written: vec![],
+        id_retracted: vec![],
         attrs_changed: false,
         schema_changed: false,
         changed_attrs: vec![],
@@ -736,6 +783,9 @@ pub async fn transact(
                 .await?;
                 for t in &resolved {
                     report.touched.push((t.entity_id, t.attr.etype.clone()));
+                    if t.attr.label == "id" {
+                        report.id_written.push((t.entity_id, t.attr.etype.clone()));
+                    }
                 }
                 let newly = insert_triples(&mut *conn, app_id, attrs, &resolved).await?;
                 for eid in newly {
@@ -784,6 +834,9 @@ pub async fn transact(
                     )
                     .await?;
                     report.touched.push((eid, attr.etype.clone()));
+                    if attr.label == "id" {
+                        report.id_written.push((eid, attr.etype.clone()));
+                    }
                     let key = (eid, attr.id);
                     match order.get(&key) {
                         Some(&i) => merges[i].2.push(value),
@@ -855,6 +908,9 @@ pub async fn transact(
                         _ => value,
                     };
                     report.touched.push((eid, attr.etype.clone()));
+                    if attr.label == "id" {
+                        report.id_retracted.push((eid, attr.etype.clone()));
+                    }
                     dels.push((eid, attr_id, value));
                 }
                 delete_triples(&mut *conn, app_id, &dels).await?;
@@ -1177,7 +1233,7 @@ async fn validate_modes(
             format!("Validation failed for tx-step: {message}"),
             Some(json!({
                 "data-type": "tx-step",
-                "input": offenders.iter().map(|(s, _)| s.vectorize()).collect::<Vec<_>>(),
+                "input": offenders.iter().map(|(s, _)| s.mapify(attrs)).collect::<Vec<_>>(),
                 "errors": [{"message": message}],
             })),
         )

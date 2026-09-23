@@ -24,8 +24,10 @@ const read = (rel) => fs.readFileSync(path.join(legacy, rel), "utf8");
 
 // routes: every file with a `defroutes` table that core.clj mounts (core.clj:196-208);
 // demo/mma/stripe/health are dev or hosted-billing routes and are listed but
-// tagged so coverage can exclude them
+// tagged so coverage can exclude them; core.clj's own three routes (`GET /`,
+// the Stripe and Honeycomb receivers) are tagged `core` for the same reason
 const ROUTE_FILES = {
+  "core.clj": "core",
   "dash/routes.clj": "dash",
   "runtime/routes.clj": "runtime",
   "admin/routes.clj": "admin",
@@ -51,8 +53,10 @@ export function legacySurface() {
   const caseStart = session.indexOf("(case op");
   const caseBody = session.slice(caseStart, caseStart + 4000);
   // refresh / refresh-presence / refresh-sync-table / server-broadcast /
-  // error are enqueued by the server itself, never sent by a client
-  const SERVER_INTERNAL_OPS = new Set(["refresh", "refresh-presence", "refresh-sync-table", "server-broadcast", "error"]);
+  // error are enqueued by the server itself, never sent by a client, and
+  // sse-init is the frame the server emits to open an SSE session
+  // (`POST /admin/sse` is the client-side act, counted as its route)
+  const SERVER_INTERNAL_OPS = new Set(["refresh", "refresh-presence", "refresh-sync-table", "server-broadcast", "error", "sse-init"]);
   for (const m of caseBody.matchAll(/^\s+:([a-z-]+)\s+\(handle-/gm)) {
     items.push({ id: `ws:${m[1]}`, group: SERVER_INTERNAL_OPS.has(m[1]) ? "ws-internal" : "ws", source: "reactive/session.clj" });
   }

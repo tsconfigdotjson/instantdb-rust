@@ -1,9 +1,11 @@
 //! CEL extension functions the legacy rule runtime registers beyond the CEL
 //! standard library (LEGACY db/cel.clj:387-414, :426-429, :439-454, :479-488):
 //!
-//! - cel-java `CelExtensions/strings`: `charAt`, `indexOf`, `lastIndexOf`,
-//!   `lowerAscii`, `upperAscii`, `replace`, `split`, `substring`, `trim`,
-//!   `join`, `reverse`, `strings.quote`;
+//! - cel-java 0.11's `CelExtensions/strings`: `charAt`, `indexOf`,
+//!   `lastIndexOf`, `lowerAscii`, `upperAscii`, `replace`, `split`,
+//!   `substring`, `trim`, `join` (the newer `reverse`, `strings.quote` and
+//!   `format` are undeclared references on the legacy server, verified by
+//!   differential step 29, so they are not registered);
 //! - cel-java `CelExtensions/math`: `math.greatest`, `math.least`, `math.abs`,
 //!   `math.sign`, `math.ceil`, `math.floor`, `math.round` (half to even, like
 //!   cel-java), `math.trunc`,
@@ -16,9 +18,15 @@
 //!   `timestamp(string)` through the same lenient date parser the `date`
 //!   checked type uses (`triple-model/parse-date-value`).
 //!
+//! - cel-java `CelExtensions/bindings` (cel.clj:489-491): the
+//!   `cel.bind(var, init, body)` macro, expanded like cel-java into a
+//!   comprehension over an empty list whose accumulator is `var`
+//!   ([`expand_bind_macros`]).
+//!
 //! The `cel` crate dispatches to its own standard-library overloads before
 //! any `Context` function, so `timestamp(string)` can only be widened by
 //! renaming the call in the AST before evaluation ([`rewrite_timestamp_calls`]).
+//! [`rewrite`] applies both AST rewrites.
 
 use std::sync::Arc;
 
@@ -267,6 +275,109 @@ fn millis_to_timestamp(ms: i64) -> Option<DateTime<FixedOffset>> {
         .map(|t| t.fixed_offset())
 }
 
+/// Every AST rewrite the legacy compiler's extensions imply: `cel.bind`
+/// expansion, then the `timestamp(...)` rename.
+pub fn rewrite(expr: &mut cel::IdedExpr) {
+    expand_bind_macros(expr);
+    rewrite_timestamp_calls(expr);
+}
+
+/// Expand `cel.bind(name, init, body)` the way cel-java's bindings macro
+/// does: `Comprehension{iter_range: [], iter_var: "#unused", accu_var: name,
+/// accu_init: init, loop_cond: false, loop_step: name, result: body}`. The
+/// empty range never iterates, so `body` is evaluated once with `name`
+/// bound to `init`. A call whose first argument isn't a simple identifier
+/// is left alone (cel-java rejects it at compile time too).
+pub fn expand_bind_macros(expr: &mut cel::IdedExpr) {
+    use cel::common::ast::{CallExpr, ComprehensionExpr, EntryExpr, Expr, ListExpr, LiteralValue};
+    if let Expr::Call(CallExpr {
+        func_name,
+        target: Some(target),
+        args,
+    }) = &mut expr.expr
+    {
+        let is_bind = func_name == "bind"
+            && matches!(&target.expr, Expr::Ident(t) if t == "cel")
+            && args.len() == 3
+            && matches!(&args[0].expr, Expr::Ident(_));
+        if is_bind {
+            let mut args = std::mem::take(args);
+            let body = args.pop().expect("three args");
+            let init = args.pop().expect("three args");
+            let Expr::Ident(name) = args.pop().expect("three args").expr else {
+                unreachable!("checked above")
+            };
+            let id = expr.id;
+            let lit = |v: LiteralValue| cel::IdedExpr {
+                id,
+                expr: Expr::Literal(v),
+            };
+            expr.expr = Expr::Comprehension(Box::new(ComprehensionExpr {
+                iter_range: cel::IdedExpr {
+                    id,
+                    expr: Expr::List(ListExpr {
+                        elements: vec![],
+                        optional_indices: vec![],
+                    }),
+                },
+                iter_var: "#unused".to_string(),
+                iter_var2: None,
+                accu_var: name.clone(),
+                accu_init: init,
+                loop_cond: lit(LiteralValue::Boolean(false.into())),
+                loop_step: cel::IdedExpr {
+                    id,
+                    expr: Expr::Ident(name),
+                },
+                result: body,
+            }));
+        }
+    }
+    match &mut expr.expr {
+        Expr::Unspecified | Expr::Ident(_) | Expr::Literal(_) => {}
+        Expr::Call(c) => {
+            if let Some(t) = &mut c.target {
+                expand_bind_macros(t);
+            }
+            for a in &mut c.args {
+                expand_bind_macros(a);
+            }
+        }
+        Expr::Comprehension(c) => {
+            expand_bind_macros(&mut c.iter_range);
+            expand_bind_macros(&mut c.accu_init);
+            expand_bind_macros(&mut c.loop_cond);
+            expand_bind_macros(&mut c.loop_step);
+            expand_bind_macros(&mut c.result);
+        }
+        Expr::List(l) => {
+            for e in &mut l.elements {
+                expand_bind_macros(e);
+            }
+        }
+        Expr::Map(m) => {
+            for e in &mut m.entries {
+                if let EntryExpr::MapEntry(me) = &mut e.expr {
+                    expand_bind_macros(&mut me.key);
+                    expand_bind_macros(&mut me.value);
+                }
+            }
+        }
+        Expr::Select(s) => expand_bind_macros(&mut s.operand),
+        Expr::Struct(st) => {
+            for e in &mut st.entries {
+                match &mut e.expr {
+                    EntryExpr::StructField(fl) => expand_bind_macros(&mut fl.value),
+                    EntryExpr::MapEntry(me) => {
+                        expand_bind_macros(&mut me.key);
+                        expand_bind_macros(&mut me.value);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Rewrite every `timestamp(x)` call (global form only) to
 /// [`TIMESTAMP_FN`] so the Instant overloads win over the standard library.
 pub fn rewrite_timestamp_calls(expr: &mut cel::IdedExpr) {
@@ -478,16 +589,6 @@ pub fn register(ctx: &mut cel::Context) {
         },
     );
     ctx.add_function(
-        "reverse",
-        |This(this): This<Value>, Arguments(args): Arguments| -> R {
-            if !args.is_empty() {
-                return Err(no_overload("reverse"));
-            }
-            let s = as_str("reverse", &this)?;
-            Ok(string(s.chars().rev().collect()))
-        },
-    );
-    ctx.add_function(
         "join",
         |This(this): This<Value>, Arguments(args): Arguments| -> R {
             let list = match &this {
@@ -506,31 +607,6 @@ pub fn register(ctx: &mut cel::Context) {
             Ok(string(parts.join(sep.as_str())))
         },
     );
-    ctx.add_function("strings.quote", |Arguments(args): Arguments| -> R {
-        let [v] = args.as_slice() else {
-            return Err(no_overload("strings.quote"));
-        };
-        let s = as_str("strings.quote", v)?;
-        let mut out = String::with_capacity(s.len() + 2);
-        out.push('"');
-        for c in s.chars() {
-            match c {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                '\u{7}' => out.push_str("\\a"),
-                '\u{8}' => out.push_str("\\b"),
-                '\u{c}' => out.push_str("\\f"),
-                '\u{b}' => out.push_str("\\v"),
-                other => out.push(other),
-            }
-        }
-        out.push('"');
-        Ok(string(out))
-    });
-
     // ---- math ------------------------------------------------------------
     ctx.add_function("math.greatest", |Arguments(args): Arguments| -> R {
         extreme("math.greatest", &args, true)
@@ -693,7 +769,7 @@ mod tests {
     fn eval(expr: &str) -> Value {
         let program = cel::Program::compile(expr).unwrap();
         let mut e = program.expression().clone();
-        rewrite_timestamp_calls(&mut e);
+        rewrite(&mut e);
         let mut ctx = cel::Context::default();
         register(&mut ctx);
         Value::resolve(&e, &ctx).unwrap()
@@ -702,7 +778,7 @@ mod tests {
     fn eval_err(expr: &str) -> ExecutionError {
         let program = cel::Program::compile(expr).unwrap();
         let mut e = program.expression().clone();
-        rewrite_timestamp_calls(&mut e);
+        rewrite(&mut e);
         let mut ctx = cel::Context::default();
         register(&mut ctx);
         Value::resolve(&e, &ctx).unwrap_err()
@@ -745,8 +821,6 @@ mod tests {
         assert_eq!(eval("'  \\ttrim\\n    '.trim()"), s("trim"));
         assert_eq!(eval("['x', 'y'].join()"), s("xy"));
         assert_eq!(eval("['x', 'y'].join('-')"), s("x-y"));
-        assert_eq!(eval("'gums'.reverse()"), s("smug"));
-        assert_eq!(eval("strings.quote('a\"b')"), s("\"a\\\"b\""));
         // out-of-range indexes are evaluation errors like cel-java
         assert!(matches!(
             eval_err("'abc'.charAt(7)"),
@@ -794,6 +868,25 @@ mod tests {
             eval_err("math.greatest('a', 'b')"),
             ExecutionError::FunctionError { .. }
         ));
+    }
+
+    #[test]
+    fn bind_macro() {
+        assert_eq!(eval("cel.bind(x, 2, x * x + x)"), Value::Int(6));
+        assert_eq!(
+            eval("cel.bind(s, 'Hello', s.lowerAscii() + s.upperAscii())"),
+            s("helloHELLO")
+        );
+        // nested, and shadowing an outer binding
+        assert_eq!(
+            eval("cel.bind(a, 1, cel.bind(b, a + 1, cel.bind(a, 10, a + b)))"),
+            Value::Int(12)
+        );
+        // inside a macro body
+        assert_eq!(
+            eval("[1, 2, 3].all(i, cel.bind(d, i * 2, d > i))"),
+            Value::Bool(true)
+        );
     }
 
     #[test]
