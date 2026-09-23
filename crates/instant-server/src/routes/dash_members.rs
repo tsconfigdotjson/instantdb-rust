@@ -147,7 +147,10 @@ fn translate_db_error(e: sqlx::Error) -> InstantError {
 /// (`req->app-and-user!` / `req->org-and-user!` with `least`).
 struct Actor {
     user_id: Uuid,
+    user_email: String,
     foreign_key: Uuid,
+    /// the app's / org's title (the invite email names it)
+    title: String,
     role: DashRole,
 }
 
@@ -168,7 +171,13 @@ async fn actor(
                 .unwrap_or_default();
             Ok(Actor {
                 user_id: user.id,
+                user_email: user.email,
                 foreign_key,
+                title: app
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
                 role,
             })
         }
@@ -183,7 +192,13 @@ async fn actor(
                 .unwrap_or(DashRole::Collaborator);
             Ok(Actor {
                 user_id: user.id,
+                user_email: user.email,
                 foreign_key: org_id,
+                title: org
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
                 role,
             })
         }
@@ -194,10 +209,10 @@ async fn actor(
 // invites
 
 /// legacy team-member-invite-send-post (dash/routes.clj:1312-1343): admin
-/// on the app / org; the invite row is upserted per (fk, email); the invite
-/// email is log-only here.
+/// on the app / org; the invite row is upserted per (fk, email), then the
+/// invite email goes out through the configured provider.
 async fn invite_send(
-    state: &AppState,
+    state: &Arc<AppState>,
     headers: &HeaderMap,
     side: Side,
     id_raw: &str,
@@ -232,10 +247,15 @@ async fn invite_send(
         .execute(&state.pool)
         .await
         .map_err(translate_db_error)?;
-    tracing::info!(
-        "team invite (log-only mail): {email} invited as {role} to {} {}",
-        side.fk(),
-        a.foreign_key
+    crate::email::deliver_team_invite(
+        state,
+        &email,
+        &a.user_email,
+        match side {
+            Side::App => "app",
+            Side::Org => "organization",
+        },
+        &a.title,
     );
     Ok(json!({}))
 }

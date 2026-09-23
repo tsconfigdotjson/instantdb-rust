@@ -287,9 +287,7 @@ pub fn rewrite(expr: &mut cel::IdedExpr) {
 /// bound to `init`. A call whose first argument isn't a simple identifier
 /// is left alone (cel-java rejects it at compile time too).
 pub fn expand_bind_macros(expr: &mut cel::IdedExpr) {
-    use cel::common::ast::{
-        CallExpr, ComprehensionExpr, EntryExpr, Expr, ListExpr, LiteralValue,
-    };
+    use cel::common::ast::{CallExpr, ComprehensionExpr, EntryExpr, Expr, ListExpr, LiteralValue};
     if let Expr::Call(CallExpr {
         func_name,
         target: Some(target),
