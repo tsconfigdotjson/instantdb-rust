@@ -1705,12 +1705,19 @@ async fn deliver_batch(state: &Arc<AppState>, events: Vec<ClaimedEvent>, what: &
             }
         }));
     }
+    let aborts: Vec<_> = tasks.iter().map(|t| t.abort_handle()).collect();
     let all = async {
         for t in tasks {
             let _ = t.await;
         }
     };
     if tokio::time::timeout(BATCH_DEADLINE, all).await.is_err() {
+        // like invokeAll's timeout, cancel what's still running or waiting on
+        // a permit: a detached send could otherwise land after free_stuck
+        // has handed the event to another claim (a double delivery)
+        for a in aborts {
+            a.abort();
+        }
         tracing::warn!("webhook {what} batch exceeded {BATCH_DEADLINE:?}; the rest is freed later");
     }
 }

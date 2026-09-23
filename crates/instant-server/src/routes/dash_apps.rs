@@ -198,9 +198,10 @@ async fn apps_for_user(state: &AppState, user_id: Uuid) -> Result<Vec<Value>> {
             AND (a.creator_id = $1
                  OR EXISTS (SELECT 1 FROM app_members m WHERE m.app_id = a.id AND m.user_id = $1
                              AND ($2 OR m.created_at < $3 OR m.member_role = 'owner'
+                                  -- all-for-user-q (app.clj:290-296) admits Pro (2) only
                                   OR EXISTS (SELECT 1 FROM instant_subscriptions sub
                                               WHERE sub.id = a.subscription_id
-                                                AND sub.subscription_type_id IN (2, 3)))))
+                                                AND sub.subscription_type_id = 2))))
           ORDER BY a.created_at, a.id",
     )
     .bind(user_id)
