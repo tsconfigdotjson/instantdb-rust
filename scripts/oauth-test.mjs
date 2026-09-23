@@ -349,7 +349,7 @@ if (adminToken) {
     headers: { cookie: s2.headers.get("set-cookie").split(";")[0] },
   });
   const forgedBody = await cbForged.json();
-  assert(cbForged.status === 400 && forgedBody.message === "Could not find OAuth request.", "a state of another app finds no request");
+  assert(cbForged.status === 400 && forgedBody.error === "Could not find OAuth request.", "a state of another app finds no request");
 }
 provider.close();
 console.log("OAUTH TEST PASSED");
