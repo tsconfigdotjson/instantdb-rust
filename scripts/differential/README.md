@@ -22,7 +22,7 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `ghcr.io/instantdb`.
 - `provision.sh` — creates the same app id + admin token in both servers'
   databases (both run the same legacy schema).
-- `replay.mjs` — 24-step scenario across init, schemaless transacts, queries
+- `replay.mjs` — 34-step scenario across init, schemaless transacts, queries
   (nested/paginated/cursor round-trip/aggregate), typed-attr query breadth
   ($gt/$lt/$like/$ilike/$in/$not/$isNull/or/and, typed ordering, offset,
   last, fields projection, dot-paths), authed sessions + permissions (real
@@ -38,7 +38,14 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `result-meta` page-info compared whole) and the generic `POST /admin/sse` +
   `/admin/sse/push` session driving join-rows queries, transacts and a stream a
   socket subscriber tails (`connectSse` in lib.mjs mirrors the SDK's
-  transports). `inferred-types` on
+  transports); and the issue #29 items (steps 29-34): the cel-java strings /
+  math extensions and `getTime` / `timestamp` overloads in binds and every
+  rule kind, view + field rules under a `fields` projection, `$isNull` inside
+  `or`, link-rule `actions` / `linkedData.ref` / link-on-create and pre-tx
+  `data.ref` in update / delete rules, `attrs.allow.create`, the `mode`
+  pre-pass messages and tx-step shape specs, the admin presence route with
+  re-fetched users and `instance-id`, `resync-table` mismatch checks, and the
+  OAuth callback's 400 surfaces + `?test-redirect` page. `inferred-types` on
   attrs is compared for real (it used to be normalized away). Frames are folded into the
   **client-visible projection** (exactly what `Reactor.js`/`SyncTable.ts`/
   `Stream.ts` read, with volatile server-chosen values normalized) and must
@@ -60,7 +67,13 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `schema/push/{plan,apply}`, perms pull, rules push (valid, unchanged and
   invalid rules), the auth/param error matrix, and the HTTP side of the admin
   SSE routes (auth / query / push-envelope errors, `session-missing` and
-  `member-missing` against a live session). Responses are folded to
+  `member-missing` against a live session), and — with `DASH_USER_TOKEN`
+  (a dashboard refresh token `provision.sh` seeds on both servers for the
+  app's creator) — the CLI's app / info / claim / auth / email routes
+  (issue #29): `/dash/me`, `/dash`, app create / get / delete, orgs, OAuth
+  providers / clients / redirect origins and the `/auth` summary, email
+  templates and status, direct indexing-job creation with its validation
+  matrix, ephemeral apps and `claim`. Responses are folded to
   what the CLI reads (server-chosen ids, timestamps and CEL diagnostics
   normalized) and must match. `node dash.mjs <app> <token> [<app2> <token2>]`.
 - `storage.mjs` — the storage surface (issue #9): every `db.storage.*`
@@ -78,10 +91,57 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   is compared with legacy's too; on the other backends rust proxies through
   `/storage/serve` and only the fetched content is compared.
   `node storage.mjs <app> <token>`.
-- `fuzz.mjs` — seeded random tx-steps + queries replayed on both servers;
-  asserts per-server invariants (monotonic tx-ids) and cross-server equality
-  of every query result. `node fuzz.mjs <app> <app> <token> [seed] [rounds]`.
+- `fuzz.mjs` — seeded random tx-steps + queries over the whole client
+  grammar (every tx-step op incl. `mode`, links, schema churn, malformed
+  steps; every where operator, dotted link paths, first/last/after/before
+  cursor walks, fields, nested links, `$$ruleParams`) replayed on both
+  servers; asserts per-server invariants (monotonic tx-ids) and cross-server
+  equality of every query result and error type.
+  `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. CI runs two seeds per
+  PR and ten longer seeds nightly (`schedule` in ci.yml).
+- `errors.mjs` / `errors-allowed.json` — the error matrix: one probe per
+  externally reachable legacy error type (`err:*` in surface.json) over HTTP
+  and the ws session; the normalized envelope (status, type, message, hint)
+  must match. `node errors.mjs <app> <token> <user-refresh-token>`.
+- `schema.mjs` / `schema-allowed.json` — diffs the two live database
+  catalogs (tables, columns, constraints, indexes, enums, functions,
+  triggers): an upstream migration the vendored copy lacks fails CI here
+  instead of at runtime. `node schema.mjs`.
+- `stress.mjs` — scheduling stress: a large transact followed immediately by
+  presence, a query and a broadcast on the same session; every op must be
+  answered on both servers, peers must see the presence/broadcast, and the
+  states must converge (the reply order is printed; legacy's per-op group
+  keys vs this server's in-order handling is documented in docs/PARITY.md).
+- `dash.mjs` step 39 drives the webhook management routes, the events a
+  transaction queues and the payload for them on both servers.
+- `dash.mjs` step 40 drives the dashboard's Google login (`/dash/oauth/start`
+  with legacy's unconfigured client, every callback error path, a real Google
+  rejection, the token errors), the get-a-db creation gates, `track-import`
+  and the active-session stats; step 41 the admin magic-code routes
+  (`send_magic_code` hands the code back, `verify_magic_code` signs in).
+  `scripts/dash-login-test.mjs` (the `cargo test + e2e` job) runs the full
+  Google round trip against a mock token endpoint.
 - `lib.mjs` — capture clients, normalization, folding.
+- `surface.mjs` / `surface.json` — the legacy server's public surface derived
+  mechanically from the vendored source (every route table, ws op, tx-step
+  op, InstaQL option and where operator, custom CEL overload, error type);
+  `--check` runs in CI so the manifest can't drift from `LEGACY/`.
+- `coverage-hook.mjs` / `coverage.mjs` / `coverage-baseline.json` — the
+  capture clients and a wrapped `fetch` record which surface items a run
+  exercised. "Covered" means the harness *sent* that route / op / option /
+  operator to a server, or *saw* that error type from one, during a run whose
+  comparisons all passed; it is a reachability count, not a per-item proof
+  that both servers' responses were compared (the replay, dash, storage,
+  error-matrix and fuzz layers are what compare, and every mismatch they find
+  fails the run). `run.sh` prints per-group coverage with the uncovered list and
+  fails if an item in the committed baseline is no longer exercised
+  (`node coverage.mjs --write <file>` updates the baseline after adding
+  coverage). `out-of-scope.json` names the hosted-only items (billing,
+  backups / restores, sunset stages, Postmark sender verification, the
+  operators' reports) with a reason each; they leave the counted total and
+  are reported on their own line, so the percentage measures what a
+  self-hosted server can serve. Groups `demo`, `health`, `ws-internal`, `cel-internal` are
+  listed but not counted.
 
 This harness found (and pinned as regression coverage) real divergences during
 development: deep-merge null semantics, system-catalog attr visibility,

@@ -53,12 +53,18 @@ pub(crate) fn app_id_param(headers: &HeaderMap, params: &HashMap<String, String>
                 })),
             )
         })?;
+    // get-some-param! malformed hint: the path found, every candidate path,
+    // and the raw input (exception.clj:441-457)
     Uuid::parse_str(&raw).map_err(|_| {
         InstantError::new(
             "param-malformed",
             400,
             format!("Malformed parameter: [\"{}\" \"{}\"]", path[0], path[1]),
-            Some(json!({"in": path, "original-input": raw})),
+            Some(json!({
+                "in": path,
+                "possible-ins": [["headers", "app-id"], ["query-params", "app_id"]],
+                "original-input": raw,
+            })),
         )
     })
 }
@@ -562,6 +568,48 @@ fn eid_to_lookup(
     }
 }
 
+/// `ex/get-param! req [:body :steps] vec` (admin/routes.clj:267,335): absent
+/// is param-missing, present but not an array is param-malformed.
+fn body_steps(body: &Value) -> Result<&Value> {
+    let steps = body.get("steps").filter(|v| !v.is_null()).ok_or_else(|| {
+        InstantError::new(
+            "param-missing",
+            400,
+            "Missing parameter: [\"body\" \"steps\"]",
+            Some(json!({"in": ["body", "steps"]})),
+        )
+    })?;
+    if !steps.is_array() {
+        return Err(InstantError::new(
+            "param-malformed",
+            400,
+            "Malformed parameter: [\"body\" \"steps\"]",
+            Some(json!({"in": ["body", "steps"], "original-input": steps})),
+        ));
+    }
+    Ok(steps)
+}
+
+/// Legacy `throw-validation-err! :steps <steps> [{message, in [idx 2]}]`
+/// (admin/model.clj:423): stamp the whole steps array and the position of
+/// the offending entity id onto an `invalid_eid` error.
+fn at_step(e: InstantError, steps: &Value, idx: usize, pos: usize) -> InstantError {
+    let mut e = e;
+    if let Some(h) = e.hint.as_mut().and_then(|h| h.as_object_mut()) {
+        if h.get("data-type").and_then(|d| d.as_str()) == Some("steps") {
+            h.insert("input".into(), steps.clone());
+            if let Some(errs) = h.get_mut("errors").and_then(|v| v.as_array_mut()) {
+                for err in errs.iter_mut() {
+                    if let Some(m) = err.as_object_mut() {
+                        m.insert("in".into(), json!([idx, pos]));
+                    }
+                }
+            }
+        }
+    }
+    e
+}
+
 fn invalid_eid(x: &str) -> InstantError {
     InstantError::validation_failed(
         "steps",
@@ -717,7 +765,9 @@ fn resolve_obj_attr(
         "id": id,
         "forward-identity": [Uuid::new_v4(), etype, label],
         "value-type": "blob", "cardinality": "one",
-        "unique?": is_id, "index?": is_id
+        // legacy create-object-attr (admin/model.clj:280-284): the auto-created
+        // `id` attr is unique but not indexed
+        "unique?": is_id, "index?": false
     }]));
     Ok(id)
 }
@@ -771,7 +821,7 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
         .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"steps\"]"))?;
     let mut new_attrs: Vec<Value> = vec![];
     let mut out: Vec<Value> = vec![];
-    for step in arr {
+    for (idx, step) in arr.iter().enumerate() {
         let sarr = step.as_array().ok_or_else(|| {
             InstantError::validation_failed("steps", "step must be an array", json!([]))
         })?;
@@ -786,7 +836,8 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                )?;
+                )
+                .map_err(|e| at_step(e, steps, idx, 2))?;
                 let obj = sarr
                     .get(3)
                     .and_then(|v| v.as_object())
@@ -835,7 +886,8 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                )?;
+                )
+                .map_err(|e| at_step(e, steps, idx, 2))?;
                 let obj = sarr
                     .get(3)
                     .and_then(|v| v.as_object())
@@ -846,6 +898,13 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                 } else {
                     "retract-triple"
                 };
+                // legacy with-id-attr-for-lookup (admin/model.clj:95-103): a
+                // lookup eid gets its `id` triple first, so the entity is
+                // created (and its create rule runs) when it doesn't exist
+                if eid.is_array() {
+                    let id_attr = resolve_obj_attr(attrs, etype, "id", &mut new_attrs)?;
+                    out.push(json!(["add-triple", eid, id_attr, eid]));
+                }
                 for (label, value) in &obj {
                     let (attr_id, forward) =
                         resolve_link_attr(attrs, etype, label, &mut new_attrs)?;
@@ -886,7 +945,8 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                )?;
+                )
+                .map_err(|e| at_step(e, steps, idx, 2))?;
                 out.push(json!(["delete-entity", eid, etype]));
             }
             "ruleParams" | "rule-params" => {
@@ -896,7 +956,8 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     etype,
                     sarr.get(2).unwrap_or(&Value::Null),
                     &mut new_attrs,
-                )?;
+                )
+                .map_err(|e| at_step(e, steps, idx, 2))?;
                 out.push(json!([
                     "rule-params",
                     eid,
@@ -908,12 +969,14 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
             | "deep-merge-triple" | "retract-triple" | "delete-entity" => {
                 out.push(step.clone());
             }
-            other => {
-                return Err(InstantError::validation_failed(
+            _ => {
+                // legacy spec explain of ::ops (admin/model.clj:503): the
+                // best problem is the last `s/or` branch's op literal
+                return Err(InstantError::validation_failed_input(
                     "steps",
-                    format!("unknown step action {other:?}"),
-                    json!([]),
-                ))
+                    steps.clone(),
+                    json!([{"expected": ["delete-attr"], "in": [idx, 0]}]),
+                ));
             }
         }
     }
@@ -952,9 +1015,7 @@ async fn transact_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed(state, headers, params).await?;
-    let steps = body
-        .get("steps")
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"steps\"]"))?;
+    let steps = body_steps(body)?;
     let throw_missing = body
         .get("throw-on-missing-attrs?")
         .and_then(|v| v.as_bool())
@@ -989,24 +1050,32 @@ async fn refresh_tokens_impl(
         .get("id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
+    // legacy refresh-tokens-post (admin/routes.clj:398-427): assert-signup!
+    // with skip-perm-check? validates extra-fields against the $users schema
+    let extra_fields = auth::extra_fields_of(body, "extra-fields");
+    let attrs = service::load_attrs(state, ctx.app_id).await?;
     let (user_id, created) = match (email, id) {
         (Some(email), _) => match auth::user_by_email(state, ctx.app_id, email).await? {
             Some(u) => (u.id, false),
             None => {
+                auth::validate_extra_fields(&attrs, extra_fields)?;
                 let uid = Uuid::new_v4();
-                let steps = json!([
-                    ["add-triple", uid, sc::attr_id("$users", "id"), uid],
-                    ["add-triple", uid, sc::attr_id("$users", "email"), email]
-                ]);
-                service::run_system_transact(state, ctx.app_id, &steps).await?;
+                let mut steps = vec![
+                    json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
+                    json!(["add-triple", uid, sc::attr_id("$users", "email"), email]),
+                ];
+                steps.extend(auth::extra_field_steps(&attrs, uid, extra_fields));
+                service::run_system_transact(state, ctx.app_id, &Value::Array(steps)).await?;
                 (uid, true)
             }
         },
         (None, Some(id)) => match auth::user_by_id(state, ctx.app_id, id).await? {
             Some(u) => (u.id, false),
             None => {
-                let steps = json!([["add-triple", id, sc::attr_id("$users", "id"), id]]);
-                service::run_system_transact(state, ctx.app_id, &steps).await?;
+                auth::validate_extra_fields(&attrs, extra_fields)?;
+                let mut steps = vec![json!(["add-triple", id, sc::attr_id("$users", "id"), id])];
+                steps.extend(auth::extra_field_steps(&attrs, id, extra_fields));
+                service::run_system_transact(state, ctx.app_id, &Value::Array(steps)).await?;
                 (id, true)
             }
         },
@@ -1157,10 +1226,55 @@ async fn presence_impl(
     params: &HashMap<String, String>,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
-    let room_id = params
-        .get("room-id")
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: room-id"))?;
-    let snapshot = crate::presence::room_snapshot(state, ctx.app_id, room_id).await?;
+    // legacy presence-get (admin/routes.clj:739-765): `room-type` is
+    // required (unused) alongside `room-id`, and every peer's stored
+    // `{id}` user is replaced with its current $users entity
+    let get_param = |name: &str| -> Result<String> {
+        match params.get(name) {
+            None => Err(InstantError::new(
+                "param-missing",
+                400,
+                format!("Missing parameter: [\"params\" \"{name}\"]"),
+                Some(json!({"in": ["params", name]})),
+            )),
+            Some(v) if v.trim().is_empty() => Err(InstantError::new(
+                "param-malformed",
+                400,
+                format!("Malformed parameter: [\"params\" \"{name}\"]"),
+                Some(json!({"in": ["params", name], "original-input": v})),
+            )),
+            Some(v) => Ok(v.clone()),
+        }
+    };
+    let _room_type = get_param("room-type")?;
+    let room_id = get_param("room-id")?;
+    let mut snapshot = crate::presence::room_snapshot(state, ctx.app_id, &room_id).await?;
+    let mut users: HashMap<Uuid, Value> = HashMap::new();
+    if let Some(sessions) = snapshot.as_object_mut() {
+        for sess in sessions.values_mut() {
+            let Some(uid) = sess
+                .get("user")
+                .and_then(|u| u.get("id"))
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+            else {
+                continue;
+            };
+            let entity = match users.get(&uid) {
+                Some(cached) => cached.clone(),
+                None => {
+                    // legacy app-user-model/get-by-ids: the app-user shape
+                    // (`id`, `app_id`, `email`, `created_at`, `isGuest`)
+                    let fetched = user_json(state, ctx.app_id, uid, None)
+                        .await
+                        .unwrap_or(Value::Null);
+                    users.insert(uid, fetched.clone());
+                    fetched
+                }
+            };
+            sess["user"] = entity;
+        }
+    }
     Ok(json!({"sessions": snapshot}))
 }
 
@@ -1755,12 +1869,8 @@ async fn admin_send_magic_code_impl(
         )
     })?;
     let email = crate::routes::runtime::coerce_email_pub(email)?;
-    state
-        .limiters
-        .magic_code_send
-        .check((ctx.app_id, email.clone()), 1.0)
-        .map_err(crate::rate_limit::email_rate_limited_err)?;
-    crate::routes::runtime::send_magic_code_for(state, ctx.app_id, &email).await
+    let code = crate::routes::runtime::send_magic_code_for(state, ctx.app_id, &email).await?;
+    Ok(json!({"code": code}))
 }
 
 pub async fn admin_verify_magic_code(
@@ -1783,6 +1893,30 @@ async fn verify_magic_code_admin_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
+    // legacy `ex/get-param!` shapes for the two required body params
+    for key in ["email", "code"] {
+        match body.get(key) {
+            None | Some(Value::Null) => {
+                return Err(InstantError::new(
+                    "param-missing",
+                    400,
+                    format!("Missing parameter: [\"body\" \"{key}\"]"),
+                    Some(json!({"in": ["body", key]})),
+                ))
+            }
+            Some(v) if !v.is_string() => {
+                // legacy's coercer (email/coerce, safe-trim) returns nil for a
+                // non-string, which get-param! reports as malformed
+                return Err(InstantError::new(
+                    "param-malformed",
+                    400,
+                    format!("Malformed parameter: [\"body\" \"{key}\"]"),
+                    Some(json!({"in": ["body", key], "original-input": v})),
+                ));
+            }
+            _ => {}
+        }
+    }
     let mut rt_body = body.clone();
     rt_body["app-id"] = json!(ctx.app_id);
     crate::routes::runtime::verify_magic_code_shared(state, &rt_body).await
@@ -1804,15 +1938,21 @@ async fn admin_sign_in_guest_impl(
     state: &AppState,
     headers: &HeaderMap,
     params: &HashMap<String, String>,
-    _body: &Value,
+    body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
     let uid = Uuid::new_v4();
-    let steps = json!([
-        ["add-triple", uid, sc::attr_id("$users", "id"), uid],
-        ["add-triple", uid, sc::attr_id("$users", "type"), "guest"]
-    ]);
-    service::run_system_transact(state, ctx.app_id, &steps).await?;
+    // legacy sign-in-guest-post (admin/routes.clj:534-554): extra-fields are
+    // validated (no rule check) and written with the guest
+    let extra_fields = auth::extra_fields_of(body, "extra-fields");
+    let attrs = service::load_attrs(state, ctx.app_id).await?;
+    auth::validate_extra_fields(&attrs, extra_fields)?;
+    let mut steps = vec![
+        json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
+        json!(["add-triple", uid, sc::attr_id("$users", "type"), "guest"]),
+    ];
+    steps.extend(auth::extra_field_steps(&attrs, uid, extra_fields));
+    service::run_system_transact(state, ctx.app_id, &Value::Array(steps)).await?;
     let token = auth::mint_refresh_token(state, ctx.app_id, uid).await?;
     let user = user_json(state, ctx.app_id, uid, Some(token)).await?;
     Ok(json!({"user": user}))
@@ -1872,15 +2012,12 @@ async fn check_files_perm(
     let program = rules.program("$files", action);
     let auth_ctx = perms.auth_ctx(state);
     let env = instant_core::perms::EvalEnv::new(app_id, &rules, &auth_ctx.request);
-    let auth_val = if let Some(uid) = auth_ctx.user_id {
-        let attrs = service::load_attrs(state, app_id).await?;
-        instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$users", uid)
-            .await?
-            .map(Value::Object)
-            .unwrap_or(Value::Null)
-    } else {
-        Value::Null
-    };
+    // legacy binds `auth` as an AuthCelMap here too (coordinator.clj:19-38),
+    // so `auth.ref('$user...')` resolves
+    let attrs = service::load_attrs(state, app_id).await?;
+    let auth_val =
+        instant_core::perms::build_auth_value(&mut conn, app_id, &attrs, &auth_ctx, &[&program])
+            .await?;
     let data = json!({"path": path});
     let ok = instant_core::perms::eval_program(&program, &data, None, &auth_val, &json!({}), &env)
         .await?;
@@ -2078,9 +2215,10 @@ async fn query_perms_check_impl(
 ) -> Result<Value> {
     let ctx = authed_admin_then_impersonating(state, headers, params).await?;
     if ctx.perms.admin {
-        return Err(InstantError::validation_failed(
-            "body",
-            "Cannot test perms as admin",
+        // legacy throw-validation-err! :non-admin :non-admin (routes.clj:222,327)
+        return Err(InstantError::validation_failed_input(
+            "non-admin",
+            json!("non-admin"),
             json!([{"message": "Cannot test perms as admin"}]),
         ));
     }
@@ -2112,6 +2250,8 @@ async fn query_perms_check_impl(
     for form in &unfiltered.forms {
         let program = rules.program(&form.etype, "view");
         for e in &form.entities {
+            // legacy `entity-map` (instaql.clj:1956-1963) re-fetches the whole
+            // entity for the check regardless of any `fields` projection
             let mut record = serde_json::Map::new();
             record.insert("id".to_string(), json!(e.eid));
             for t in &e.triples {
@@ -2121,18 +2261,23 @@ async fn query_perms_check_impl(
                     }
                 }
             }
-            let mut data = instant_core::perms::base_entity_map(&attrs, &form.etype, e.eid);
-            for (k, v) in &record {
-                data.insert(k.clone(), v.clone());
-            }
-            let auth_val = if let Some(uid) = auth_ctx.user_id {
-                instant_core::perms::fetch_entity_map(&mut conn, ctx.app_id, &attrs, "$users", uid)
-                    .await?
-                    .map(Value::Object)
-                    .unwrap_or(Value::Null)
-            } else {
-                Value::Null
-            };
+            let data = instant_core::perms::fetch_entity_map(
+                &mut conn,
+                ctx.app_id,
+                &attrs,
+                &form.etype,
+                e.eid,
+            )
+            .await?
+            .unwrap_or_else(|| instant_core::perms::base_entity_map(&attrs, &form.etype, e.eid));
+            let auth_val = instant_core::perms::build_auth_value(
+                &mut conn,
+                ctx.app_id,
+                &attrs,
+                &auth_ctx,
+                &[&program],
+            )
+            .await?;
             let rule_params = q.get("$$ruleParams").cloned().unwrap_or(json!({}));
             let ok = instant_core::perms::eval_program(
                 &program,
@@ -2143,9 +2288,12 @@ async fn query_perms_check_impl(
                 &env,
             )
             .await?;
+            // legacy keys check results by [etype id label] (instaql.clj:2028-2037);
+            // `label` is nil for the entity-level view check
             check_results.push(json!({
                 "id": e.eid,
                 "entity": form.etype,
+                "label": null,
                 "record": record,
                 "program": {
                     "etype": form.etype,
@@ -2164,7 +2312,10 @@ async fn query_perms_check_impl(
     Ok(json!({
         "check-results": check_results,
         "result": tree,
-        "rule-wheres": [],
+        // legacy's map of {etype -> {short-circuit? where-clauses rate-limits}}
+        // from its rule-where rewriter (instaql.clj:2116-2152); rules are
+        // evaluated per entity here, so no where clauses are ever derived
+        "rule-wheres": {},
     }))
 }
 
@@ -2185,15 +2336,14 @@ async fn transact_perms_check_impl(
 ) -> Result<Value> {
     let ctx = authed_admin_then_impersonating(state, headers, params).await?;
     if ctx.perms.admin {
-        return Err(InstantError::validation_failed(
-            "body",
-            "Cannot test perms as admin",
+        // legacy throw-validation-err! :non-admin :non-admin (routes.clj:222,327)
+        return Err(InstantError::validation_failed_input(
+            "non-admin",
+            json!("non-admin"),
             json!([{"message": "Cannot test perms as admin"}]),
         ));
     }
-    let steps = body
-        .get("steps")
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: [\"body\" \"steps\"]"))?;
+    let steps = body_steps(body)?;
     let throw_missing = body
         .get("throw-on-missing-attrs?")
         .and_then(|v| v.as_bool())

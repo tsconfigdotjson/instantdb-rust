@@ -121,10 +121,10 @@ impl<K: Eq + Hash> RateLimiter<K> {
 
 /// Cost of one websocket op against the per-app `ws` bucket. Ops that hit the
 /// database (queries, transacts, sync/stream setup) are weighted heavier than
-/// ephemeral fan-out (presence, broadcast); `init` heaviest (auth + attr load).
+/// ephemeral fan-out (presence, broadcast). `init` is exempt like legacy
+/// (session.clj:981-984) and never reaches the bucket.
 pub fn ws_op_cost(op: &str) -> f64 {
     match op {
-        "init" => 10.0,
         "add-query" | "transact" | "start-sync" | "resync-table" | "start-stream"
         | "append-stream" | "subscribe-stream" => 5.0,
         _ => 1.0,

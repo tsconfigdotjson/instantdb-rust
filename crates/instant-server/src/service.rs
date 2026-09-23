@@ -28,7 +28,8 @@ pub async fn get_app(state: &AppState, app_id: Uuid) -> Result<AppRow> {
     .fetch_optional(&state.pool)
     .await
     .map_err(InstantError::from)?
-    .ok_or_else(|| InstantError::record_not_found("app", "Could not find app."))?;
+    // legacy app-model/get-by-id! (model/app.clj:107-110)
+    .ok_or_else(|| InstantError::record_not_found_args("app", json!({"id": app_id})))?;
     Ok(AppRow {
         id: row.get("id"),
         title: row.get("title"),
@@ -213,9 +214,10 @@ pub async fn run_query_full(
     let mut result = instaql::query(&mut conn, &ctx, q).await?;
     // Topics come from the pre-permissions result: an entity hidden by a
     // view rule is still tracked, so a write that makes it visible refreshes.
-    let mut topics = match instaql::parse_query(q) {
-        Ok(forms) => instant_core::topics::query_topics(attrs, &forms, &result),
-        Err(_) => QueryTopics::catch_all(),
+    let parsed_forms = instaql::parse_query(q).ok();
+    let mut topics = match &parsed_forms {
+        Some(forms) => instant_core::topics::query_topics(attrs, forms, &result),
+        None => QueryTopics::catch_all(),
     };
     if !perms.admin {
         let loaded;
@@ -239,7 +241,17 @@ pub async fn run_query_full(
                 .or(perms.rule_params.clone())
                 .unwrap_or(json!({})),
         };
-        filter.filter(&mut conn, app_id, attrs, &mut result).await?;
+        // view / field rules see the whole entity even under a `fields`
+        // projection (instaql.clj:1956-2007), so the parsed forms ride along
+        filter
+            .filter_with_forms(
+                &mut conn,
+                app_id,
+                attrs,
+                &mut result,
+                parsed_forms.as_deref().unwrap_or(&[]),
+            )
+            .await?;
     }
     drop(conn);
     inject_file_urls(state, app_id, attrs, q, &mut result);
@@ -358,8 +370,12 @@ pub async fn run_transact(
         .await?
     };
 
+    let queued = crate::webhooks::queue_events(state, &mut dbtx, app_id, &attrs, &report).await?;
     dbtx.commit().await.map_err(InstantError::from)?;
     notify_tx(state, app_id, &TxNotice::from(&report)).await;
+    if queued {
+        state.webhook_notify.notify_one();
+    }
     crate::metrics::METRICS
         .transact_seconds
         .observe_since(started);
@@ -386,8 +402,12 @@ pub async fn run_system_transact(
         },
     )
     .await?;
+    let queued = crate::webhooks::queue_events(state, &mut dbtx, app_id, &attrs, &report).await?;
     dbtx.commit().await.map_err(InstantError::from)?;
     notify_tx(state, app_id, &TxNotice::from(&report)).await;
+    if queued {
+        state.webhook_notify.notify_one();
+    }
     Ok(report)
 }
 

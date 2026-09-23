@@ -1,0 +1,173 @@
+{
+ "_comment": "Legacy surface items that exist only for instantdb.com's hosted service; coverage.mjs leaves them out of the counted total and lists them separately. Every id must be in surface.json.",
+ "items": [
+  {
+   "id": "http:DELETE /dash/apps/:app_id/backup-jobs/:job_id",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backup-jobs",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backup-jobs/:job_id",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/backups/:backup_id",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backups",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backups/:backup_id/file-url",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backups/:backup_id/files",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backups/:backup_id/storage-files",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/backups",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:DELETE /dash/restore-jobs/:id",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:GET /dash/restore-jobs",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:GET /dash/restore-jobs/:id",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:POST /dash/restores/zip",
+   "reason": "Backups and restores of hosted apps into S3 backup buckets (dash/routes.clj backup-* / restore-* handlers, instant.backups)"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/billing",
+   "reason": "Billing through Stripe (checkout / portal sessions, subscriptions, the billing views); a self-hosted server has no plans"
+  },
+  {
+   "id": "http:GET /dash/orgs/:org_id/billing",
+   "reason": "Billing through Stripe (checkout / portal sessions, subscriptions, the billing views); a self-hosted server has no plans"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/checkout_session",
+   "reason": "Billing through Stripe (checkout / portal sessions, subscriptions, the billing views); a self-hosted server has no plans"
+  },
+  {
+   "id": "http:POST /dash/orgs/:org_id/checkout_session",
+   "reason": "Billing through Stripe (checkout / portal sessions, subscriptions, the billing views); a self-hosted server has no plans"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/portal_session",
+   "reason": "Billing through Stripe (checkout / portal sessions, subscriptions, the billing views); a self-hosted server has no plans"
+  },
+  {
+   "id": "http:POST /dash/orgs/:org_id/portal_session",
+   "reason": "Billing through Stripe (checkout / portal sessions, subscriptions, the billing views); a self-hosted server has no plans"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/self_hosted_subscription",
+   "reason": "Billing through Stripe (checkout / portal sessions, subscriptions, the billing views); a self-hosted server has no plans"
+  },
+  {
+   "id": "http:POST /dash/orgs/:org_id/self_hosted_subscription",
+   "reason": "Billing through Stripe (checkout / portal sessions, subscriptions, the billing views); a self-hosted server has no plans"
+  },
+  {
+   "id": "http:GET /dash/paid",
+   "reason": "Billing through Stripe (checkout / portal sessions, subscriptions, the billing views); a self-hosted server has no plans"
+  },
+  {
+   "id": "err:billing-closed",
+   "reason": "Billing through Stripe (checkout / portal sessions, subscriptions, the billing views); a self-hosted server has no plans"
+  },
+  {
+   "id": "http:GET /dash/sunset",
+   "reason": "instantdb.com's sunset stages (signups closed, app creation disabled, subscription cancellation)"
+  },
+  {
+   "id": "http:POST /dash/sunset",
+   "reason": "instantdb.com's sunset stages (signups closed, app creation disabled, subscription cancellation)"
+  },
+  {
+   "id": "http:GET /dash/sunset/billing",
+   "reason": "instantdb.com's sunset stages (signups closed, app creation disabled, subscription cancellation)"
+  },
+  {
+   "id": "http:POST /dash/sunset/cancel_subscriptions",
+   "reason": "instantdb.com's sunset stages (signups closed, app creation disabled, subscription cancellation)"
+  },
+  {
+   "id": "err:signups-closed",
+   "reason": "instantdb.com's sunset stages (signups closed, app creation disabled, subscription cancellation)"
+  },
+  {
+   "id": "err:app-creation-disabled",
+   "reason": "instantdb.com's sunset stages (signups closed, app creation disabled, subscription cancellation)"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/sender-verification",
+   "reason": "Postmark sender verification for custom email senders (the default sender keeps delivering)"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/sender-verification/send-magic-code",
+   "reason": "Postmark sender verification for custom email senders (the default sender keeps delivering)"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/sender-verification/verify-magic-code",
+   "reason": "Postmark sender verification for custom email senders (the default sender keeps delivering)"
+  },
+  {
+   "id": "err:email-send-failed",
+   "reason": "Postmark sender verification for custom email senders (the default sender keeps delivering)"
+  },
+  {
+   "id": "http:GET /dash/admin",
+   "reason": "The hosted operators' dashboards: overview / top-app reports from CloudWatch and per-machine summaries, the investor updates page, the ws playground, the session-counter websocket feed, the debug-uri lookup"
+  },
+  {
+   "id": "http:GET /dash/admin-debug-uri",
+   "reason": "The hosted operators' dashboards: overview / top-app reports from CloudWatch and per-machine summaries, the investor updates page, the ws playground, the session-counter websocket feed, the debug-uri lookup"
+  },
+  {
+   "id": "http:GET /dash/overview/daily",
+   "reason": "The hosted operators' dashboards: overview / top-app reports from CloudWatch and per-machine summaries, the investor updates page, the ws playground, the session-counter websocket feed, the debug-uri lookup"
+  },
+  {
+   "id": "http:GET /dash/overview/minute",
+   "reason": "The hosted operators' dashboards: overview / top-app reports from CloudWatch and per-machine summaries, the investor updates page, the ws playground, the session-counter websocket feed, the debug-uri lookup"
+  },
+  {
+   "id": "http:GET /dash/top",
+   "reason": "The hosted operators' dashboards: overview / top-app reports from CloudWatch and per-machine summaries, the investor updates page, the ws playground, the session-counter websocket feed, the debug-uri lookup"
+  },
+  {
+   "id": "http:GET /dash/storage",
+   "reason": "The hosted operators' dashboards: overview / top-app reports from CloudWatch and per-machine summaries, the investor updates page, the ws playground, the session-counter websocket feed, the debug-uri lookup"
+  },
+  {
+   "id": "http:GET /dash/investor_updates",
+   "reason": "The hosted operators' dashboards: overview / top-app reports from CloudWatch and per-machine summaries, the investor updates page, the ws playground, the session-counter websocket feed, the debug-uri lookup"
+  },
+  {
+   "id": "http:GET /dash/ws_playground",
+   "reason": "The hosted operators' dashboards: overview / top-app reports from CloudWatch and per-machine summaries, the investor updates page, the ws playground, the session-counter websocket feed, the debug-uri lookup"
+  },
+  {
+   "id": "http:GET /dash/session_counts",
+   "reason": "The hosted operators' dashboards: overview / top-app reports from CloudWatch and per-machine summaries, the investor updates page, the ws playground, the session-counter websocket feed, the debug-uri lookup"
+  }
+ ]
+}

@@ -63,18 +63,40 @@ pub fn coerce_email_pub(raw: &str) -> Result<String> {
     coerce_email(raw)
 }
 
+/// Legacy `email/coerce` (util/email.clj:7-21): lower-cased, trimmed, and
+/// matched whole against its RFC-5322-ish pattern — a dotted local part of
+/// `[a-z0-9!#$%&'*+/=?^_`{|}~-]` atoms, then two or more `[a-z0-9-]` labels
+/// that don't start or end with a hyphen. An empty local part (`@b.com`),
+/// an empty or hyphen-edged label, and any other character all fail.
+pub fn valid_email(email: &str) -> bool {
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    let atom_char = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+/=?^_`{|}~-".contains(c);
+    let local_ok = !local.is_empty()
+        && local
+            .split('.')
+            .all(|atom| !atom.is_empty() && atom.chars().all(atom_char));
+    let labels: Vec<&str> = domain.split('.').collect();
+    let label_ok = |l: &str| {
+        !l.is_empty()
+            && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+    };
+    local_ok && labels.len() >= 2 && labels.iter().all(|l| label_ok(l))
+}
+
 fn coerce_email(raw: &str) -> Result<String> {
-    let email = raw.trim().to_lowercase();
-    let ok = email.contains('@')
-        && email.split('@').count() == 2
-        && email
-            .split('@')
-            .nth(1)
-            .map(|d| d.contains('.'))
-            .unwrap_or(false)
-        && !email.contains(' ');
-    if !ok {
-        return Err(InstantError::param_malformed("Malformed parameter: email"));
+    let email = raw.to_lowercase().trim().to_string();
+    if !valid_email(&email) {
+        // legacy get-param! [:body :email] email/coerce (exception.clj:421-428)
+        return Err(InstantError::new(
+            "param-malformed",
+            400,
+            "Malformed parameter: [\"body\" \"email\"]",
+            Some(json!({"in": ["body", "email"], "original-input": raw})),
+        ));
     }
     Ok(email)
 }
@@ -152,16 +174,20 @@ async fn send_magic_code_impl(state: &Arc<AppState>, body: &Value) -> Result<Val
     let app_id = get_app_id(body, "app-id")?;
     check_auth_limit(state, app_id)?;
     let email = coerce_email(get_str(body, "email")?)?;
-    send_magic_code_for(state, app_id, &email).await
+    send_magic_code_for(state, app_id, &email).await?;
+    Ok(json!({"sent": true}))
 }
 
 /// Generate, store and deliver a magic code (legacy magic-code-auth/send!);
 /// shared by `/runtime/auth/send_magic_code` and `/admin/send_magic_code`.
+/// Generates, stores and delivers a magic code, returning the plaintext code.
+/// The runtime route answers `{sent: true}`; the admin route answers the code
+/// itself (admin/routes.clj:506-511).
 pub async fn send_magic_code_for(
     state: &Arc<AppState>,
     app_id: Uuid,
     email: &str,
-) -> Result<Value> {
+) -> Result<String> {
     let app = service::get_app(state, app_id).await?;
     let email = email.to_string();
     // per-(app, email) budget, matching legacy's 20/hour default
@@ -204,7 +230,7 @@ pub async fn send_magic_code_for(
     // Fire-and-forget delivery (log-only by default); the response never
     // depends on whether the email actually goes out.
     crate::email::deliver_magic_code(state, app_id, &app.title, &email, &code);
-    Ok(json!({"sent": true}))
+    Ok(code)
 }
 
 pub async fn verify_magic_code(
@@ -254,9 +280,9 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
                 }
             }
             None => {
-                return Err(InstantError::record_not_found(
+                return Err(InstantError::record_not_found_args(
                     "app-user",
-                    "Record not found: app-user",
+                    json!({"app-id": app_id, "refresh-token": token}),
                 ))
             }
         }
@@ -285,10 +311,13 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
     .fetch_optional(&state.pool)
     .await
     .map_err(InstantError::from)?;
+    // legacy consume! (app_user_magic_code.clj:50-66): the lookup params
+    // are the hint args, for the not-found and the expired case alike
+    let args = json!({"app-id": app_id, "code": code, "email": email});
     let Some(row) = row else {
-        return Err(InstantError::record_not_found(
+        return Err(InstantError::record_not_found_args(
             "app-user-magic-code",
-            "Record not found: app-user-magic-code",
+            args,
         ));
     };
     let entity: Uuid = row.get("entity_id");
@@ -301,8 +330,19 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
         .as_ref()
         .map(|g| g.id)
         .unwrap_or_else(Uuid::new_v4);
-    if !admin && auth::user_by_email(state, app_id, &email).await?.is_none() {
-        auth::assert_signup(state, app_id, prospective_id, Some(&email)).await?;
+    let extra_fields = auth::extra_fields_of(body, "extra-fields");
+    if auth::user_by_email(state, app_id, &email).await?.is_none() {
+        // admin flows still validate extra-fields (skip-perm-check? only
+        // skips the rule, magic_code_auth.clj:277-288)
+        auth::assert_signup(
+            state,
+            app_id,
+            prospective_id,
+            Some(&email),
+            extra_fields,
+            admin,
+        )
+        .await?;
     }
     // consume (one-time)
     service::run_system_transact(
@@ -327,7 +367,7 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
             "record-expired",
             400,
             "Record expired: app-user-magic-code",
-            Some(json!({"record-type": "app-user-magic-code"})),
+            Some(json!({"args": [args]})),
         ));
     }
 
@@ -340,12 +380,14 @@ async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> 
             // legacy magic_code_auth.clj:284 `(or guest-user-id (random-uuid))`:
             // a guest upgrading to a NEW email is upgraded in place (same id)
             let uid = prospective_id;
-            let steps = json!([
-                ["add-triple", uid, sc::attr_id("$users", "id"), uid],
-                ["add-triple", uid, sc::attr_id("$users", "email"), email],
-                ["add-triple", uid, sc::attr_id("$users", "type"), "user"]
-            ]);
-            service::run_system_transact(state, app_id, &steps).await?;
+            let mut steps = vec![
+                json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
+                json!(["add-triple", uid, sc::attr_id("$users", "email"), email]),
+                json!(["add-triple", uid, sc::attr_id("$users", "type"), "user"]),
+            ];
+            let attrs = service::load_attrs(state, app_id).await?;
+            steps.extend(auth::extra_field_steps(&attrs, uid, extra_fields));
+            service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
             auth::AppUser {
                 id: uid,
                 email: None,
@@ -383,7 +425,12 @@ async fn verify_refresh_token_impl(state: &AppState, body: &Value) -> Result<Val
     let token = get_str(body, "refresh-token")?;
     let user = auth::user_by_refresh_token(state, app_id, token)
         .await?
-        .ok_or_else(|| InstantError::record_not_found("app-user", "Record not found: app-user"))?;
+        .ok_or_else(|| {
+            InstantError::record_not_found_args(
+                "app-user",
+                json!({"app-id": app_id, "refresh-token": token}),
+            )
+        })?;
     let token_uuid = Uuid::parse_str(token).ok();
     let user = user_json(state, app_id, user.id, token_uuid).await?;
     Ok(json!({"user": user}))
@@ -401,12 +448,15 @@ async fn sign_in_guest_impl(state: &AppState, body: &Value) -> Result<Value> {
     check_auth_limit(state, app_id)?;
     service::get_app(state, app_id).await?;
     let uid = Uuid::new_v4();
-    auth::assert_signup(state, app_id, uid, None).await?;
-    let steps = json!([
-        ["add-triple", uid, sc::attr_id("$users", "id"), uid],
-        ["add-triple", uid, sc::attr_id("$users", "type"), "guest"]
-    ]);
-    service::run_system_transact(state, app_id, &steps).await?;
+    let extra_fields = auth::extra_fields_of(body, "extra-fields");
+    auth::assert_signup(state, app_id, uid, None, extra_fields, false).await?;
+    let mut steps = vec![
+        json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
+        json!(["add-triple", uid, sc::attr_id("$users", "type"), "guest"]),
+    ];
+    let attrs = service::load_attrs(state, app_id).await?;
+    steps.extend(auth::extra_field_steps(&attrs, uid, extra_fields));
+    service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
     let token = auth::mint_refresh_token(state, app_id, uid).await?;
     let user = user_json(state, app_id, uid, Some(token)).await?;
     Ok(json!({"user": user}))

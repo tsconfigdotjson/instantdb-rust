@@ -315,9 +315,11 @@ const SHAPES = {
   },
 };
 
-// presence snapshot entry: {peer-id, user, data} — client only reads .data
+// presence snapshot entry: {peer-id, instance-id, user, data} — client only
+// reads .data (instance-id is the node the session lives on, ephemeral.clj:280-286)
 const PRESENCE_ENTRY_SPEC = {
   "peer-id": T.uuid,
+  "instance-id": T.or(T.uuid, T.string, T.null),
   user: T.or(T.object, T.null),
   data: T.any,
 };
@@ -831,7 +833,9 @@ await expectError(
 await expectError(
   st,
   { op: "resync-table", "subscription-id": sOk["subscription-id"], "tx-id": sFin["tx-id"], token: uuid() },
-  { type: "record-not-found", originalKeys: ["subscription-id"] },
+  // legacy get-by-id-with-topics! (model/sync_sub.clj:178-183): a bad token
+  // is a `subscription` validation error, not a missing record
+  { type: "validation-failed", originalKeys: ["subscription-id"] },
   "resync-table: invalid token",
 );
 

@@ -1,0 +1,1581 @@
+{
+ "generatedFrom": "LEGACY/server/src/instant",
+ "count": 315,
+ "items": [
+  {
+   "id": "cel:_checked_data_ref",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_datakey_contains",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_datakey_ends_with",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_datakey_starts_with",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_eq_dynamic",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_getTime",
+   "group": "cel",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_in_dynamic",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_neq_dynamic",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_not_datakey",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_not_whereclause",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_rateLimit_limit",
+   "group": "cel",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_rateLimit_limit_tokens",
+   "group": "cel",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_ref",
+   "group": "cel",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_size_refpath_size",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_timestamp_from_datakey",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_timestamp_from_number",
+   "group": "cel",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_timestamp_from_string",
+   "group": "cel",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_type_datakey_override",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_type_refpath_override",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "cel:_type_whereclause_override",
+   "group": "cel-internal",
+   "source": "db/cel.clj"
+  },
+  {
+   "id": "err:app-creation-disabled",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:app-disabled",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:app-read-only",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:billing-closed",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:connection-closed",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:email-send-failed",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:member-missing",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:oauth-error",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:operation-timed-out",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:param-malformed",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:param-missing",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:parameter-limit-exceeded",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:permission-denied",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:permission-evaluation-failed",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:rate-limited",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:record-check-violation",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:record-expired",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:record-foreign-key-invalid",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:record-not-found",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:record-not-unique",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:session-missing",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:signups-closed",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:socket-error",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:socket-missing",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:sql-exception",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:sql-raise",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:timeout",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "err:validation-failed",
+   "group": "errors",
+   "source": "util/exception.clj"
+  },
+  {
+   "id": "http:DELETE /admin/storage/files",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:DELETE /admin/users",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/authorized_redirect_origins/:id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/backup-jobs/:job_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/backups/:backup_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/email_templates/:id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/invite/revoke",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/members/remove",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/oauth-app-client-secrets/:client_secret_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/oauth-app-clients/:client_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/oauth-apps/:oauth_app_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/oauth_clients/:id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/test_users",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/apps/:app_id/webhooks/:webhook_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/orgs/:org_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/orgs/:org_id/invite/revoke",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/orgs/:org_id/members/remove",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/personal_access_tokens/:id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /dash/restore-jobs/:id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:DELETE /storage/files",
+   "group": "storage",
+   "source": "storage/routes.clj"
+  },
+  {
+   "id": "http:DELETE /superadmin/apps/:app_id",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:GET /",
+   "group": "core",
+   "source": "core.clj"
+  },
+  {
+   "id": "http:GET /.well-known/webhooks/jwks.json",
+   "group": "webhooks",
+   "source": "webhook_routes.clj"
+  },
+  {
+   "id": "http:GET /admin/rooms/presence",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:GET /admin/schema",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:GET /admin/soft_deleted_attrs",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:GET /admin/storage/files",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:GET /admin/storage/signed-download-url",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:GET /admin/users",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:GET /dash",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/admin",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/admin-debug-uri",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/auth",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backup-jobs",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backup-jobs/:job_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backups",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backups/:backup_id/file-url",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backups/:backup_id/files",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/backups/:backup_id/storage-files",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/billing",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/email_status",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/indexing-jobs/:job_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/indexing-jobs/group/:group_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/oauth-apps",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/perms/pull",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/rule-versions",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/schema/pull",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/sender-verification",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/soft_deleted_attrs",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/stats",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/test_users",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/webhooks",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/webhooks/:webhook_id/events",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/:app_id/webhooks/:webhook_id/events/*",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/ephemeral/:app_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/apps/get_a_db/:app_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/check-admin",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/cli/version",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/default-email-template",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/investor_updates",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/me",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/oauth/callback",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/oauth/start",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/orgs/:org_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/orgs/:org_id/billing",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/overview/daily",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/overview/minute",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/paid",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/personal_access_tokens",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/restore-jobs",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/restore-jobs/:id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/session_counts",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/stats/active_sessions",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/storage",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/sunset",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/sunset/billing",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/top",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/user/oauth_apps",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /dash/ws_playground",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:GET /demo/csp",
+   "group": "demo",
+   "source": "demo_routes.clj"
+  },
+  {
+   "id": "http:GET /health/system",
+   "group": "health",
+   "source": "health.clj"
+  },
+  {
+   "id": "http:GET /platform/oauth/start",
+   "group": "platform",
+   "source": "oauth_apps/routes.clj"
+  },
+  {
+   "id": "http:GET /platform/oauth/token-info",
+   "group": "platform",
+   "source": "oauth_apps/routes.clj"
+  },
+  {
+   "id": "http:GET /runtime/:app_id/.well-known/openid-configuration",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:GET /runtime/:app_id/oauth/start",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:GET /runtime/oauth/callback",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:GET /runtime/oauth/start",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:GET /runtime/session",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:GET /runtime/sse",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:GET /storage/signed-download-url",
+   "group": "storage",
+   "source": "storage/routes.clj"
+  },
+  {
+   "id": "http:GET /superadmin/apps",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:GET /superadmin/apps/:app_id",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:GET /superadmin/apps/:app_id/perms",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:GET /superadmin/apps/:app_id/schema",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:GET /superadmin/orgs",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:GET /superadmin/orgs/:org_id/apps",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:GET /webhooks/payload/:app_id/:webhook_id/*",
+   "group": "webhooks",
+   "source": "webhook_routes.clj"
+  },
+  {
+   "id": "http:POST /admin/magic_code",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/query",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/query_perms_check",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/refresh_tokens",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/send_magic_code",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/sign_in_guest",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/sign_out",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/sse",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/sse/push",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/storage/files/delete",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/storage/signed-upload-url",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/subscribe-query",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/transact",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/transact_perms_check",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /admin/verify_magic_code",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/authorized_redirect_origins",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/backups",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/checkout_session",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/claim",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/clear",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/email_templates",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/indexing-jobs",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/invite/send",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/members/update",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/oauth-app-clients/:client_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/oauth-app-clients/:client_id/client-secrets",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/oauth-apps",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/oauth-apps/:oauth_app_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/oauth-apps/:oauth_app_id/clients",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/oauth_clients",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/oauth_clients/:id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/oauth_service_providers",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/portal_session",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/rename",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/rules",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/schema/push/apply",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/schema/push/plan",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/schema/steps/apply",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/self_hosted_subscription",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/send-test-email",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/sender-verification/send-magic-code",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/sender-verification/verify-magic-code",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/set-magic-code-expiry",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/status",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/storage/files/delete",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/test_users",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/tokens",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/track-import",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/transfer_to_org/:org_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/webhooks",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/webhooks/:webhook_id",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/webhooks/:webhook_id/disable",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/webhooks/:webhook_id/enable",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/:app_id/webhooks/:webhook_id/events/*",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/ephemeral",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/ephemeral/:app_id/claim",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/ephemeral/:app_id/status",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/apps/get_a_db",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/auth/send_magic_code",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/auth/verify_magic_code",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/cli/auth/check",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/cli/auth/claim",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/cli/auth/register",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/cli/auth/void",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/invites/accept",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/invites/decline",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/oauth/token",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/orgs",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/orgs/:org_id/checkout_session",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/orgs/:org_id/invite/send",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/orgs/:org_id/members/update",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/orgs/:org_id/portal_session",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/orgs/:org_id/rename",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/orgs/:org_id/self_hosted_subscription",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/personal_access_tokens",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/profiles",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/restores/zip",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/signout",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/sunset",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/sunset/cancel_subscriptions",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /dash/user/oauth_apps/revoke_access",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:POST /examples/mma",
+   "group": "demo",
+   "source": "mma_example.clj"
+  },
+  {
+   "id": "http:POST /hooks/honeycomb/exceptions",
+   "group": "core",
+   "source": "core.clj"
+  },
+  {
+   "id": "http:POST /hooks/stripe",
+   "group": "core",
+   "source": "core.clj"
+  },
+  {
+   "id": "http:POST /platform/oauth/claim",
+   "group": "platform",
+   "source": "oauth_apps/routes.clj"
+  },
+  {
+   "id": "http:POST /platform/oauth/deny",
+   "group": "platform",
+   "source": "oauth_apps/routes.clj"
+  },
+  {
+   "id": "http:POST /platform/oauth/grant",
+   "group": "platform",
+   "source": "oauth_apps/routes.clj"
+  },
+  {
+   "id": "http:POST /platform/oauth/revoke",
+   "group": "platform",
+   "source": "oauth_apps/routes.clj"
+  },
+  {
+   "id": "http:POST /platform/oauth/token",
+   "group": "platform",
+   "source": "oauth_apps/routes.clj"
+  },
+  {
+   "id": "http:POST /runtime/:app_id/oauth/token",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:POST /runtime/auth/send_magic_code",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:POST /runtime/auth/sign_in_guest",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:POST /runtime/auth/verify_magic_code",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:POST /runtime/auth/verify_refresh_token",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:POST /runtime/framework/query",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:POST /runtime/oauth/callback",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:POST /runtime/oauth/id_token",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:POST /runtime/oauth/token",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:POST /runtime/signout",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:POST /runtime/sse",
+   "group": "runtime",
+   "source": "runtime/routes.clj"
+  },
+  {
+   "id": "http:POST /storage/signed-upload-url",
+   "group": "storage",
+   "source": "storage/routes.clj"
+  },
+  {
+   "id": "http:POST /superadmin/apps",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:POST /superadmin/apps/:app_id",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:POST /superadmin/apps/:app_id/perms",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:POST /superadmin/apps/:app_id/schema/push/apply",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:POST /superadmin/apps/:app_id/schema/push/plan",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:POST /superadmin/apps/:app_id/transfers/revoke",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:POST /superadmin/apps/:app_id/transfers/send",
+   "group": "superadmin",
+   "source": "superadmin/routes.clj"
+  },
+  {
+   "id": "http:PUT /admin/storage/upload",
+   "group": "admin",
+   "source": "admin/routes.clj"
+  },
+  {
+   "id": "http:PUT /dash/apps/:app_id/storage/upload",
+   "group": "dash",
+   "source": "dash/routes.clj"
+  },
+  {
+   "id": "http:PUT /storage/:upload-id/consume-upload-url",
+   "group": "storage",
+   "source": "storage/routes.clj"
+  },
+  {
+   "id": "http:PUT /storage/upload",
+   "group": "storage",
+   "source": "storage/routes.clj"
+  },
+  {
+   "id": "iq:$after",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "iq:$afterInclusive",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "iq:$aggregate",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "iq:$before",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "iq:$beforeInclusive",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "iq:$entityId",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$entityIdStartsWith",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$fields",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "iq:$first",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "iq:$gt",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$gte",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$ilike",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$in",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$isNull",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$last",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "iq:$like",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$limit",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "iq:$lt",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$lte",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$ne",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$not",
+   "group": "instaql",
+   "source": "db/instaql.clj where"
+  },
+  {
+   "id": "iq:$offset",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "iq:$order",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "iq:$where",
+   "group": "instaql",
+   "source": "db/instaql.clj options"
+  },
+  {
+   "id": "tx:add-attr",
+   "group": "tx",
+   "source": "db/transaction.clj"
+  },
+  {
+   "id": "tx:add-triple",
+   "group": "tx",
+   "source": "db/transaction.clj"
+  },
+  {
+   "id": "tx:deep-merge-triple",
+   "group": "tx",
+   "source": "db/transaction.clj"
+  },
+  {
+   "id": "tx:delete-attr",
+   "group": "tx",
+   "source": "db/transaction.clj"
+  },
+  {
+   "id": "tx:delete-entity",
+   "group": "tx",
+   "source": "db/transaction.clj"
+  },
+  {
+   "id": "tx:mode",
+   "group": "tx",
+   "source": "db/transaction.clj ::opts"
+  },
+  {
+   "id": "tx:restore-attr",
+   "group": "tx",
+   "source": "db/transaction.clj"
+  },
+  {
+   "id": "tx:retract-triple",
+   "group": "tx",
+   "source": "db/transaction.clj"
+  },
+  {
+   "id": "tx:rule-params",
+   "group": "tx",
+   "source": "db/transaction.clj"
+  },
+  {
+   "id": "tx:update-attr",
+   "group": "tx",
+   "source": "db/transaction.clj"
+  },
+  {
+   "id": "ws:add-query",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:append-stream",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:client-broadcast",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:error",
+   "group": "ws-internal",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:init",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:join-room",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:leave-room",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:refresh",
+   "group": "ws-internal",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:refresh-presence",
+   "group": "ws-internal",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:refresh-sync-table",
+   "group": "ws-internal",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:remove-query",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:remove-sync",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:resync-table",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:server-broadcast",
+   "group": "ws-internal",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:set-presence",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:sse-init",
+   "group": "ws-internal",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:start-stream",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:start-sync",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:subscribe-stream",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:transact",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  },
+  {
+   "id": "ws:unsubscribe-stream",
+   "group": "ws",
+   "source": "reactive/session.clj"
+  }
+ ]
+}

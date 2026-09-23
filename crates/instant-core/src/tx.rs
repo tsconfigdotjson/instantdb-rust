@@ -59,6 +59,42 @@ pub enum TxStep {
 impl TxStep {
     /// The step in legacy's `vectorize-tx-step` form (transaction.clj:106-124),
     /// which is what validation errors echo as their `input`.
+    /// Legacy's `mapify-tx-step` (transaction.clj:70-99): the map form
+    /// `{op eid etype aid value rev-etype opts}` its validation errors echo
+    /// as `input`; etype / rev-etype come from the attr catalog and are null
+    /// for an unknown attr, `opts` is null when the step carries none.
+    pub fn mapify(&self, attrs: &AttrMap) -> Value {
+        let v = self.vectorize();
+        let arr = v.as_array().cloned().unwrap_or_default();
+        let at = |i: usize| arr.get(i).cloned().unwrap_or(Value::Null);
+        let op = at(0);
+        match self {
+            TxStep::AddAttr(_) | TxStep::UpdateAttr(_) => json!({"op": op, "value": at(1)}),
+            TxStep::DeleteAttr(_) | TxStep::RestoreAttr(_) => json!({"op": op, "aid": at(1)}),
+            TxStep::AddTriple { attr_id, .. }
+            | TxStep::DeepMergeTriple { attr_id, .. }
+            | TxStep::RetractTriple { attr_id, .. } => {
+                let attr = attrs.get(attr_id);
+                json!({
+                    "op": op,
+                    "eid": at(1),
+                    "etype": attr.map(|a| json!(a.etype)).unwrap_or(Value::Null),
+                    "aid": at(2),
+                    "value": at(3),
+                    "rev-etype": attr
+                        .and_then(|a| a.reverse_etype.clone())
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                    "opts": at(4),
+                })
+            }
+            TxStep::DeleteEntity { .. } => json!({"op": op, "eid": at(1), "etype": at(2)}),
+            TxStep::RuleParams { .. } => {
+                json!({"op": op, "eid": at(1), "etype": at(2), "value": at(3)})
+            }
+        }
+    }
+
     pub fn vectorize(&self) -> Value {
         let eid = |e: &EidRef| match e {
             EidRef::Id(id) => json!(id),
@@ -118,11 +154,23 @@ impl TxStep {
     }
 }
 
-fn parse_mode(opts: Option<&Value>) -> WriteMode {
-    match opts.and_then(|o| o.get("mode")).and_then(|m| m.as_str()) {
-        Some("create") => WriteMode::Create,
-        Some("update") => WriteMode::Update,
-        _ => WriteMode::Upsert,
+/// `::opts` (transaction.clj:25-30): absent or nil, or a map whose `mode`
+/// is one of create / update / upsert.
+fn parse_mode(steps: &Value, idx: usize, opts: Option<&Value>) -> Result<WriteMode> {
+    match opts {
+        None | Some(Value::Null) => Ok(WriteMode::Upsert),
+        Some(Value::Object(o)) => match o.get("mode") {
+            None | Some(Value::Null) => Ok(WriteMode::Upsert),
+            Some(Value::String(m)) if m == "create" => Ok(WriteMode::Create),
+            Some(Value::String(m)) if m == "update" => Ok(WriteMode::Update),
+            Some(Value::String(m)) if m == "upsert" => Ok(WriteMode::Upsert),
+            Some(_) => Err(spec_err(
+                steps,
+                "#{:create :update :upsert}",
+                json!([idx, 4, "mode"]),
+            )),
+        },
+        Some(_) => Err(spec_err(steps, "map?", json!([idx, 4]))),
     }
 }
 
@@ -163,6 +211,15 @@ fn check_ref_value(attrs: &AttrMap, attr_id: &Uuid, value: &Value) -> Result<()>
 /// Step-shape (spec-level) failure. Legacy's message for these is the bare
 /// "Validation failed for tx-steps" — spec explain data lives in the hint
 /// (util/exception.clj throw-validation-err! with coercion errors).
+/// Legacy `hsql-attr-id-or-raise` (db/model/triple.clj:235-246): a triple
+/// naming an attr that doesn't exist raises inside the insert, which
+/// surfaces as a `sql-raise`.
+fn unknown_attr_raise(attr_id: Uuid) -> InstantError {
+    InstantError::sql_raise(format!(
+        "We could not find an attribute with id = '{attr_id}'"
+    ))
+}
+
 fn coerce_err(detail: impl Into<String>) -> InstantError {
     InstantError::new(
         "validation-failed",
@@ -172,25 +229,145 @@ fn coerce_err(detail: impl Into<String>) -> InstantError {
     )
 }
 
-/// Parse the wire `tx-steps` array.
+/// A `::tx-steps` spec failure (transaction.clj:25-69, :204-211): the bare
+/// message plus legacy's `explain->validation-errors` shape, `{expected,
+/// in}` per problem, with the whole input echoed.
+fn spec_err(steps: &Value, expected: &str, in_path: Value) -> InstantError {
+    InstantError::new(
+        "validation-failed",
+        400,
+        "Validation failed for tx-steps",
+        Some(json!({
+            "data-type": "tx-steps",
+            "input": steps,
+            "errors": [{"expected": expected, "in": in_path}],
+        })),
+    )
+}
+
+/// Legacy `check-for-invalid-entity-ids!` (transaction.clj:183-196): the
+/// friendly message for a non-uuid, non-lookup entity id wins over the
+/// generic spec failure.
+fn invalid_entity_id_err(steps: &Value, idx: usize, e: &Value) -> InstantError {
+    let shown = match e {
+        Value::String(s) => s.clone(),
+        other => clj_print(other),
+    };
+    let message = format!(
+        "Invalid entity ID '{shown}'. Entity IDs must be UUIDs. Use id() or lookup() to generate a valid UUID."
+    );
+    InstantError::new(
+        "validation-failed",
+        400,
+        format!("Validation failed for tx-steps: {message}"),
+        Some(json!({
+            "data-type": "tx-steps",
+            "input": steps,
+            "errors": [{"message": message, "in": [idx, 1]}],
+        })),
+    )
+}
+
+/// Print a JSON value the way Clojure's `str` prints the coerced step data
+/// (uuid strings become `#uuid "..."`, strings are quoted, nil for null).
+pub fn clj_print(v: &Value) -> String {
+    match v {
+        Value::Null => "nil".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => {
+            if Uuid::parse_str(s).is_ok() {
+                format!("#uuid \"{s}\"")
+            } else {
+                serde_json::to_string(s).unwrap_or_default()
+            }
+        }
+        Value::Array(a) => format!(
+            "[{}]",
+            a.iter().map(clj_print).collect::<Vec<_>>().join(" ")
+        ),
+        Value::Object(m) => format!(
+            "{{{}}}",
+            m.iter()
+                .map(|(k, v)| format!(
+                    "{} {}",
+                    serde_json::to_string(k).unwrap_or_default(),
+                    clj_print(v)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// The entity-id position of a triple / delete-entity / rule-params step:
+/// a uuid or a `[attr-id value]` lookup (triple.clj:37-46), with legacy's
+/// friendly message for anything else.
+fn parse_step_eid(steps: &Value, idx: usize, v: &Value, friendly: bool) -> Result<EidRef> {
+    let ok_shape = match v {
+        Value::String(s) => Uuid::parse_str(s).is_ok(),
+        Value::Array(arr) => arr.len() == 2,
+        _ => false,
+    };
+    if !ok_shape {
+        return Err(if friendly {
+            invalid_entity_id_err(steps, idx, v)
+        } else {
+            spec_err(steps, "uuid?", json!([idx, 1]))
+        });
+    }
+    parse_eid(v).map_err(|_| spec_err(steps, "uuid?", json!([idx, 1, 0])))
+}
+
+/// Parse the wire `tx-steps` array, enforcing legacy's `::tx-steps` specs
+/// (transaction.clj:25-69): every step is a fixed-arity vector, `opts` is
+/// nil or a map with a known `mode`, `delete-entity` / `rule-params` etypes
+/// are strings, `rule-params` params are a map, and triples carry a value.
 pub fn parse_tx_steps(steps: &Value) -> Result<Vec<TxStep>> {
-    let arr = steps
-        .as_array()
-        .ok_or_else(|| coerce_err("tx-steps must be an array"))?;
+    // legacy coerce! assert-coll! (transaction.clj:126-134): the raw value
+    // is the hint's input
+    let arr = steps.as_array().ok_or_else(|| {
+        InstantError::validation_failed_input(
+            "tx-steps",
+            steps.clone(),
+            json!([{"expected": "coll?", "in": []}]),
+        )
+    })?;
     let mut out = vec![];
-    for step in arr {
-        let step_arr = step
-            .as_array()
-            .ok_or_else(|| coerce_err("each tx-step must be an array"))?;
+    for (idx, step) in arr.iter().enumerate() {
+        let step_arr = step.as_array().ok_or_else(|| {
+            // legacy coerce! assert-coll! (transaction.clj:126-134)
+            InstantError::new(
+                "validation-failed",
+                400,
+                "Validation failed for tx-steps",
+                Some(json!({
+                    "data-type": "tx-steps",
+                    "input": steps,
+                    "errors": [{"expected": "coll?", "in": [idx]}],
+                })),
+            )
+        })?;
         let op = step_arr
             .first()
             .and_then(|v| v.as_str())
             .ok_or_else(|| coerce_err("tx-step missing op"))?;
+        let arity = |min: usize, max: usize| -> Result<()> {
+            if step_arr.len() < min {
+                return Err(spec_err(steps, "value?", json!([idx, step_arr.len()])));
+            }
+            if step_arr.len() > max {
+                return Err(spec_err(steps, "nil?", json!([idx, max])));
+            }
+            Ok(())
+        };
         let parsed = match op {
             "add-attr" => {
+                arity(2, 2)?;
                 TxStep::AddAttr(Attr::from_wire(step_arr.get(1).unwrap_or(&Value::Null))?)
             }
             "update-attr" => {
+                arity(2, 2)?;
                 let patch = step_arr.get(1).cloned().unwrap_or(Value::Null);
                 if !patch.is_object() {
                     return Err(InstantError::validation_failed(
@@ -201,40 +378,75 @@ pub fn parse_tx_steps(steps: &Value) -> Result<Vec<TxStep>> {
                 }
                 TxStep::UpdateAttr(patch)
             }
-            "delete-attr" => TxStep::DeleteAttr(parse_attr_uuid(step_arr.get(1))?),
-            "restore-attr" => TxStep::RestoreAttr(parse_attr_uuid(step_arr.get(1))?),
-            "add-triple" => TxStep::AddTriple {
-                eid: parse_eid(step_arr.get(1).unwrap_or(&Value::Null))?,
-                attr_id: parse_attr_uuid(step_arr.get(2))?,
-                value: step_arr.get(3).cloned().unwrap_or(Value::Null),
-                mode: parse_mode(step_arr.get(4)),
-            },
-            "deep-merge-triple" => TxStep::DeepMergeTriple {
-                eid: parse_eid(step_arr.get(1).unwrap_or(&Value::Null))?,
-                attr_id: parse_attr_uuid(step_arr.get(2))?,
-                value: step_arr.get(3).cloned().unwrap_or(Value::Null),
-                mode: parse_mode(step_arr.get(4)),
-            },
-            "retract-triple" => TxStep::RetractTriple {
-                eid: parse_eid(step_arr.get(1).unwrap_or(&Value::Null))?,
-                attr_id: parse_attr_uuid(step_arr.get(2))?,
-                value: step_arr.get(3).cloned().unwrap_or(Value::Null),
-            },
-            "delete-entity" => TxStep::DeleteEntity {
-                eid: parse_eid(step_arr.get(1).unwrap_or(&Value::Null))?,
-                etype: step_arr
-                    .get(2)
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-            },
-            "rule-params" => TxStep::RuleParams {
-                eid: parse_eid(step_arr.get(1).unwrap_or(&Value::Null))?,
-                etype: step_arr
-                    .get(2)
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                params: step_arr.get(3).cloned().unwrap_or(Value::Null),
-            },
+            "delete-attr" => {
+                arity(2, 2)?;
+                TxStep::DeleteAttr(parse_attr_uuid(step_arr.get(1))?)
+            }
+            "restore-attr" => {
+                arity(2, 2)?;
+                TxStep::RestoreAttr(parse_attr_uuid(step_arr.get(1))?)
+            }
+            "add-triple" | "deep-merge-triple" => {
+                arity(4, 5)?;
+                let eid = parse_step_eid(steps, idx, &step_arr[1], true)?;
+                let attr_id = parse_attr_uuid(step_arr.get(2))?;
+                let value = step_arr[3].clone();
+                let mode = parse_mode(steps, idx, step_arr.get(4))?;
+                if op == "add-triple" {
+                    TxStep::AddTriple {
+                        eid,
+                        attr_id,
+                        value,
+                        mode,
+                    }
+                } else {
+                    TxStep::DeepMergeTriple {
+                        eid,
+                        attr_id,
+                        value,
+                        mode,
+                    }
+                }
+            }
+            "retract-triple" => {
+                arity(4, 4)?;
+                TxStep::RetractTriple {
+                    eid: parse_step_eid(steps, idx, &step_arr[1], true)?,
+                    attr_id: parse_attr_uuid(step_arr.get(2))?,
+                    value: step_arr[3].clone(),
+                }
+            }
+            "delete-entity" => {
+                arity(2, 3)?;
+                let eid = parse_step_eid(steps, idx, &step_arr[1], true)?;
+                let etype = match step_arr.get(2) {
+                    None => None,
+                    Some(Value::String(s)) => Some(s.clone()),
+                    Some(_) => return Err(spec_err(steps, "string?", json!([idx, 2]))),
+                };
+                TxStep::DeleteEntity { eid, etype }
+            }
+            "rule-params" => {
+                arity(3, 4)?;
+                let eid = parse_step_eid(steps, idx, &step_arr[1], false)?;
+                let (etype, params) = if step_arr.len() == 3 {
+                    (None, &step_arr[2])
+                } else {
+                    let etype = match &step_arr[2] {
+                        Value::String(s) => s.clone(),
+                        _ => return Err(spec_err(steps, "string?", json!([idx, 2]))),
+                    };
+                    (Some(etype), &step_arr[3])
+                };
+                if !params.is_object() {
+                    return Err(spec_err(steps, "map?", json!([idx, step_arr.len() - 1])));
+                }
+                TxStep::RuleParams {
+                    eid,
+                    etype,
+                    params: params.clone(),
+                }
+            }
             other => return Err(coerce_err(format!("unknown tx-step op {other:?}"))),
         };
         out.push(parsed);
@@ -252,6 +464,15 @@ pub struct TxReport {
     pub deleted: Vec<(Uuid, String)>,
     /// all touched (eid, etype), for perms/required checks
     pub touched: Vec<(Uuid, String)>,
+    /// entities whose `id` attr triple this tx wrote (add-triple /
+    /// deep-merge-triple on the etype's id attr), with the etype: legacy's
+    /// webhook matcher keys create / update events on writes of the id
+    /// attr's triple (model/webhook.clj `webhook-matches?`), never on ref or
+    /// value attrs alone
+    pub id_written: Vec<(Uuid, String)>,
+    /// entities whose `id` attr triple this tx retracted (retract-triple on
+    /// the id attr): a delete of the id triple for the webhook matcher
+    pub id_retracted: Vec<(Uuid, String)>,
     /// true when the tx changed the attr catalog in any way (flags, idents,
     /// inferred types): attr caches must be reloaded
     pub attrs_changed: bool,
@@ -380,6 +601,10 @@ pub async fn transact(
         }
     }
 
+    // legacy validate-mode (transaction.clj:283-358): one pre-pass over the
+    // pre-tx state before any step runs
+    validate_modes(&mut *conn, app_id, attrs, &steps, opts.admin).await?;
+
     // Group steps by op, groups ordered by first appearance.
     let mut groups: Vec<(&'static str, Vec<TxStep>)> = vec![];
     for step in steps {
@@ -404,6 +629,8 @@ pub async fn transact(
         created: vec![],
         deleted: vec![],
         touched: vec![],
+        id_written: vec![],
+        id_retracted: vec![],
         attrs_changed: false,
         schema_changed: false,
         changed_attrs: vec![],
@@ -556,6 +783,9 @@ pub async fn transact(
                 .await?;
                 for t in &resolved {
                     report.touched.push((t.entity_id, t.attr.etype.clone()));
+                    if t.attr.label == "id" {
+                        report.id_written.push((t.entity_id, t.attr.etype.clone()));
+                    }
                 }
                 let newly = insert_triples(&mut *conn, app_id, attrs, &resolved).await?;
                 for eid in newly {
@@ -587,9 +817,10 @@ pub async fn transact(
                     else {
                         unreachable!()
                     };
-                    let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
-                        InstantError::record_not_found("attr", format!("attr {attr_id} not found"))
-                    })?;
+                    let attr = attrs
+                        .get(&attr_id)
+                        .cloned()
+                        .ok_or_else(|| unknown_attr_raise(attr_id))?;
                     check_ref_value(attrs, &attr_id, &value)?;
                     let eid = resolve_eid(
                         &mut *conn,
@@ -602,17 +833,10 @@ pub async fn transact(
                         &attr.etype,
                     )
                     .await?;
-                    validate_mode(
-                        &mut *conn,
-                        app_id,
-                        attrs,
-                        eid,
-                        &attr.etype,
-                        mode,
-                        &created_etypes,
-                    )
-                    .await?;
                     report.touched.push((eid, attr.etype.clone()));
+                    if attr.label == "id" {
+                        report.id_written.push((eid, attr.etype.clone()));
+                    }
                     let key = (eid, attr.id);
                     match order.get(&key) {
                         Some(&i) => merges[i].2.push(value),
@@ -656,9 +880,10 @@ pub async fn transact(
                     else {
                         unreachable!()
                     };
-                    let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
-                        InstantError::record_not_found("attr", format!("attr {attr_id} not found"))
-                    })?;
+                    let attr = attrs
+                        .get(&attr_id)
+                        .cloned()
+                        .ok_or_else(|| unknown_attr_raise(attr_id))?;
                     check_ref_value(attrs, &attr_id, &value)?;
                     let eid = match eid {
                         EidRef::Id(id) => Some(id),
@@ -683,6 +908,9 @@ pub async fn transact(
                         _ => value,
                     };
                     report.touched.push((eid, attr.etype.clone()));
+                    if attr.label == "id" {
+                        report.id_retracted.push((eid, attr.etype.clone()));
+                    }
                     dels.push((eid, attr_id, value));
                 }
                 delete_triples(&mut *conn, app_id, &dels).await?;
@@ -893,54 +1121,142 @@ fn validate_value_lookup_etype(attrs: &AttrMap, attr: &Attr, lookup_attr: Uuid) 
     }
 }
 
-/// create-mode: entity must not already exist; update-mode: must exist.
-async fn validate_mode(
+/// Legacy `validate-mode` (transaction.clj:283-358): every `mode: create` /
+/// `mode: update` add-triple and deep-merge-triple step is checked in one
+/// pre-pass against the pre-tx state. A uuid entity exists when any triple
+/// of the step's etype exists for it; a lookup exists when an `av` triple
+/// matches it. Offenders are reported together, in step order, under the
+/// singular `tx-step` input type with the offending steps as `input`.
+async fn validate_modes(
     conn: &mut PgConnection,
     app_id: Uuid,
     attrs: &AttrMap,
-    eid: Uuid,
-    etype: &str,
-    mode: WriteMode,
-    created_etypes: &HashMap<Uuid, String>,
+    steps: &[TxStep],
+    admin: bool,
 ) -> Result<()> {
-    if mode == WriteMode::Upsert {
+    let moded: Vec<(&TxStep, &EidRef, &str, WriteMode)> = steps
+        .iter()
+        .filter_map(|s| match s {
+            TxStep::AddTriple {
+                eid, attr_id, mode, ..
+            }
+            | TxStep::DeepMergeTriple {
+                eid, attr_id, mode, ..
+            } if *mode != WriteMode::Upsert => Some((
+                s,
+                eid,
+                attrs.get(attr_id).map(|a| a.etype.as_str()).unwrap_or(""),
+                *mode,
+            )),
+            _ => None,
+        })
+        .collect();
+    if moded.is_empty() {
         return Ok(());
     }
-    let id_attr = match attrs.id_attr_of(etype) {
-        Some(a) => a,
-        None => return Ok(()),
-    };
-    let existed_before_tx = sqlx::query(
-        "SELECT 1 AS x FROM triples WHERE app_id = $1 AND entity_id = $2 AND attr_id = $3",
-    )
-    .bind(app_id)
-    .bind(eid)
-    .bind(id_attr.id)
-    .fetch_optional(&mut *conn)
-    .await?
-    .is_some()
-        && !created_etypes.contains_key(&eid);
-    // legacy reports these under the singular `tx-step` input type
-    // (LEGACY transaction.clj:346-358)
-    match mode {
-        WriteMode::Create if existed_before_tx => {
-            let m = format!("Creating entities that exist: {eid}");
-            Err(InstantError::validation_failed(
-                "tx-step",
-                m.clone(),
-                json!([{"message": m}]),
-            ))
+    // uuid eids: any triple of the etype
+    let mut by_etype: HashMap<&str, Vec<Uuid>> = HashMap::new();
+    let mut lookups: Vec<(Uuid, &CanonicalValue)> = vec![];
+    for (_, eid, etype, _) in &moded {
+        match eid {
+            EidRef::Id(id) => by_etype.entry(etype).or_default().push(*id),
+            EidRef::Lookup(a, v) => lookups.push((*a, v)),
         }
-        WriteMode::Update if !existed_before_tx && !created_etypes.contains_key(&eid) => {
-            let m = format!("Updating entities that don't exist: {eid}");
-            Err(InstantError::validation_failed(
-                "tx-step",
-                m.clone(),
-                json!([{"message": m}]),
-            ))
-        }
-        _ => Ok(()),
     }
+    let mut existing: HashSet<(Uuid, String)> = HashSet::new();
+    for (etype, ids) in &by_etype {
+        let attr_ids: Vec<Uuid> = attrs.attrs_of_etype(etype).map(|a| a.id).collect();
+        if attr_ids.is_empty() {
+            continue;
+        }
+        let rows = sqlx::query(
+            "SELECT DISTINCT entity_id FROM triples
+             WHERE app_id = $1 AND entity_id = ANY($2) AND attr_id = ANY($3)",
+        )
+        .bind(app_id)
+        .bind(ids)
+        .bind(attr_ids)
+        .fetch_all(&mut *conn)
+        .await?;
+        for r in rows {
+            existing.insert((r.get::<Uuid, _>("entity_id"), etype.to_string()));
+        }
+    }
+    // lookups: an av triple with that value
+    let mut resolved_lookups: HashMap<(Uuid, CanonicalValue), Uuid> = HashMap::new();
+    for (a, v) in &lookups {
+        let key = (*a, (*v).clone());
+        if resolved_lookups.contains_key(&key) {
+            continue;
+        }
+        let row = sqlx::query(
+            "SELECT entity_id FROM triples
+             WHERE app_id = $1 AND attr_id = $2 AND av AND value = $3::jsonb LIMIT 1",
+        )
+        .bind(app_id)
+        .bind(a)
+        .bind(&v.0)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some(row) = row {
+            resolved_lookups.insert(key, row.get("entity_id"));
+        }
+    }
+    let exists = |eid: &EidRef, etype: &str| -> Option<Uuid> {
+        match eid {
+            EidRef::Id(id) => existing.contains(&(*id, etype.to_string())).then_some(*id),
+            EidRef::Lookup(a, v) => resolved_lookups.get(&(*a, v.clone())).copied(),
+        }
+    };
+    // how legacy prints the offending eid: a lookup the permissioned path
+    // could resolve was rewritten to its uuid (permissioned_transaction.clj
+    // :173-190); otherwise the coerced `[#uuid "attr" value]` vector
+    let shown = |eid: &EidRef, resolved: Option<Uuid>| -> String {
+        match (eid, resolved) {
+            (EidRef::Id(id), _) => id.to_string(),
+            (EidRef::Lookup(..), Some(id)) if !admin => id.to_string(),
+            (EidRef::Lookup(a, v), _) => clj_print(&json!([a.to_string(), v.value()])),
+        }
+    };
+    let err = |offenders: Vec<(&TxStep, String)>, prefix: &str| -> InstantError {
+        let message = format!(
+            "{prefix}{}",
+            offenders
+                .iter()
+                .map(|(_, e)| e.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        InstantError::new(
+            "validation-failed",
+            400,
+            format!("Validation failed for tx-step: {message}"),
+            Some(json!({
+                "data-type": "tx-step",
+                "input": offenders.iter().map(|(s, _)| s.mapify(attrs)).collect::<Vec<_>>(),
+                "errors": [{"message": message}],
+            })),
+        )
+    };
+    let existing_creates: Vec<(&TxStep, String)> = moded
+        .iter()
+        .filter(|(_, _, _, mode)| *mode == WriteMode::Create)
+        .filter_map(|(s, eid, etype, _)| {
+            exists(eid, etype).map(|resolved| (*s, shown(eid, Some(resolved))))
+        })
+        .collect();
+    if !existing_creates.is_empty() {
+        return Err(err(existing_creates, "Creating entities that exist: "));
+    }
+    let missing_updates: Vec<(&TxStep, String)> = moded
+        .iter()
+        .filter(|(_, eid, etype, mode)| *mode == WriteMode::Update && exists(eid, etype).is_none())
+        .map(|(s, eid, _, _)| (*s, shown(eid, None)))
+        .collect();
+    if !missing_updates.is_empty() {
+        return Err(err(missing_updates, "Updating entities that don't exist: "));
+    }
+    Ok(())
 }
 
 async fn resolve_add_batch(
@@ -952,11 +1268,11 @@ async fn resolve_add_batch(
     items: Vec<(EidRef, Uuid, Value, WriteMode)>,
 ) -> Result<Vec<ResolvedTriple>> {
     let mut out = vec![];
-    let mut mode_checked: HashSet<(Uuid, String)> = HashSet::new();
     for (eid, attr_id, value, mode) in items {
-        let attr = attrs.get(&attr_id).cloned().ok_or_else(|| {
-            InstantError::record_not_found("attr", format!("attr {attr_id} not found"))
-        })?;
+        let attr = attrs
+            .get(&attr_id)
+            .cloned()
+            .ok_or_else(|| unknown_attr_raise(attr_id))?;
         let eid = resolve_eid(
             &mut *conn,
             app_id,
@@ -968,18 +1284,6 @@ async fn resolve_add_batch(
             &attr.etype,
         )
         .await?;
-        if mode != WriteMode::Upsert && mode_checked.insert((eid, attr.etype.clone())) {
-            validate_mode(
-                &mut *conn,
-                app_id,
-                attrs,
-                eid,
-                &attr.etype,
-                mode,
-                created_etypes,
-            )
-            .await?;
-        }
         // Ref values (and id-triple values) may be lookup refs to resolve.
         let value = if attr.value_type == crate::attr::ValueType::Ref || attr.label == "id" {
             match value_lookup(&value) {

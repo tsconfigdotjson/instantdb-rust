@@ -30,6 +30,10 @@ pub const TRIPLE_TOO_LARGE_ERROR: &str = "triple-too-large-error";
 pub const TRIPLE_NOT_UNIQUE_ERROR: &str = "triple-not-unique-error";
 pub const MISSING_REQUIRED_ERROR: &str = "missing-required-error";
 pub const UNEXPECTED_ERROR: &str = "unexpected-error";
+/// legacy `invalid-attr-state-error` (indexing_jobs.clj:469-486): the attr's
+/// flags changed underneath the job, so the guarded `update-attr-done`
+/// matched no row.
+pub const INVALID_ATTR_STATE_ERROR: &str = "invalid-attr-state-error";
 
 /// (serial key, first stage, final stage) per job type (indexing_jobs.clj
 /// `jobs` + the `*--stages` vectors).
@@ -51,11 +55,13 @@ pub struct NewJob {
     pub checked_data_type: Option<String>,
 }
 
-/// Insert a `waiting` job row. Returns the job id.
+/// Insert a `waiting` job row. Returns the job id. `group_id` is None for a
+/// directly created job (`POST /dash/apps/:id/indexing-jobs`), like legacy's
+/// `create-job!` without a `:group-id`.
 pub async fn create_job(
     conn: &mut PgConnection,
     app_id: Uuid,
-    group_id: Uuid,
+    group_id: Option<Uuid>,
     job: &NewJob,
 ) -> Result<Uuid> {
     let (serial_key, stage, _) = job_spec(&job.job_type).ok_or_else(|| {
@@ -70,6 +76,13 @@ pub async fn create_job(
             "Missing parameter: [\"checked-data-type\"]",
         ));
     }
+    // legacy create-job! (indexing_jobs.clj:225-227) only stores the checked
+    // type for check-data-type jobs
+    let checked_data_type = if job.job_type == "check-data-type" {
+        job.checked_data_type.as_deref()
+    } else {
+        None
+    };
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO indexing_jobs (id, group_id, app_id, attr_id, job_serial_key, job_type,
@@ -83,7 +96,7 @@ pub async fn create_job(
     .bind(serial_key)
     .bind(&job.job_type)
     .bind(stage)
-    .bind(job.checked_data_type.as_deref())
+    .bind(checked_data_type)
     .execute(conn)
     .await
     .map_err(|e| match &e {
@@ -250,6 +263,30 @@ pub async fn get_by_id_for_client(
         .fetch_optional(&state.pool)
         .await?;
     Ok(row.map(|r| row_to_client(&r, true)))
+}
+
+/// The freshly inserted row through legacy's `job->client-format`
+/// (indexing_jobs.clj:71-89) as `POST /dash/apps/:id/indexing-jobs` answers:
+/// only the client columns, and neither `attr_name` nor
+/// `invalid_triples_sample` (which the GET routes compute).
+pub async fn get_client_format(conn: &mut PgConnection, job_id: Uuid) -> Result<Value> {
+    let row = sqlx::query(
+        "SELECT id, app_id, group_id, attr_id, job_type, job_status, job_stage, work_estimate,
+                work_completed, error, checked_data_type::text AS checked_data_type, created_at,
+                updated_at, done_at, invalid_unique_value, error_data
+           FROM indexing_jobs WHERE id = $1",
+    )
+    .bind(job_id)
+    .fetch_one(conn)
+    .await?;
+    Ok(row_to_client(&row, false))
+}
+
+/// Start one directly created (group-less) job on this node.
+pub fn spawn_job(state: Arc<AppState>, job_id: Uuid) {
+    tokio::spawn(async move {
+        process_job(&state, job_id, CONFLICT_RETRIES).await;
+    });
 }
 
 /// The freshly inserted row exactly as legacy's `create-job!` (INSERT ...
@@ -648,7 +685,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
         }
         ("check-data-type", "update-triples") => set_checked_data_type_batch(state, job, cdt).await,
         ("check-data-type", "update-attr-done") => {
-            update_attr(
+            let matched = update_attr(
                 state,
                 job,
                 "checking_data_type = false",
@@ -656,7 +693,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
                 cdt,
             )
             .await?;
-            Ok(Step::Next)
+            Ok(guarded(matched))
         }
         // remove-data-type
         ("remove-data-type", "update-attr-start") => {
@@ -675,7 +712,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
             set_checked_data_type_batch(state, job, None).await
         }
         ("remove-data-type", "update-attr-done") => {
-            update_attr(
+            let matched = update_attr(
                 state,
                 job,
                 "checking_data_type = false",
@@ -683,11 +720,11 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
                 None,
             )
             .await?;
-            Ok(Step::Next)
+            Ok(guarded(matched))
         }
         // index
         ("index", "update-attr-start") => {
-            update_attr(state, job, "is_indexed = true, indexing = true", "", None).await?;
+            let _ = update_attr(state, job, "is_indexed = true, indexing = true", "", None).await?;
             Ok(Step::Next)
         }
         ("index", "estimate-work") => estimate_work(state, job).await,
@@ -707,7 +744,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
             }
         },
         ("index", "update-attr-done") => {
-            update_attr(
+            let matched = update_attr(
                 state,
                 job,
                 "indexing = false",
@@ -715,17 +752,18 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
                 None,
             )
             .await?;
-            Ok(Step::Next)
+            Ok(guarded(matched))
         }
         // remove-index
         ("remove-index", "update-attr-start") => {
-            update_attr(state, job, "is_indexed = false, indexing = true", "", None).await?;
+            let _ =
+                update_attr(state, job, "is_indexed = false, indexing = true", "", None).await?;
             Ok(Step::Next)
         }
         ("remove-index", "estimate-work") => estimate_work(state, job).await,
         ("remove-index", "update-triples") => clear_flag_batch(state, job, "ave").await,
         ("remove-index", "update-attr-done") => {
-            update_attr(
+            let matched = update_attr(
                 state,
                 job,
                 "indexing = false",
@@ -733,7 +771,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
                 None,
             )
             .await?;
-            Ok(Step::Next)
+            Ok(guarded(matched))
         }
         // unique
         ("unique", "update-attr-start") => {
@@ -756,7 +794,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
             }
         },
         ("unique", "update-attr-done") => {
-            update_attr(
+            let matched = update_attr(
                 state,
                 job,
                 "setting_unique = false",
@@ -764,7 +802,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
                 None,
             )
             .await?;
-            Ok(Step::Next)
+            Ok(guarded(matched))
         }
         // remove-unique
         ("remove-unique", "update-attr-start") => {
@@ -781,7 +819,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
         ("remove-unique", "estimate-work") => estimate_work(state, job).await,
         ("remove-unique", "update-triples") => clear_flag_batch(state, job, "av").await,
         ("remove-unique", "update-attr-done") => {
-            update_attr(
+            let matched = update_attr(
                 state,
                 job,
                 "setting_unique = false",
@@ -789,7 +827,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
                 None,
             )
             .await?;
-            Ok(Step::Next)
+            Ok(guarded(matched))
         }
         // required
         ("required", "estimate-work") => estimate_required(state, job).await,
@@ -797,12 +835,12 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
             required_validate(state, job).await
         }
         ("required", "update-attr") => {
-            update_attr(state, job, "is_required = true", "", None).await?;
+            let _ = update_attr(state, job, "is_required = true", "", None).await?;
             Ok(Step::Next)
         }
         // remove-required
         ("remove-required", "update-attr") => {
-            update_attr(state, job, "is_required = false", "", None).await?;
+            let _ = update_attr(state, job, "is_required = false", "", None).await?;
             Ok(Step::Next)
         }
         (t, s) => Err(InstantError::validation_failed(
@@ -929,15 +967,16 @@ async fn add_work_completed(state: &AppState, job: &Job, n: i64) -> Result<()> {
 /// legacy update-attr!: the attrs UPDATE together with a `transactions` row,
 /// so the invalidator refreshes every session's attrs (clients see
 /// `indexing?` appear and disappear). `set` / `where_` may reference
-/// `$3::checked_data_type` when `cdt` is given. Like legacy, a non-matching
-/// `where_` is a no-op.
+/// `$3::checked_data_type` when `cdt` is given. Returns whether the guarded
+/// update matched the attr; legacy answers `[::error
+/// invalid-attr-state-error]` when it did not (indexing_jobs.clj:485-486).
 async fn update_attr(
     state: &AppState,
     job: &Job,
     set: &str,
     where_: &str,
     cdt: Option<&str>,
-) -> Result<()> {
+) -> Result<bool> {
     let mut dbtx = state.pool.begin().await?;
     let tx_id: i64 = sqlx::query("INSERT INTO transactions (app_id) VALUES ($1) RETURNING id")
         .bind(job.app_id)
@@ -947,7 +986,7 @@ async fn update_attr(
     let sql = format!("UPDATE attrs SET {set} WHERE app_id = $1 AND id = $2 {where_}");
     let q = sqlx::query(&sql).bind(job.app_id).bind(job.attr_id);
     let q = if let Some(cdt) = cdt { q.bind(cdt) } else { q };
-    q.execute(&mut *dbtx).await?;
+    let matched = q.execute(&mut *dbtx).await?.rows_affected() > 0;
     dbtx.commit().await?;
     // an attr flag flip evicts attr caches and, like legacy's attrs-row
     // topic, refreshes the sessions whose queries mention the attr; it is
@@ -964,7 +1003,17 @@ async fn update_attr(
         },
     )
     .await;
-    Ok(())
+    Ok(matched)
+}
+
+/// `update-attr-done` and the abort paths: a guard that no longer matches
+/// errors the job with `invalid-attr-state-error`.
+fn guarded(matched: bool) -> Step {
+    if matched {
+        Step::Next
+    } else {
+        Step::Error(INVALID_ATTR_STATE_ERROR)
+    }
 }
 
 /// The attr map straight from Postgres (bypassing the per-node cache) and
@@ -1282,7 +1331,7 @@ async fn insert_nulls_batch(state: &AppState, job: &Job) -> Result<Step> {
 async fn required_validate(state: &AppState, job: &Job) -> Result<Step> {
     let (attrs, attr) = load_attr(state, job).await?;
     let Some(id_attr) = attrs.id_attr_of(&attr.etype) else {
-        update_attr(state, job, "is_required = false", "", None).await?;
+        let _ = update_attr(state, job, "is_required = false", "", None).await?;
         return Ok(Step::Failed(JobError {
             error: MISSING_REQUIRED_ERROR,
             error_data: Some(json!({"attr-id": job.attr_id, "etype": attr.etype})),
@@ -1322,7 +1371,7 @@ async fn required_validate(state: &AppState, job: &Job) -> Result<Step> {
     let invalid_ids: Option<Value> = row.get("invalid_ids");
     let invalid_count: i64 = row.get("invalid_count");
     if let Some(ids) = invalid_ids.filter(|v| v.as_array().is_some_and(|a| !a.is_empty())) {
-        update_attr(state, job, "is_required = false", "", None).await?;
+        let _ = update_attr(state, job, "is_required = false", "", None).await?;
         return Ok(Step::Failed(JobError {
             error: MISSING_REQUIRED_ERROR,
             error_data: Some(json!({

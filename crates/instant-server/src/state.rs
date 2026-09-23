@@ -39,6 +39,34 @@ pub struct Config {
     /// A processing job with no progress for this long is treated as
     /// orphaned by a dead node and reclaimed (`INSTANT_INDEXING_STALE_SECS`).
     pub indexing_stale_secs: u64,
+    /// The self-hosted operator (`INSTANT_SUPERUSER_EMAIL`, legacy
+    /// config/superuser-email): `GET /dash/check-admin` passes for them.
+    pub superuser_email: Option<String>,
+    /// Dashboard signup policy (`INSTANT_DASHBOARD_SIGNUP_MODE`: open |
+    /// restricted | closed; legacy flags/dashboard-signup-mode) and the
+    /// allow-list for `restricted` (`INSTANT_DASHBOARD_ALLOWED_EMAILS`,
+    /// comma-separated).
+    pub dashboard_signup_mode: String,
+    pub dashboard_allowed_emails: Vec<String>,
+    /// Legacy `flags/paid-features-free?`: when false (the self-hosted legacy
+    /// default) app/org members added after the free-teams cutoff need a paid
+    /// plan, which does not exist here, so they get legacy's
+    /// insufficient-plan error and don't see the app (`INSTANT_PAID_FEATURES_FREE`).
+    pub paid_features_free: bool,
+    /// Where the platform OAuth consent screen lives (`INSTANT_DASHBOARD_URL`,
+    /// legacy config/dashboard-origin; default the dev dashboard).
+    pub dashboard_origin: String,
+    /// The dashboard's Google login (`GET /dash/oauth/start` ...): legacy
+    /// `config/get-google-oauth-client` reads
+    /// `INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID` / `_SECRET`, which must be
+    /// set together. Unset means the login redirects with an empty client id,
+    /// as legacy does without a configured client.
+    pub google_oauth_client_id: Option<String>,
+    pub google_oauth_client_secret: Option<String>,
+    /// Google's endpoints, overridable for tests
+    /// (`INSTANT_DASHBOARD_GOOGLE_OAUTH_AUTH_URL` / `_TOKEN_URL`).
+    pub google_oauth_auth_url: String,
+    pub google_oauth_token_url: String,
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -66,8 +94,46 @@ impl Config {
             indexing_batch_size: env_num("INSTANT_INDEXING_BATCH_SIZE", 1000usize).max(1),
             indexing_sweep_secs: env_num("INSTANT_INDEXING_SWEEP_SECS", 60u64).max(1),
             indexing_stale_secs: env_num("INSTANT_INDEXING_STALE_SECS", 600u64).max(30),
+            superuser_email: std::env::var("INSTANT_SUPERUSER_EMAIL")
+                .ok()
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty()),
+            dashboard_signup_mode: std::env::var("INSTANT_DASHBOARD_SIGNUP_MODE")
+                .unwrap_or_else(|_| "open".into())
+                .trim()
+                .to_lowercase(),
+            dashboard_allowed_emails: std::env::var("INSTANT_DASHBOARD_ALLOWED_EMAILS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            paid_features_free: matches!(
+                std::env::var("INSTANT_PAID_FEATURES_FREE").as_deref(),
+                Ok("1") | Ok("true") | Ok("on")
+            ),
+            dashboard_origin: std::env::var("INSTANT_DASHBOARD_URL")
+                .ok()
+                .map(|s| s.trim().trim_end_matches('/').to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "http://localhost:3000".into()),
+            google_oauth_client_id: env_nonblank("INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID"),
+            google_oauth_client_secret: env_nonblank(
+                "INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET",
+            ),
+            google_oauth_auth_url: env_nonblank("INSTANT_DASHBOARD_GOOGLE_OAUTH_AUTH_URL")
+                .unwrap_or_else(|| "https://accounts.google.com/o/oauth2/v2/auth".into()),
+            google_oauth_token_url: env_nonblank("INSTANT_DASHBOARD_GOOGLE_OAUTH_TOKEN_URL")
+                .unwrap_or_else(|| "https://oauth2.googleapis.com/token".into()),
         }
     }
+}
+
+fn env_nonblank(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Authenticated user attached to a session.
@@ -111,8 +177,15 @@ pub struct SessionState {
 
 #[derive(Debug, Clone)]
 pub struct SyncSub {
+    /// the synced namespace (kept for logging; pushes use `attr_ids`)
+    #[allow(dead_code)]
     pub etype: String,
     pub last_tx: i64,
+    /// the etype's cardinality-one attrs when the subscription started (or
+    /// was resynced): legacy derives the sub's topics then and keeps them
+    /// for the session's lifetime, so an attr added later is not synced
+    /// until a resync
+    pub attr_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +347,12 @@ pub struct AppState {
     pub query_cache: DashMap<QueryCacheKey, QueryCacheEntry>,
     /// live stream subscribers on this node: (app, stream) -> (session, subscribe event id)
     pub stream_subs: DashMap<(Uuid, Uuid), HashSet<(Uuid, String)>>,
+    /// subscribers still receiving their catch-up snapshot: live appends
+    /// that arrive meanwhile are parked here (keyed by (session, subscribe
+    /// event id)) and replayed after the snapshot, so the reader never sees
+    /// a frame ahead of what it has been told (Stream.ts:565-570 treats a
+    /// gap as a corrupted stream)
+    pub stream_catchup: DashMap<(Uuid, String), Vec<Value>>,
     /// per-app token buckets (issue #1)
     pub limiters: crate::rate_limit::Limiters,
     /// per-app attr catalog cache (issue #11), invalidated on attrs_changed
@@ -286,6 +365,15 @@ pub struct AppState {
     /// per-app `apps.status` cache for the read gate, refreshed by the
     /// `instant_app_status` NOTIFY (and a TTL as the safety net)
     pub app_status_cache: DashMap<Uuid, (String, std::time::Instant)>,
+    /// the Ed25519 key that signs webhook deliveries and payload JWTs
+    /// (webhooks::load_or_generate_key at boot)
+    pub webhook_key: std::sync::OnceLock<crate::webhooks::WebhookKey>,
+    /// wakes this node's webhook delivery loop after events are queued
+    pub webhook_notify: tokio::sync::Notify,
+    /// per-app active webhooks read on the transaction path
+    /// (webhooks::active_webhooks), evicted by the `instant_webhooks` NOTIFY
+    /// and a TTL
+    pub webhook_cache: DashMap<Uuid, (std::time::Instant, Arc<Vec<crate::webhooks::Webhook>>)>,
 }
 
 impl AppState {
@@ -302,11 +390,15 @@ impl AppState {
             room_snapshots: DashMap::new(),
             query_cache: DashMap::new(),
             stream_subs: DashMap::new(),
+            stream_catchup: DashMap::new(),
             limiters: crate::rate_limit::Limiters::from_env(),
             attr_cache: DashMap::new(),
             attr_gen: DashMap::new(),
             refresh_queues: DashMap::new(),
             app_status_cache: DashMap::new(),
+            webhook_key: std::sync::OnceLock::new(),
+            webhook_notify: tokio::sync::Notify::new(),
+            webhook_cache: DashMap::new(),
         })
     }
 

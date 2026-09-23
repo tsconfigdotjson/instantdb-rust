@@ -712,3 +712,361 @@ async fn field_rules_filter_columns() {
     assert!(titles.contains(&Some("visible")));
     assert!(!titles.contains(&Some("hidden")));
 }
+
+/// Legacy evaluates view and field rules on the whole entity even when the
+/// query projected `fields` (instaql.clj:1956-2007 preload-entity-maps).
+#[tokio::test]
+async fn view_rules_see_the_whole_entity_under_a_fields_projection() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {
+            "allow": {"view": "data.done == true"},
+            "fields": {"title": "data.done == true"}
+        }}),
+    )
+    .await;
+    let (t1, t2) = (Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", t1, ids.todos_id, t1],
+            ["add-triple", t1, ids.todos_title, "shown"],
+            ["add-triple", t1, ids.todos_done, true],
+            ["add-triple", t2, ids.todos_id, t2],
+            ["add-triple", t2, ids.todos_title, "hidden"],
+            ["add-triple", t2, ids.todos_done, false]
+        ]),
+    )
+    .await
+    .unwrap();
+    let attrs = attrs_of(&pool, app).await;
+    let q = json!({"todos": {"$": {"fields": ["title"]}}});
+    let ctx = QueryCtx {
+        app_id: app,
+        attrs: &attrs,
+        admin: true,
+    };
+    let mut conn = pool.acquire().await.unwrap();
+    let mut result = query(&mut conn, &ctx, &q).await.unwrap();
+    let rules = Rules::load(&mut conn, app).await.unwrap();
+    let auth = AuthCtx::default();
+    let filter = PermsFilter {
+        rules: &rules,
+        auth: &auth,
+        rule_params: json!({}),
+    };
+    let forms = instant_core::instaql::parse_query(&q).unwrap();
+    filter
+        .filter_with_forms(&mut conn, app, &attrs, &mut result, &forms)
+        .await
+        .unwrap();
+    let entities = &result.forms[0].entities;
+    assert_eq!(entities.len(), 1);
+    assert_eq!(entities[0].eid, t1);
+    // the projected result still carries only id + title, and the field rule
+    // kept `title` because it saw `done` on the full entity
+    let labels: Vec<String> = entities[0]
+        .triples
+        .iter()
+        .map(|t| attrs.get(&t.a).unwrap().label.clone())
+        .collect();
+    assert!(labels.contains(&"title".to_string()));
+    assert!(!labels.contains(&"done".to_string()));
+}
+
+/// Link rules: `actions` is bound, `linkedData.ref` resolves, and a link in
+/// the same tx that creates the entity runs the link rule with
+/// `actions.data == "create"` (permissioned_transaction.clj:528-560).
+#[tokio::test]
+async fn link_rule_bindings() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {
+            "create": "false",
+            "link": {"owner": "actions.data == 'create' && actions.linkedData == 'update' && 'boss' in linkedData.ref('name') && linkedData.name == 'boss'"}
+        }}}),
+    )
+    .await;
+    let boss = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", boss, ids.owners_id, boss],
+            ["add-triple", boss, ids.owners_name, "boss"]
+        ]),
+    )
+    .await
+    .unwrap();
+    // a todo brought into being by the link step alone: the link rule runs
+    // (with actions.data == create), not the `create: false` rule
+    let t1 = Uuid::new_v4();
+    transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["add-triple", t1, ids.todos_owner, boss]]),
+    )
+    .await
+    .unwrap();
+    // an existing todo linking later has actions.data == update: denied here
+    let t2 = Uuid::new_v4();
+    transact_json(&pool, app, json!([["add-triple", t2, ids.todos_id, t2]]))
+        .await
+        .unwrap();
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["add-triple", t2, ids.todos_owner, boss]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+    // legacy hint: [etype scope]
+    assert_eq!(err.hint.unwrap()["input"], json!(["todos", "object"]));
+}
+
+/// Update / delete rules read `data.ref` against the pre-tx graph
+/// (legacy runs them as pre-checks, permissioned_transaction.clj:697-715).
+#[tokio::test]
+async fn update_and_delete_refs_are_pre_tx() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {
+            "delete": "'ann' in data.ref('owner.name')",
+            "update": "'ann' in data.ref('owner.name')"
+        }}}),
+    )
+    .await;
+    let (ann, t1, t2) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", ann, ids.owners_id, ann],
+            ["add-triple", ann, ids.owners_name, "ann"],
+            ["add-triple", t1, ids.todos_id, t1],
+            ["add-triple", t1, ids.todos_owner, ann],
+            ["add-triple", t2, ids.todos_id, t2],
+            ["add-triple", t2, ids.todos_owner, ann]
+        ]),
+    )
+    .await
+    .unwrap();
+    // deleting the todo severs the link; the rule still sees ann
+    transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["delete-entity", t1, "todos"]]),
+    )
+    .await
+    .unwrap();
+    // unlinking in the same tx as an update: the update rule sees the old link
+    transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([
+            ["retract-triple", t2, ids.todos_owner, ann],
+            ["add-triple", t2, ids.todos_title, "renamed"]
+        ]),
+    )
+    .await
+    .unwrap();
+    // and now that the link is gone, the update is denied
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["add-triple", t2, ids.todos_title, "again"]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+}
+
+/// `attrs.allow.create` (falling back to `$default`) governs schemaless
+/// add-attr steps (permissioned_transaction.clj:519-527); `data` is the attr.
+#[tokio::test]
+async fn attrs_create_rule_gates_inline_add_attr() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let new_attr = |label: &str| {
+        json!(["add-attr", {"id": Uuid::new_v4(), "forward-identity": [Uuid::new_v4(), "todos", label],
+            "value-type": "blob", "cardinality": "one", "unique?": false, "index?": false}])
+    };
+    // default: allowed
+    transact_with_perms(&pool, app, &AuthCtx::default(), json!([new_attr("a")]))
+        .await
+        .unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"attrs": {"allow": {"create": "data['forward-identity'][2].startsWith('ok')"}}}),
+    )
+    .await;
+    transact_with_perms(&pool, app, &AuthCtx::default(), json!([new_attr("okay")]))
+        .await
+        .unwrap();
+    let err = transact_with_perms(&pool, app, &AuthCtx::default(), json!([new_attr("nope")]))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+    assert_eq!(err.hint.unwrap()["input"], json!(["attrs", "attr"]));
+    // $default.allow.create applies too
+    set_rules(
+        &pool,
+        app,
+        json!({"$default": {"allow": {"create": "false"}}}),
+    )
+    .await;
+    let err = transact_with_perms(&pool, app, &AuthCtx::default(), json!([new_attr("later")]))
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+    let _ = ids;
+}
+
+/// `auth.ref(...)` in update / delete / link / unlink checks reads the graph
+/// as it was before the steps ran (legacy pre-checks bind `auth` on the tx
+/// conn before `transact!`, permissioned_transaction.clj:697-715): a tx
+/// can't grant itself a role and use it in the same transaction.
+#[tokio::test]
+async fn auth_refs_are_pre_tx() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    // a custom $users attr the user may write through the default self rule
+    let role_attr = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([["add-attr", {"id": role_attr,
+            "forward-identity": [Uuid::new_v4(), "$users", "role"],
+            "value-type": "blob", "cardinality": "one", "unique?": false, "index?": false}]]),
+    )
+    .await
+    .unwrap();
+    let mallory = mk_user(&pool, app, "mallory@example.com").await;
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"update": "'admin' in auth.ref('$user.role')"}}}),
+    )
+    .await;
+    let t = Uuid::new_v4();
+    transact_json(&pool, app, json!([["add-triple", t, ids.todos_id, t]]))
+        .await
+        .unwrap();
+    let auth = AuthCtx {
+        user_id: Some(mallory),
+        user_map: None,
+        request: Default::default(),
+    };
+    // grant-and-use in one tx: the update check sees the pre-tx role (none)
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &auth,
+        json!([
+            ["add-triple", mallory, role_attr, "admin"],
+            ["add-triple", t, ids.todos_title, "owned"]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+    // the self-write alone is allowed by the $users default rules ...
+    transact_with_perms(
+        &pool,
+        app,
+        &auth,
+        json!([["add-triple", mallory, role_attr, "admin"]]),
+    )
+    .await
+    .unwrap();
+    // ... and a later tx sees the role
+    transact_with_perms(
+        &pool,
+        app,
+        &auth,
+        json!([["add-triple", t, ids.todos_title, "owned"]]),
+    )
+    .await
+    .unwrap();
+}
+
+/// A link whose value is a lookup ref (`[attr, value]`) runs the link rule
+/// on the resolved entity like legacy's `resolve-lookups-tx-steps`
+/// (permissioned_transaction.clj:173-190) — it can't skip the rule.
+#[tokio::test]
+async fn link_rules_run_for_lookup_values() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"link": {"owner": "linkedData.name == 'boss'"}}}}),
+    )
+    .await;
+    let (boss, peon, t1, t2) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", boss, ids.owners_id, boss],
+            ["add-triple", boss, ids.owners_name, "boss"],
+            ["add-triple", peon, ids.owners_id, peon],
+            ["add-triple", peon, ids.owners_name, "peon"],
+            ["add-triple", t1, ids.todos_id, t1],
+            ["add-triple", t2, ids.todos_id, t2]
+        ]),
+    )
+    .await
+    .unwrap();
+    transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["add-triple", t1, ids.todos_owner, [ids.owners_name, "boss"]]]),
+    )
+    .await
+    .unwrap();
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["add-triple", t2, ids.todos_owner, [ids.owners_name, "peon"]]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+}

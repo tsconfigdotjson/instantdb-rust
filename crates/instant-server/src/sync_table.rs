@@ -72,7 +72,9 @@ pub async fn handle_start_sync(
 ) -> std::result::Result<(), InstantError> {
     let (app_id, admin, user_id) = {
         let st = session.state.lock().await;
-        let app_id = st.app_id.ok_or_else(crate::ws::not_initialized)?;
+        let app_id = st
+            .app_id
+            .ok_or_else(|| crate::ws::not_initialized(session.id))?;
         (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
     let q = msg
@@ -80,17 +82,17 @@ pub async fn handle_start_sync(
         .cloned()
         .filter(|q| !q.is_null())
         .ok_or_else(|| {
-            InstantError::validation_failed(
+            InstantError::validation_failed_input(
                 "start-sync",
-                "Query can not be null.",
+                json!({"q": null}),
                 json!([{"message": "Query can not be null."}]),
             )
         })?;
     if !admin {
         // legacy gates sync tables to admin sessions (session.clj:281-284)
-        return Err(InstantError::validation_failed(
+        return Err(InstantError::validation_failed_input(
             "start-sync",
-            "start-sync is currently supported for admins only.",
+            json!({"q": q}),
             json!([{"message": "start-sync is currently supported for admins only."}]),
         ));
     }
@@ -122,6 +124,7 @@ pub async fn handle_start_sync(
     }));
 
     let tx_id = initial_load(state, session, app_id, &attrs, &etype, sub_id).await?;
+    let attr_ids = ea_attr_ids(&attrs, &etype);
     {
         let mut st = session.state.lock().await;
         st.sync_subs.insert(
@@ -129,6 +132,7 @@ pub async fn handle_start_sync(
             SyncSub {
                 etype,
                 last_tx: tx_id,
+                attr_ids,
             },
         );
     }
@@ -205,15 +209,14 @@ pub async fn handle_resync_table(
     session: &Arc<Session>,
     msg: &Value,
 ) -> std::result::Result<(), InstantError> {
-    let (app_id, _) = {
+    let (app_id, admin, user_id) = {
         let st = session.state.lock().await;
-        (st.app_id.ok_or_else(crate::ws::not_initialized)?, ())
+        let app_id = st
+            .app_id
+            .ok_or_else(|| crate::ws::not_initialized(session.id))?;
+        (app_id, st.admin, st.user.as_ref().map(|u| u.id))
     };
-    let sub_id = msg
-        .get("subscription-id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| InstantError::param_missing("missing subscription-id"))?;
+    let sub_id = subscription_id_param(msg)?;
     let from_tx = msg
         .get("tx-id")
         .and_then(|v| v.as_i64())
@@ -224,16 +227,58 @@ pub async fn handle_resync_table(
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| InstantError::param_missing("missing token"))?;
 
-    let row = sqlx::query("SELECT query, token_hash FROM sync_subs WHERE id = $1 AND app_id = $2")
-        .bind(sub_id)
-        .bind(app_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(InstantError::from)?
-        .ok_or_else(|| InstantError::record_not_found("sync-sub", "Unknown subscription."))?;
+    // legacy get-by-id-with-topics! (model/sync_sub.clj:170-195): the token
+    // hash, the admin-ness and the user of the session must all match the
+    // subscription's
+    let row = sqlx::query(
+        "SELECT query, token_hash, is_admin, user_id FROM sync_subs WHERE id = $1 AND app_id = $2",
+    )
+    .bind(sub_id)
+    .bind(app_id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(InstantError::from)?
+    .ok_or_else(|| {
+        InstantError::new(
+            "record-not-found",
+            400,
+            "Record not found: subscription",
+            Some(json!({"subscription-id": sub_id, "record-type": "subscription"})),
+        )
+    })?;
+    let sub_err = |input: Value, message: &str| {
+        InstantError::new(
+            "validation-failed",
+            400,
+            format!("Validation failed for subscription: {message}"),
+            Some(json!({
+                "data-type": "subscription",
+                "input": input,
+                "errors": [{"message": message}],
+            })),
+        )
+    };
     let stored_hash: Option<Vec<u8>> = row.get("token_hash");
     if stored_hash.as_deref() != Some(hash_token(token).as_slice()) {
-        return Err(InstantError::record_not_found("sync-sub", "Invalid token."));
+        return Err(sub_err(json!({"token": token}), "Invalid token."));
+    }
+    let sub_admin: bool = row.try_get("is_admin").unwrap_or(false);
+    if sub_admin != admin {
+        return Err(sub_err(
+            json!({"admin?": admin}),
+            if admin {
+                "Subscription was not created by an admin, but the session is an admin session."
+            } else {
+                "Subscription was created as an admin, but the session is not an admin session."
+            },
+        ));
+    }
+    let sub_user: Option<Uuid> = row.try_get("user_id").unwrap_or(None);
+    if sub_user != user_id {
+        return Err(sub_err(
+            json!({"user-id": user_id}),
+            "Subscription was created by a different user.",
+        ));
     }
     let q: Value = serde_json::from_str(&row.get::<String, _>("query"))
         .map_err(|_| InstantError::internal("corrupt sync sub"))?;
@@ -268,6 +313,7 @@ pub async fn handle_resync_table(
             SyncSub {
                 etype: etype.clone(),
                 last_tx: from_tx,
+                attr_ids: ea_attr_ids(&attrs, &etype),
             },
         );
     }
@@ -277,34 +323,39 @@ pub async fn handle_resync_table(
     Ok(())
 }
 
+/// `ex/get-param! event [:subscription-id] uuid-util/coerce`
+fn subscription_id_param(msg: &Value) -> std::result::Result<Uuid, InstantError> {
+    let raw = msg
+        .get("subscription-id")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| crate::ws::param_missing_at(&["subscription-id"]))?;
+    raw.as_str()
+        .and_then(|s| Uuid::parse_str(s.trim()).ok())
+        .ok_or_else(|| crate::ws::param_malformed_at(&["subscription-id"], raw))
+}
+
 pub async fn handle_remove_sync(
     state: &Arc<AppState>,
     session: &Arc<Session>,
     msg: &Value,
 ) -> std::result::Result<(), InstantError> {
-    let sub_id = msg
-        .get("subscription-id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| InstantError::param_missing("missing subscription-id"))?;
+    let sub_id = subscription_id_param(msg)?;
     let keep = msg
         .get("keep-subscription")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let (app_id, owned) = {
+    {
         let mut st = session.state.lock().await;
-        let app_id = st.app_id.ok_or_else(crate::ws::not_initialized)?;
-        (app_id, st.sync_subs.remove(&sub_id).is_some())
-    };
-    // legacy deletes only `{:id ... :app-id app-id}` and only for a sub this
-    // session holds; a foreign id is a silent no-op
-    if !keep && owned {
-        let _ = sqlx::query("DELETE FROM sync_subs WHERE id = $1 AND app_id = $2")
-            .bind(sub_id)
-            .bind(app_id)
-            .execute(&state.pool)
-            .await;
+        st.app_id
+            .ok_or_else(|| crate::ws::not_initialized(session.id))?;
+        st.sync_subs.remove(&sub_id);
     }
+    // legacy (session.clj:373-381) drops the in-memory query and, without
+    // `keep-subscription`, calls `sync-sub-model/delete!` with
+    // `(:sync/subscription-id sync-ent)` -- an attribute nothing ever sets, so
+    // the row survives and a later `resync-table` on the same id still
+    // resumes it. Matched on the wire: the row is kept either way.
+    let _ = (keep, state);
     // legacy sends no reply to remove-sync (session.clj handle-remove-sync!)
     Ok(())
 }
@@ -322,14 +373,11 @@ pub async fn push_updates(state: &AppState, session: &Arc<Session>, app_id: Uuid
     if subs.is_empty() {
         return;
     }
-    let Ok(attrs) = service::load_attrs(state, app_id).await else {
-        return;
-    };
     for (sub_id, sub) in subs {
         if sub.last_tx >= latest {
             continue;
         }
-        let ea_ids = ea_attr_ids(&attrs, &sub.etype);
+        let ea_ids = sub.attr_ids.clone();
         let rows = sqlx::query(
             "SELECT tx_id, entity_id, attr_id, value, created_at, action
              FROM rust_tx_changes
