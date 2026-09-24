@@ -1,31 +1,43 @@
 import { ImageResponse } from '@vercel/og';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 
 const SIZE = { width: 1200, height: 630 };
 
+function fontPath(filename: string) {
+  return join(process.cwd(), 'public', 'fonts', filename);
+}
+
 function readFont(filename: string): Buffer {
-  return readFileSync(join(process.cwd(), 'public', 'fonts', filename));
+  return readFileSync(fontPath(filename));
 }
 
 export async function loadFonts() {
-  const berkRegular = readFont('BerkeleyMono-Regular.ttf');
-  const berkBold = readFont('BerkeleyMono-Bold.ttf');
   const swRegular = readFont('Switzer-Regular.woff');
   const swSemibold = readFont('Switzer-Semibold.woff');
+  // Berkeley Mono is licensed and only fetched for hosted builds
+  // (next.config.js); without it images render in Switzer.
+  const hasBerkeley = ['BerkeleyMono-Regular.ttf', 'BerkeleyMono-Bold.ttf'].every(
+    (f) => existsSync(fontPath(f)),
+  );
+  const berkeley = hasBerkeley
+    ? [
+        {
+          name: 'Berkeley Mono',
+          data: readFont('BerkeleyMono-Regular.ttf'),
+          style: 'normal' as const,
+          weight: 500 as const,
+        },
+        {
+          name: 'Berkeley Mono',
+          data: readFont('BerkeleyMono-Bold.ttf'),
+          style: 'normal' as const,
+          weight: 700 as const,
+        },
+      ]
+    : [];
   return [
-    {
-      name: 'Berkeley Mono',
-      data: berkRegular,
-      style: 'normal' as const,
-      weight: 500 as const,
-    },
-    {
-      name: 'Berkeley Mono',
-      data: berkBold,
-      style: 'normal' as const,
-      weight: 700 as const,
-    },
+    ...berkeley,
     {
       name: 'Switzer',
       data: swRegular,

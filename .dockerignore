@@ -1,0 +1,12 @@
+# Server image build context: only Cargo sources + the migrations it bundles.
+target
+**/node_modules
+examples
+docs
+.git
+LEGACY/*
+!LEGACY/server
+LEGACY/server/*
+!LEGACY/server/resources
+LEGACY/server/resources/*
+!LEGACY/server/resources/migrations

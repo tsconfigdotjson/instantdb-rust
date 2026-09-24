@@ -1,0 +1,19 @@
+# TLS is automatic (Let's Encrypt) once DNS for both names points here.
+{
+	email {$ACME_EMAIL}
+}
+
+{$DASH_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy dashboard:3000
+}
+
+{$API_DOMAIN} {
+	# Prometheus metrics stay off the public internet.
+	respond /metrics 404
+	# SSE needs unbuffered streaming; websockets upgrade automatically.
+	reverse_proxy /runtime/sse* server:8888 {
+		flush_interval -1
+	}
+	reverse_proxy server:8888
+}
