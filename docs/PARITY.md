@@ -223,12 +223,31 @@ particular deployment hits. Decide each one and the ledger is complete.
 
 | Gap | Legacy | Here | Decision needed |
 |---|---|---|---|
-| hard deletion of apps and attrs | `hard_deletion_sweeper.clj` + `custodian.clj` purge apps / attrs whose `deletion_marked_at` passed the grace period, in batches | `DELETE /dash/apps/:id`, `/superadmin/apps/:id` and `delete-attr` only mark; nothing purges, so triples of a deleted app stay reachable by id and the tables grow | port the sweeper (recommended; it is a periodic batched `DELETE` off the existing marks) |
 | `app_files_to_sweep` on the `s3` backend | `storage/sweeper.clj` drains the table migration 52's trigger fills on every `$files` delete and removes the objects | `storage.rs` deletes objects synchronously; the trigger still fills the table and nothing reads it | port the sweeper (recommended) or drop the trigger in a `rust_*` migration step |
 | Apple and GitHub sign-in | Apple client-secret JWT + issuer quirk (auth/oauth.clj:141-147, :215), GitHub non-OIDC client (:31-113), Instant's shared credentials | generic OIDC discovery only; the dashboard route accepts a `github` provider that the runtime can't sign anyone in with | implement both (a day each) or refuse those provider types on the dash route so the failure is at setup, not at sign-in |
-| SSRF guard on the OIDC discovery fetch | `smokescreen.clj` refuses private addresses (`assert-safe-discovery-endpoints!`) | `routes/oauth.rs discovery()` fetches whatever the stored endpoint says | port the check (recommended; the webhook validator's `bad_ip` already exists) |
 | email delivery provider | Postmark (with Sendgrid behind a flag) and per-app verified senders | `EMAIL_PROVIDER=log` or `cloudflare`; custom senders only via a hand-set `verified` row | add a Postmark / SMTP arm; decide whether sender verification (a Postmark feature) stays out of scope |
 | per-session op scheduling | a session's ops run on independent group keys with combining (session.clj:1463-1553) | strict arrival order per session (other sessions unaffected) | keep (latency-only difference) or port the group-key scheduler |
+
+### Resolved
+
+- **Hard deletion of apps and attrs** (`hard_deletion_sweeper.clj` +
+  `custodian.clj`): `hard_delete.rs` purges apps and attrs whose
+  `deletion_marked_at` is older than `INSTANT_HARD_DELETE_GRACE_HOURS`
+  (default 48, legacy's 2 days). One node at a time drains triples and
+  transactions in 1000-row statements that re-check the mark, then deletes
+  the app row (the rest cascades) and its `rust_*` rows. On the `s3` backend
+  the objects stay (see `app_files_to_sweep` above).
+- **SSRF guard on OIDC fetches** (`smokescreen.clj`,
+  `assert-safe-discovery-endpoints!`): discovery, token, userinfo and JWKS
+  fetches, plus the dashboard's discovery-endpoint check, go through
+  `ssrf.rs`: private addresses refused, connections pinned to the vetted
+  addresses, no redirects, 1 MB response cap. `INSTANT_OAUTH_ALLOW_PRIVATE=1`
+  admits test providers on localhost.
+- **Triple size roll-up** (`triples_size_updates.clj`): the migration 114
+  triggers log every write's size delta to `triples_size_updates`; nothing
+  aggregated it, so the table grew without bound. `usage.rs` runs legacy's
+  collect query every `INSTANT_SIZE_COLLECT_SECS`, which also backs the
+  optional per-app size cap (`INSTANT_APP_SIZE_LIMIT_MB`).
 
 ### Deliberate divergences to confirm (keep, or match legacy bug-for-bug)
 

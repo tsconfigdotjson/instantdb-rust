@@ -339,6 +339,7 @@ pub async fn run_transact(
 ) -> Result<TxReport> {
     let started = std::time::Instant::now();
     let steps = tx::parse_tx_steps(tx_steps)?;
+    crate::usage::check_transact(state, app_id, &steps)?;
     let mut attrs = (*load_attrs(state, app_id).await?).clone();
     let mut dbtx = state.pool.begin().await.map_err(InstantError::from)?;
     tx::assert_write_allowed(&mut dbtx, app_id).await?;

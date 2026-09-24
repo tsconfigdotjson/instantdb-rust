@@ -369,6 +369,36 @@ pub(crate) async fn create_app(
     Ok(app)
 }
 
+/// `INSTANT_MAX_APPS_PER_USER`: apps the user created plus the apps of every
+/// org they belong to. Apps marked for deletion count until the hard-delete
+/// sweeper purges them, so create/delete cycles can't outrun the purge.
+pub(crate) async fn assert_app_limit(state: &AppState, user_id: Uuid) -> Result<()> {
+    let Some(limit) = state.cfg.max_apps_per_user else {
+        return Ok(());
+    };
+    let n: i64 = sqlx::query(
+        "SELECT count(*) AS n FROM apps
+          WHERE creator_id = $1
+             OR org_id IN (SELECT org_id FROM org_members WHERE user_id = $1)",
+    )
+    .bind(user_id)
+    .fetch_one(&state.pool)
+    .await?
+    .get("n");
+    if n >= limit {
+        return Err(InstantError::new(
+            "app-limit-exceeded",
+            400,
+            format!(
+                "You can have at most {limit} apps on this server. Deleted apps count until they are purged ({} hours after deletion).",
+                state.cfg.hard_delete_grace_hours
+            ),
+            Some(json!({"limit": limit})),
+        ));
+    }
+    Ok(())
+}
+
 /// Optional `rules.code` on app creation: validated, then stored.
 fn rules_code_of(body: &Value) -> Result<Option<Value>> {
     match body.get("rules").and_then(|r| r.get("code")) {
@@ -446,6 +476,7 @@ pub async fn apps_post(
             }
             None => (Some(user.id), None),
         };
+        assert_app_limit(&state, user.id).await?;
         let app = create_app(&state, id, &title, creator_id, org_id, token).await?;
         if let Some(code) = &rules_code {
             put_rules(&state, id, code).await?;
@@ -771,6 +802,14 @@ fn app_expires_ms(app: &Value) -> Value {
 /// `schema` / `rules.code` like `POST /dash/apps`.
 pub async fn ephemeral_post(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
     let r = async {
+        if !state.cfg.ephemeral_apps {
+            return Err(InstantError::new(
+                "permission-denied",
+                400,
+                "Temporary apps are disabled on this server. Sign in to the dashboard to create an app.",
+                None,
+            ));
+        }
         let body = parse_body(&body)?;
         let title = body_str(&body, "title")?;
         let rules_code = rules_code_of(&body)?;
@@ -1322,7 +1361,7 @@ pub async fn providers_post(
 
 /// legacy `validate-discovery-endpoint!` (model/app_oauth_client.clj:17-32):
 /// the document must load and carry a string `issuer`.
-async fn validate_discovery_endpoint(endpoint: &str) -> Result<()> {
+async fn validate_discovery_endpoint(state: &AppState, endpoint: &str) -> Result<()> {
     let fail = || {
         InstantError::new(
             "validation-failed",
@@ -1335,16 +1374,7 @@ async fn validate_discovery_endpoint(endpoint: &str) -> Result<()> {
             })),
         )
     };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|_| fail())?;
-    let doc: Value = client
-        .get(endpoint)
-        .send()
-        .await
-        .map_err(|_| fail())?
-        .json()
+    let doc = crate::ssrf::get_json(endpoint, None, state.cfg.oauth_allow_private)
         .await
         .map_err(|_| fail())?;
     if doc.get("issuer").and_then(|v| v.as_str()).is_none() {
@@ -1444,7 +1474,7 @@ pub async fn clients_post(
             ));
         }
         if let Some(d) = &discovery_endpoint {
-            validate_discovery_endpoint(d).await?;
+            validate_discovery_endpoint(&state, d).await?;
         }
         let id = Uuid::new_v4();
         let mut steps = vec![
@@ -1516,7 +1546,7 @@ pub async fn clients_update(
         }
         if has("discovery_endpoint") {
             if let Some(d) = &discovery_endpoint {
-                validate_discovery_endpoint(d).await?;
+                validate_discovery_endpoint(&state, d).await?;
             }
         }
         let mut steps = vec![json!(["add-triple", id, sc::attr_id("$oauthClients", "id"), id])];

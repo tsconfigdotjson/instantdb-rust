@@ -113,8 +113,8 @@ jobs:
           cargo build -p instant-server
           export INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_ID=mock-google-client INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET=mock-google-secret
           export INSTANT_DASHBOARD_GOOGLE_OAUTH_AUTH_URL=http://localhost:9378/authorize INSTANT_DASHBOARD_GOOGLE_OAUTH_TOKEN_URL=http://localhost:9378/token
-          INSTANT_WEBHOOK_ALLOW_INSECURE=1 PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/server1.log 2>&1 &
-          INSTANT_WEBHOOK_ALLOW_INSECURE=1 PORT=8889 BASE_URL=http://localhost:8889 ./target/debug/instant-server > /tmp/server2.log 2>&1 &
+          INSTANT_WEBHOOK_ALLOW_INSECURE=1 INSTANT_OAUTH_ALLOW_PRIVATE=1 PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/server1.log 2>&1 &
+          INSTANT_WEBHOOK_ALLOW_INSECURE=1 INSTANT_OAUTH_ALLOW_PRIVATE=1 PORT=8889 BASE_URL=http://localhost:8889 ./target/debug/instant-server > /tmp/server2.log 2>&1 &
           # a node whose ws handlers always overrun (security-test.mjs timeout section)
           INSTANT_HANDLE_RECEIVE_TIMEOUT_MS=1 PORT=8887 BASE_URL=http://localhost:8887 ./target/debug/instant-server > /tmp/server-timeout.log 2>&1 &
           for i in $(seq 1 60); do
@@ -163,6 +163,17 @@ jobs:
         run: node scripts/multinode-ws.mjs "$APP_ID"
       - name: "e2e: multinode storage"
         run: node scripts/multinode-storage-test.mjs "$APP_ID" "$ADMIN_TOKEN"
+
+      # Public-deployment limits on their own node, booted last: its 0-hour
+      # hard-delete grace would purge apps the other e2e steps mark deleted.
+      - name: "e2e: demo limits (size cap, app cap, hard delete, oauth ssrf)"
+        run: |
+          INSTANT_APP_SIZE_LIMIT_MB=1 INSTANT_SIZE_COLLECT_SECS=1 INSTANT_MAX_APPS_PER_USER=2 \
+          INSTANT_EPHEMERAL_APPS=off INSTANT_HARD_DELETE_GRACE_HOURS=0 INSTANT_HARD_DELETE_SWEEP_SECS=2 \
+            PORT=8886 BASE_URL=http://localhost:8886 ./target/debug/instant-server > /tmp/server-limits.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://localhost:8886/health >/dev/null && break; sleep 1; done
+          SERVER_URL=http://localhost:8886 node scripts/demo-limits-test.mjs
+          kill %1 || true
 
       # S3 storage backend (issue #9): MinIO stands in for S3/R2; two
       # presigning nodes + one proxying node run beside the postgres-backed
@@ -217,6 +228,7 @@ jobs:
           echo "=== node 1 (:8888) ==="; cat /tmp/server1.log || true
           echo "=== node 2 (:8889) ==="; cat /tmp/server2.log || true
           echo "=== timeout node (:8887) ==="; cat /tmp/server-timeout.log || true
+          echo "=== limits node (:8886) ==="; cat /tmp/server-limits.log || true
           echo "=== s3 node 1 (:8898) ==="; cat /tmp/server-s3-1.log || true
           echo "=== s3 node 2 (:8899) ==="; cat /tmp/server-s3-2.log || true
           echo "=== s3 proxy node (:8897) ==="; cat /tmp/server-s3-proxy.log || true

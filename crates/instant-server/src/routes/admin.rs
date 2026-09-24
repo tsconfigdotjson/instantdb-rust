@@ -1367,6 +1367,7 @@ pub(crate) async fn store_file(
     body: &[u8],
     meta: &crate::storage::BlobMeta,
 ) -> Result<Value> {
+    crate::usage::check_upload(state, app_id, body.len()).await?;
     let location_id = Uuid::new_v4().to_string();
     let size = crate::storage::put_blob(state, app_id, &location_id, body, meta).await?;
 

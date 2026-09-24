@@ -120,13 +120,11 @@ async fn fetch_json_cached(state: &AppState, cache_key: &str, url: &str) -> Resu
             return Ok(v.clone());
         }
     }
-    let resp = reqwest::get(url)
+    // discovery endpoints are app-supplied, and so is everything their
+    // documents point at: SSRF-guarded (legacy fetch-discovery / safe-get)
+    let v = crate::ssrf::get_json(url, None, state.cfg.oauth_allow_private)
         .await
-        .map_err(|e| oauth_err(format!("Failed to fetch {url}: {e}")))?;
-    let v: Value = resp
-        .json()
-        .await
-        .map_err(|e| oauth_err(format!("Invalid JSON from {url}: {e}")))?;
+        .map_err(oauth_err)?;
     state.oauth_cache.insert(
         cache_key.to_string(),
         (v.clone(), std::time::Instant::now()),
@@ -734,13 +732,10 @@ async fn exchange_code(
         .get("token_endpoint")
         .and_then(|v| v.as_str())
         .ok_or_else(|| oauth_err("Discovery document missing token_endpoint."))?;
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| InstantError::internal(format!("http client: {e}")))?;
-    let resp = http
-        .post(token_endpoint)
-        .form(&[
+    // legacy safe-post-form: the token endpoint comes from the discovery doc
+    let body = crate::ssrf::post_form_json(
+        token_endpoint,
+        &[
             ("client_id", client.client_id.as_deref().unwrap_or_default()),
             (
                 "client_secret",
@@ -749,14 +744,11 @@ async fn exchange_code(
             ("code", code),
             ("grant_type", "authorization_code"),
             ("redirect_uri", callback_url),
-        ])
-        .send()
-        .await
-        .map_err(|e| oauth_err(format!("Token exchange failed: {e}")))?;
-    let body: Value = resp
-        .json()
-        .await
-        .map_err(|e| oauth_err(format!("Invalid token response: {e}")))?;
+        ],
+        state.cfg.oauth_allow_private,
+    )
+    .await
+    .map_err(|e| oauth_err(format!("Token exchange failed: {e}")))?;
     if let Some(err) = body.get("error") {
         return Err(oauth_err(format!("Provider error: {err}")));
     }
@@ -773,14 +765,9 @@ async fn exchange_code(
                 .get("access_token")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| oauth_err("No access token in response."))?;
-            http.get(userinfo)
-                .bearer_auth(access_token)
-                .send()
+            crate::ssrf::get_json(userinfo, Some(access_token), state.cfg.oauth_allow_private)
                 .await
                 .map_err(|e| oauth_err(format!("userinfo failed: {e}")))?
-                .json()
-                .await
-                .map_err(|e| oauth_err(format!("Invalid userinfo response: {e}")))?
         }
     };
     let email_verified = claims

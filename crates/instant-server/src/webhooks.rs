@@ -301,33 +301,7 @@ pub fn verify_payload_jwt(
 // ---------------------------------------------------------------------------
 // url validation + SSRF guard (webhook_sender.clj, smokescreen.clj)
 
-fn bad_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            let o = v4.octets();
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                || (o[0] == 100 && (64..=127).contains(&o[1])) // CGNAT 100.64/10
-                || o[0] == 0
-        }
-        IpAddr::V6(v6) => {
-            let seg = v6.segments();
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (seg[0] & 0xfe00) == 0xfc00 // unique local
-                || (seg[0] & 0xffc0) == 0xfe80 // link local
-                || (seg[0] == 0x2002) // 6to4
-                || (seg[0] == 0x2001 && seg[1] == 0) // teredo
-                || (seg[0] == 0x64 && seg[1] == 0xff9b) // NAT64
-                || v6.to_ipv4_mapped().map(|v4| bad_ip(IpAddr::V4(v4))).unwrap_or(false)
-        }
-    }
-}
+use crate::ssrf::bad_ip;
 
 fn webhook_validation(input: Value, message: &str) -> InstantError {
     InstantError::validation_failed_input("webhook", input, json!([{"message": message}]))

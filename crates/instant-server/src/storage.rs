@@ -110,6 +110,16 @@ fn check_location_id(location_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove a purged app's blob directory (disk backend).
+pub async fn delete_app_dir(app_id: Uuid) {
+    let dir = storage_dir().join(app_id.to_string());
+    if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%app_id, error = %e, "hard-delete: blob dir cleanup failed");
+        }
+    }
+}
+
 fn blob_path(app_id: Uuid, location_id: &str) -> Result<PathBuf> {
     check_location_id(location_id)?;
     Ok(storage_dir().join(app_id.to_string()).join(location_id))
