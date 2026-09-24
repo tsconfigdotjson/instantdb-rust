@@ -59,6 +59,12 @@ services:
       INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET: ${INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET:-}
       # Free-tier demo: everyone gets the paid feature set.
       INSTANT_PAID_FEATURES_FREE: "true"
+      # Demo limits: small apps, a few per user, no anonymous apps, and
+      # deleted apps purged quickly so their slots and disk come back.
+      INSTANT_APP_SIZE_LIMIT_MB: ${INSTANT_APP_SIZE_LIMIT_MB:-10}
+      INSTANT_MAX_APPS_PER_USER: ${INSTANT_MAX_APPS_PER_USER:-3}
+      INSTANT_EPHEMERAL_APPS: "off"
+      INSTANT_HARD_DELETE_GRACE_HOURS: ${INSTANT_HARD_DELETE_GRACE_HOURS:-2}
     mem_limit: 768m
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8888 && printf \"GET /health HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q ok <&3'"]

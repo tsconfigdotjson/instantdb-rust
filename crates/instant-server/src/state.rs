@@ -67,6 +67,28 @@ pub struct Config {
     /// (`INSTANT_DASHBOARD_GOOGLE_OAUTH_AUTH_URL` / `_TOKEN_URL`).
     pub google_oauth_auth_url: String,
     pub google_oauth_token_url: String,
+    /// Per-app size cap in bytes: triples plus `$files` sizes, as tracked in
+    /// `triples_size_aggregate` (`INSTANT_APP_SIZE_LIMIT_MB`; unset = no cap).
+    /// An app over it can only delete (usage.rs).
+    pub app_size_limit_bytes: Option<i64>,
+    /// How often sizes are rolled up and the cap re-checked
+    /// (`INSTANT_SIZE_COLLECT_SECS`, legacy collects every 5 minutes).
+    pub size_collect_secs: u64,
+    /// Apps one dashboard user may own, directly or through their orgs
+    /// (`INSTANT_MAX_APPS_PER_USER`; unset = no cap).
+    pub max_apps_per_user: Option<i64>,
+    /// Unauthenticated `POST /dash/apps/ephemeral` (`INSTANT_EPHEMERAL_APPS`,
+    /// default on like legacy; public deployments turn it off).
+    pub ephemeral_apps: bool,
+    /// Marked-deleted apps and attrs are purged after this grace period
+    /// (`INSTANT_HARD_DELETE_GRACE_HOURS`, legacy 2 days), checked every
+    /// `INSTANT_HARD_DELETE_SWEEP_SECS`.
+    pub hard_delete_grace_hours: u64,
+    pub hard_delete_sweep_secs: u64,
+    /// Lets OIDC discovery / token / userinfo / JWKS fetches reach private
+    /// addresses (`INSTANT_OAUTH_ALLOW_PRIVATE`): test providers on
+    /// localhost only, never in production.
+    pub oauth_allow_private: bool,
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -125,6 +147,24 @@ impl Config {
                 .unwrap_or_else(|| "https://accounts.google.com/o/oauth2/v2/auth".into()),
             google_oauth_token_url: env_nonblank("INSTANT_DASHBOARD_GOOGLE_OAUTH_TOKEN_URL")
                 .unwrap_or_else(|| "https://oauth2.googleapis.com/token".into()),
+            app_size_limit_bytes: env_nonblank("INSTANT_APP_SIZE_LIMIT_MB")
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|mb| *mb > 0)
+                .map(|mb| mb * 1024 * 1024),
+            size_collect_secs: env_num("INSTANT_SIZE_COLLECT_SECS", 60u64).max(1),
+            max_apps_per_user: env_nonblank("INSTANT_MAX_APPS_PER_USER")
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|n| *n > 0),
+            ephemeral_apps: !matches!(
+                std::env::var("INSTANT_EPHEMERAL_APPS").as_deref(),
+                Ok("0") | Ok("false") | Ok("off")
+            ),
+            hard_delete_grace_hours: env_num("INSTANT_HARD_DELETE_GRACE_HOURS", 48u64),
+            hard_delete_sweep_secs: env_num("INSTANT_HARD_DELETE_SWEEP_SECS", 3600u64).max(1),
+            oauth_allow_private: matches!(
+                std::env::var("INSTANT_OAUTH_ALLOW_PRIVATE").as_deref(),
+                Ok("1") | Ok("true") | Ok("on")
+            ),
         }
     }
 }
@@ -374,6 +414,8 @@ pub struct AppState {
     /// (webhooks::active_webhooks), evicted by the `instant_webhooks` NOTIFY
     /// and a TTL
     pub webhook_cache: DashMap<Uuid, (std::time::Instant, Arc<Vec<crate::webhooks::Webhook>>)>,
+    /// apps over `app_size_limit_bytes` as of the last size check (usage.rs)
+    pub over_size_limit: dashmap::DashSet<Uuid>,
 }
 
 impl AppState {
@@ -399,6 +441,7 @@ impl AppState {
             webhook_key: std::sync::OnceLock::new(),
             webhook_notify: tokio::sync::Notify::new(),
             webhook_cache: DashMap::new(),
+            over_size_limit: dashmap::DashSet::new(),
         })
     }
 

@@ -114,6 +114,12 @@ works exactly as with the hosted service. A complete example lives in
 | `INSTANT_INDEXING_BATCH_SIZE` | `1000` | triples an indexing job (index / unique / type check / required) rewrites per step; the job is released between steps so large attrs never hold a long lock |
 | `INSTANT_INDEXING_SWEEP_SECS` | `60` | how often each node picks up indexing jobs nobody is driving (created by a node that died, or blocked by a conflicting job) |
 | `INSTANT_INDEXING_STALE_SECS` | `600` | a processing indexing job with no progress for this long is treated as orphaned and reclaimed |
+| `INSTANT_APP_SIZE_LIMIT_MB` | — | per-app cap on stored data (triples + files). An app over it can still delete, but writes, uploads and stream appends are refused until it is back under. Unset: no cap |
+| `INSTANT_SIZE_COLLECT_SECS` | `60` | how often per-app sizes are rolled up (legacy's `triples_size_aggregate`) and the cap re-checked |
+| `INSTANT_MAX_APPS_PER_USER` | — | apps a dashboard user may own, directly or through their orgs; deleted apps count until purged. Unset: no cap |
+| `INSTANT_EPHEMERAL_APPS` | on | `off` refuses the unauthenticated `POST /dash/apps/ephemeral` (temporary apps); turn it off on public deployments |
+| `INSTANT_HARD_DELETE_GRACE_HOURS` / `_SWEEP_SECS` | `48` / `3600` | deleted apps and attrs can be restored for this long, then the sweeper purges their data |
+| `INSTANT_OAUTH_ALLOW_PRIVATE` | `false` | lets OIDC discovery / token / userinfo / JWKS fetches reach private addresses (test providers on localhost only; never in production) |
 
 ### Horizontal scaling
 

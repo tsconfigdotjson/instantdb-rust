@@ -334,6 +334,7 @@ pub async fn handle_append_stream(
             json!([{"message": "Invalid offset for stream."}]),
         ));
     }
+    crate::usage::check_append(state, app_id)?;
     let new_size =
         crate::storage::append_blob(state, app_id, &stream_key(stream_id), offset, bytes).await?;
     // two writers racing on one stream can make prev_size stale; never

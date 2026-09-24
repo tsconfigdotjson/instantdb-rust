@@ -453,6 +453,7 @@ pub async fn apps_create(
             Some(o) => (None, Some(o)),
             None => (Some(user.id), None),
         };
+        crate::routes::dash_apps::assert_app_limit(&state, user.id).await?;
         let mut app = create_app(&state, id, &title, creator, org, Uuid::new_v4()).await?;
         let perms_code = match &perms {
             Some(code) => {
