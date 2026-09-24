@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time setup of a fresh Ubuntu 24.04 VPS for the demo stack. Run as root:
+# One-time setup of a fresh Ubuntu (24.04+) VPS for the demo stack. Run as root:
 #   curl -fsSL <raw url>/deploy/bootstrap.sh | bash -s -- '<deploy ssh public key>'
 # Idempotent: safe to re-run.
 set -euo pipefail
@@ -8,10 +8,11 @@ APP_DIR=/opt/instant
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
-apt-get install -yq ca-certificates curl ufw unattended-upgrades
-
-# Docker (official convenience script installs engine + compose plugin).
-command -v docker >/dev/null || curl -fsSL https://get.docker.com | sh
+# Docker from Ubuntu's archive: covered by unattended security upgrades and
+# available on new releases before Docker's own repo supports them.
+apt-get install -yq ca-certificates curl openssl ufw unattended-upgrades \
+  docker.io docker-compose-v2
+systemctl enable --now docker
 
 # 2 GB swap: the memory backstop for a 4 GB box.
 if ! swapon --show | grep -q /swapfile; then

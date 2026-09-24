@@ -40,7 +40,7 @@ than the box can spare.
 
 1. **DNS**: A/AAAA records for `$DASH_DOMAIN` and `$API_DOMAIN` → the VPS.
 2. **Deploy key**: `ssh-keygen -t ed25519 -f instant-deploy -N ''`.
-3. **Bootstrap** (as root on a fresh Ubuntu 24.04):
+3. **Bootstrap** (as root on a fresh Ubuntu 24.04 or newer):
    ```sh
    bash bootstrap.sh "$(cat instant-deploy.pub)"
    ```

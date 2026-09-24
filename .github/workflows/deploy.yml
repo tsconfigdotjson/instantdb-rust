@@ -4,7 +4,8 @@ name: Deploy
 # Runs after CI passes on main, or by hand (Actions → Deploy → Run workflow).
 # PRs touching the images or the stack build both images without pushing.
 #
-# Setup (once): repo variables VPS_HOST, API_DOMAIN; secrets VPS_SSH_KEY
+# Setup (once), in the `production` environment: variables VPS_HOST,
+# API_DOMAIN; secrets VPS_SSH_KEY
 # (private key for the `deploy` user bootstrap.sh created) and
 # VPS_KNOWN_HOSTS (`ssh-keyscan <host>` output). See docs/DEPLOY.md.
 
@@ -73,7 +74,7 @@ jobs:
 
   deploy:
     needs: build
-    if: github.event_name != 'pull_request' && vars.VPS_HOST != ''
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
