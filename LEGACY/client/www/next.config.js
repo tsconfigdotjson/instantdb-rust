@@ -194,6 +194,11 @@ async function fetchFonts() {
 }
 
 module.exports = async () => {
+  // Self-hosted builds must not depend on hosted Instant: the licensed font
+  // falls back to ui-monospace (globals.css) and the star count is unused.
+  if (process.env.NEXT_PUBLIC_SELF_HOSTED === 'true') {
+    return withMarkdoc()(nextConfig);
+  }
   await fetchFonts();
   const starCount = await fetchStarCount();
   if (starCount) {
