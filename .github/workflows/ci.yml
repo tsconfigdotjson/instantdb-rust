@@ -166,19 +166,19 @@ jobs:
 
       # S3 storage backend (issue #9): MinIO stands in for S3/R2; two
       # presigning nodes + one proxying node run beside the postgres-backed
-      # pair above. dl.min.io and Docker Hub no longer serve MinIO, so the
-      # pinned Quay images run it.
+      # pair above. Upstream MinIO is archived and its images are gone from
+      # Docker Hub and Quay; pgsty/* is the maintained community build.
       - name: Boot MinIO
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z server /data --address ":9000"
+            pgsty/minio:RELEASE.2026-08-04T00-00-00Z server /data --address ":9000"
           for i in $(seq 1 30); do
             curl -sf http://localhost:9000/minio/health/live >/dev/null && break
             sleep 1
           done
           docker run --rm --network host --entrypoint /bin/sh \
-            quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z -c \
+            pgsty/mc:RELEASE.2026-09-16T00-00-00Z -c \
             "mc alias set local http://localhost:9000 minioadmin minioadmin && mc mb --ignore-existing local/instant-rust-bucket"
       - name: Boot S3-backed nodes
         env:

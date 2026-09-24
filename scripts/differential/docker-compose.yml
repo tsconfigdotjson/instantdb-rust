@@ -30,8 +30,9 @@ services:
       - "shared_preload_libraries=pg_hint_plan"
 
   minio:
-    # Docker Hub no longer serves minio/minio; the pinned Quay release does
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    # Upstream MinIO is archived and its images are gone from Docker Hub and
+    # Quay; pgsty/* is the maintained community build of the same code.
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     # host-mapped so the harness can fetch legacy's presigned URLs and the
     # rust server can run STORAGE_BACKEND=s3 against the same store
     ports:
@@ -47,7 +48,7 @@ services:
       retries: 12
 
   createbuckets:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    image: pgsty/mc:RELEASE.2026-09-16T00-00-00Z
     depends_on:
       minio:
         condition: service_healthy
