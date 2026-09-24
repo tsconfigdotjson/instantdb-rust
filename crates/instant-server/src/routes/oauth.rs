@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, RawForm, State};
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::Engine;
 use instant_core::error::{InstantError, Result};
@@ -23,6 +23,70 @@ use crate::state::AppState;
 fn oauth_err(msg: impl Into<String>) -> InstantError {
     let msg = msg.into();
     InstantError::new("oauth-error", 400, msg, None)
+}
+
+/// Legacy `get-some-param!` (util/exception.clj:440-457): the first path
+/// holding a value wins; none is param-missing on the first path (the rest as
+/// `possible-ins`), a value `coerce` rejects is param-malformed on its path.
+fn some_param<T>(
+    paths: &[(&[&str], Option<&Value>)],
+    coerce: impl Fn(&Value) -> Option<T>,
+) -> Result<T> {
+    let all: Vec<&[&str]> = paths.iter().map(|(p, _)| *p).collect();
+    // clojure truthiness: nil and false are absent
+    let found = paths.iter().find_map(|(p, v)| {
+        v.filter(|v| !v.is_null() && **v != Value::Bool(false))
+            .map(|v| (*p, v))
+    });
+    let Some((path, v)) = found else {
+        return Err(InstantError::new(
+            "param-missing",
+            400,
+            format!(
+                "Missing parameter: {}",
+                crate::routes::dash::clj_vec(all[0])
+            ),
+            Some(json!({"in": all[0], "possible-ins": &all[1..]})),
+        ));
+    };
+    coerce(v).ok_or_else(|| {
+        InstantError::new(
+            "param-malformed",
+            400,
+            format!(
+                "Malformed parameter: {}",
+                crate::routes::dash::clj_vec(path)
+            ),
+            Some(json!({"in": path, "possible-ins": all, "original-input": v})),
+        )
+    })
+}
+
+/// Legacy `get-param!`: one path.
+fn get_param<T>(
+    path: &[&str],
+    v: Option<&Value>,
+    coerce: impl Fn(&Value) -> Option<T>,
+) -> Result<T> {
+    match v.filter(|v| !v.is_null() && **v != Value::Bool(false)) {
+        None => Err(crate::routes::dash::param_missing(path)),
+        Some(v) => coerce(v).ok_or_else(|| crate::routes::dash::param_malformed(path, v.clone())),
+    }
+}
+
+fn coerce_uuid(v: &Value) -> Option<Uuid> {
+    v.as_str().and_then(|s| Uuid::parse_str(s.trim()).ok())
+}
+
+/// `string-util/coerce-non-blank-str`
+fn coerce_non_blank(v: &Value) -> Option<String> {
+    v.as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn qp(params: &HashMap<String, String>, k: &str) -> Option<Value> {
+    params.get(k).map(|v| Value::String(v.clone()))
 }
 
 /// oauth-error bodies are {"type": "oauth-error", "error": msg} (no message/hint)
@@ -227,17 +291,27 @@ pub async fn start_with_app(
 }
 
 async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Result<Response> {
-    let app_id = params
-        .get("app_id")
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| InstantError::param_missing("Missing required parameter: app_id"))?;
-    let client_name = params
-        .get("client_name")
-        .or_else(|| params.get("client_id"))
-        .ok_or_else(|| InstantError::param_missing("Missing required parameter: client_name"))?;
-    let redirect_uri = params
-        .get("redirect_uri")
-        .ok_or_else(|| InstantError::param_missing("Missing required parameter: redirect_uri"))?;
+    // legacy oauth-start (runtime/routes.clj:213-236), params in its order
+    let app_id = get_param(
+        &["params", "app_id"],
+        qp(params, "app_id").as_ref(),
+        coerce_uuid,
+    )?;
+    let client_name = &some_param(
+        &[
+            (
+                &["params", "client_name"],
+                qp(params, "client_name").as_ref(),
+            ),
+            (&["params", "client_id"], qp(params, "client_id").as_ref()),
+        ],
+        coerce_non_blank,
+    )?;
+    let redirect_uri = &get_param(
+        &["params", "redirect_uri"],
+        qp(params, "redirect_uri").as_ref(),
+        coerce_non_blank,
+    )?;
 
     // legacy wraps both start routes in with-rate-limiting (runtime/routes.clj:754-759)
     state
@@ -248,14 +322,17 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
     let client = client_by_name(state, app_id, client_name)
         .await?
         .ok_or_else(|| {
-            InstantError::record_not_found("app-oauth-client", "Record not found: app-oauth-client")
+            InstantError::record_not_found_args(
+                "app-oauth-client",
+                json!({"app-id": app_id, "client-name": client_name}),
+            )
         })?;
 
     if !origin_authorized(state, app_id, redirect_uri).await? {
-        return Err(InstantError::validation_failed(
-            "redirect_uri",
-            "Invalid redirect_uri. If you're the developer, make sure to add your website to the list of approved domains.",
-            json!([]),
+        return Err(InstantError::validation_failed_input(
+            "redirect-uri",
+            json!(redirect_uri),
+            json!([{"message": "Invalid redirect_uri. If you're the developer, make sure to add your website to the list of approved domains."}]),
         ));
     }
 
@@ -365,7 +442,8 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
     let cookie = format!(
         "__session=instantdb_{cookie_uuid}; HttpOnly; Path=/runtime/oauth; Max-Age=3600; SameSite=Lax"
     );
-    let mut resp = Redirect::temporary(auth_url.as_str()).into_response();
+    // legacy `response/found`
+    let mut resp = found(auth_url.as_str());
     resp.headers_mut()
         .insert(header::SET_COOKIE, cookie.parse().unwrap());
     Ok(resp)
@@ -809,7 +887,7 @@ pub async fn token(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    match token_impl(&state, &headers, &body, false).await {
+    match token_impl(&state, &headers, &body, None).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => oauth_err_response(&e),
     }
@@ -819,12 +897,11 @@ pub async fn token_with_app(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
     headers: HeaderMap,
-    Json(mut body): Json<Value>,
+    Json(body): Json<Value>,
 ) -> Response {
-    body["app_id"] = json!(app_id);
     // legacy wraps only the app-scoped route in with-rate-limiting
-    // (runtime/routes.clj:768)
-    match token_impl(&state, &headers, &body, true).await {
+    // (runtime/routes.clj:768); the path's app id is one of its `:params`
+    match token_impl(&state, &headers, &body, Some(Value::String(app_id))).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => oauth_err_response(&e),
     }
@@ -937,13 +1014,24 @@ async fn token_impl(
     state: &AppState,
     headers: &HeaderMap,
     body: &Value,
-    rate_limited: bool,
+    path_app_id: Option<Value>,
 ) -> Result<Value> {
-    let app_id = body
-        .get("app_id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| InstantError::param_missing("Missing required parameter: app_id"))?;
+    // legacy oauth-token-callback (runtime/routes.clj:607-615): each param is
+    // looked up under `param-paths` (params, body, form-params; keyword and
+    // string keys, printed alike)
+    let body_app_id = body.get("app_id");
+    let app_id = some_param(
+        &[
+            (&["params", "app_id"], path_app_id.as_ref()),
+            (&["params", "app_id"], path_app_id.as_ref()),
+            (&["body", "app_id"], body_app_id),
+            (&["body", "app_id"], body_app_id),
+            (&["form-params", "app_id"], None),
+            (&["form-params", "app_id"], None),
+        ],
+        coerce_uuid,
+    )?;
+    let rate_limited = path_app_id.is_some();
     if rate_limited {
         state
             .limiters
@@ -951,10 +1039,21 @@ async fn token_impl(
             .check(app_id, 1.0)
             .map_err(crate::rate_limit::rate_limited_err)?;
     }
-    let code = body
-        .get("code")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| InstantError::param_missing("Missing required parameter: code"))?;
+    let body_code = body.get("code");
+    let code = some_param(
+        &[
+            (&["params", "code"], None),
+            (&["params", "code"], None),
+            (&["body", "code"], body_code),
+            (&["body", "code"], body_code),
+            (&["form-params", "code"], None),
+            (&["form-params", "code"], None),
+        ],
+        coerce_uuid,
+    )?
+    .to_string();
+    let code = code.as_str();
+    let verifier = body.get("code_verifier").cloned().unwrap_or(Value::Null);
 
     // consume $oauthCodes by hash
     let code_hash = auth::hash_string(code);
@@ -970,9 +1069,9 @@ async fn token_impl(
     .await
     .map_err(InstantError::from)?;
     let Some(row) = row else {
-        return Err(InstantError::record_not_found(
+        return Err(InstantError::record_not_found_args(
             "app-oauth-code",
-            "Record not found: app-oauth-code",
+            json!({"code": code, "app-id": app_id, "verifier": verifier}),
         ));
     };
     let eid: Uuid = row.get("entity_id");
@@ -1065,23 +1164,26 @@ pub async fn id_token(
 }
 
 async fn id_token_impl(state: &AppState, headers: &HeaderMap, body: &Value) -> Result<Value> {
-    let app_id = body
-        .get("app_id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| InstantError::param_missing("Missing required parameter: app_id"))?;
-    let jwt = body
-        .get("id_token")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| InstantError::param_missing("Missing required parameter: id_token"))?;
-    let client_name = body
-        .get("client_name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| InstantError::param_missing("Missing required parameter: client_name"))?;
+    // legacy oauth-id-token-callback (runtime/routes.clj:661-672), params in
+    // its order
+    let jwt = &get_param(
+        &["body", "id_token"],
+        body.get("id_token"),
+        coerce_non_blank,
+    )?;
+    let app_id = get_param(&["body", "app_id"], body.get("app_id"), coerce_uuid)?;
+    let client_name = &get_param(
+        &["body", "client_name"],
+        body.get("client_name"),
+        coerce_non_blank,
+    )?;
     let client = client_by_name(state, app_id, client_name)
         .await?
         .ok_or_else(|| {
-            InstantError::record_not_found("app-oauth-client", "Record not found: app-oauth-client")
+            InstantError::record_not_found_args(
+                "app-oauth-client",
+                json!({"app-id": app_id, "client-name": client_name}),
+            )
         })?;
 
     assert_request_origin(state, app_id, headers).await?;
@@ -1450,6 +1552,14 @@ pub async fn well_known(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Response {
+    // legacy openid-configuration-get: `(ex/get-param! req [:params :app_id] uuid-util/coerce)`
+    if let Err(e) = get_param(
+        &["params", "app_id"],
+        Some(&Value::String(app_id.clone())),
+        coerce_uuid,
+    ) {
+        return json_or_err(Err(e));
+    }
     json_or_err(Ok(json!({
         "authorization_endpoint": format!("{}/runtime/{}/oauth/start", state.cfg.base_url, app_id),
         "token_endpoint": format!("{}/runtime/{}/oauth/token", state.cfg.base_url, app_id),

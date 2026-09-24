@@ -50,7 +50,7 @@ pub(crate) fn param_malformed(ks: &[&str], original: Value) -> InstantError {
 }
 
 /// `(format "%s" ["headers" "authorization"])` → `["headers" "authorization"]`
-fn clj_vec(ks: &[&str]) -> String {
+pub(crate) fn clj_vec(ks: &[&str]) -> String {
     format!(
         "[{}]",
         ks.iter()
