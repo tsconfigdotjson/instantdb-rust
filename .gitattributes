@@ -1,0 +1,3 @@
+# LEGACY/ is the original InstantDB codebase, kept as reference: keep it out of
+# GitHub's language stats.
+LEGACY/** linguist-vendored
