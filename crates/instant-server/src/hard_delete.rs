@@ -58,13 +58,13 @@ pub async fn sweep(state: &AppState) -> Result<()> {
 }
 
 async fn sweep_locked(state: &AppState) -> Result<()> {
-    let grace = state.cfg.hard_delete_grace_hours as f64;
+    let grace_secs = (state.cfg.hard_delete_grace_hours * 3600) as f64;
     let attrs = sqlx::query(
         "SELECT id, app_id FROM attrs
           WHERE deletion_marked_at IS NOT NULL
-            AND deletion_marked_at < now() - make_interval(hours => $1)",
+            AND deletion_marked_at < now() - make_interval(secs => $1)",
     )
-    .bind(grace)
+    .bind(grace_secs)
     .fetch_all(&state.pool)
     .await?;
     for r in &attrs {
@@ -74,9 +74,9 @@ async fn sweep_locked(state: &AppState) -> Result<()> {
     let apps = sqlx::query(
         "SELECT id FROM apps
           WHERE deletion_marked_at IS NOT NULL
-            AND deletion_marked_at < now() - make_interval(hours => $1)",
+            AND deletion_marked_at < now() - make_interval(secs => $1)",
     )
-    .bind(grace)
+    .bind(grace_secs)
     .fetch_all(&state.pool)
     .await?;
     for r in &apps {
