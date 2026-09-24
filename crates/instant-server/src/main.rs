@@ -640,16 +640,19 @@ async fn main() -> anyhow::Result<()> {
         // single request can't buffer 100MB of JSON.
         .layer(axum::extract::DefaultBodyLimit::max(JSON_BODY_LIMIT))
         .merge(storage_uploads)
+        // legacy core.clj:189-190: unmatched paths (and, since compojure
+        // falls through, wrong methods) answer a JSON 404 the CLI can parse
+        .fallback(route_not_found)
+        .method_not_allowed_fallback(route_not_found)
         // Wildcard CORS without credential reflection: every browser-facing
         // route authenticates via bearer headers, never cookies, so the
         // origin-reflection + allow-credentials of very_permissive() is
         // unnecessary exposure. The oauth __session cookie is SameSite=Lax
         // and only read on top-level navigations, which CORS doesn't govern.
+        // Layered after the fallbacks so it wraps them: otherwise a preflight
+        // OPTIONS to a POST-only route hits the method-not-allowed 404 and
+        // every cross-origin browser POST (the dashboard) is blocked.
         .layer(CorsLayer::permissive())
-        // legacy core.clj:189-190: unmatched paths (and, since compojure
-        // falls through, wrong methods) answer a JSON 404 the CLI can parse
-        .fallback(route_not_found)
-        .method_not_allowed_fallback(route_not_found)
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", cfg.port);

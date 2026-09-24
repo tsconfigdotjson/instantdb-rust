@@ -233,6 +233,23 @@ if (TIMEOUT_NODE) {
   assert(guest2.status === 200 && guest2.body?.user?.refresh_token, "guest sign-in works once the rule is gone");
 }
 
+// CORS preflight: the self-hosted dashboard is a different origin than the
+// API, so every JSON POST it makes is preflighted. The preflight must be
+// answered by the CORS layer, not the method-not-allowed 404.
+{
+  const pre = await fetch(`${SERVER}/dash/auth/send_magic_code`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://dash.example.com",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type,authorization",
+    },
+  });
+  assert(pre.ok && pre.headers.get("access-control-allow-origin") === "*", "preflight to a POST-only route is allowed");
+  const miss = await fetch(`${SERVER}/no/such/route`, { headers: { Origin: "https://dash.example.com" } });
+  assert(miss.status === 404 && miss.headers.get("access-control-allow-origin") === "*", "404s carry CORS headers");
+}
+
 admin.close();
 console.log("SECURITY TEST PASSED");
 process.exit(0);
