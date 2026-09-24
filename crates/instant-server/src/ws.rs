@@ -202,8 +202,9 @@ fn required_str<'a>(msg: &'a Value, key: &str) -> Result<&'a str, InstantError> 
 /// null when unknown.
 fn err_msg(original: &Value, e: &InstantError) -> Value {
     // legacy session.clj:1040-1060 sends every request-scoped error type,
-    // rate-limited included, with status 400 on the socket (429 is HTTP-only)
-    let status = if e.error_type == "rate-limited" {
+    // rate-limited and timeout included, with status 400 on the socket (429
+    // is HTTP-only, util/http.clj:188-199)
+    let status = if e.error_type == "rate-limited" || e.error_type == "timeout" {
         400
     } else {
         e.status

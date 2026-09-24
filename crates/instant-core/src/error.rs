@@ -137,9 +137,10 @@ impl InstantError {
     }
 
     /// Legacy `throw-query-timeout!` (util/exception.clj:467-469), also what
-    /// a statement cancelled by its timeout becomes.
+    /// a statement cancelled by its timeout becomes. HTTP answers it 429 like
+    /// `rate-limited` (util/http.clj:192-194); the socket says 400.
     pub fn query_timeout() -> Self {
-        InstantError::new("timeout", 400, "The query took too long to complete.", None)
+        InstantError::new("timeout", 429, "The query took too long to complete.", None)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -189,7 +190,7 @@ impl From<sqlx::Error> for InstantError {
                 Some("25P03") => {
                     return InstantError::new(
                         "timeout",
-                        400,
+                        429,
                         "The transaction took too long to complete.",
                         None,
                     )
