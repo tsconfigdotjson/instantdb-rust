@@ -137,14 +137,15 @@ async fn session_loop(
                     Err(_) => continue,
                 };
                 crate::metrics::METRICS.ws_messages_received_total.inc();
-                handle_message(&state, &session, parsed).await;
+                crate::scheduler::dispatch(&state, &session, parsed).await;
             }
             Message::Close(_) => break,
             _ => {}
         }
     }
 
-    // cleanup
+    // cleanup, once the ops still running have finished
+    session.scheduler.shutdown().await;
     state.drop_session(session_id);
     state.stream_subs.iter_mut().for_each(|mut e| {
         e.value_mut().retain(|(sid, _)| *sid != session_id);
@@ -201,8 +202,9 @@ fn required_str<'a>(msg: &'a Value, key: &str) -> Result<&'a str, InstantError> 
 /// null when unknown.
 fn err_msg(original: &Value, e: &InstantError) -> Value {
     // legacy session.clj:1040-1060 sends every request-scoped error type,
-    // rate-limited included, with status 400 on the socket (429 is HTTP-only)
-    let status = if e.error_type == "rate-limited" {
+    // rate-limited and timeout included, with status 400 on the socket (429
+    // is HTTP-only, util/http.clj:188-199)
+    let status = if e.error_type == "rate-limited" || e.error_type == "timeout" {
         400
     } else {
         e.status
@@ -218,7 +220,23 @@ fn err_msg(original: &Value, e: &InstantError) -> Value {
     })
 }
 
-pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>, msg: Value) {
+pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>, mut msg: Value) {
+    // events a combined transact took over (scheduler.rs): answered with
+    // its result, each under its own client-event-id (session.clj:579-584,
+    // handle-error! :596-605)
+    let redundant = match msg
+        .as_object_mut()
+        .and_then(|m| m.remove(crate::scheduler::REDUNDANT))
+    {
+        Some(Value::Array(v)) => v,
+        _ => vec![],
+    };
+    let send_err = |e: &InstantError| {
+        for r in &redundant {
+            session.send(err_msg(r, e));
+        }
+        session.send(err_msg(&msg, e));
+    };
     let op = msg.get("op").and_then(|o| o.as_str()).unwrap_or("");
     // Per-app rate limit (issue #1). Like legacy handle-event
     // (reactive/session.clj:974-984) the bucket is keyed by the session's
@@ -236,7 +254,7 @@ pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>
             .ws
             .check(app_id, crate::rate_limit::ws_op_cost(op))
         {
-            session.send(err_msg(&msg, &crate::rate_limit::rate_limited_err(retry)));
+            send_err(&crate::rate_limit::rate_limited_err(retry));
             return;
         }
     }
@@ -245,7 +263,7 @@ pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>
             "init" => handle_init(state, session, &msg).await,
             "add-query" => handle_add_query(state, session, &msg).await,
             "remove-query" => handle_remove_query(session, &msg).await,
-            "transact" => handle_transact(state, session, &msg).await,
+            "transact" => handle_transact(state, session, &msg, &redundant).await,
             "join-room" => handle_join_room(state, session, &msg).await,
             "leave-room" => handle_leave_room(state, session, &msg).await,
             "set-presence" => handle_set_presence(state, session, &msg).await,
@@ -285,7 +303,7 @@ pub(crate) async fn handle_message(state: &Arc<AppState>, session: &Arc<Session>
             )),
         };
     if let Err(e) = result {
-        session.send(err_msg(&msg, &e));
+        send_err(&e);
     }
 }
 
@@ -500,9 +518,6 @@ async fn handle_add_query(
         st.inference
     };
     let started = std::time::Instant::now();
-    // Watermark first, so a cached result is never older than the tx id the
-    // client is told it reflects.
-    let processed_tx_id = service::max_tx_id(state, app_id).await?;
     // the shared cache holds join-rows frames; tree subscribers are few
     let cacheable = !tree
         && perms.user_map.is_none()
@@ -516,62 +531,80 @@ async fn handle_add_query(
         perms.ip.clone(),
         perms.origin.clone(),
     );
-    let attr_gen = service::attr_generation(state, app_id);
-    let cached = if cacheable {
-        state.query_cache.get(&cache_key).and_then(|e| {
-            (e.tx_id == processed_tx_id
-                && e.attr_gen == attr_gen
-                && e.created.elapsed() < QUERY_CACHE_TTL)
-                .then(|| (e.ws_json.clone(), e.hash, e.topics.clone()))
-        })
-    } else {
-        None
-    };
-    let mut result_meta = Value::Null;
-    let (ws_json, hash, topics) = match cached {
-        Some(hit) => {
-            crate::metrics::METRICS.query_cache_hits_total.inc();
-            hit
-        }
-        None => {
-            crate::metrics::METRICS.query_cache_misses_total.inc();
-            let attrs = service::load_attrs(state, app_id).await?;
-            let outcome = service::run_query_full(state, app_id, &attrs, &perms, &q, None).await?;
-            let (wire, meta, hash) =
-                format_query_result(&outcome.result, &attrs, &q, tree, inference);
-            result_meta = meta;
-            let ws_json = Arc::new(
-                RawValue::from_string(wire.to_string()).expect("serde_json output is valid JSON"),
-            );
-            let topics = Arc::new(outcome.topics);
-            if cacheable {
-                state.query_cache.insert(
-                    cache_key,
-                    QueryCacheEntry {
-                        ws_json: ws_json.clone(),
-                        hash,
-                        topics: topics.clone(),
-                        tx_id: processed_tx_id,
-                        attr_gen,
-                        created: std::time::Instant::now(),
-                    },
-                );
+    // Compute, register, then re-read the watermark: a tx that committed
+    // after the query ran but was refreshed before the query was
+    // registered would otherwise never reach this subscription (ops of one
+    // session run concurrently, so a transact next to this add-query is the
+    // common case). A moved watermark recomputes; the invalidator's own
+    // hash check keeps a refresh it did send from repeating.
+    let mut attempts = 0;
+    let (ws_json, result_meta, processed_tx_id) = loop {
+        attempts += 1;
+        // Watermark first, so a cached result is never older than the tx id
+        // the client is told it reflects.
+        let processed_tx_id = service::max_tx_id(state, app_id).await?;
+        let attr_gen = service::attr_generation(state, app_id);
+        let cached = if cacheable {
+            state.query_cache.get(&cache_key).and_then(|e| {
+                (e.tx_id == processed_tx_id
+                    && e.attr_gen == attr_gen
+                    && e.created.elapsed() < QUERY_CACHE_TTL)
+                    .then(|| (e.ws_json.clone(), e.hash, e.topics.clone()))
+            })
+        } else {
+            None
+        };
+        let mut result_meta = Value::Null;
+        let (ws_json, hash, topics) = match cached {
+            Some(hit) => {
+                crate::metrics::METRICS.query_cache_hits_total.inc();
+                hit
             }
-            (ws_json, hash, topics)
+            None => {
+                crate::metrics::METRICS.query_cache_misses_total.inc();
+                let attrs = service::load_attrs(state, app_id).await?;
+                let outcome =
+                    service::run_query_full(state, app_id, &attrs, &perms, &q, None).await?;
+                let (wire, meta, hash) =
+                    format_query_result(&outcome.result, &attrs, &q, tree, inference);
+                result_meta = meta;
+                let ws_json = Arc::new(
+                    RawValue::from_string(wire.to_string())
+                        .expect("serde_json output is valid JSON"),
+                );
+                let topics = Arc::new(outcome.topics);
+                if cacheable {
+                    state.query_cache.insert(
+                        cache_key.clone(),
+                        QueryCacheEntry {
+                            ws_json: ws_json.clone(),
+                            hash,
+                            topics: topics.clone(),
+                            tx_id: processed_tx_id,
+                            attr_gen,
+                            created: std::time::Instant::now(),
+                        },
+                    );
+                }
+                (ws_json, hash, topics)
+            }
+        };
+        {
+            let mut st = session.state.lock().await;
+            st.queries.insert(
+                key.clone(),
+                QueryEntry {
+                    q: q.clone(),
+                    result_hash: hash,
+                    topics: Some(topics),
+                    tree,
+                },
+            );
+        }
+        if attempts >= 3 || service::max_tx_id(state, app_id).await? == processed_tx_id {
+            break (ws_json, result_meta, processed_tx_id);
         }
     };
-    {
-        let mut st = session.state.lock().await;
-        st.queries.insert(
-            key,
-            QueryEntry {
-                q: q.clone(),
-                result_hash: hash,
-                topics: Some(topics),
-                tree,
-            },
-        );
-    }
     crate::metrics::METRICS
         .add_query_seconds
         .observe_since(started);
@@ -634,6 +667,7 @@ async fn handle_transact(
     state: &Arc<AppState>,
     session: &Arc<Session>,
     msg: &Value,
+    redundant: &[Value],
 ) -> HandlerResult {
     let (app_id, perms) = session_ctx(session).await?;
     let steps = msg.get("tx-steps").ok_or_else(|| {
@@ -644,14 +678,17 @@ async fn handle_transact(
         )
     })?;
     let report = service::run_transact(state, app_id, &perms, steps).await?;
-    session.send(json!({
-        "op": "transact-ok",
-        "client-event-id": msg.get("client-event-id"),
-        "tx-id": report.tx_id,
-        // legacy attaches the tx's ISN (session.clj:580-584); reading the WAL
-        // position after commit keeps refresh isn >= transact isn.
-        "isn": service::current_isn(state).await,
-    }));
+    // legacy attaches the tx's ISN (session.clj:580-584); reading the WAL
+    // position after commit keeps refresh isn >= transact isn.
+    let isn = service::current_isn(state).await;
+    for event in redundant.iter().chain(std::iter::once(msg)) {
+        session.send(json!({
+            "op": "transact-ok",
+            "client-event-id": event.get("client-event-id"),
+            "tx-id": report.tx_id,
+            "isn": isn,
+        }));
+    }
     Ok(())
 }
 

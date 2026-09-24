@@ -8,5 +8,10 @@
     "probe": "^(http|ws)/validation-failed/query-bad-op$",
     "reason": "An unknown where operator fails legacy's `::forms` spec after coercion, so its message is `Validation failed for coerced-query` and the hint carries legacy's internal coerced form (`{k etype option-map child-forms}`) as input with a clojure.spec predicate name as `expected`. This server answers `Validation failed for query: Unsupported where operator ...` with the operator in the hint. Both the message and the hint differ; docs/PARITY.md (wire-level divergences: unknown where operator) records it. No client reads the coerced form and the client surfaces both as an event error.",
     "citation": "LEGACY/server/src/instant/db/instaql.clj:563 (assert-valid! :coerced-query); LEGACY/client/packages/core/src/Reactor.js reads type/message only"
+  },
+  {
+    "probe": "^http/no-error/query-entity-id$",
+    "reason": "Decided divergence (issue #38 item 10). `$entityId` is accepted by legacy's where-value-valid-keys? (a dashboard hack) but has no spec entry and no SQL branch, so legacy answers a degenerate result instead of an error. This server rejects it as an unsupported where operator. No shipped client sends it; the spec'd `$entityIdStartsWith` is implemented and covered by the fuzz layer. docs/PARITY.md (wire-level divergences: `$entityId` where key).",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:69-75"
   }
 ]

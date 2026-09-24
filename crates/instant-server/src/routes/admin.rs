@@ -522,7 +522,14 @@ async fn query_impl(
         .unwrap_or(false);
     service::assert_read_allowed(state, ctx.app_id).await?;
     let attrs = service::load_attrs(state, ctx.app_id).await?;
-    let result = service::run_query(state, ctx.app_id, &attrs, &ctx.perms, q).await?;
+    // legacy query-post (admin/routes.clj:295-316): a query that outlives
+    // the statement timeout is `timeout`
+    let result = tokio::time::timeout(
+        service::query_timeout(),
+        service::run_query(state, ctx.app_id, &attrs, &ctx.perms, q),
+    )
+    .await
+    .map_err(|_| InstantError::query_timeout())??;
     Ok(object_tree(&result, &attrs, q, inference))
 }
 

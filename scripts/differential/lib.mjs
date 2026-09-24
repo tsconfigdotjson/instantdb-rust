@@ -110,7 +110,7 @@ export function connect(serverUrl, appId, name, headers) {
 // `body`; the stream is open once `sse-init` arrives, and `send` POSTs the
 // message envelope (machine_id / session_id / sse_token / messages) to
 // `pushPath` like SSEConnection.postMessages.
-export function connectSse(serverUrl, appId, name, { path, pushPath, headers = {}, body }) {
+export function connectSse(serverUrl, appId, name, { path, pushPath, headers = {}, body, method = "POST" }) {
   const frames = [];
   let cursorMark = 0;
   const waiters = [];
@@ -132,10 +132,12 @@ export function connectSse(serverUrl, appId, name, { path, pushPath, headers = {
   };
   const controller = new AbortController();
   const open = (async () => {
+    // the browser transport opens with GET (core/src/Connection.ts
+    // SSEConnection), the admin SDK's with a POST body
     const res = await fetch(serverUrl + path, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "text/event-stream", ...headers },
-      body: JSON.stringify(body ?? {}),
+      method,
+      headers: method === "GET" ? { accept: "text/event-stream", ...headers } : { "content-type": "application/json", accept: "text/event-stream", ...headers },
+      body: method === "GET" ? undefined : JSON.stringify(body ?? {}),
       signal: controller.signal,
     });
     httpStatus = res.status;

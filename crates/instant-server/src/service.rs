@@ -342,6 +342,15 @@ pub async fn run_transact(
     crate::usage::check_transact(state, app_id, &steps)?;
     let mut attrs = (*load_attrs(state, app_id).await?).clone();
     let mut dbtx = state.pool.begin().await.map_err(InstantError::from)?;
+    // legacy runs every statement under a 30s query timeout (jdbc/sql.clj
+    // *query-timeout-seconds*); a cancelled one is `timeout` (57014)
+    sqlx::query(&format!(
+        "SET LOCAL statement_timeout = {}",
+        query_timeout().as_millis()
+    ))
+    .execute(&mut *dbtx)
+    .await
+    .map_err(InstantError::from)?;
     tx::assert_write_allowed(&mut dbtx, app_id).await?;
 
     let report = if perms.admin {
@@ -381,6 +390,19 @@ pub async fn run_transact(
         .transact_seconds
         .observe_since(started);
     Ok(report)
+}
+
+/// Legacy's per-statement query timeout (`INSTANT_QUERY_TIMEOUT_SECS`,
+/// default 30, jdbc/sql.clj `*query-timeout-seconds*`).
+pub fn query_timeout() -> std::time::Duration {
+    static SECS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    std::time::Duration::from_secs(*SECS.get_or_init(|| {
+        std::env::var("INSTANT_QUERY_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(30)
+    }))
 }
 
 /// Server-internal transact (system catalog writes for auth flows).

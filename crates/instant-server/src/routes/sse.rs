@@ -37,7 +37,19 @@ const ADMIN_RETRY: std::time::Duration = std::time::Duration::from_millis(500);
 pub async fn stream(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
+    // legacy sse-get: `(ex/get-param! req [:params :app_id] uuid-util/coerce)`
+    // (runtime/routes.clj:57-62)
+    if let Err(e) = uuid_param(
+        &["params", "app_id"],
+        params
+            .get("app_id")
+            .map(|v| Value::String(v.clone()))
+            .as_ref(),
+    ) {
+        return err_response(&e);
+    }
     let session_id = Uuid::new_v4();
     let sse_token = Uuid::new_v4();
     let (tx, rx) = mpsc::unbounded_channel::<Outgoing>();
@@ -118,53 +130,48 @@ impl RxGuard {
 impl Drop for RxGuard {
     fn drop(&mut self) {
         let state = self.state.clone();
-        let session_id = self.session.id;
+        let session = self.session.clone();
+        let session_id = session.id;
         tokio::spawn(async move {
+            session.scheduler.shutdown().await;
             state.drop_session(session_id);
             crate::presence::leave_all(&state, session_id).await;
         });
     }
 }
 
-pub async fn push(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -> Response {
-    let session_id = body
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok());
-    let sse_token = body
-        .get("sse_token")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok());
-    let (Some(session_id), Some(sse_token)) = (session_id, sse_token) else {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(json!({"type": "param-missing", "message": "Missing session_id/sse_token"})),
-        )
-            .into_response();
-    };
-    let Some(session) = state.sessions.get(&session_id).map(|s| s.clone()) else {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(json!({"type": "record-not-found", "message": "Unknown session"})),
-        )
-            .into_response();
-    };
-    {
-        let st = session.state.lock().await;
-        if st.sse_token != Some(sse_token) {
-            return (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(json!({"type": "record-not-found", "message": "Invalid sse token"})),
-            )
-                .into_response();
-        }
+/// `POST /runtime/sse?app_id=...` — legacy sse-post (runtime/routes.clj
+/// :64-70): the params in its order, then the same session lookup as the
+/// admin push.
+pub async fn push(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+    body: Bytes,
+) -> Response {
+    let r = async {
+        let body = parse_body(&body)?;
+        let machine_id = uuid_param(&["body", "machine_id"], body.get("machine_id"))?;
+        uuid_param(
+            &["params", "app_id"],
+            params
+                .get("app_id")
+                .map(|v| Value::String(v.clone()))
+                .as_ref(),
+        )?;
+        let session_id = uuid_param(&["body", "session_id"], body.get("session_id"))?;
+        let sse_token = uuid_param(&["body", "sse_token"], body.get("sse_token"))?;
+        let messages = body
+            .get("messages")
+            .filter(|m| !m.is_null())
+            .ok_or_else(|| param_missing(&["body", "messages"]))?
+            .clone();
+        enqueue_messages(&state, machine_id, session_id, sse_token, &messages).await
     }
-    if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
-        for msg in messages {
-            crate::ws::handle_message(&state, &session, msg.clone()).await;
-        }
+    .await;
+    match r {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => err_response(&e),
     }
-    Json(json!({})).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -210,7 +217,7 @@ pub async fn admin_subscribe_query(
                     "return-type": "tree",
                     "client-event-id": Uuid::new_v4(),
                 });
-                crate::ws::handle_message(&st, &sess, msg).await;
+                crate::scheduler::dispatch(&st, &sess, msg).await;
             });
             open_stream(state, session, rx, Some(ADMIN_RETRY))
         }
@@ -287,7 +294,7 @@ pub async fn admin_push(
     }
 }
 
-fn uuid_param(ks: &[&str], v: Option<&Value>) -> Result<Uuid> {
+pub(crate) fn uuid_param(ks: &[&str], v: Option<&Value>) -> Result<Uuid> {
     let v = v
         .filter(|v| !v.is_null())
         .ok_or_else(|| param_missing(ks))?;
@@ -319,7 +326,18 @@ async fn admin_push_impl(
         .filter(|m| !m.is_null())
         .ok_or_else(|| param_missing(&["body", "messages"]))?
         .clone();
+    enqueue_messages(state, machine_id, session_id, sse_token, &messages).await
+}
 
+/// Legacy `sse/enqueue-messages` (session.clj:1250-1261): find the session,
+/// check its token, queue the messages.
+async fn enqueue_messages(
+    state: &Arc<AppState>,
+    machine_id: Uuid,
+    session_id: Uuid,
+    sse_token: Uuid,
+    messages: &Value,
+) -> Result<Value> {
     let session = state.sessions.get(&session_id).map(|s| s.clone());
     let session = match session {
         Some(s) => s,
@@ -347,7 +365,7 @@ async fn admin_push_impl(
     }
     if let Some(messages) = messages.as_array() {
         for msg in messages {
-            crate::ws::handle_message(state, &session, msg.clone()).await;
+            crate::scheduler::dispatch(state, &session, msg.clone()).await;
         }
     }
     Ok(json!({}))

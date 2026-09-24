@@ -8,6 +8,7 @@ mod presence;
 mod rate_limit;
 mod routes;
 mod s3;
+mod scheduler;
 mod service;
 mod ssrf;
 mod state;

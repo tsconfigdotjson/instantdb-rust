@@ -1255,7 +1255,10 @@ async fn grant_inner(
     )))
 }
 
-/// POST /platform/oauth/deny — legacy oauth-deny-access (:318-338)
+/// POST /platform/oauth/deny — legacy oauth-deny-access (:318-338), with
+/// the redirect's grant token and cookie checked before it is deleted
+/// (legacy `deny-redirect!` ignores the grant token and deletes first, so a
+/// wrong cookie still burns the redirect).
 pub async fn deny(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1265,19 +1268,40 @@ pub async fn deny(
     let params = merged_params(&headers, &query, &body);
     let r = async {
         let redirect_id = qp_uuid(&params, "redirect_id")?;
-        let _grant_token = qp_uuid(&params, "grant_token")?;
+        let grant_token = qp_uuid(&params, "grant_token")?;
+        let not_found = || {
+            record_not_found(
+                "oauth-app-redirect",
+                json!({"args": [{"redirect-id": redirect_id}]}),
+            )
+        };
         let row = sqlx::query(&format!(
-            "DELETE FROM instant_oauth_app_redirects WHERE lookup_key = $1 RETURNING {REDIRECT_COLUMNS}"
+            "SELECT {REDIRECT_COLUMNS} FROM instant_oauth_app_redirects WHERE lookup_key = $1"
         ))
         .bind(uuid_sha256(redirect_id))
         .fetch_optional(&state.pool)
         .await?
-        .ok_or_else(|| record_not_found("oauth-app-redirect", json!({"args": [{"redirect-id": redirect_id}]})))?;
+        .ok_or_else(not_found)?;
         let redirect = redirect_from_row(&row);
-        let cookie = cookie_value(&headers).ok_or_else(|| InstantError::new("param-missing", 400, "Missing cookie.", None))?;
-        if !constant_eq(cookie.as_bytes(), redirect.cookie.as_bytes()) {
-            return Err(InstantError::new("param-missing", 400, "Invalid cookie.", None));
+        if redirect.grant_token != Some(grant_token) {
+            return Err(not_found());
         }
+        let cookie = cookie_value(&headers)
+            .ok_or_else(|| InstantError::new("param-missing", 400, "Missing cookie.", None))?;
+        if !constant_eq(cookie.as_bytes(), redirect.cookie.as_bytes()) {
+            return Err(InstantError::new(
+                "param-missing",
+                400,
+                "Invalid cookie.",
+                None,
+            ));
+        }
+        // delete-if-still-there: a concurrent grant / deny consumed it first
+        sqlx::query("DELETE FROM instant_oauth_app_redirects WHERE lookup_key = $1 RETURNING 1")
+            .bind(uuid_sha256(redirect_id))
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(not_found)?;
         Ok(found(&add_query_params(
             &redirect.redirect_uri,
             &[("error", "access_denied"), ("state", &redirect.state)],

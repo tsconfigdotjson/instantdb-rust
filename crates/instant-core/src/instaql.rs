@@ -729,6 +729,79 @@ fn push_typed_value(qb: &mut QueryBuilder<Postgres>, t: CheckedDataType, v: &Val
     }
 }
 
+/// `(<extract>(alias.value) = ANY(<array>) AND alias.checked_data_type = t)`
+/// for a set of non-null typed values; `push_typed_value`'s per-value
+/// conversions, applied element-wise.
+fn push_typed_any(
+    qb: &mut QueryBuilder<Postgres>,
+    t: CheckedDataType,
+    alias: &str,
+    vals: &[&Value],
+) {
+    let lhs = format!("{}({}.value)", extract_fn(t), alias);
+    qb.push("(");
+    match t {
+        CheckedDataType::Number => {
+            qb.push(format!("{lhs} = ANY("));
+            qb.push_bind(
+                vals.iter()
+                    .map(|v| v.as_f64().unwrap_or(0.0))
+                    .collect::<Vec<f64>>(),
+            );
+            qb.push("::float8[])");
+        }
+        CheckedDataType::Boolean => {
+            qb.push(format!("{lhs} = ANY("));
+            qb.push_bind(
+                vals.iter()
+                    .map(|v| v.as_bool().unwrap_or(false))
+                    .collect::<Vec<bool>>(),
+            );
+            qb.push("::boolean[])");
+        }
+        CheckedDataType::String => {
+            qb.push(format!("{lhs} = ANY("));
+            qb.push_bind(
+                vals.iter()
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect::<Vec<_>>(),
+            );
+            qb.push("::text[])");
+        }
+        CheckedDataType::Date => {
+            let millis: Vec<f64> = vals.iter().filter_map(|v| v.as_f64()).collect();
+            let texts: Vec<String> = vals
+                .iter()
+                .filter(|v| !v.is_number())
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .collect();
+            let has_millis = !millis.is_empty();
+            qb.push("(");
+            if has_millis {
+                qb.push(format!(
+                    "{lhs} = ANY(ARRAY(SELECT to_timestamp(x / 1000.0) FROM unnest("
+                ));
+                qb.push_bind(millis);
+                qb.push("::float8[]) x))");
+            }
+            if !texts.is_empty() {
+                if has_millis {
+                    qb.push(" OR ");
+                }
+                qb.push(format!("{lhs} = ANY("));
+                qb.push_bind(texts);
+                qb.push("::text[]::timestamptz[])");
+            }
+            qb.push(")");
+        }
+    }
+    qb.push(format!(
+        " AND {}.checked_data_type = '{}'::checked_data_type)",
+        alias,
+        t.as_str()
+    ));
+}
+
 impl<'a> SqlCtx<'a> {
     /// Push SQL boolean expression testing `cond` for the entity id expression
     /// `ent` (SQL text) of type `etype`.
@@ -1035,6 +1108,35 @@ impl<'a> SqlCtx<'a> {
             qb.push(" AND ");
         };
         match emit {
+            // legacy binds a `$in` set as one array parameter (datalog.clj
+            // in-any / data-type-comparison), so its size is not bounded by
+            // the 65,535 bind parameters of a statement
+            LeafEmit::Eq(vals) if vals.len() > 1 => {
+                base(qb, false);
+                qb.push("(");
+                let (typed_vals, raw_vals): (Vec<&Value>, Vec<&Value>) = match typed {
+                    Some(t) if t != CheckedDataType::String => {
+                        vals.iter().partition(|v| !v.is_null())
+                    }
+                    _ => (vec![], vals.iter().collect()),
+                };
+                if let Some(t) = typed.filter(|_| !typed_vals.is_empty()) {
+                    for v in &typed_vals {
+                        coerce_typed(attr, t, v, "$eq")?;
+                    }
+                    push_typed_any(qb, t, alias, &typed_vals);
+                }
+                if !raw_vals.is_empty() {
+                    if !typed_vals.is_empty() {
+                        qb.push(" OR ");
+                    }
+                    qb.push(format!("{}.value = ANY(", alias));
+                    qb.push_bind(raw_vals.iter().map(|v| v.to_string()).collect::<Vec<_>>());
+                    qb.push("::jsonb[])");
+                }
+                qb.push("))");
+                Ok(())
+            }
             LeafEmit::Eq(vals) => {
                 base(qb, false);
                 qb.push("(");

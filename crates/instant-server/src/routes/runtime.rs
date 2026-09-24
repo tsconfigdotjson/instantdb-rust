@@ -519,8 +519,11 @@ pub async fn signout(State(state): State<Arc<AppState>>, Json(body): Json<Value>
 }
 
 async fn signout_impl(state: &AppState, body: &Value) -> Result<Value> {
-    let app_id = get_app_id(body, "app_id")?;
-    let token = get_str(body, "refresh_token")?;
-    auth::sign_out(state, app_id, None, Some(token)).await?;
+    // legacy signout-post: both params `get-param!`ed as uuids, app_id first
+    // (runtime/routes.clj:161-165)
+    let app_id = crate::routes::sse::uuid_param(&["body", "app_id"], body.get("app_id"))?;
+    let token =
+        crate::routes::sse::uuid_param(&["body", "refresh_token"], body.get("refresh_token"))?;
+    auth::sign_out(state, app_id, None, Some(&token.to_string())).await?;
     Ok(json!({}))
 }

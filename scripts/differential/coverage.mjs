@@ -9,7 +9,8 @@
 // Groups `demo`, `health`, `core`, `ws-internal` and `cel-internal` are listed in the
 // manifest but never counted (dev tooling, server-enqueued ops, optimizer
 // internals), and the hosted-only items of out-of-scope.json (billing,
-// backups, sunset, Postmark, the operators' reports) are counted separately.
+// backups, sunset, Postmark, the operators' reports) and the error types of
+// unreachable.json no request can produce are counted separately.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -28,13 +29,17 @@ for (const l of lines) for (const id of JSON.parse(l).covered) covered.add(id);
 
 const outOfScope = JSON.parse(fs.readFileSync(path.join(here, "out-of-scope.json"), "utf8")).items;
 const outOfScopeIds = new Set(outOfScope.map((i) => i.id));
+const unreachable = JSON.parse(fs.readFileSync(path.join(here, "unreachable.json"), "utf8")).items;
+const unreachableIds = new Set(unreachable.map((i) => i.id));
 const manifestIds = new Set(manifest.items.map((i) => i.id));
-const unknown = outOfScope.filter((i) => !manifestIds.has(i.id));
-if (unknown.length) {
-  console.error(`out-of-scope.json names ids that are not in surface.json: ${unknown.map((i) => i.id).join(", ")}`);
-  process.exit(1);
+for (const [file, items] of [["out-of-scope.json", outOfScope], ["unreachable.json", unreachable]]) {
+  const unknown = items.filter((i) => !manifestIds.has(i.id));
+  if (unknown.length) {
+    console.error(`${file} names ids that are not in surface.json: ${unknown.map((i) => i.id).join(", ")}`);
+    process.exit(1);
+  }
 }
-const counted = manifest.items.filter((i) => !NOT_COUNTED.has(i.group) && !outOfScopeIds.has(i.id));
+const counted = manifest.items.filter((i) => !NOT_COUNTED.has(i.group) && !outOfScopeIds.has(i.id) && !unreachableIds.has(i.id));
 const byGroup = {};
 for (const i of counted) {
   const g = (byGroup[i.group] ??= { total: 0, covered: 0, missing: [] });
@@ -44,9 +49,11 @@ for (const i of counted) {
 }
 const total = counted.length;
 const hit = counted.filter((i) => covered.has(i.id)).length;
-console.log(`legacy surface coverage: ${hit}/${total} (${((100 * hit) / total).toFixed(1)}%); ${outOfScopeIds.size} hosted-only items out of scope (out-of-scope.json)`);
+console.log(`legacy surface coverage: ${hit}/${total} (${((100 * hit) / total).toFixed(1)}%); ${outOfScopeIds.size} hosted-only items out of scope (out-of-scope.json), ${unreachableIds.size} unreachable (unreachable.json)`);
 const exercisedOutOfScope = [...outOfScopeIds].filter((id) => covered.has(id));
 if (exercisedOutOfScope.length) console.log(`  out-of-scope items a run exercised (drop them from out-of-scope.json): ${exercisedOutOfScope.join(", ")}`);
+const exercisedUnreachable = [...unreachableIds].filter((id) => covered.has(id));
+if (exercisedUnreachable.length) console.log(`  unreachable items a run exercised (drop them from unreachable.json): ${exercisedUnreachable.join(", ")}`);
 for (const [g, v] of Object.entries(byGroup).sort()) {
   console.log(`  ${g.padEnd(11)} ${String(v.covered).padStart(3)}/${String(v.total).padEnd(3)}${v.missing.length ? "  missing: " + v.missing.join(", ") : ""}`);
 }
