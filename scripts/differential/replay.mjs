@@ -84,6 +84,8 @@ function buildScenario() {
     projectsId: mk(), projectsName: mk(), tasksId: mk(), tasksTitle: mk(), tasksProject: mk(),
     p1: mk(), p2: mk(), k1: mk(), k2: mk(), k3: mk(),
     dynAttrOk: mk(), dynAttrDenied: mk(), m1: mk(), m2: mk(),
+    // runtime SSE (issue #38, step 35)
+    rtSseTodo: mk(),
     // stream ids must be v4-shaped uuids on both servers
     stream2Token: "00000000-0000-4000-8000-00000000a5ee",
   };
@@ -1552,6 +1554,60 @@ function buildScenario() {
         rec(view("cbUnknownRequest", await call(`?state=${env.appId}${ids.m1}&code=x`, { cookie: `__session=instantdb_${ids.m2}` })));
         const landing = await call("?test-redirect=1");
         rec({ name: "cbTestRedirect", status: landing.status, ct: landing.ct, ok: landing.raw.includes("Your OAuth redirect looks good!") });
+      },
+    },
+    {
+      // the browser's SSE fallback transport (core/src/Connection.ts
+      // SSEConnection): GET /runtime/sse opens the session, POST
+      // /runtime/sse feeds it the ops the socket takes (runtime/routes.clj
+      // :57-70); then POST /runtime/signout deletes a refresh token, so it
+      // no longer verifies (:161-165)
+      name: "35-runtime-sse-signout",
+      run: async (env) => {
+        env.conns.RSSE = connectSse(env.url, env.appId, `${env.serverName}:RSSE`, {
+          method: "GET",
+          path: `/runtime/sse?app_id=${env.appId}`,
+          pushPath: `/runtime/sse?app_id=${env.appId}`,
+        });
+        await env.conns.RSSE.open;
+        msg(env.conns.RSSE, { op: "init", "app-id": env.appId, "refresh-token": env.scratch.refreshToken, versions: { "@instantdb/core": "v0.22.0" } });
+        await env.conns.RSSE.waitFor((m) => m.op === "init-ok");
+        const q = { todos: { $: { where: { title: "over runtime sse" } } } };
+        msg(env.conns.RSSE, { op: "add-query", q });
+        await env.conns.RSSE.waitFor((m) => m.op === "add-query-ok");
+        msg(env.conns.RSSE, {
+          op: "transact",
+          "tx-steps": [
+            ["add-triple", ids.rtSseTodo, ids.todosId, ids.rtSseTodo],
+            ["add-triple", ids.rtSseTodo, ids.todosTitle, "over runtime sse"],
+          ],
+        });
+        await env.conns.RSSE.waitFor((m) => m.op === "transact-ok");
+        await env.conns.RSSE.waitFor((m) => m.op === "refresh-ok");
+        msg(env.conns.RSSE, { op: "join-room", "room-type": "sse-room", "room-id": "sse-room-1" });
+        await env.conns.RSSE.waitFor((m) => m.op === "join-room-ok");
+
+        env.conns.HTTP = env.conns.HTTP ?? httpConn(`${env.serverName}:HTTP`);
+        const post = async (p, body) => {
+          const res = await fetch(`${env.url}${p}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+          const text = await res.text();
+          let json = null;
+          try { json = JSON.parse(text); } catch {}
+          return { status: res.status, type: json?.type ?? null, message: json?.message ?? null, keys: json && typeof json === "object" ? Object.keys(json).sort() : null };
+        };
+        const rec = (name, r) => env.conns.HTTP.record({ name, ...r });
+        const guest = await fetch(`${env.url}/runtime/auth/sign_in_guest`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ "app-id": env.appId }) }).then((r) => r.json());
+        const guestToken = guest?.user?.refresh_token;
+        if (!guestToken) throw new Error(`no guest refresh token from ${env.serverName}: ${JSON.stringify(guest).slice(0, 300)}`);
+        rec("signoutMissingApp", await post("/runtime/signout", { refresh_token: guestToken }));
+        rec("signoutMissingToken", await post("/runtime/signout", { app_id: env.appId }));
+        rec("signoutMalformedToken", await post("/runtime/signout", { app_id: env.appId, refresh_token: "nope" }));
+        rec("verifyBeforeSignout", await post("/runtime/auth/verify_refresh_token", { "app-id": env.appId, "refresh-token": guestToken }));
+        rec("signout", await post("/runtime/signout", { app_id: env.appId, refresh_token: guestToken }));
+        rec("verifyAfterSignout", await post("/runtime/auth/verify_refresh_token", { "app-id": env.appId, "refresh-token": guestToken }));
+        rec("signoutAgain", await post("/runtime/signout", { app_id: env.appId, refresh_token: guestToken }));
+        rec("sseOpenMissingApp", { status: (await fetch(`${env.url}/runtime/sse`, { headers: { accept: "text/event-stream" } })).status });
+        rec("ssePushUnknownSession", await post(`/runtime/sse?app_id=${env.appId}`, { machine_id: ids.m1, session_id: ids.m2, sse_token: ids.m1, messages: [] }));
       },
     },
   ];

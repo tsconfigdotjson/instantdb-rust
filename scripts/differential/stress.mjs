@@ -1,10 +1,8 @@
-// Scheduling / timing stress step of the differential harness. Legacy runs a
-// session's ops on independent group keys (session.clj:1463-1553), so a slow
-// transact does not delay that session's presence or query replies; this
-// server handles a session's frames in arrival order (docs/PARITY.md "session
-// op scheduling"). This step pins down that the difference is latency only:
-// a large transact is followed immediately by set-presence, add-query and a
-// client-broadcast on the same session, and both servers must
+// Scheduling / timing stress step of the differential harness. Both servers
+// run a session's ops on independent group keys (session.clj:1463-1553,
+// scheduler.rs), so a slow transact does not delay that session's presence or
+// query replies. A large transact is followed immediately by set-presence,
+// add-query and a client-broadcast on the same session, and both servers must
 //   - answer every op (no drop, no timeout),
 //   - deliver the presence update and the broadcast to a peer session,
 //   - and converge to the same query result and presence state.

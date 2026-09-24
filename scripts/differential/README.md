@@ -45,7 +45,9 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `data.ref` in update / delete rules, `attrs.allow.create`, the `mode`
   pre-pass messages and tx-step shape specs, the admin presence route with
   re-fetched users and `instance-id`, `resync-table` mismatch checks, and the
-  OAuth callback's 400 surfaces + `?test-redirect` page. `inferred-types` on
+  OAuth callback's 400 surfaces + `?test-redirect` page; step 35 the
+  browser's SSE fallback transport (`GET` / `POST /runtime/sse`) and
+  `POST /runtime/signout`. `inferred-types` on
   attrs is compared for real (it used to be normalized away). Frames are folded into the
   **client-visible projection** (exactly what `Reactor.js`/`SyncTable.ts`/
   `Stream.ts` read, with volatile server-chosen values normalized) and must
@@ -102,7 +104,11 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
 - `errors.mjs` / `errors-allowed.json` — the error matrix: one probe per
   externally reachable legacy error type (`err:*` in surface.json) over HTTP
   and the ws session; the normalized envelope (status, type, message, hint)
-  must match. `node errors.mjs <app> <token> <user-refresh-token>`.
+  must match. The timeout probes hold `LOCK TABLE triples IN SHARE MODE` on
+  each server's database so a transact outlives the 5s handler timeout
+  (ws, `operation-timed-out`) or the 30s statement timeout (HTTP, `timeout`).
+  `unreachable.json` lists the error types no request can produce, with the
+  reason. `node errors.mjs <app> <token> <user-refresh-token>`.
 - `schema.mjs` / `schema-allowed.json` — diffs the two live database
   catalogs (tables, columns, constraints, indexes, enums, functions,
   triggers): an upstream migration the vendored copy lacks fails CI here
@@ -110,15 +116,18 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
 - `stress.mjs` — scheduling stress: a large transact followed immediately by
   presence, a query and a broadcast on the same session; every op must be
   answered on both servers, peers must see the presence/broadcast, and the
-  states must converge (the reply order is printed; legacy's per-op group
-  keys vs this server's in-order handling is documented in docs/PARITY.md).
+  states must converge (the reply order is printed; both servers run a
+  session's ops on legacy's group keys).
 - `dash.mjs` step 39 drives the webhook management routes, the events a
   transaction queues and the payload for them on both servers.
 - `dash.mjs` step 40 drives the dashboard's Google login (`/dash/oauth/start`
   with legacy's unconfigured client, every callback error path, a real Google
   rejection, the token errors), the get-a-db creation gates, `track-import`
   and the active-session stats; step 41 the admin magic-code routes
-  (`send_magic_code` hands the code back, `verify_magic_code` signs in).
+  (`send_magic_code` hands the code back, `verify_magic_code` signs in);
+  step 42 the runtime OAuth routes (the `start` redirect through Google's
+  real discovery document, the callback / token / id_token error surfaces,
+  `openid-configuration`).
   `scripts/dash-login-test.mjs` (the `cargo test + e2e` job) runs the full
   Google round trip against a mock token endpoint.
 - `lib.mjs` — capture clients, normalization, folding.
@@ -138,8 +147,9 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   (`node coverage.mjs --write <file>` updates the baseline after adding
   coverage). `out-of-scope.json` names the hosted-only items (billing,
   backups / restores, sunset stages, Postmark sender verification, the
-  operators' reports) with a reason each; they leave the counted total and
-  are reported on their own line, so the percentage measures what a
+  operators' reports) and `unreachable.json` the error types no request can
+  produce, with a reason each; they leave the counted total and are
+  reported on their own line, so the percentage measures what a
   self-hosted server can serve. Groups `demo`, `health`, `ws-internal`, `cel-internal` are
   listed but not counted.
 

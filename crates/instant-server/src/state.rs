@@ -271,6 +271,8 @@ pub struct Session {
     /// set once the outgoing queue overflowed — the transport closes the
     /// session instead of buffering without bound
     pub overflowed: AtomicBool,
+    /// per-session op lanes (legacy group keys)
+    pub scheduler: crate::scheduler::Scheduler,
 }
 
 impl Session {
@@ -283,6 +285,7 @@ impl Session {
             queued: AtomicUsize::new(0),
             max_queued,
             overflowed: AtomicBool::new(false),
+            scheduler: Default::default(),
         }
     }
 
@@ -461,6 +464,7 @@ impl AppState {
 
     pub fn drop_session(&self, session_id: Uuid) {
         if let Some((_, session)) = self.sessions.remove(&session_id) {
+            session.scheduler.close();
             drop(session);
         }
         self.app_sessions.retain(|_, set| {

@@ -15,14 +15,14 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | `refresh-ok` push with computations + attrs | ✅ | result-hash suppression; per-app coalesced refresh batches, identical (query, auth, request.ip/origin) recomputed once across sessions. Fan-out follows legacy's invalidator: only sessions with a topic-stale query are refreshed (triple topics plus a wildcard per changed attrs row, `topics-for-attr-upsert`), except attr inserts / deletes and ident changes (`schema-changes-require-refreshing-sessions?`), which refresh every session; flag flips and inferred-types writes therefore reach only sessions whose queries mention the attr |
 | topic-based invalidation narrowing | ✅ | coarse topics per registered query (`instant_core::topics`, QUERY.md §6.2 shapes with result substitution on the entity fetch) matched against the tx's `rust_tx_changes` rows; unresolvable shapes and `.ref(` rules fall back to catch-all; result-hash suppression remains the backstop |
 | error shapes (`type`, `hint`, `original-event` echo) | ✅ | full legacy key set incl. null `hint`/`client-event-id` (conformance error matrix); unknown ops are `param-malformed` "Invalid op", pre-init ops `validation-failed` "`init` has not run for this session.", `ex/get-param!` shapes (`Missing parameter: ["app-id"]` / `Malformed parameter: [...]` with `hint.in`) for `app-id`, `room-id`, stream `chunks`/`offset`/`reconnect-token`, `q: null` is "Query can not be null.", a missing `tx-steps` is `validation-failed` for `tx-steps`, a bad `__admin-token` is `record-not-found` (differential step 26) |
-| per-op handler timeout (`operation-timed-out`) | 🟡 | legacy cancels a handler after `handle-receive-timeout-ms` (5000, session.clj:58, :1137-1207) and answers `operation-timed-out` status 500; same here (`INSTANT_HANDLE_RECEIVE_TIMEOUT_MS`). Legacy additionally runs a session's ops on independent group keys (`[:transact sid]`, `[:query sid q]`, `[:room sid room-id]`, session.clj:1463-1510); this server handles a session's frames in order, so one slow query delays that session's next op (never other sessions) |
+| per-op handler timeout and op scheduling (`operation-timed-out`) | ✅ | legacy cancels a handler after `handle-receive-timeout-ms` (5000, session.clj:58, :1137-1207) and answers `operation-timed-out` status 500; same here (`INSTANT_HANDLE_RECEIVE_TIMEOUT_MS`). A session's ops run on legacy's group keys (`scheduler.rs`, session.clj:1463-1553): same-key ops in arrival order, different keys concurrently; while an op waits, a newer `set-presence` replaces it, `append-stream`s merge, and a transact of the same cardinality-one `add-triple`s takes it over (legacy's default-on `combine-transacts?`, every client-event-id answered with the one result); an `add-query` re-reads the tx watermark after registering and recomputes if a tx landed in between. Differential error matrix (`ws/operation-timed-out/transact-blocked`), stress.mjs |
 | rooms: join/leave/set-presence/refresh-presence | ✅ | cross-node via Postgres; in-room asserts + `set-presence-ok`/`client-broadcast-ok` acks like legacy; re-joining a room keeps the presence data already set (hazelcast.clj:123-134, the client re-joins on every reconnect; differential step 26) |
 | `patch-presence` incremental edits | ✅ | diff-based patches for core > 0.17.5; full snapshots for older clients and fresh joiners |
 | `client-broadcast` / `server-broadcast` | ✅ | |
 | message batching (JSON array frames) | ✅ | queued messages coalesce into one array frame for core > 0.22.75 (see divergence table) |
 | legacy field superset (`processed-isn`, `isn`, `result-meta`, computation metadata, `trace-id`) | ✅ | see "Wire-level divergences" below |
 | `skip-attrs` version gating | ✅ | refresh-ok omits `attrs` for core > 0.20.4 unless attrs changed (legacy session.clj:503-533) |
-| SSE fallback transport (`/runtime/sse`) | ✅ | sse-init handshake + POST envelope (scripts/sse-test.mjs) |
+| SSE fallback transport (`/runtime/sse`) | ✅ | sse-init handshake + POST envelope, ops through the same scheduler as the socket (scripts/sse-test.mjs, differential replay step 35) |
 | `add-query` `return-type: tree` | ✅ | legacy session.clj:249 / query.clj:139-144: `result` is the admin object tree and `result-meta` carries `{page-info, aggregate}` keyed by top-level form; refresh-ok computations keep the shape. Used by the admin SSE session; a ws client may ask for it too |
 | sync tables (`start-sync`, `sync-load-batch`, `sync-update-triples`, `resync-table`, `remove-sync`) | ✅ | admin-only like legacy (session.clj:281-284); trigger-based per-tx change log replaces the WAL feed; cross-session resync + pruned-log forced-restart path (scripts/synctable-test.mjs, scripts/conformance-test.mjs) |
 | streams (`start-stream`, `append-stream`, `subscribe-stream`, live tailing, resume) | ✅ | disk-backed bytes + NOTIFY fan-out; $streams perms enforced with the stream row as `data` for view checks (scripts/streams-test.mjs); `reconnect-token` is required (session.clj:767-769, so a client-id can't be taken over), appends need `chunks` + `offset`, "Stream is completed." / "Invalid offset for stream." (app_stream.clj:444-457), an unknown `unsubscribe-stream` is "Stream subscription is missing." (differential step 26); `remove-sync` deletes only a sub this session holds, scoped to its app (session.clj:373-381) |
@@ -184,7 +184,6 @@ client-code citation proving it is unread (client paths relative to
 | sync-table attr set | derived from the query when the subscription starts (or resyncs) and kept with the session, so an attr added to the etype later is not synced until a resync | same (`SyncSub.attr_ids` frozen at start-sync / resync) | — |
 | `permission-denied` hint `input` | `[etype scope]` — `["posts" "object"]` for entity checks, `["attrs" "attr"]` for attr checks (`run-checks!`, permissioned_transaction.clj:613-631); `["$users" "create"]` on signup; `["$files" action]` / `["$streams" action]` with `has-storage-permission?` / `has-streams-permission?` | same | — |
 | `debugQuery` / `debugTransact` check-results | `bindings` (`data`, `new-data`, `linked-data`, `linked-etype`, `actions`, `rule-params`, `modified-fields`) per transact check; query checks keyed by `[etype id label]` with `rule-wheres` derived from convertible view rules | `bindings` carried on every transact check; query checks carry `label: null` (entity-level) and `rule-wheres: {}` because rules are evaluated per entity, never rewritten into where clauses | the admin SDK's debug helpers print these maps; nothing pattern-matches `rule-wheres` |
-| session op scheduling | a session's ops run on independent group keys (`[:transact session]`, `[:query session q]`, `[:room session room]`, ...) and same-key events may be combined (session.clj:1463-1553), so a slow transact does not delay that session's queries or presence | a session's frames are handled strictly in arrival order (other sessions are unaffected); nothing is combined | ordering within a session is a superset of legacy's guarantees; the only observable difference is latency under a slow op, and legacy's combining only drops redundant refreshes |
 | batching scope | only server-broadcast fan-out is batched, 500/frame, core > 0.22.75 (reactive/session.clj:747-757) | any queued frames coalesce (≤100/frame) for core > 0.22.75 | array frames are handled for every op (`Reactor.js:1798-1804`); single-vs-array framing is transport-level |
 | `stream-append` payload | file URLs for flushed segments + inline `content` for the tail | always inline `content` | reader consumes `files` (if any) then `content` (`Stream.ts:1077-1084`); bytes delivered are identical |
 | `client-broadcast-ok` payload | includes fanned-out envelope | same | no client handler for the op at all (unknown ops ignored, `Reactor.js:932-934`) |
@@ -197,6 +196,9 @@ client-code citation proving it is unread (client paths relative to
 | webhook event production | the logical-replication feed: every WAL record's attr ids are bloom-matched against `webhooks.topics`, then `webhook-matches?` inspects the triple changes; the payload is rebuilt from the stored WAL record (`history`) | inside each transaction, before commit: an entity of a webhook namespace produces `create` when its id-attr triple was inserted, `update` when it was written again, `delete` when it was deleted (the same signal `webhook-matches?` reads off the WAL: ref / value attrs alone, i.e. link / unlink steps and the referrers of a deleted entity, produce nothing); a per-tx snapshot (`rust_webhook_history`: cardinality-one triples as this tx leaves them + the tx's triple changes) and the `webhook_events` rows commit with the data; the ISN is `0/<tx id as lsn>`. Active webhooks are cached per node and evicted by a `webhooks` row trigger's NOTIFY | same events for the same transactions (an "update" needs an entity write, which InstaML always accompanies with the id triple legacy keys on); ISN values differ (tx ids vs Postgres LSNs), so cursors and payload URLs are only comparable in shape |
 | `$entityId` where key | present in `where-value-valid-keys?` (a dashboard hack, instaql.clj:69-75) but with no spec entry and no SQL branch, so a `{$entityId: v}` where value passes validation and yields a degenerate query result rather than an error | rejected as an unsupported where operator | undefined legacy behavior with no client that relies on it; the real, spec’d `$entityIdStartsWith` operator is implemented and covered by the fuzz layer |
 | `remove-sync` without `keep-subscription` | drops the in-memory sync query and calls `sync-sub-model/delete!` with `(:sync/subscription-id sync-ent)`, an attribute nothing sets, so the `sync_subs` row is never deleted (reactive/session.clj:373-381) | the same: the row is kept, `keep-subscription` changes nothing | a client that removes and later `resync-table`s the same subscription id resumes on both servers (differential replay steps 12 and 33) |
+| transaction with more than ~32k distinct lookup refs | `parameter-limit-exceeded`: lookups resolve through one `VALUES` list of two bind parameters each (transaction.clj resolve-lookups), past pgjdbc's 65,535 | the transaction runs | an implementation limit, not a contract; `$in` sets are one array parameter on both servers (error matrix `query-in-70k-values`) |
+| `/dash/cli/auth/claim` on a ticket another user claimed | the ticket is re-pointed at the caller (instant_cli_login.clj `claim!`) | refused: `validation-failed`, issue `user-already-claimed`; a same-user re-claim still succeeds | hardening (issue #38); the CLI only polls `check`, which signs in the first claimant (differential dash step 40, allowlisted) |
+| `/platform/oauth/deny` checks | deletes the redirect first, then checks the cookie; the grant token is never compared (oauth_apps/routes.clj:318-338) | grant token (`record-not-found`, like `grant`) and cookie checked before the redirect is deleted | hardening (issue #38): a bad deny can no longer burn the user's pending consent (differential dash step 38, allowlisted) |
 | `join-room-error` op | defined in the client (`Reactor.js:921-927`) but never emitted by the legacy server either | never emitted; join failures use the generic `error` op | matches legacy behavior (no emitter in LEGACY/server) |
 
 ## Open items from the 2026-09-04 audit
@@ -226,10 +228,22 @@ particular deployment hits. Decide each one and the ledger is complete.
 | `app_files_to_sweep` on the `s3` backend | `storage/sweeper.clj` drains the table migration 52's trigger fills on every `$files` delete and removes the objects | `storage.rs` deletes objects synchronously; the trigger still fills the table and nothing reads it | port the sweeper (recommended) or drop the trigger in a `rust_*` migration step |
 | Apple and GitHub sign-in | Apple client-secret JWT + issuer quirk (auth/oauth.clj:141-147, :215), GitHub non-OIDC client (:31-113), Instant's shared credentials | generic OIDC discovery only; the dashboard route accepts a `github` provider that the runtime can't sign anyone in with | implement both (a day each) or refuse those provider types on the dash route so the failure is at setup, not at sign-in |
 | email delivery provider | Postmark (with Sendgrid behind a flag) and per-app verified senders | `EMAIL_PROVIDER=log` or `cloudflare`; custom senders only via a hand-set `verified` row | add a Postmark / SMTP arm; decide whether sender verification (a Postmark feature) stays out of scope |
-| per-session op scheduling | a session's ops run on independent group keys with combining (session.clj:1463-1553) | strict arrival order per session (other sessions unaffected) | keep (latency-only difference) or port the group-key scheduler |
 
 ### Resolved
 
+- **Per-session op scheduling** (session.clj:1463-1553): ported as
+  `scheduler.rs` (issue #38 item 9). Ops with different group keys run
+  concurrently, so a slow transact no longer delays that session's queries or
+  presence; the concurrency needed one fix legacy gets from its store, an
+  `add-query` that re-checks the tx watermark after it registers.
+- **Statement timeout** (jdbc/sql.clj `*query-timeout-seconds*`): user
+  transacts run with `statement_timeout` = `INSTANT_QUERY_TIMEOUT_SECS`
+  (default 30) and `/admin/query` is cut off at the same bound; a cancelled
+  statement (57014) is legacy's `timeout` "The query took too long to
+  complete." (error matrix `http/timeout/transact-blocked`).
+- **`$in` binding**: a `$in` set is one array parameter, like legacy's
+  `in-any`; it used to be one bind parameter per value, which failed past
+  65,535 values where legacy answers.
 - **Hard deletion of apps and attrs** (`hard_deletion_sweeper.clj` +
   `custodian.clj`): `hard_delete.rs` purges apps and attrs whose
   `deletion_marked_at` is older than `INSTANT_HARD_DELETE_GRACE_HOURS`
@@ -249,11 +263,13 @@ particular deployment hits. Decide each one and the ledger is complete.
   collect query every `INSTANT_SIZE_COLLECT_SECS`, which also backs the
   optional per-app size cap (`INSTANT_APP_SIZE_LIMIT_MB`).
 
-### Deliberate divergences to confirm (keep, or match legacy bug-for-bug)
+### Deliberate divergences (decided 2026-09-24: keep)
 
 Each is documented in the wire-level table above with the client-code citation
-that makes it safe; none is observable by a shipped client. They are listed
-here because "100%" is a policy choice for each: `update-attr` keeps cascade
+that makes it safe; none is observable by a shipped client. Issue #38 item 10
+settled every one as a keep; the differential harness pins the observable ones
+(`allowed-divergences.json`, `errors-allowed.json`, including `$entityId` and
+the out-of-scope invite revoke): `update-attr` keeps cascade
 config; admin `delete` by ref lookup deletes the doc; invite revoke is scoped
 to the app / org; `$entityId` is rejected; the `permission-evaluation-failed`
 cause text is always "You may have a typo"; `timestamp(string)` parse failures
@@ -295,14 +311,17 @@ service's own machinery.
   (build `www`, point `INSTANT_API_URI` at a node, sign in, manage an app,
   push a schema, invite a member, create a webhook) is the last validation
   layer the dashboard-route PRs lack.
-- 20 counted surface items are still not exercised differentially: seven
-  error types with no probe (`connection-closed`, `operation-timed-out`,
-  `parameter-limit-exceeded`, `record-check-violation`, `socket-error`,
-  `socket-missing`, `timeout`), the runtime OAuth and SSE routes and
-  `POST /runtime/signout` (covered single-server by `scripts/oauth-test.mjs`
-  and `scripts/sse-test.mjs`; the differential dropped them because legacy
-  fetches the provider's discovery document through its own SSRF guard, so a
-  container-local double is not reachable the same way on both servers),
-  `DELETE /dash/orgs/:org_id/invite/revoke`, and `$entityId` (undefined in
-  legacy). Decide whether a differential probe is required for each or the
-  single-server coverage is enough.
+- Differential coverage (issue #38 item 8): every counted surface item is
+  exercised on both servers. The runtime OAuth routes are compared in dash
+  step 42 (the `start` redirect against Google's real discovery document, the
+  callback / token / id_token error surfaces, `openid-configuration`), the
+  runtime SSE transport and `POST /runtime/signout` in replay step 35, org
+  invite revoke in dash step 37, `operation-timed-out` and `timeout` in the
+  error matrix (a transact held behind a table lock), and `$entityId` as an
+  allowlisted divergence. The OAuth code exchange's success path needs a
+  provider round trip that legacy's DNS-over-HTTPS resolver can't make to a
+  local double, so it stays single-server in `scripts/oauth-test.mjs`. Five
+  error types no request can produce (`socket-missing`, `socket-error`,
+  `connection-closed`, `parameter-limit-exceeded`, `record-check-violation`)
+  are listed with a reason each in `scripts/differential/unreachable.json`
+  and counted apart.

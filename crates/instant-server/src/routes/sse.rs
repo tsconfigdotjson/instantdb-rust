@@ -118,8 +118,10 @@ impl RxGuard {
 impl Drop for RxGuard {
     fn drop(&mut self) {
         let state = self.state.clone();
-        let session_id = self.session.id;
+        let session = self.session.clone();
+        let session_id = session.id;
         tokio::spawn(async move {
+            session.scheduler.shutdown().await;
             state.drop_session(session_id);
             crate::presence::leave_all(&state, session_id).await;
         });
@@ -161,7 +163,7 @@ pub async fn push(State(state): State<Arc<AppState>>, Json(body): Json<Value>) -
     }
     if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
         for msg in messages {
-            crate::ws::handle_message(&state, &session, msg.clone()).await;
+            crate::scheduler::dispatch(&state, &session, msg.clone()).await;
         }
     }
     Json(json!({})).into_response()
@@ -210,7 +212,7 @@ pub async fn admin_subscribe_query(
                     "return-type": "tree",
                     "client-event-id": Uuid::new_v4(),
                 });
-                crate::ws::handle_message(&st, &sess, msg).await;
+                crate::scheduler::dispatch(&st, &sess, msg).await;
             });
             open_stream(state, session, rx, Some(ADMIN_RETRY))
         }
@@ -347,7 +349,7 @@ async fn admin_push_impl(
     }
     if let Some(messages) = messages.as_array() {
         for msg in messages {
-            crate::ws::handle_message(state, &session, msg.clone()).await;
+            crate::scheduler::dispatch(state, &session, msg.clone()).await;
         }
     }
     Ok(json!({}))

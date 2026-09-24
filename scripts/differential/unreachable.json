@@ -1,0 +1,25 @@
+{
+ "_comment": "Legacy surface items no client request can make either server produce (decided in issue #38 item 8). coverage.mjs leaves them out of the counted total, lists them separately, and flags one a run does exercise. Every id must be in surface.json.",
+ "items": [
+  {
+   "id": "err:socket-missing",
+   "reason": "Thrown by the send path when a session's socket is already gone (reactive/store.clj:1596-1617, util/exception.clj:525-528); the error is logged server-side and there is no socket left to deliver it to."
+  },
+  {
+   "id": "err:socket-error",
+   "reason": "Wraps an IOException from writing to a socket (reactive/store.clj:1583-1617, util/exception.clj:530-535): the connection it would be reported on is the one that failed."
+  },
+  {
+   "id": "err:connection-closed",
+   "reason": "Raised when the websocket or the admin HTTP exchange closed before the reply was written (reactive/store.clj:1596-1615, admin/transact_queue.clj:49); by construction the client is no longer there to read it."
+  },
+  {
+   "id": "err:parameter-limit-exceeded",
+   "reason": "pgjdbc's 65,535-bind-parameter limit (util/exception.clj:733-740, `PreparedStatement can have at most`). Legacy binds query value sets as arrays (datalog.clj in-any), so only a transaction with ~33k distinct lookup refs (transaction.clj resolve-lookups, a VALUES list of 2 parameters each) reaches it; this server binds `$in` sets as one array too (errors.mjs query-in-70k-values) and resolves lookups without that limit, so the request succeeds instead. The error is an implementation limit, not a contract."
+  },
+  {
+   "id": "err:record-check-violation",
+   "reason": "The fallback for a CHECK constraint psql-throw! can't attribute to a triple (util/exception.clj:710-722). The triples checks become validation-failed and orgs_title_check has its own message; the remaining checks (apps status, requires_creator_or_org, the Stripe subscription tables) guard columns only server code writes, with values it validates first."
+  }
+ ]
+}

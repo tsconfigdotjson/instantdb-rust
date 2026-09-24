@@ -1093,6 +1093,24 @@ async function runAgainst(name) {
     r37.orgRemoveOwnerByCollaborator = errView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/members/remove`, { token: inviteeToken, body: { id: orgOwnerId } }));
     r37.orgMemberRemove = plainView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/members/remove`, { token: userToken, body: { id: orgMemberId } }));
     r37.orgAfterRemove = await orgView();
+    // org invite revoke: gates, then the revoke itself. Revoking the app's
+    // pending invite through the org path is the scoping divergence (legacy
+    // revokes any invite by id, member_invites.clj:166-172; here the revoke
+    // is scoped to the org in the path).
+    await call(base, "POST", `/dash/orgs/${teamOrgId}/invite/send`, { token: userToken, body: { "invitee-email": "orgthird@example.com", role: "collaborator" } });
+    orgGot = await call(base, "GET", `/dash/orgs/${teamOrgId}`, { token: userToken });
+    const orgThirdInvite = (orgGot.body?.invites ?? []).find((i) => i.email === "orgthird@example.com")?.id;
+    r37.orgRevokeMissingId = errView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/invite/revoke`, { token: userToken, body: {} }));
+    r37.orgRevokeByStranger = errView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/invite/revoke`, { token: inviteeToken, body: { "invite-id": orgThirdInvite } }));
+    r37.orgRevokeNoAuth = errView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/invite/revoke`, { token: null, body: { "invite-id": orgThirdInvite } }));
+    r37.orgRevoke = plainView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/invite/revoke`, { token: userToken, body: { "invite-id": orgThirdInvite } }));
+    r37.orgAfterRevoke = await orgView();
+    await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": "appfourth@example.com", role: "collaborator" } });
+    appRow = await invitesOf(userToken);
+    const appFourthInvite = (appRow.invites ?? []).find((i) => i.email === "appfourth@example.com")?.id;
+    await call(base, "DELETE", `/dash/orgs/${teamOrgId}/invite/revoke`, { token: userToken, body: { "invite-id": appFourthInvite } });
+    appRow = await invitesOf(userToken);
+    r37.orgRevokeForeignInvite = norm((appRow.invites ?? []).filter((i) => i.email === "appfourth@example.com").map((i) => ({ email: i.email, status: i.status })));
     // transfer an app into the org
     const tApp = mk();
     await call(base, "POST", "/dash/apps", { token: userToken, body: { id: tApp, title: "to transfer", admin_token: mk() } });
@@ -1256,6 +1274,23 @@ async function runAgainst(name) {
     const denyLoc = denyRes.headers.get("location");
     r38.deny = { status: denyRes.status, params: denyLoc ? Object.fromEntries(new URL(denyLoc).searchParams.entries()) : null };
     r38.denyAgain = errView(await (async () => { const res = await fetch(base + "/platform/oauth/deny", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", cookie: `__session=${d.cookie}` }, body: new URLSearchParams({ redirect_id: d.redirectId, grant_token: d.grantToken }), redirect: "manual" }); const text = await res.text(); let json; try { json = JSON.parse(text); } catch { json = { "<non-json>": text.slice(0, 80) }; } return { status: res.status, body: json }; })());
+    // deny checks the grant token and cookie before it consumes the
+    // redirect (legacy deletes first and ignores the grant token)
+    const denyView = async (x) => {
+      const res = await fetch(base + "/platform/oauth/deny", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", ...(x.cookie ? { cookie: `__session=${x.cookie}` } : {}) }, body: new URLSearchParams({ redirect_id: x.redirectId, grant_token: x.grantToken }), redirect: "manual" });
+      const loc = res.headers.get("location");
+      if (loc) return { status: res.status, params: Object.fromEntries(new URL(loc).searchParams.entries()) };
+      const text = await res.text();
+      let json;
+      try { json = JSON.parse(text); } catch { json = { "<non-json>": text.slice(0, 80) }; }
+      return errView({ status: res.status, body: json });
+    };
+    const dg = await startAndClaim();
+    r38.denyWrongGrant = await denyView({ ...dg, grantToken: mk() });
+    r38.denyAfterWrongGrant = await denyView(dg);
+    const dc = await startAndClaim();
+    r38.denyWrongCookie = await denyView({ ...dc, cookie: `instantdb_${mk()}` });
+    r38.denyAfterWrongCookie = await denyView(dc);
     const e = await startAndClaim();
     const grant1 = await grantView(e);
     const code1 = grant1.code;
@@ -1463,9 +1498,19 @@ async function runAgainst(name) {
     r40.cliClaimMissing = errView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: {} }));
     r40.cliClaimUnknown = plainView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: { ticket: mk() } }));
     r40.cliClaim = plainView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: { ticket: creg.body?.ticket } }));
+    r40.cliClaimAgainSameUser = plainView(await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: { ticket: creg.body?.ticket } }));
     const cchecked = await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg.body?.secret } });
     r40.cliCheck = cchecked.status === 200 ? { status: 200, keys: Object.keys(cchecked.body).sort(), email: cchecked.body.email } : errView(cchecked);
     r40.cliCheckAgain = errView(await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg.body?.secret } }));
+    // a second dashboard user claiming an already-claimed ticket: legacy
+    // re-points the ticket at them (instant_cli_login.clj claim!), here it is
+    // refused and the CLI signs in the user who claimed it first
+    const creg3 = await call(base, "POST", "/dash/cli/auth/register", { token: null });
+    await call(base, "POST", "/dash/cli/auth/claim", { token: userToken, body: { ticket: creg3.body?.ticket } });
+    const otherClaim = await call(base, "POST", "/dash/cli/auth/claim", { token: inviteeToken, body: { ticket: creg3.body?.ticket } });
+    r40.cliClaimOtherUser = otherClaim.status === 200 ? plainView(otherClaim) : errView(otherClaim);
+    const cchecked3 = await call(base, "POST", "/dash/cli/auth/check", { token: null, body: { secret: creg3.body?.secret } });
+    r40.cliClaimOtherUserSignsIn = cchecked3.status === 200 ? { firstClaimant: cchecked3.body.email === cchecked.body?.email } : errView(cchecked3);
     const creg2 = await call(base, "POST", "/dash/cli/auth/register", { token: null });
     r40.cliVoid = plainView(await call(base, "POST", "/dash/cli/auth/void", { token: userToken, body: { ticket: creg2.body?.ticket } }));
     r40.cliVoidNoAuth = errView(await call(base, "POST", "/dash/cli/auth/void", { token: null, body: { ticket: creg2.body?.ticket } }));
@@ -1492,6 +1537,77 @@ async function runAgainst(name) {
     r41.verifyAgain = errView(await call(base, "POST", "/admin/verify_magic_code", { ...appHdr, body: { email: magicEmail, code: String(sent.body?.code) } }));
     raw("41-admin-magic-codes", r41);
     record("41-admin-magic-codes", r41);
+
+    // 42 runtime OAuth (issue #38 item 8): every runtime OAuth route on both
+    // servers. The start redirect goes out to Google's real discovery
+    // document (public, so legacy's SSRF-guarded client reaches it too); the
+    // code exchange's success path needs a provider round trip and stays in
+    // scripts/oauth-test.mjs, so the token / id_token routes are compared on
+    // their error surfaces.
+    {
+      const r42 = {};
+      const gprov = await call(base, "POST", `/dash/apps/${appId}/oauth_service_providers`, { body: { provider_name: "google" } });
+      const gProviderId = gprov.body?.provider?.id;
+      const gclient = await call(base, "POST", `/dash/apps/${appId}/oauth_clients`, {
+        body: { provider_id: gProviderId, client_name: "google-web", client_id: "diff-client.apps.googleusercontent.com", client_secret: "diff-secret", discovery_endpoint: "https://accounts.google.com/.well-known/openid-configuration", meta: { providerName: "google" } },
+      });
+      r42.clientCreate = gclient.status === 200 ? { status: 200 } : errView(gclient);
+      await call(base, "POST", `/dash/apps/${appId}/authorized_redirect_origins`, { body: { service: "generic", params: ["app.example.com"] } });
+      const startView = async (p) => {
+        const res = await fetch(base + p, { redirect: "manual" });
+        const loc = res.headers.get("location");
+        if (!loc) {
+          const text = await res.text();
+          let json;
+          try { json = JSON.parse(text); } catch { json = { "<non-json>": text.slice(0, 80) }; }
+          return errView({ status: res.status, body: json });
+        }
+        const u = new URL(loc);
+        const params = Object.fromEntries([...u.searchParams.entries()].map(([k, v]) => {
+          // the callback URL carries each server's own origin; state is app id + a fresh uuid
+          if (k === "redirect_uri") return [k, new URL(v).pathname];
+          if (k === "state") return [k, v.startsWith(appId) ? "<app-id><uuid>" : v];
+          return [k, v];
+        }));
+        const cookie = res.headers.get("set-cookie") ?? "";
+        return { status: res.status, to: u.origin + u.pathname, params, cookie: { prefixed: /__session=instantdb_[0-9a-f-]{36}/.test(cookie), path: cookie.match(/Path=([^;]+)/i)?.[1] ?? null, httpOnly: /HttpOnly/i.test(cookie) } };
+      };
+      const redirectUri = encodeURIComponent("https://app.example.com/after");
+      r42.startMissingApp = await startView(`/runtime/oauth/start?client_name=google-web&redirect_uri=${redirectUri}`);
+      r42.startMissingClient = await startView(`/runtime/oauth/start?app_id=${appId}&redirect_uri=${redirectUri}`);
+      r42.startUnknownClient = await startView(`/runtime/oauth/start?app_id=${appId}&client_name=nope&redirect_uri=${redirectUri}`);
+      r42.startMissingRedirect = await startView(`/runtime/oauth/start?app_id=${appId}&client_name=google-web`);
+      r42.startUnauthorizedRedirect = await startView(`/runtime/oauth/start?app_id=${appId}&client_name=google-web&redirect_uri=${encodeURIComponent("https://evil.example.net/cb")}`);
+      r42.start = await startView(`/runtime/oauth/start?app_id=${appId}&client_name=google-web&redirect_uri=${redirectUri}&state=client-state&code_challenge=abc&code_challenge_method=S256`);
+      r42.startClientIdAlias = await startView(`/runtime/oauth/start?app_id=${appId}&client_id=google-web&redirect_uri=${redirectUri}`);
+      r42.startAppInPath = await startView(`/runtime/${appId}/oauth/start?client_name=google-web&redirect_uri=${redirectUri}`);
+      // the form_post callback shares the GET callback's error surfaces
+      const postCallback = async (form) => {
+        const res = await fetch(base + "/runtime/oauth/callback", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(form), redirect: "manual" });
+        const text = await res.text();
+        let json;
+        try { json = JSON.parse(text); } catch { json = { "<non-json>": text.slice(0, 80) }; }
+        return { status: res.status, redirected: res.headers.get("location") != null, type: json.type ?? null, message: json.message ?? json.error ?? null };
+      };
+      r42.callbackPostProviderError = await postCallback({ error: "access_denied", state: "whatever" });
+      r42.callbackPostMissingState = await postCallback({});
+      r42.callbackPostMissingCookie = await postCallback({ state: `${appId}${mk()}`, code: "x" });
+      // token exchange: the code lookup precedes any provider call
+      const tokenPost = (p, body) => call(base, "POST", p, { token: null, body });
+      r42.tokenMissingApp = errView(await tokenPost("/runtime/oauth/token", { code: mk() }));
+      r42.tokenMissingCode = errView(await tokenPost("/runtime/oauth/token", { app_id: appId }));
+      r42.tokenMalformedCode = errView(await tokenPost("/runtime/oauth/token", { app_id: appId, code: "nope" }));
+      r42.tokenUnknownCode = errView(await tokenPost("/runtime/oauth/token", { app_id: appId, code: mk() }));
+      r42.tokenAppInPathUnknownCode = errView(await tokenPost(`/runtime/${appId}/oauth/token`, { code: mk() }));
+      r42.idTokenMissing = errView(await tokenPost("/runtime/oauth/id_token", { app_id: appId, client_name: "google-web" }));
+      r42.idTokenMissingClient = errView(await tokenPost("/runtime/oauth/id_token", { app_id: appId, id_token: "x.y.z" }));
+      r42.idTokenUnknownClient = errView(await tokenPost("/runtime/oauth/id_token", { app_id: appId, client_name: "nope", id_token: "x.y.z" }));
+      const oidc = await call(base, "GET", `/runtime/${appId}/.well-known/openid-configuration`, { token: null });
+      r42.openidConfiguration = oidc.status === 200 ? { status: 200, keys: Object.keys(oidc.body).sort(), paths: Object.fromEntries(Object.entries(oidc.body).map(([k, v]) => [k, new URL(v).pathname.replace(appId, "<app-id>")])) } : errView(oidc);
+      r42.openidConfigurationBadApp = errView(await call(base, "GET", "/runtime/nope/.well-known/openid-configuration", { token: null }));
+      raw("42-runtime-oauth", r42);
+      record("42-runtime-oauth", r42);
+    }
   }
 
   return out;

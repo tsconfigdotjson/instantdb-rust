@@ -10,6 +10,7 @@
 //    creator refresh token must exist on both servers)
 // Env: LEGACY_URL, RUST_URL, LEGACY_DATABASE_URL, RUST_DATABASE_URL, DUMP=1
 
+import { execSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +45,8 @@ const FIXED = {
   // the mode-create probe's entity: a fixed id, since the error echoes it and
   // the per-server counter behind mk() is not in step across servers by then
   modeEntity: mk(),
+  // the one entity the 70k-value `$in` probe must find
+  needle: mk(),
 };
 const isFixed = (s) => typeof s === "string" && s.includes("-0000-4000-8000-");
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
@@ -179,6 +182,19 @@ probe("http/validation-failed/query-like-on-number", async (ctx) =>
   httpView(await admin(ctx, "/admin/query", { query: { probe: { $: { where: { name: { $like: 3 } } } } } })));
 probe("http/validation-failed/query-empty-or", async (ctx) =>
   httpView(await admin(ctx, "/admin/query", { query: { probe: { $: { where: { or: [] } } } } })));
+// `$entityId` is in legacy's where-value-valid-keys? (a dashboard hack,
+// instaql.clj:69-75) with no spec entry and no SQL branch: legacy answers a
+// degenerate result, this server rejects it (errors-allowed.json)
+probe("http/no-error/query-entity-id", async (ctx) =>
+  httpView(await admin(ctx, "/admin/query", { query: { probe: { $: { where: { $entityId: FIXED.entity } } } } })));
+// a `$in` set is one array parameter on both servers (datalog.clj in-any),
+// so a set past Postgres' 65,535 bind parameters still answers
+probe("http/no-error/query-in-70k-values", async (ctx) => {
+  await admin(ctx, "/admin/transact", { steps: [["update", "probe", FIXED.needle, { name: "v69999" }]] });
+  const values = Array.from({ length: 70000 }, (_, i) => `v${i}`);
+  const res = await admin(ctx, "/admin/query", { query: { probe: { $: { where: { name: { $in: values } } } } } });
+  return { ...httpView({ status: res.status, body: res.status === 200 ? {} : res.body }), found: (res.body?.probe ?? []).map((e) => e.name).sort() };
+});
 probe("http/validation-failed/rules", async (ctx) =>
   httpView(await call(ctx.url, "POST", `/dash/apps/${appId}/rules`, { token: userToken, body: { code: { probe: { allow: { view: "this is not cel" } } } } })));
 probe("http/validation-failed/rules-undeclared", async (ctx) =>
@@ -463,6 +479,38 @@ probe("ws/app-disabled/add-query", async (ctx) => {
     await setStatus(ctx, "active");
   }
 });
+
+// timeouts: `LOCK TABLE triples IN SHARE MODE` held on the server's own
+// database blocks every write to triples (reads go on), so a transact waits
+// past the socket handler's 5s handle-receive timeout (`operation-timed-out`,
+// session.clj:1137-1207) or, over HTTP, past the 30s statement timeout
+// (jdbc/sql.clj *query-timeout-seconds*; the cancelled statement is
+// `timeout`, util/exception.clj psql-throw! :query-canceled)
+async function withTriplesLocked(ctx, secs, fn) {
+  const holder = spawn("psql", [ctx.db, "-q", "-v", "ON_ERROR_STOP=1", "-c", `BEGIN; LOCK TABLE triples IN SHARE MODE; SELECT pg_sleep(${secs}); COMMIT;`], { stdio: "ignore" });
+  const released = new Promise((resolve) => holder.on("exit", resolve));
+  const held = () =>
+    execSync(`psql "${ctx.db}" -Atc "SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = 'triples' AND l.mode = 'ShareLock' AND l.granted"`).toString().trim() !== "0";
+  for (let i = 0; !held(); i++) {
+    if (i > 100) throw new Error(`[${ctx.name}] triples lock never taken`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  try {
+    return await fn();
+  } finally {
+    await released;
+  }
+}
+probe("ws/operation-timed-out/transact-blocked", async (ctx) =>
+  withTriplesLocked(ctx, 8, async () => {
+    const c = await session(ctx);
+    const eid = mk();
+    const v = wsView(await wsError(c, { op: "transact", "tx-steps": [["add-triple", eid, FIXED.probeId, eid]] }, 12000));
+    c.close();
+    return v;
+  }));
+probe("http/timeout/transact-blocked", async (ctx) =>
+  withTriplesLocked(ctx, 34, async () => httpView(await admin(ctx, "/admin/transact", { steps: [["update", "probe", mk(), { name: "slow" }]] }))));
 
 // ---------------------------------------------------------------------------
 

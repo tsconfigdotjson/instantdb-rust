@@ -664,6 +664,8 @@ pub async fn cli_auth_register(State(state): State<Arc<AppState>>) -> Response {
 
 /// POST /dash/cli/auth/claim {ticket} — the logged-in user attaches
 /// themselves to the ticket (an unknown ticket updates nothing, like legacy).
+/// Unlike legacy's `claim!` (instant_cli_login.clj), a ticket another user
+/// already claimed is refused instead of re-pointed at the caller.
 pub async fn cli_auth_claim(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -673,11 +675,25 @@ pub async fn cli_auth_claim(
         let user = dash_user(&state, &headers).await?;
         let body = parse_body(&body)?;
         let ticket = body_uuid(&body, "ticket")?;
-        sqlx::query("UPDATE instant_cli_logins SET user_id = $1 WHERE id = $2")
-            .bind(user.id)
-            .bind(ticket)
-            .execute(&state.pool)
-            .await?;
+        let claimed_by: Option<Option<Uuid>> = sqlx::query_scalar(
+            "WITH claimed AS (
+               UPDATE instant_cli_logins SET user_id = $1
+                WHERE id = $2 AND (user_id IS NULL OR user_id = $1)
+               RETURNING user_id)
+             SELECT user_id FROM instant_cli_logins
+              WHERE id = $2 AND NOT EXISTS (SELECT 1 FROM claimed)",
+        )
+        .bind(user.id)
+        .bind(ticket)
+        .fetch_optional(&state.pool)
+        .await?;
+        if let Some(Some(_other)) = claimed_by {
+            return Err(cli_login_validation(
+                json!(ticket),
+                "user-already-claimed",
+                "This request has already been claimed",
+            ));
+        }
         Ok(json!({"ticket": ticket}))
     }
     .await;

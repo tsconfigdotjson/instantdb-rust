@@ -136,6 +136,12 @@ impl InstantError {
         )
     }
 
+    /// Legacy `throw-query-timeout!` (util/exception.clj:467-469), also what
+    /// a statement cancelled by its timeout becomes.
+    pub fn query_timeout() -> Self {
+        InstantError::new("timeout", 400, "The query took too long to complete.", None)
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new("internal-error", 500, message, None)
     }
@@ -175,6 +181,20 @@ impl From<sqlx::Error> for InstantError {
                     "Record not unique",
                     Some(json!({"record-type": "triples", "constraint": db.constraint()})),
                 );
+            }
+            // legacy psql-throw! (util/exception.clj): a statement cancelled
+            // by the statement timeout, and an idle-in-transaction kill
+            match db.code().as_deref() {
+                Some("57014") => return InstantError::query_timeout(),
+                Some("25P03") => {
+                    return InstantError::new(
+                        "timeout",
+                        400,
+                        "The transaction took too long to complete.",
+                        None,
+                    )
+                }
+                _ => {}
             }
         }
         InstantError::internal(format!("database error: {e}"))

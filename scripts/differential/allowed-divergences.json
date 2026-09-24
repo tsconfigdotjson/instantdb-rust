@@ -17,7 +17,7 @@
   {
     "path": "^dash:23-errors/badAttr$",
     "reason": "An add-attr step whose attr map is garbage (`{id: \"x\"}`) reaches the legacy SQL layer and surfaces as a 500 `sql-exception`; this server rejects it as a 400 `validation-failed` on parse. The CLI never sends such a step (its steps come from @instantdb/platform convertTxSteps) and only prints `message` on failure either way.",
-    "citation": "LEGACY/client/packages/cli/src/lib/http.ts:67-101 (error body \u2192 message); LEGACY/client/packages/platform/src/migrations.ts:230-252"
+    "citation": "LEGACY/client/packages/cli/src/lib/http.ts:67-101 (error body → message); LEGACY/client/packages/platform/src/migrations.ts:230-252"
   },
   {
     "path": "^dash:24-admin-ref-lookups/queryAfterDelete$",
@@ -47,5 +47,20 @@
     "path": "^dash:38-platform/transferWithAccessToken$",
     "reason": "Legacy maps `:apps/transfer` to the unused scope string `apps-transfer` and then asks `satisfies-scope?`, whose `condp` has no clause for it, so a platform access token on the transfer routes raises `No matching clause` (a 500) instead of the intended missing-scope permission-denied. This server answers `You are missing the apps-transfer scope`.",
     "citation": "LEGACY/server/src/instant/superadmin/routes.clj:44-57; model/oauth_app.clj:34-46"
+  },
+  {
+    "path": "^dash:38-platform/deny(WrongGrant|AfterWrongGrant|AfterWrongCookie)$",
+    "reason": "Hardening (issue #38 item 11). Legacy's deny-redirect! deletes the redirect by id before it checks anything and never compares the grant token, so a deny with a wrong grant token succeeds and a deny with a wrong cookie still burns the redirect (the real deny that follows is then record-not-found). This server checks the grant token (record-not-found, like grant) and the cookie before deleting, so the rightful deny after either bad attempt still redirects with access_denied.",
+    "citation": "LEGACY/server/src/instant/oauth_apps/routes.clj:318-338; model/oauth_app.clj deny-redirect!"
+  },
+  {
+    "path": "^dash:40-dash-login/cliClaimOtherUser(SignsIn)?$",
+    "reason": "Hardening (issue #38 item 11). Legacy's claim! overwrites user_id on a ticket someone already claimed, so a second dashboard user who learns the ticket id re-points the CLI login at themselves. This server refuses the second claim (validation-failed, issue user-already-claimed) and the CLI signs in the first claimant. The CLI only polls check, and a same-user re-claim still succeeds.",
+    "citation": "LEGACY/server/src/instant/model/instant_cli_login.clj claim!; dash/routes.clj cli-auth-claim-post"
+  },
+  {
+    "path": "^dash:37-teams/orgRevokeForeignInvite$",
+    "reason": "Decided divergence (issue #38 item 10): legacy's reject-by-id-and-foreign-key formats the id-only query, so an org admin can revoke any pending invite by id, including another app's. This server scopes the revoke to the org in the path, so the app's invite stays pending. docs/PARITY.md (wire-level divergences: invite revoke scope).",
+    "citation": "LEGACY/server/src/instant/model/member_invites.clj:166-172"
   }
 ]
