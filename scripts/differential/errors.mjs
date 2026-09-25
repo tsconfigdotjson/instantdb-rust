@@ -184,12 +184,14 @@ probe("http/validation-failed/query-empty-or", async (ctx) =>
   httpView(await admin(ctx, "/admin/query", { query: { probe: { $: { where: { or: [] } } } } })));
 // `$entityId` is in legacy's where-value-valid-keys? (a dashboard hack,
 // instaql.clj:69-75) with no spec entry and no SQL branch: legacy answers a
-// degenerate result, this server rejects it (errors-allowed.json). This
-// probe sends it as a top-level where key, which both servers answer the
-// same way, so that entry is flaky until a probe sends the operator shape
-// (`{name: {$entityId: ...}}`).
+// degenerate result, this server rejects it (errors-allowed.json). As a
+// top-level where key both servers answer it the same way; the second probe
+// sends the operator shape (`{name: {$entityId: ...}}`).
 probe("http/no-error/query-entity-id", async (ctx) =>
   httpView(await admin(ctx, "/admin/query", { query: { probe: { $: { where: { $entityId: FIXED.entity } } } } })));
+// the where-value operator shape the errors-allowed.json entry documents
+probe("http/no-error/query-entity-id-op", async (ctx) =>
+  httpView(await admin(ctx, "/admin/query", { query: { probe: { $: { where: { name: { $entityId: FIXED.entity } } } } } })));
 // a `$in` set is one array parameter on both servers (datalog.clj in-any),
 // so a set past Postgres' 65,535 bind parameters still answers
 probe("http/no-error/query-in-70k-values", async (ctx) => {

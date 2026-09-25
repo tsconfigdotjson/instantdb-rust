@@ -42,11 +42,22 @@ APP_ID=$(python3 -c "import uuid; print(uuid.uuid4())")
 TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$APP_ID" "$TOKEN"
 
+# Every layer runs even when an earlier one fails, so one CI round reports
+# them all; the script fails at the end if any did.
+FAILED_LAYERS=""
+layer() {
+  local name="$1"; shift
+  if ! "$@"; then
+    FAILED_LAYERS="$FAILED_LAYERS $name"
+    echo "LAYER FAILED: $name"
+  fi
+}
+
 echo "== schema parity =="
-node schema.mjs
+layer schema node schema.mjs
 
 echo "== differential replay =="
-node replay.mjs "$APP_ID" "$APP_ID" "$TOKEN"
+layer replay node replay.mjs "$APP_ID" "$APP_ID" "$TOKEN"
 
 echo "== dashboard/CLI routes =="
 DASH_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
@@ -58,34 +69,56 @@ DASH_TOKEN2=$(python3 -c "import uuid; print(uuid.uuid4())")
 DASH_USER_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$DASH_APP" "$DASH_TOKEN" "$DASH_USER_TOKEN"
 ./provision.sh "$DASH_APP2" "$DASH_TOKEN2"
-DASH_USER_TOKEN="$DASH_USER_TOKEN" node dash.mjs "$DASH_APP" "$DASH_TOKEN" "$DASH_APP2" "$DASH_TOKEN2"
+layer dash env DASH_USER_TOKEN="$DASH_USER_TOKEN" node dash.mjs "$DASH_APP" "$DASH_TOKEN" "$DASH_APP2" "$DASH_TOKEN2"
 
 echo "== storage routes =="
 STORAGE_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
 STORAGE_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$STORAGE_APP" "$STORAGE_TOKEN"
-node storage.mjs "$STORAGE_APP" "$STORAGE_TOKEN"
+layer storage node storage.mjs "$STORAGE_APP" "$STORAGE_TOKEN"
 
 echo "== error matrix =="
 ERR_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
 ERR_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ERR_USER_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$ERR_APP" "$ERR_TOKEN" "$ERR_USER_TOKEN"
-node errors.mjs "$ERR_APP" "$ERR_TOKEN" "$ERR_USER_TOKEN"
+layer errors node errors.mjs "$ERR_APP" "$ERR_TOKEN" "$ERR_USER_TOKEN"
 
 echo "== scheduling stress =="
 STRESS_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
 STRESS_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$STRESS_APP" "$STRESS_TOKEN"
-node stress.mjs "$STRESS_APP" "$STRESS_APP" "$STRESS_TOKEN" "${STRESS_TRIPLES:-400}"
+layer stress node stress.mjs "$STRESS_APP" "$STRESS_APP" "$STRESS_TOKEN" "${STRESS_TRIPLES:-400}"
 
 echo "== fuzz layer =="
-for SEED in ${FUZZ_SEEDS:-42 99}; do
+# FUZZ_SEEDS: fixed seeds (every run); FUZZ_SEED_WINDOW=N adds N more seeds
+# from a window that moves every day (seeds 1000 + day*N ...), so the
+# nightly keeps exploring new scripts while any failure stays reproducible
+# from the seed it prints. Every seed runs; failures are listed at the end.
+SEEDS="${FUZZ_SEEDS:-42 99}"
+if [ "${FUZZ_SEED_WINDOW:-0}" -gt 0 ]; then
+  DAY=$(( $(date -u +%s) / 86400 ))
+  BASE=$(( 1000 + (DAY % 1000) * FUZZ_SEED_WINDOW ))
+  SEEDS="$SEEDS $(seq -s ' ' "$BASE" $(( BASE + FUZZ_SEED_WINDOW - 1 )))"
+fi
+FUZZ_FAILED=""
+for SEED in $SEEDS; do
   FUZZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
   FUZZ_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
-  ./provision.sh "$FUZZ_APP" "$FUZZ_TOKEN"
-  node fuzz.mjs "$FUZZ_APP" "$FUZZ_APP" "$FUZZ_TOKEN" "$SEED" "${FUZZ_ROUNDS:-60}"
+  ./provision.sh "$FUZZ_APP" "$FUZZ_TOKEN" > /dev/null
+  if ! node fuzz.mjs "$FUZZ_APP" "$FUZZ_APP" "$FUZZ_TOKEN" "$SEED" "${FUZZ_ROUNDS:-60}"; then
+    FUZZ_FAILED="$FUZZ_FAILED $SEED"
+  fi
 done
+if [ -n "$FUZZ_FAILED" ]; then
+  echo "FUZZ FAILED for seeds:$FUZZ_FAILED (rerun one with: FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60} ./run.sh)"
+  FAILED_LAYERS="$FAILED_LAYERS fuzz"
+fi
+
+if [ -n "$FAILED_LAYERS" ]; then
+  echo "DIFFERENTIAL HARNESS FAILED:$FAILED_LAYERS"
+  exit 1
+fi
 
 echo "== legacy surface coverage =="
 node coverage.mjs --check "$COVERAGE_FILE"

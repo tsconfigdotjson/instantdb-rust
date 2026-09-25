@@ -276,8 +276,12 @@ jobs:
           echo "rust server failed to boot"; cat /tmp/rust-server.log; exit 1
       - name: Differential replay + fuzz vs legacy server
         env:
-          FUZZ_SEEDS: ${{ github.event_name == 'schedule' && '1 2 3 4 5 6 7 8 9 10' || '42 99' }}
-          FUZZ_ROUNDS: ${{ github.event_name == 'schedule' && '250' || '80' }}
+          # PRs and main run the nightly's original seeds at nightly depth
+          # (a 250-round seed takes ~10s); the nightly adds a fresh window
+          # of 40 seeds every day (FUZZ_SEED_WINDOW, see run.sh), deeper.
+          FUZZ_SEEDS: "42 99 1 2 3 4 5 6 7 8 9 10"
+          FUZZ_ROUNDS: ${{ github.event_name == 'schedule' && '400' || '250' }}
+          FUZZ_SEED_WINDOW: ${{ github.event_name == 'schedule' && '40' || '0' }}
         run: KEEP=1 ./scripts/differential/run.sh
       - name: Server logs
         if: failure()
