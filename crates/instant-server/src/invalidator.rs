@@ -107,7 +107,14 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                 if attrs_changed {
                     service::invalidate_attrs(state, app_id);
                 }
-                enqueue_tx(state, app_id, tx_id, schema_changed, requery_all, changed_attrs);
+                enqueue_tx(
+                    state,
+                    app_id,
+                    tx_id,
+                    schema_changed,
+                    requery_all,
+                    changed_attrs,
+                );
             }
             "instant_room" => {
                 let (Some(app_id), Some(room_id)) = (

@@ -1842,7 +1842,8 @@ impl<'a> PermsFilter<'a> {
                 let sources: Vec<&str> = program.all_sources();
                 let data_paths = extract_ref_paths(&sources, "data");
                 attach_refs(conn, app_id, attrs, etype, *eid, &data_paths, &mut data).await?;
-                let auth_val = build_auth_value(conn, app_id, attrs, self.auth, &[&program]).await?;
+                let auth_val =
+                    build_auth_value(conn, app_id, attrs, self.auth, &[&program]).await?;
                 let env = EvalEnv::new(app_id, self.rules, &self.auth.request);
                 eval_program(
                     &program,
@@ -2018,12 +2019,14 @@ fn prune_node(attrs: &AttrMap, memo: &CheckMemo, node: &mut crate::instaql::Enti
             continue;
         }
         let key = |t: &crate::instaql::TripleOut| (t.e, t.a, t.v.to_string());
-        let links: HashSet<(Uuid, Uuid, String)> =
-            child.rows.iter().filter_map(|r| r.first()).map(key).collect();
+        let links: HashSet<(Uuid, Uuid, String)> = child
+            .rows
+            .iter()
+            .filter_map(|r| r.first())
+            .map(key)
+            .collect();
         child.link_triples.retain(|t| links.contains(&key(t)));
-        child
-            .entities
-            .retain_mut(|n| prune_node(attrs, memo, n));
+        child.entities.retain_mut(|n| prune_node(attrs, memo, n));
     }
     true
 }

@@ -110,6 +110,16 @@ for SEED in $SEEDS; do
     FUZZ_FAILED="$FUZZ_FAILED $SEED"
   fi
 done
+# permissions + concurrency fuzz: generated rules, four concurrent sessions,
+# subscriptions compared at settled checkpoints (fuzz-perms.mjs)
+for SEED in ${FUZZ_PERMS_SEEDS:-7 8 9}; do
+  PZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+  PZ_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+  ./provision.sh "$PZ_APP" "$PZ_TOKEN" > /dev/null
+  if ! node fuzz-perms.mjs "$PZ_APP" "$PZ_APP" "$PZ_TOKEN" "$SEED" "${FUZZ_PERMS_ROUNDS:-120}"; then
+    FUZZ_FAILED="$FUZZ_FAILED perms:$SEED"
+  fi
+done
 if [ -n "$FUZZ_FAILED" ]; then
   echo "FUZZ FAILED for seeds:$FUZZ_FAILED (rerun one with: FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60} ./run.sh)"
   FAILED_LAYERS="$FAILED_LAYERS fuzz"

@@ -2469,7 +2469,8 @@ async fn chain_rows(
                     qb.push(" AND t.ea AND t.entity_id = ANY(");
                     qb.push_bind(currents);
                     qb.push(") AND ");
-                    match sql_ctx.push_path(&mut qb, &cur_etype, "t.entity_id", &path[i..], emit, 1) {
+                    match sql_ctx.push_path(&mut qb, &cur_etype, "t.entity_id", &path[i..], emit, 1)
+                    {
                         Ok(r) => r?,
                         Err(MissingAttr) => return Ok(HashMap::new()),
                     }
@@ -2538,11 +2539,9 @@ async fn chain_rows(
             // a hop through a link; the rest of the path must hold from its
             // far end
             let (attr, here, there) = match &step {
-                PathStep::Forward(a) if a.value_type == ValueType::Ref => (
-                    *a,
-                    "t.eav AND t.entity_id",
-                    "json_uuid_to_uuid(t.value)",
-                ),
+                PathStep::Forward(a) if a.value_type == ValueType::Ref => {
+                    (*a, "t.eav AND t.entity_id", "json_uuid_to_uuid(t.value)")
+                }
                 PathStep::Reverse(a) => (*a, "t.vae AND json_uuid_to_uuid(t.value)", "t.entity_id"),
                 _ => return Ok(HashMap::new()),
             };

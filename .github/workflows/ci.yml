@@ -282,6 +282,8 @@ jobs:
           FUZZ_SEEDS: "42 99 1 2 3 4 5 6 7 8 9 10"
           FUZZ_ROUNDS: ${{ github.event_name == 'schedule' && '400' || '250' }}
           FUZZ_SEED_WINDOW: ${{ github.event_name == 'schedule' && '40' || '0' }}
+          FUZZ_PERMS_SEEDS: ${{ github.event_name == 'schedule' && '7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22' || '7 8 9' }}
+          FUZZ_PERMS_ROUNDS: ${{ github.event_name == 'schedule' && '300' || '120' }}
         run: KEEP=1 ./scripts/differential/run.sh
       - name: Server logs
         if: failure()

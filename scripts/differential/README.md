@@ -22,7 +22,7 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `ghcr.io/instantdb`.
 - `provision.sh` — creates the same app id + admin token in both servers'
   databases (both run the same legacy schema).
-- `replay.mjs` — 34-step scenario across init, schemaless transacts, queries
+- `replay.mjs` — 37-step scenario across init, schemaless transacts, queries
   (nested/paginated/cursor round-trip/aggregate), typed-attr query breadth
   ($gt/$lt/$like/$ilike/$in/$not/$isNull/or/and, typed ordering, offset,
   last, fields projection, dot-paths), authed sessions + permissions (real
@@ -47,7 +47,11 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   re-fetched users and `instance-id`, `resync-table` mismatch checks, and the
   OAuth callback's 400 surfaces + `?test-redirect` page; step 35 the
   browser's SSE fallback transport (`GET` / `POST /runtime/sse`) and
-  `POST /runtime/signout`. `inferred-types` on
+  `POST /runtime/signout`; step 36 the triples a where clause matched under
+  `fields` projections, link paths, `or` / `and` / `$not` / `$isNull` and
+  view / field rules (issue #45), step 37 a refresh whose view rule's
+  `rateLimit` runs dry (the session's error frame, the unsubscribed query).
+  `inferred-types` on
   attrs is compared for real (it used to be normalized away). Frames are folded into the
   **client-visible projection** (exactly what `Reactor.js`/`SyncTable.ts`/
   `Stream.ts` read, with volatile server-chosen values normalized) and must
@@ -100,8 +104,24 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   cursor walks, fields, nested links, `$$ruleParams`) replayed on both
   servers; asserts per-server invariants (monotonic tx-ids) and cross-server
   equality of every query result and error type.
-  `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. CI runs two seeds per
-  PR and ten longer seeds nightly (`schedule` in ci.yml).
+  `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
+  runs twelve seeds at 250 rounds (42, 99 and the nightly's original 1-10);
+  the nightly (`schedule` in ci.yml) runs them at 400 rounds plus a window of
+  40 fresh seeds that moves every day (`FUZZ_SEED_WINDOW`). `run.sh` runs
+  every seed and lists the failing ones at the end.
+- `fuzz-perms.mjs` — the same grammar under **generated permission rules**
+  (view / create / update / delete per namespace, a bind, field rules,
+  `ruleParams`) driven by four concurrent sessions: a guest, two signed-in
+  users and an admin. Compared: every transact outcome and one-shot query
+  result per session; at settled checkpoints, each session's folded
+  subscription state (what the client computes from its `add-query-ok` /
+  `refresh-ok` frames) and the refresh errors it received; bursts of
+  transacts from several sessions at once (disjoint entities, so the outcome
+  can't depend on their order) and transact / add-query / transact on one
+  session sent without waiting (the per-session scheduler).
+  `node fuzz-perms.mjs <app> <app> <token> [seed] [rounds]`; seeds 7-9 at 120
+  rounds per PR (`FUZZ_PERMS_SEEDS` / `FUZZ_PERMS_ROUNDS`), 16 seeds at 300
+  nightly.
 - `errors.mjs` / `errors-allowed.json` — the error matrix: one probe per
   externally reachable legacy error type (`err:*` in surface.json) over HTTP
   and the ws session; the normalized envelope (status, type, message, hint)

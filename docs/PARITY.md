@@ -201,6 +201,66 @@ client-code citation proving it is unread (client paths relative to
 | `/platform/oauth/deny` checks | deletes the redirect first, then checks the cookie; the grant token is never compared (oauth_apps/routes.clj:318-338) | grant token (`record-not-found`, like `grant`) and cookie checked before the redirect is deleted | hardening (issue #38): a bad deny can no longer burn the user's pending consent (differential dash step 38, allowlisted) |
 | `join-room-error` op | defined in the client (`Reactor.js:921-927`) but never emitted by the legacy server either | never emitted; join failures use the generic `error` op | matches legacy behavior (no emitter in LEGACY/server) |
 
+## What the harness proves (issue #45)
+
+"242/242" in the coverage report is a reachability count: every counted
+legacy surface item was sent to both servers (or seen from them) in a run
+whose comparisons all passed. It is not a proof that every input behaves the
+same. Stated precisely: **every surface item matches on the scripted and
+probed paths**, plus whatever the seeded fuzz layers reach. What is compared
+against the live legacy server:
+
+| Layer | What must match |
+|---|---|
+| replay (37 steps) | client-visible projection of every frame, op key sets, final folded state per connection |
+| dash / storage | HTTP responses folded to what the CLI / SDK reads |
+| error matrix | status, type, message, hint per probe |
+| fuzz (12 seeds × 250 rounds per PR; + 40 moving seeds × 400 nightly) | every query result and error type over the whole tx / query grammar |
+| fuzz-perms (3 seeds per PR, 16 nightly) | transact outcomes, query results and settled subscription state under generated rules, four concurrent sessions, bursts |
+| official SDK suites | `@instantdb/core`'s e2e suite and instant-cli's e2e suite, run against both servers and compared test by test (`scripts/sdk-suites/`) |
+| allowlists | each entry names the exact sub-paths that may differ and pins both sides' values; an entry that stops matching fails its layer |
+
+Divergences found by that work and fixed here:
+
+- **Where-pattern triples.** Legacy compiles a where clause into patterns of
+  the form's own datalog query, and every pattern's matched triple is part of
+  the join row (datalog.clj accumulate-results). So a result carries the
+  triples its where clause matched even when a `fields` projection leaves the
+  attr out, and the linked entity's triples for a dotted path (`owner.name`).
+  This server now emits the same rows (`instaql.rs` `where_rows`), top-level
+  and in child forms, and permissions drop whole rows like legacy's
+  permissioned-node: a row with one unviewable triple goes, and a form left
+  with no viewable row loses every entity. Replay step 36.
+- **Permission evaluation count.** Each `[etype eid]` view rule and
+  `[etype eid label]` field rule runs once per query, over every entity any
+  join row mentions, before anything is pruned (legacy
+  extract-permission-helpers). A rule's `rateLimit` bucket is charged once per
+  entity, and a rule that errors anywhere fails the query. A forward link
+  triple to a hidden entity is kept (its viewability is the parent's), the
+  hidden entity is not.
+- **Failed refreshes.** A recomputation that throws (a dry `rateLimit`
+  bucket, a rule error) fails that session's whole refresh like legacy's
+  handle-refresh! (one `pmap` over the stale queries): the failing query is
+  unsubscribed, the other recomputations are recorded but not sent, no
+  refresh-ok goes out, and the client gets an `error` whose original-event is
+  `{op: "refresh", ...}`. Refresh recomputations charge rule buckets per
+  session (legacy recomputes per session), and the add-query result cache is
+  bypassed when the rules call `rateLimit` (its key now carries the rules
+  hash). Replay step 37.
+- **Schema changes.** A schema change reaches every session (so it learns the
+  new attrs) but recomputes only queries whose topics the change matches;
+  only restoring a blob attr stales every query (topics-for-attr-upsert's
+  `[#{:ea} _ _ _]`). Before, every query was recomputed on any schema change,
+  which charged rule buckets legacy never charged.
+
+### Single-server areas, decided
+
+| Area | Coverage | Decision |
+|---|---|---|
+| multi-node fan-out (`multinode-ws.mjs`, `multinode-storage-test.mjs`) | this server only | Keep single-implementation. Legacy's multi-node path is Hazelcast + a shared WAL consumer, which has no self-hosted counterpart to diff against; the client-visible contract (a write on node A reaches a subscriber on node B, once, with a monotonic tx id) is asserted directly. |
+| OAuth code exchange success path (`oauth-test.mjs`) | this server only | Keep single-implementation. Legacy resolves the provider's discovery document through its DNS-over-HTTPS SSRF guard, which can't reach a container-local mock provider; every error surface of the same routes is compared (replay step 34, dash step 42). |
+| behaviour under load, timing-dependent paths | two timeout probes, `stress.mjs`, fuzz-perms bursts | Load itself stays a benchmark (`crates/instant-loadtest`), not a parity check: the two servers' latencies are not a contract. Ordering-dependent outcomes are compared where the protocol fixes them (per-session op order, settled state). |
+
 ## Open items from the 2026-09-04 audit
 
 Three read-only audits (security, sync/InstaQL/InstaML parity, perms/auth/admin
