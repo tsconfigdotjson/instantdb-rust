@@ -156,3 +156,7 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
 This harness found (and pinned as regression coverage) real divergences during
 development: deep-merge null semantics, system-catalog attr visibility,
 `tx-step` vs `tx-steps` error wording, and subscribe-stream validation order.
+
+The official SDK suites (`@instantdb/core`'s browser e2e, `instant-cli`'s e2e)
+run against this same legacy stack and the rust server in the `sdk-suites`
+CI job; see `scripts/sdk-suites/README.md`.
