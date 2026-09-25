@@ -102,7 +102,9 @@ pub struct Metrics {
     pub refresh_queries_computed_total: Counter,
     pub refresh_queries_changed_total: Counter,
     pub refresh_queries_deduped_total: Counter,
+    pub refresh_queries_failed_total: Counter,
     pub refresh_ok_sent_total: Counter,
+    pub refresh_errors_sent_total: Counter,
     // caches
     pub attr_cache_hits_total: Counter,
     pub attr_cache_misses_total: Counter,
@@ -303,6 +305,18 @@ pub fn render(state: &AppState) -> String {
         "instant_refresh_queries_deduped_total",
         "session queries served from another session's identical recompute",
         m.refresh_queries_deduped_total.get(),
+    );
+    counter(
+        &mut out,
+        "instant_refresh_queries_failed_total",
+        "recomputations that failed (rule errors, rate limits)",
+        m.refresh_queries_failed_total.get(),
+    );
+    counter(
+        &mut out,
+        "instant_refresh_errors_sent_total",
+        "refreshes answered with an error frame instead of refresh-ok",
+        m.refresh_errors_sent_total.get(),
     );
     counter(
         &mut out,

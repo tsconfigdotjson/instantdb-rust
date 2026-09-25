@@ -442,6 +442,8 @@ pub struct TxNotice {
     /// legacy `schema-changes-require-refreshing-sessions?` (attr inserts /
     /// deletes, ident changes): refresh every session of the app
     pub schema_changed: bool,
+    /// every query is stale (a blob attr was restored)
+    pub requery_all: bool,
     /// attrs whose rows changed: queries mentioning them are refreshed
     /// (legacy topics-for-attr-upsert)
     pub changed_attrs: Vec<Uuid>,
@@ -453,6 +455,7 @@ impl From<&instant_core::tx::TxReport> for TxNotice {
             tx_id: r.tx_id,
             attrs_changed: r.attrs_changed,
             schema_changed: r.schema_changed,
+            requery_all: r.requery_all,
             changed_attrs: r.changed_attrs.clone(),
         }
     }
@@ -466,6 +469,7 @@ pub async fn notify_tx(state: &AppState, app_id: Uuid, notice: &TxNotice) {
         tx_id,
         attrs_changed,
         schema_changed,
+        requery_all,
         changed_attrs,
     } = notice;
     if *attrs_changed {
@@ -477,6 +481,7 @@ pub async fn notify_tx(state: &AppState, app_id: Uuid, notice: &TxNotice) {
         "tx_id": tx_id,
         "attrs_changed": attrs_changed,
         "schema_changed": schema_changed,
+        "requery_all": requery_all,
         "changed_attrs": changed_attrs,
         "ts": chrono::Utc::now().timestamp_millis(),
     })

@@ -31,6 +31,12 @@ impl Rules {
         })
     }
 
+    /// Whether any rule calls a `$rateLimits` bucket: every evaluation then
+    /// charges tokens, so evaluations can't be shared or cached.
+    pub fn uses_rate_limits(&self) -> bool {
+        !self.code.is_null() && self.code.to_string().contains("rateLimit")
+    }
+
     /// Lookup chain: [etype allow action] -> [etype allow $default]
     /// -> [$default allow action] -> [$default allow $default] -> system default.
     /// Returns (expr, binds) or None = allow (user etypes) / system default.
@@ -1771,6 +1777,14 @@ impl<'a> PermsFilter<'a> {
     /// when the query projected `fields` (instaql.clj:1956-2007
     /// `preload-entity-maps` re-fetches every checked entity in full), so a
     /// projected node is re-read before its rules run.
+    ///
+    /// Mirrors legacy permissioned-query in two passes: every `[etype eid]`
+    /// view rule and `[etype eid label]` field rule that some triple of the
+    /// result calls for is evaluated once (extract-permission-helpers walks
+    /// every join row of every node before anything is pruned, so a rule's
+    /// rateLimit is charged once per entity and any failing rule fails the
+    /// query), then join rows are dropped whole when one of their triples is
+    /// not viewable (permissioned-node).
     pub async fn filter_with_forms(
         &self,
         conn: &mut PgConnection,
@@ -1779,74 +1793,56 @@ impl<'a> PermsFilter<'a> {
         result: &mut QueryResult,
         forms: &[crate::instaql::Form],
     ) -> Result<()> {
-        for form in &mut result.forms {
+        let mut memo = CheckMemo::default();
+        let mut todo = CheckTodo::default();
+        for form in &result.forms {
             let parsed = forms.iter().find(|f| f.k == form.k);
-            let mut kept = vec![];
-            let entities = std::mem::take(&mut form.entities);
-            for mut node in entities {
-                if self
-                    .check_view_node(conn, app_id, attrs, &mut node, parsed)
-                    .await?
-                {
-                    kept.push(node);
-                }
+            for row in &form.where_rows {
+                todo.note(attrs, row);
             }
-            form.entities = kept;
+            for node in &form.entities {
+                note_node(attrs, node, parsed, &mut todo, &mut memo);
+            }
+        }
+        self.evaluate(conn, app_id, attrs, &todo, &mut memo).await?;
+        for form in &mut result.forms {
+            let had_where = !form.where_rows.is_empty();
+            form.where_rows
+                .retain(|row| row.iter().all(|t| memo.triple_ok(attrs, t)));
+            if had_where && form.where_rows.is_empty() {
+                // no viewable top-level row: legacy drops the form's child
+                // nodes, i.e. every entity (instaql.clj permissioned-node)
+                form.entities.clear();
+                continue;
+            }
+            form.entities
+                .retain_mut(|node| prune_node(attrs, &memo, node));
         }
         Ok(())
     }
 
-    fn check_view_node<'b>(
-        &'b self,
-        conn: &'b mut PgConnection,
+    async fn evaluate(
+        &self,
+        conn: &mut PgConnection,
         app_id: Uuid,
-        attrs: &'b AttrMap,
-        node: &'b mut crate::instaql::EntityNode,
-        form: Option<&'b crate::instaql::Form>,
-    ) -> futures::future::BoxFuture<'b, Result<bool>> {
-        Box::pin(async move {
-            let projected = form.map(|f| f.opts.fields.is_some()).unwrap_or(false);
-            let program = self.rules.program(&node.etype, "view");
-            let has_field_rules = self.rules.has_field_rules(&node.etype);
-            // the `data` binding: the whole entity (re-fetched when the
-            // query projected it)
-            let entity_map = if program.is_true() && !has_field_rules {
-                None
-            } else if projected {
-                Some(
-                    fetch_entity_map(conn, app_id, attrs, &node.etype, node.eid)
-                        .await?
-                        .unwrap_or_else(|| base_entity_map(attrs, &node.etype, node.eid)),
-                )
-            } else {
-                let mut data = base_entity_map(attrs, &node.etype, node.eid);
-                for t in &node.triples {
-                    if let Some(a) = attrs.get(&t.a) {
-                        if a.cardinality == Cardinality::One {
-                            data.insert(a.label.clone(), t.v.clone());
-                        }
-                    }
-                }
-                Some(data)
-            };
+        attrs: &AttrMap,
+        todo: &CheckTodo,
+        memo: &mut CheckMemo,
+    ) -> Result<()> {
+        for (etype, eid) in &todo.views {
+            let key = (etype.clone(), *eid);
+            if memo.view.contains_key(&key) {
+                continue;
+            }
+            let program = self.rules.program(etype, "view");
             let ok = if program.is_true() {
                 true
             } else {
-                let mut data = entity_map.clone().unwrap_or_default();
+                let mut data = memo.data(conn, app_id, attrs, etype, *eid).await?;
                 let sources: Vec<&str> = program.all_sources();
                 let data_paths = extract_ref_paths(&sources, "data");
-                attach_refs(
-                    conn,
-                    app_id,
-                    attrs,
-                    &node.etype,
-                    node.eid,
-                    &data_paths,
-                    &mut data,
-                )
-                .await?;
-                let auth_val =
-                    build_auth_value(conn, app_id, attrs, self.auth, &[&program]).await?;
+                attach_refs(conn, app_id, attrs, etype, *eid, &data_paths, &mut data).await?;
+                let auth_val = build_auth_value(conn, app_id, attrs, self.auth, &[&program]).await?;
                 let env = EvalEnv::new(app_id, self.rules, &self.auth.request);
                 eval_program(
                     &program,
@@ -1858,69 +1854,178 @@ impl<'a> PermsFilter<'a> {
                 )
                 .await?
             };
-            if !ok {
-                return Ok(false);
+            memo.view.insert(key, ok);
+        }
+        for (etype, eid, label) in &todo.fields {
+            let key = (etype.clone(), *eid, label.clone());
+            if memo.field.contains_key(&key) {
+                continue;
             }
-            // field-level rules: drop triples whose field program fails
-            if has_field_rules {
-                let data_val = Value::Object(entity_map.unwrap_or_default());
-                let mut keep = Vec::with_capacity(node.triples.len());
-                for t in std::mem::take(&mut node.triples) {
-                    let label = attrs.get(&t.a).map(|a| a.label.clone());
-                    let allowed = match label.as_deref() {
-                        Some("id") | None => true,
-                        Some(label) => match self.rules.field_program(&node.etype, label) {
-                            None => true,
-                            Some(program) => {
-                                let auth_val =
-                                    build_auth_value(conn, app_id, attrs, self.auth, &[&program])
-                                        .await?;
-                                let env = EvalEnv::new(app_id, self.rules, &self.auth.request);
-                                eval_program(
-                                    &program,
-                                    &data_val,
-                                    None,
-                                    &auth_val,
-                                    &self.rule_params,
-                                    &env,
-                                )
-                                .await?
-                            }
-                        },
-                    };
-                    if allowed {
-                        keep.push(t);
-                    }
-                }
-                node.triples = keep;
-            }
-            for child in &mut node.children {
-                let child_form = form.and_then(|f| f.children.iter().find(|cf| cf.k == child.k));
-                let mut kept = vec![];
-                let entities = std::mem::take(&mut child.entities);
-                let mut kept_ids = HashSet::new();
-                for mut n in entities {
-                    if self
-                        .check_view_node(conn, app_id, attrs, &mut n, child_form)
-                        .await?
-                    {
-                        kept_ids.insert(n.eid);
-                        kept.push(n);
-                    }
-                }
-                child.link_triples.retain(|t| {
-                    let child_id = if t.e == node.eid {
-                        t.v.as_str().and_then(|s| Uuid::parse_str(s).ok())
-                    } else {
-                        Some(t.e)
-                    };
-                    child_id.map(|c| kept_ids.contains(&c)).unwrap_or(false)
-                });
-                child.entities = kept;
-            }
-            Ok(true)
-        })
+            let Some(program) = self.rules.field_program(etype, label) else {
+                continue;
+            };
+            let data = memo.data(conn, app_id, attrs, etype, *eid).await?;
+            let auth_val = build_auth_value(conn, app_id, attrs, self.auth, &[&program]).await?;
+            let env = EvalEnv::new(app_id, self.rules, &self.auth.request);
+            let ok = eval_program(
+                &program,
+                &Value::Object(data),
+                None,
+                &auth_val,
+                &self.rule_params,
+                &env,
+            )
+            .await?;
+            memo.field.insert(key, ok);
+        }
+        Ok(())
     }
+}
+
+/// The rules a result's triples call for, in first-seen order.
+#[derive(Default)]
+struct CheckTodo {
+    views: Vec<(String, Uuid)>,
+    fields: Vec<(String, Uuid, String)>,
+    seen_views: HashSet<(String, Uuid)>,
+    seen_fields: HashSet<(String, Uuid, String)>,
+}
+
+impl CheckTodo {
+    /// legacy join-rows->etype-maps: a triple's etype and label are its
+    /// attr's forward identity, its entity is `e`
+    fn note(&mut self, attrs: &AttrMap, triples: &[crate::instaql::TripleOut]) {
+        for t in triples {
+            let Some(a) = attrs.get(&t.a) else { continue };
+            let view = (a.etype.clone(), t.e);
+            if self.seen_views.insert(view.clone()) {
+                self.views.push(view);
+            }
+            if a.label != "id" {
+                let field = (a.etype.clone(), t.e, a.label.clone());
+                if self.seen_fields.insert(field.clone()) {
+                    self.fields.push(field);
+                }
+            }
+        }
+    }
+}
+
+/// Rule outcomes and entity maps of one query's permission pass.
+#[derive(Default)]
+struct CheckMemo {
+    view: HashMap<(String, Uuid), bool>,
+    field: HashMap<(String, Uuid, String), bool>,
+    /// the `data` binding per entity: the node's own triples when the
+    /// query fetched the whole entity, else re-read in full
+    data: HashMap<(String, Uuid), Map<String, Value>>,
+}
+
+impl CheckMemo {
+    async fn data(
+        &mut self,
+        conn: &mut PgConnection,
+        app_id: Uuid,
+        attrs: &AttrMap,
+        etype: &str,
+        eid: Uuid,
+    ) -> Result<Map<String, Value>> {
+        let key = (etype.to_string(), eid);
+        if let Some(d) = self.data.get(&key) {
+            return Ok(d.clone());
+        }
+        let d = fetch_entity_map(conn, app_id, attrs, etype, eid)
+            .await?
+            .unwrap_or_else(|| base_entity_map(attrs, etype, eid));
+        self.data.insert(key, d.clone());
+        Ok(d)
+    }
+
+    /// legacy viewable-triple?: the entity's view rule and the field's rule
+    /// both pass; a triple of an unknown attr is never viewable
+    fn triple_ok(&self, attrs: &AttrMap, t: &crate::instaql::TripleOut) -> bool {
+        let Some(a) = attrs.get(&t.a) else {
+            return false;
+        };
+        let view = self
+            .view
+            .get(&(a.etype.clone(), t.e))
+            .copied()
+            .unwrap_or(true);
+        view && (a.label == "id"
+            || self
+                .field
+                .get(&(a.etype.clone(), t.e, a.label.clone()))
+                .copied()
+                .unwrap_or(true))
+    }
+}
+
+fn note_node(
+    attrs: &AttrMap,
+    node: &crate::instaql::EntityNode,
+    form: Option<&crate::instaql::Form>,
+    todo: &mut CheckTodo,
+    memo: &mut CheckMemo,
+) {
+    let projected = form.map(|f| f.opts.fields.is_some()).unwrap_or(false);
+    if !projected {
+        let key = (node.etype.clone(), node.eid);
+        memo.data.entry(key).or_insert_with(|| {
+            let mut data = base_entity_map(attrs, &node.etype, node.eid);
+            for t in &node.triples {
+                if let Some(a) = attrs.get(&t.a) {
+                    if a.cardinality == Cardinality::One {
+                        data.insert(a.label.clone(), t.v.clone());
+                    }
+                }
+            }
+            data
+        });
+    }
+    todo.note(attrs, &node.triples);
+    for child in &node.children {
+        let child_form = form.and_then(|f| f.children.iter().find(|cf| cf.k == child.k));
+        for row in &child.rows {
+            todo.note(attrs, row);
+        }
+        todo.note(attrs, &child.link_triples);
+        for n in &child.entities {
+            note_node(attrs, n, child_form, todo, memo);
+        }
+    }
+}
+
+/// legacy permissioned-node on an entity node: each of its triples is a row
+/// of its own; the node survives while one does, and a child form's rows
+/// (link triple + the child's where rows) are dropped whole. A child form
+/// left without rows loses its entities.
+fn prune_node(attrs: &AttrMap, memo: &CheckMemo, node: &mut crate::instaql::EntityNode) -> bool {
+    node.triples.retain(|t| memo.triple_ok(attrs, t));
+    if node.triples.is_empty() {
+        return false;
+    }
+    for child in &mut node.children {
+        if child.rows.is_empty() && !child.link_triples.is_empty() {
+            child.rows = child.link_triples.iter().map(|t| vec![t.clone()]).collect();
+        }
+        child
+            .rows
+            .retain(|row| row.iter().all(|t| memo.triple_ok(attrs, t)));
+        if child.rows.is_empty() {
+            child.link_triples.clear();
+            child.entities.clear();
+            continue;
+        }
+        let key = |t: &crate::instaql::TripleOut| (t.e, t.a, t.v.to_string());
+        let links: HashSet<(Uuid, Uuid, String)> =
+            child.rows.iter().filter_map(|r| r.first()).map(key).collect();
+        child.link_triples.retain(|t| links.contains(&key(t)));
+        child
+            .entities
+            .retain_mut(|n| prune_node(attrs, memo, n));
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------

@@ -83,6 +83,12 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                     .get("schema_changed")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(attrs_changed);
+                // older nodes (rolling deploy) omit the key: they refreshed
+                // every query on any schema change
+                let requery_all = payload
+                    .get("requery_all")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(schema_changed);
                 let changed_attrs: Vec<Uuid> = payload
                     .get("changed_attrs")
                     .and_then(|v| v.as_array())
@@ -101,7 +107,7 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                 if attrs_changed {
                     service::invalidate_attrs(state, app_id);
                 }
-                enqueue_tx(state, app_id, tx_id, schema_changed, changed_attrs);
+                enqueue_tx(state, app_id, tx_id, schema_changed, requery_all, changed_attrs);
             }
             "instant_room" => {
                 let (Some(app_id), Some(room_id)) = (
@@ -221,6 +227,8 @@ struct Pending {
     /// a pending tx requires refreshing every session (attr insert / delete,
     /// ident change)
     schema_changed: bool,
+    /// a pending tx stales every query (a blob attr restored)
+    requery_all: bool,
     /// attrs whose rows a pending tx changed (attr-wildcard topics)
     changed_attrs: HashSet<Uuid>,
     /// when the oldest pending tx was enqueued (for batch latency)
@@ -241,6 +249,7 @@ pub fn enqueue_tx(
     app_id: Uuid,
     tx_id: i64,
     schema_changed: bool,
+    requery_all: bool,
     changed_attrs: Vec<Uuid>,
 ) {
     let queue = state.refresh_queues.entry(app_id).or_default().clone();
@@ -248,6 +257,7 @@ pub fn enqueue_tx(
         let mut p = queue.pending.lock().unwrap_or_else(|e| e.into_inner());
         p.tx_ids.insert(tx_id);
         p.schema_changed |= schema_changed;
+        p.requery_all |= requery_all;
         p.changed_attrs.extend(changed_attrs);
         p.since.get_or_insert_with(Instant::now);
         if p.running {
@@ -275,14 +285,23 @@ async fn refresh_worker(state: Arc<AppState>, app_id: Uuid, queue: Arc<RefreshQu
             }
             let tx_ids: Vec<i64> = std::mem::take(&mut p.tx_ids).into_iter().collect();
             let schema_changed = std::mem::take(&mut p.schema_changed);
+            let requery_all = std::mem::take(&mut p.requery_all);
             let changed_attrs = std::mem::take(&mut p.changed_attrs);
             let since = p.since.take().unwrap_or_else(Instant::now);
-            (tx_ids, schema_changed, changed_attrs, since)
+            (tx_ids, schema_changed, requery_all, changed_attrs, since)
         };
-        let (tx_ids, schema_changed, changed_attrs, since) = batch;
+        let (tx_ids, schema_changed, requery_all, changed_attrs, since) = batch;
         METRICS.refresh_batches_total.inc();
         METRICS.refresh_txs_total.add(tx_ids.len() as u64);
-        refresh_batch(&state, app_id, &tx_ids, schema_changed, &changed_attrs).await;
+        refresh_batch(
+            &state,
+            app_id,
+            &tx_ids,
+            schema_changed,
+            requery_all,
+            &changed_attrs,
+        )
+        .await;
         METRICS.refresh_batch_seconds.observe_since(since);
     }
 }
@@ -335,8 +354,10 @@ struct Job {
     subscribers: Vec<(usize, String)>,
 }
 
-/// (query key, admin?, user id, ip, origin, tree?, inference?): sessions
-/// sharing this see identical frames.
+/// (query key, admin?, user id, ip, origin, tree?, inference?, session):
+/// sessions sharing this see identical frames. The session slot is only
+/// filled when the app's rules call `rateLimit`: legacy recomputes per
+/// session, so each session's refresh charges the buckets.
 type JobKey = (
     String,
     bool,
@@ -345,9 +366,13 @@ type JobKey = (
     Option<String>,
     bool,
     bool,
+    Option<usize>,
 );
-/// Subscribers of a job and its outcome (None when the query failed).
-type JobOutcome = (Vec<(usize, String)>, Option<JobResult>);
+/// Subscribers of a job and its outcome.
+type JobOutcome = (
+    Vec<(usize, String)>,
+    Result<JobResult, instant_core::error::InstantError>,
+);
 
 struct JobResult {
     /// the instaql-result, serialized once for every subscriber
@@ -406,6 +431,16 @@ struct SessionPlan {
     stale: Vec<(String, u64)>,
 }
 
+/// A stale query of one session, before recomputations are shared.
+struct StaleQuery {
+    plan: usize,
+    key: String,
+    q: Value,
+    perms: PermsCtx,
+    tree: bool,
+    inference: bool,
+}
+
 /// Refresh every local session of an app for a batch of transactions.
 #[tracing::instrument(level = "debug", skip_all, fields(app_id = %app_id, txs = tx_ids.len()))]
 pub async fn refresh_batch(
@@ -413,6 +448,7 @@ pub async fn refresh_batch(
     app_id: Uuid,
     tx_ids: &[i64],
     schema_changed: bool,
+    requery_all: bool,
     changed_attrs: &HashSet<Uuid>,
 ) {
     let sessions = state.sessions_for_app(app_id);
@@ -427,10 +463,14 @@ pub async fn refresh_batch(
             return;
         }
     };
-    // legacy invalidator.clj:225-231: a schema change refreshes every
-    // session (all queries recomputed, attrs included); anything else
-    // reaches only the sessions whose query topics went stale
-    let tx_topics = if schema_changed {
+    // Legacy stales only the queries whose topics a change matches — attr
+    // rows included (topics-for-attr-changes) — and recomputes only stale
+    // queries (store.clj get-stale-instaql-queries). A schema change
+    // additionally reaches every session (invalidator.clj:225-231), so they
+    // learn the new attrs, but it does not recompute their queries; only
+    // restoring a blob attr stales every query (topics-for-attr-upsert's
+    // `[#{:ea} _ _ _]`).
+    let tx_topics = if requery_all {
         TxTopics::catch_all()
     } else {
         load_tx_topics(state, app_id, tx_ids, changed_attrs).await
@@ -438,7 +478,7 @@ pub async fn refresh_batch(
 
     // 1. snapshot queries under each session lock; decide what to recompute
     let mut plans: Vec<SessionPlan> = Vec::with_capacity(sessions.len());
-    let mut jobs: HashMap<JobKey, Job> = HashMap::new();
+    let mut stale_queries: Vec<StaleQuery> = vec![];
     for session in sessions {
         let st = session.state.lock().await;
         if st.app_id != Some(app_id) {
@@ -471,43 +511,21 @@ pub async fn refresh_batch(
                 METRICS.refresh_queries_skipped_total.inc();
                 continue;
             }
-            let idx = plans.len();
-            // rules may read request.ip / request.origin, so only sessions
-            // with the same request facts share a recomputation
-            let job_key = (
-                key.clone(),
-                perms.admin,
-                perms.user_id,
-                perms.ip.clone(),
-                perms.origin.clone(),
-                entry.tree,
-                st.inference,
-            );
-            match jobs.get_mut(&job_key) {
-                Some(job) => {
-                    METRICS.refresh_queries_deduped_total.inc();
-                    job.subscribers.push((idx, key.clone()));
-                }
-                None => {
-                    jobs.insert(
-                        job_key,
-                        Job {
-                            q: entry.q.clone(),
-                            perms: perms.clone(),
-                            tree: entry.tree,
-                            inference: st.inference,
-                            subscribers: vec![(idx, key.clone())],
-                        },
-                    );
-                }
-            }
+            stale_queries.push(StaleQuery {
+                plan: plans.len(),
+                key: key.clone(),
+                q: entry.q.clone(),
+                perms: perms.clone(),
+                tree: entry.tree,
+                inference: st.inference,
+            });
             stale.push((key.clone(), entry.result_hash));
         }
         // legacy only runs handle-refresh! for sockets the invalidator
         // picked (a stale query, or every socket on a schema change); a
         // session with nothing stale gets no frame, not even an attrs-only
         // refresh-ok when the attrs hash moved (session.clj:467-530)
-        if stale.is_empty() && !tx_topics.catch_all {
+        if stale.is_empty() && !schema_changed {
             continue;
         }
         let skip_attrs = st.supports_skip_attrs;
@@ -526,12 +544,12 @@ pub async fn refresh_batch(
     let needs_attrs_only = plans
         .iter()
         .any(|p| p.skip_attrs && p.prev_attrs_hash != Some(attrs_hash));
-    if jobs.is_empty() && !needs_attrs_only {
+    if stale_queries.is_empty() && !needs_attrs_only && !schema_changed {
         return;
     }
 
     // 2. rules once per batch (non-admin sessions only)
-    let rules = if jobs.values().any(|j| !j.perms.admin) {
+    let rules = if stale_queries.iter().any(|q| !q.perms.admin) {
         match state.pool.acquire().await {
             Ok(mut conn) => match Rules::load(&mut conn, app_id).await {
                 Ok(r) => Some(r),
@@ -548,8 +566,44 @@ pub async fn refresh_batch(
     } else {
         None
     };
+    let per_session_jobs = rules.as_ref().is_some_and(|r| r.uses_rate_limits());
 
-    // 3. run distinct recomputations with bounded concurrency
+    // 3. share recomputations between sessions that would see the same
+    //    frames; rules may read request.ip / request.origin, so only
+    //    sessions with the same request facts share one
+    let mut jobs: HashMap<JobKey, Job> = HashMap::new();
+    for sq in stale_queries {
+        let job_key = (
+            sq.key.clone(),
+            sq.perms.admin,
+            sq.perms.user_id,
+            sq.perms.ip.clone(),
+            sq.perms.origin.clone(),
+            sq.tree,
+            sq.inference,
+            (per_session_jobs && !sq.perms.admin).then_some(sq.plan),
+        );
+        match jobs.get_mut(&job_key) {
+            Some(job) => {
+                METRICS.refresh_queries_deduped_total.inc();
+                job.subscribers.push((sq.plan, sq.key));
+            }
+            None => {
+                jobs.insert(
+                    job_key,
+                    Job {
+                        q: sq.q,
+                        perms: sq.perms,
+                        tree: sq.tree,
+                        inference: sq.inference,
+                        subscribers: vec![(sq.plan, sq.key)],
+                    },
+                );
+            }
+        }
+    }
+
+    // 4. run distinct recomputations with bounded concurrency
     let concurrency = state.cfg.refresh_concurrency;
     let results: Vec<JobOutcome> = futures::stream::iter(jobs.into_values())
         .map(|job| {
@@ -573,7 +627,7 @@ pub async fn refresh_batch(
                         );
                         let ws_json = RawValue::from_string(wire.to_string())
                             .expect("serde_json output is valid JSON");
-                        Some(JobResult {
+                        Ok(JobResult {
                             ws_json,
                             result_meta,
                             hash,
@@ -582,8 +636,9 @@ pub async fn refresh_batch(
                         })
                     }
                     Err(e) => {
-                        tracing::warn!("refresh query failed: {e}");
-                        None
+                        tracing::debug!("refresh query failed: {e}");
+                        METRICS.refresh_queries_failed_total.inc();
+                        Err(e)
                     }
                 };
                 (job.subscribers, result)
@@ -593,18 +648,29 @@ pub async fn refresh_batch(
         .collect()
         .await;
 
-    // 4. per session: collect changed computations, update entries, send
+    // 5. per session: collect changed computations, update entries, send
     let mut per_session: Vec<Vec<(String, Arc<JobResult>)>> =
         (0..plans.len()).map(|_| vec![]).collect();
+    let mut failed: Vec<Vec<(String, Arc<instant_core::error::InstantError>)>> =
+        (0..plans.len()).map(|_| vec![]).collect();
     for (subscribers, result) in results {
-        let Some(result) = result else { continue };
-        let result = Arc::new(result);
-        for (idx, key) in subscribers {
-            per_session[idx].push((key, result.clone()));
+        match result {
+            Ok(result) => {
+                let result = Arc::new(result);
+                for (idx, key) in subscribers {
+                    per_session[idx].push((key, result.clone()));
+                }
+            }
+            Err(e) => {
+                let e = Arc::new(e);
+                for (idx, key) in subscribers {
+                    failed[idx].push((key, e.clone()));
+                }
+            }
         }
     }
     let processed_isn = service::current_isn(state).await;
-    for (plan, outcomes) in plans.into_iter().zip(per_session) {
+    for ((plan, outcomes), failures) in plans.into_iter().zip(per_session).zip(failed) {
         let prev: HashMap<&str, u64> = plan.stale.iter().map(|(k, h)| (k.as_str(), *h)).collect();
         let mut computations = vec![];
         let mut updates: Vec<(String, Option<u64>, Arc<QueryTopics>)> = vec![];
@@ -619,6 +685,10 @@ pub async fn refresh_batch(
                 computations.push((key.clone(), r.clone()));
             }
             updates.push((key.clone(), changed.then_some(r.hash), r.topics.clone()));
+        }
+        if !failures.is_empty() {
+            refresh_failed(&plan, updates, &failures, latest, &processed_isn).await;
+            continue;
         }
         let attrs_changed_for_session = plan.prev_attrs_hash != Some(attrs_hash);
         // legacy refreshes every session on a schema change
@@ -686,4 +756,52 @@ pub async fn refresh_batch(
         METRICS.refresh_ok_sent_total.inc();
         plan.session.send_raw(frame);
     }
+}
+
+/// A session whose refresh hit a failing recomputation, the way legacy's
+/// handle-refresh! fails: its recomputations run in one `pmap`, so one
+/// throwing query fails the whole refresh. Every recomputation that did
+/// finish has already recorded its result (query.clj
+/// instaql-query-reactive! -> add-instaql-query!), the failing query was
+/// unsubscribed (its catch -> rs/remove-query!), no refresh-ok goes out and
+/// the attrs hash stays put; the exception reaches the client as an `error`
+/// frame whose original-event is the refresh event
+/// (session.clj handle-instant-exception / handle-error!).
+async fn refresh_failed(
+    plan: &SessionPlan,
+    updates: Vec<(String, Option<u64>, Arc<QueryTopics>)>,
+    failures: &[(String, Arc<instant_core::error::InstantError>)],
+    latest: i64,
+    processed_isn: &Value,
+) {
+    let frame = {
+        let mut st = plan.session.state.lock().await;
+        for (key, hash, topics) in updates {
+            if let Some(entry) = st.queries.get_mut(&key) {
+                if let Some(h) = hash {
+                    entry.result_hash = h;
+                }
+                entry.topics = Some(topics);
+            }
+        }
+        let queries: Vec<Value> = plan
+            .stale
+            .iter()
+            .filter_map(|(k, _)| st.queries.get(k).map(|e| e.q.clone()))
+            .collect();
+        for (key, _) in failures {
+            st.queries.remove(key);
+        }
+        let original = json!({
+            "op": "refresh",
+            "session-id": plan.session.id,
+            "tx-id": latest,
+            "processed-tx-id": latest,
+            "processed-isn": processed_isn,
+            "instaql-queries": queries,
+        });
+        crate::ws::err_msg(&original, &failures[0].1)
+    };
+    METRICS.refresh_errors_sent_total.inc();
+    plan.session.send(frame);
 }

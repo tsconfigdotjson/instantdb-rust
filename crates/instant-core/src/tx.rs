@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
-use crate::attr::{Attr, AttrMap};
+use crate::attr::{Attr, AttrMap, ValueType};
 use crate::error::{InstantError, Result};
 use crate::system_catalog;
 use crate::triple::{
@@ -482,6 +482,10 @@ pub struct TxReport {
     /// catalog; other attr updates (flags, inferred types) only reach
     /// sessions whose queries went stale anyway
     pub schema_changed: bool,
+    /// restoring a blob attr stales every query: legacy
+    /// topics-for-attr-upsert adds `[#{:ea} _ _ _]` for an object attr's
+    /// restoration (reactive/topics.clj:151-165)
+    pub requery_all: bool,
     /// attrs whose rows this tx wrote (added, updated, deleted, restored,
     /// inferred types): legacy derives a `[_ #{attr-id} _]` topic from every
     /// attrs-row change (reactive/topics.clj topics-for-attr-upsert), so any
@@ -633,6 +637,7 @@ pub async fn transact(
         id_retracted: vec![],
         attrs_changed: false,
         schema_changed: false,
+        requery_all: false,
         changed_attrs: vec![],
         rule_params: HashMap::new(),
         resolved_lookups: HashMap::new(),
@@ -750,6 +755,7 @@ pub async fn transact(
                     .collect();
                 let restored = crate::attr::restore(&mut *conn, app_id, &ids).await?;
                 for attr in restored {
+                    report.requery_all |= attr.value_type != ValueType::Ref;
                     report.changed_attrs.push(attr.id);
                     attrs.remove(&attr.id);
                     attrs.insert(attr);

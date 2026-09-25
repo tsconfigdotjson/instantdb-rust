@@ -133,6 +133,11 @@ pub struct ChildResult {
     pub etype: String,
     /// link triples connecting this parent to the children (stored orientation)
     pub link_triples: Vec<TripleOut>,
+    /// legacy's join rows of this child form under this parent: each link
+    /// triple followed by one of the child's where-pattern rows (just the
+    /// link triple when the child form has no where). Permissions drop
+    /// whole rows (instaql.clj permissioned-node).
+    pub rows: Vec<Vec<TripleOut>>,
     pub entities: Vec<EntityNode>,
 }
 
@@ -148,6 +153,9 @@ pub struct PageInfoOut {
 pub struct FormOut {
     pub k: String,
     pub etype: String,
+    /// join rows of the top-level where patterns (see [`where_rows`]); empty
+    /// without a where, where legacy's rows are the entities' id triples
+    pub where_rows: Vec<Vec<TripleOut>>,
     pub entities: Vec<EntityNode>,
     pub page_info: Option<PageInfoOut>,
     pub aggregate: Option<i64>,
@@ -175,7 +183,7 @@ impl QueryResult {
                 }
             }
             for c in &node.children {
-                for t in &c.link_triples {
+                for t in c.link_triples.iter().chain(c.rows.iter().flatten()) {
                     if seen.insert((t.e, t.a, t.v.to_string())) {
                         triples.push(t.to_json());
                     }
@@ -188,6 +196,11 @@ impl QueryResult {
         let mut page_info = Map::new();
         let mut aggregate = Map::new();
         for form in &self.forms {
+            for t in form.where_rows.iter().flatten() {
+                if seen.insert((t.e, t.a, t.v.to_string())) {
+                    triples.push(t.to_json());
+                }
+            }
             for e in &form.entities {
                 walk(e, &mut triples, &mut seen);
             }
@@ -1452,6 +1465,7 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
             return Ok(FormOut {
                 k: form.k.clone(),
                 etype: form.etype.clone(),
+                where_rows: vec![],
                 entities: vec![],
                 page_info: None,
                 // legacy: no aggregate key for an unknown namespace
@@ -1474,6 +1488,7 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
                     return Ok(FormOut {
                         k: form.k.clone(),
                         etype: form.etype.clone(),
+                        where_rows: vec![],
                         entities: vec![],
                         page_info: None,
                         aggregate: Some(0),
@@ -1486,6 +1501,7 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
         return Ok(FormOut {
             k: form.k.clone(),
             etype: form.etype.clone(),
+            where_rows: vec![],
             entities: vec![],
             page_info: None,
             aggregate: Some(n),
@@ -1667,6 +1683,7 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
         return Ok(FormOut {
             k: form.k.clone(),
             etype: form.etype.clone(),
+            where_rows: vec![],
             entities: vec![],
             // legacy emits neither page-info nor aggregate for a form whose
             // attrs don't exist (instaql.clj:1171-1172)
@@ -1820,11 +1837,21 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
 
     // ---- entity fetch + children ----
     let eids: Vec<Uuid> = matched.iter().map(|m| m.eid).collect();
+    let where_rows = match &form.opts.where_conds {
+        Some(w) if !eids.is_empty() => {
+            let mut by_eid = where_rows(conn, &sql_ctx, &form.etype, w, &eids).await?;
+            eids.iter()
+                .flat_map(|e| by_eid.remove(e).unwrap_or_default())
+                .collect()
+        }
+        _ => vec![],
+    };
     let entities = fetch_entities(conn, ctx, form, &eids).await?;
 
     Ok(FormOut {
         k: form.k.clone(),
         etype: form.etype.clone(),
+        where_rows,
         entities,
         page_info,
         aggregate: None,
@@ -2072,6 +2099,7 @@ fn attach_children<'a>(
                     k: child_form.k.clone(),
                     etype: child_form.k.clone(),
                     link_triples: vec![],
+                    rows: vec![],
                     entities: vec![],
                 });
             }
@@ -2162,6 +2190,7 @@ fn attach_children<'a>(
                                 k: child_form.k.clone(),
                                 etype: child_etype.clone(),
                                 link_triples: vec![],
+                                rows: vec![],
                                 entities: vec![],
                             });
                         }
@@ -2189,6 +2218,22 @@ fn attach_children<'a>(
             path: child_form.path.clone(),
             root: child_form.root.clone(),
         };
+        // the child's where patterns join its link pattern (instaql.clj
+        // form->child-forms + where-query), so each row is a link triple
+        // followed by one of the child's where rows
+        let child_where_rows = match &child_form.opts.where_conds {
+            Some(w) if !kept_vec.is_empty() => {
+                let sql_ctx = SqlCtx {
+                    app_id: ctx.app_id,
+                    attrs: ctx.attrs,
+                    root: &child_form.root,
+                    path: &child_form.path,
+                    cur_where: Default::default(),
+                };
+                Some(where_rows(conn, &sql_ctx, &child_etype, w, &kept_vec).await?)
+            }
+            _ => None,
+        };
         let child_nodes = fetch_entities(conn, ctx, &child_form_resolved, &kept_vec).await?;
         let node_by_id: HashMap<Uuid, EntityNode> =
             child_nodes.into_iter().map(|n| (n.eid, n)).collect();
@@ -2196,11 +2241,23 @@ fn attach_children<'a>(
         for p in parents.iter_mut() {
             let pairs = per_parent.remove(&p.eid).unwrap_or_default();
             let mut link_triples = vec![];
+            let mut rows = vec![];
             let mut entities = vec![];
             let mut seen = HashSet::new();
             for (t, child) in pairs {
                 if !kept.contains(&child) {
                     continue;
+                }
+                match &child_where_rows {
+                    Some(by_child) => {
+                        for wr in by_child.get(&child).into_iter().flatten() {
+                            let mut row = Vec::with_capacity(wr.len() + 1);
+                            row.push(t.clone());
+                            row.extend(wr.iter().cloned());
+                            rows.push(row);
+                        }
+                    }
+                    None => rows.push(vec![t.clone()]),
                 }
                 link_triples.push(t);
                 if seen.insert(child) {
@@ -2213,9 +2270,355 @@ fn attach_children<'a>(
                 k: child_form.k.clone(),
                 etype: child_etype.clone(),
                 link_triples,
+                rows,
                 entities,
             });
         }
         Ok(())
     })
+}
+
+// ---------------------------------------------------------------------------
+// Where-pattern join rows
+
+/// Rows per entity above which an `and` stops multiplying: a guard against
+/// pathological fan-out. Clients read the union of the triples, never the
+/// row multiplicity.
+const MAX_WHERE_ROWS: usize = 256;
+
+type RowsByEid = HashMap<Uuid, Vec<Vec<TripleOut>>>;
+
+/// The join rows legacy's where patterns contribute for the matched `eids`.
+///
+/// Legacy compiles the where clause into datalog patterns of the form's own
+/// query, and every pattern's matched triple is a column of the join row
+/// (datalog.clj accumulate-results), so the triples a where clause matched
+/// reach the client even when a `fields` projection leaves the attr out, or
+/// when they belong to a linked entity. Per entity: a leaf's rows are its
+/// matching chains of triples along the path, `and` multiplies its
+/// children's rows, `or` unions them (or-gather-cte: one row per matching
+/// branch).
+fn where_rows<'a, 'b: 'a>(
+    conn: &'a mut PgConnection,
+    sql_ctx: &'a SqlCtx<'b>,
+    etype: &'a str,
+    cond: &'a WhereCond,
+    eids: &'a [Uuid],
+) -> futures::future::BoxFuture<'a, Result<RowsByEid>> {
+    Box::pin(async move {
+        match cond {
+            WhereCond::And(cs) => {
+                let mut acc: RowsByEid = eids.iter().map(|e| (*e, vec![vec![]])).collect();
+                for c in cs {
+                    let live: Vec<Uuid> = eids
+                        .iter()
+                        .filter(|e| acc.contains_key(*e))
+                        .cloned()
+                        .collect();
+                    if live.is_empty() {
+                        break;
+                    }
+                    let mut child = where_rows(&mut *conn, sql_ctx, etype, c, &live).await?;
+                    acc = acc
+                        .into_iter()
+                        .filter_map(|(e, rows)| {
+                            let crows = child.remove(&e)?;
+                            let mut out = vec![];
+                            'outer: for r in &rows {
+                                for cr in &crows {
+                                    if out.len() >= MAX_WHERE_ROWS {
+                                        break 'outer;
+                                    }
+                                    let mut row = r.clone();
+                                    row.extend(cr.iter().cloned());
+                                    out.push(row);
+                                }
+                            }
+                            (!out.is_empty()).then_some((e, out))
+                        })
+                        .collect();
+                }
+                Ok(acc)
+            }
+            WhereCond::Or(cs) => {
+                let mut acc: RowsByEid = HashMap::new();
+                for c in cs {
+                    // the same `{$isNull: true}` -> `{in [nil]}` fold as
+                    // push_cond (instaql.clj combine-or-where-conds)
+                    let folded;
+                    let c = match c {
+                        WhereCond::Cond {
+                            path,
+                            op: WhereOp::IsNull(true),
+                        } if sql_ctx.final_attr_indexed(etype, path) => {
+                            folded = WhereCond::Cond {
+                                path: path.clone(),
+                                op: WhereOp::In(vec![Value::Null]),
+                            };
+                            &folded
+                        }
+                        other => other,
+                    };
+                    for (e, rows) in where_rows(&mut *conn, sql_ctx, etype, c, eids).await? {
+                        acc.entry(e).or_default().extend(rows);
+                    }
+                }
+                Ok(acc)
+            }
+            WhereCond::Cond { path, op } => leaf_rows(conn, sql_ctx, etype, path, op, eids).await,
+        }
+    })
+}
+
+/// A where leaf as the or-branches legacy's coercion expands it into (see
+/// push_leaf), each a path ending in one comparison.
+async fn leaf_rows(
+    conn: &mut PgConnection,
+    sql_ctx: &SqlCtx<'_>,
+    etype: &str,
+    path: &[String],
+    op: &WhereOp,
+    eids: &[Uuid],
+) -> Result<RowsByEid> {
+    if path.len() == 1 && path[0] == "$entityIdStartsWith" {
+        // [?e id-attr {:$entityIdStartsWith prefix}]: the entity's id triple
+        let Some(id_attr) = sql_ctx.attrs.id_attr_of(etype) else {
+            return Ok(HashMap::new());
+        };
+        let mut qb = select_triples(sql_ctx.app_id, id_attr.id);
+        qb.push(" AND t.ea AND t.entity_id = ANY(");
+        qb.push_bind(eids.to_vec());
+        qb.push(") AND ");
+        match sql_ctx.push_leaf(&mut qb, etype, "t.entity_id", path, op, 1) {
+            Ok(r) => r?,
+            Err(MissingAttr) => return Ok(HashMap::new()),
+        }
+        let mut out: RowsByEid = HashMap::new();
+        for t in fetch_triples(conn, qb).await? {
+            out.entry(t.e).or_default().push(vec![t]);
+        }
+        return Ok(out);
+    }
+    let branches: Vec<(&[String], LeafEmit)> = match op {
+        WhereOp::Not(v) => {
+            let mut b = vec![(path, LeafEmit::NotRaw(v.clone()))];
+            for i in 1..path.len() {
+                b.push((&path[..i], LeafEmit::IsNull(true)));
+            }
+            if !sql_ctx.final_attr_indexed(etype, path) {
+                b.push((path, LeafEmit::IsNull(true)));
+            }
+            b
+        }
+        WhereOp::IsNull(true) if path.len() > 1 => (1..=path.len())
+            .map(|i| (&path[..i], LeafEmit::IsNull(true)))
+            .collect(),
+        WhereOp::IsNull(b) => vec![(path, LeafEmit::IsNull(*b))],
+        WhereOp::Eq(v) => vec![(path, LeafEmit::Eq(vec![v.clone()]))],
+        WhereOp::In(vs) => vec![(path, LeafEmit::Eq(vs.clone()))],
+        WhereOp::Cmp(o, v) => vec![(path, LeafEmit::Cmp(*o, v.clone()))],
+        WhereOp::Like(p, ci) => vec![(path, LeafEmit::Like(p.clone(), *ci))],
+        WhereOp::EntityIdStartsWith(_) => vec![],
+    };
+    let mut acc: RowsByEid = HashMap::new();
+    for (p, emit) in branches {
+        for (e, rows) in chain_rows(conn, sql_ctx, etype, p, &emit, eids).await? {
+            acc.entry(e).or_default().extend(rows);
+        }
+    }
+    Ok(acc)
+}
+
+/// Chains of triples from each of `eids` along `path` whose last segment
+/// satisfies `emit`: the link triples of every hop (legacy ->ref-attr-pats)
+/// and the value pattern's triple — the matched value triple, the link
+/// triple for a link label, or the entity's id triple for `$isNull`
+/// (legacy puts `$isNull` on the id attr, instaql.clj ->where-cond-attr-pats).
+async fn chain_rows(
+    conn: &mut PgConnection,
+    sql_ctx: &SqlCtx<'_>,
+    etype: &str,
+    path: &[String],
+    emit: &LeafEmit,
+    eids: &[Uuid],
+) -> Result<RowsByEid> {
+    // (root entity, entity reached so far, triples along the way)
+    let mut frontier: Vec<(Uuid, Uuid, Vec<TripleOut>)> =
+        eids.iter().map(|e| (*e, *e, vec![])).collect();
+    let mut cur_etype = etype.to_string();
+    let parse = |v: &Value| v.as_str().and_then(|s| Uuid::parse_str(s).ok());
+    for (i, seg) in path.iter().enumerate() {
+        if frontier.is_empty() {
+            break;
+        }
+        let Ok(step) = resolve_seg(sql_ctx.attrs, &cur_etype, seg) else {
+            return Ok(HashMap::new());
+        };
+        let mut currents: Vec<Uuid> = frontier.iter().map(|f| f.1).collect();
+        currents.sort();
+        currents.dedup();
+        // (from entity, entity the chain continues at, triple)
+        let mut found: Vec<(Uuid, Uuid, TripleOut)> = vec![];
+        if i + 1 == path.len() {
+            match (emit, &step) {
+                (LeafEmit::IsNull(_), _) => {
+                    let Some(id_attr) = sql_ctx.attrs.id_attr_of(&cur_etype) else {
+                        return Ok(HashMap::new());
+                    };
+                    let mut qb = select_triples(sql_ctx.app_id, id_attr.id);
+                    qb.push(" AND t.ea AND t.entity_id = ANY(");
+                    qb.push_bind(currents);
+                    qb.push(") AND ");
+                    match sql_ctx.push_path(&mut qb, &cur_etype, "t.entity_id", &path[i..], emit, 1) {
+                        Ok(r) => r?,
+                        Err(MissingAttr) => return Ok(HashMap::new()),
+                    }
+                    for t in fetch_triples(conn, qb).await? {
+                        found.push((t.e, t.e, t));
+                    }
+                }
+                (_, PathStep::Forward(attr)) if attr.value_type == ValueType::Blob => {
+                    let mut qb = select_triples(sql_ctx.app_id, attr.id);
+                    qb.push(" AND t.entity_id = ANY(");
+                    qb.push_bind(currents);
+                    qb.push(") AND ");
+                    // the comparison on this very row: pinned to it by its
+                    // primary key
+                    sql_ctx.push_blob_leaf(
+                        &mut qb,
+                        attr,
+                        "t.entity_id AND w1.value_md5 = t.value_md5",
+                        emit,
+                        "w1",
+                    )?;
+                    for t in fetch_triples(conn, qb).await? {
+                        found.push((t.e, t.e, t));
+                    }
+                }
+                (_, step) => {
+                    // a link label: the link triple to a matching entity
+                    let (attr, forward) = match step {
+                        PathStep::Forward(a) => (*a, true),
+                        PathStep::Reverse(a) => (*a, false),
+                    };
+                    let (here, there) = if forward {
+                        ("t.eav AND t.entity_id", "json_uuid_to_uuid(t.value)")
+                    } else {
+                        ("t.vae AND json_uuid_to_uuid(t.value)", "t.entity_id")
+                    };
+                    let mut qb = select_triples(sql_ctx.app_id, attr.id);
+                    qb.push(format!(" AND {here} = ANY("));
+                    qb.push_bind(currents);
+                    qb.push(")");
+                    match emit {
+                        LeafEmit::Eq(vals) => {
+                            let uuids: Vec<Uuid> = vals.iter().filter_map(parse).collect();
+                            qb.push(format!(" AND {there} = ANY("));
+                            qb.push_bind(uuids);
+                            qb.push(")");
+                        }
+                        LeafEmit::NotRaw(v) => {
+                            let Some(u) = parse(v) else {
+                                return Ok(HashMap::new());
+                            };
+                            qb.push(format!(" AND {there} != "));
+                            qb.push_bind(u);
+                        }
+                        _ => return Ok(HashMap::new()),
+                    }
+                    for t in fetch_triples(conn, qb).await? {
+                        let from = if forward { Some(t.e) } else { parse(&t.v) };
+                        if let Some(from) = from {
+                            found.push((from, from, t));
+                        }
+                    }
+                }
+            }
+        } else {
+            // a hop through a link; the rest of the path must hold from its
+            // far end
+            let (attr, here, there) = match &step {
+                PathStep::Forward(a) if a.value_type == ValueType::Ref => (
+                    *a,
+                    "t.eav AND t.entity_id",
+                    "json_uuid_to_uuid(t.value)",
+                ),
+                PathStep::Reverse(a) => (*a, "t.vae AND json_uuid_to_uuid(t.value)", "t.entity_id"),
+                _ => return Ok(HashMap::new()),
+            };
+            let next = next_etype(&step);
+            let mut qb = select_triples(sql_ctx.app_id, attr.id);
+            qb.push(format!(" AND {here} = ANY("));
+            qb.push_bind(currents);
+            qb.push(") AND ");
+            match sql_ctx.push_path(&mut qb, &next, there, &path[i + 1..], emit, 1) {
+                Ok(r) => r?,
+                Err(MissingAttr) => return Ok(HashMap::new()),
+            }
+            let forward = matches!(step, PathStep::Forward(_));
+            for t in fetch_triples(conn, qb).await? {
+                let ends = if forward {
+                    parse(&t.v).map(|to| (t.e, to))
+                } else {
+                    parse(&t.v).map(|from| (from, t.e))
+                };
+                if let Some((from, to)) = ends {
+                    found.push((from, to, t));
+                }
+            }
+            cur_etype = next;
+        }
+        let mut by_current: HashMap<Uuid, Vec<usize>> = HashMap::new();
+        for (idx, f) in frontier.iter().enumerate() {
+            by_current.entry(f.1).or_default().push(idx);
+        }
+        let mut advanced = vec![];
+        for (from, to, t) in found {
+            for idx in by_current.get(&from).into_iter().flatten() {
+                let (root, _, chain) = &frontier[*idx];
+                let mut chain = chain.clone();
+                chain.push(t.clone());
+                advanced.push((*root, to, chain));
+            }
+        }
+        frontier = advanced;
+    }
+    let mut out: RowsByEid = HashMap::new();
+    for (root, _, chain) in frontier {
+        let rows = out.entry(root).or_default();
+        if rows.len() < MAX_WHERE_ROWS {
+            rows.push(chain);
+        }
+    }
+    Ok(out)
+}
+
+/// `SELECT <triple cols> FROM triples t WHERE t.app_id = .. AND t.attr_id = ..`
+fn select_triples(app_id: Uuid, attr_id: Uuid) -> QueryBuilder<'static, Postgres> {
+    let mut qb = QueryBuilder::new(
+        "SELECT t.entity_id, t.attr_id, t.value, t.created_at FROM triples t WHERE t.app_id = ",
+    );
+    qb.push_bind(app_id);
+    qb.push(" AND t.attr_id = ");
+    qb.push_bind(attr_id);
+    qb
+}
+
+async fn fetch_triples(
+    conn: &mut PgConnection,
+    mut qb: QueryBuilder<'_, Postgres>,
+) -> Result<Vec<TripleOut>> {
+    // a stable order keeps the result hash (and so refresh suppression)
+    // independent of the plan
+    qb.push(" ORDER BY t.entity_id, t.value_md5");
+    let rows = qb.build().fetch_all(&mut *conn).await?;
+    Ok(rows
+        .iter()
+        .map(|row| TripleOut {
+            e: row.get("entity_id"),
+            a: row.get("attr_id"),
+            v: row.get("value"),
+            t: row.get::<Option<i64>, _>("created_at").unwrap_or(0),
+        })
+        .collect())
 }

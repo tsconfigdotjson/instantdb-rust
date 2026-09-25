@@ -348,10 +348,10 @@ pub struct QueryCacheEntry {
     pub created: std::time::Instant,
 }
 
-/// (app id, canonical query, admin?, user id)
-/// (app, query, admin?, user, request.ip, request.origin): rules may read
-/// `request.ip` / `request.origin`, so results are only shared between
-/// sessions with the same request facts.
+/// (app, query, admin?, user, request.ip, request.origin, rules hash):
+/// rules may read `request.ip` / `request.origin`, so results are only
+/// shared between sessions with the same request facts, and a rules change
+/// (which commits no tx) keys new entries.
 pub type QueryCacheKey = (
     Uuid,
     String,
@@ -359,6 +359,7 @@ pub type QueryCacheKey = (
     Option<Uuid>,
     Option<String>,
     Option<String>,
+    u64,
 );
 
 /// Entries older than this are never served (bounds the staleness of results

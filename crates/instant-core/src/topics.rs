@@ -413,6 +413,7 @@ mod tests {
                 .map(|(k, entities)| FormOut {
                     k: k.into(),
                     etype: k.into(),
+                    where_rows: vec![],
                     entities,
                     page_info: None,
                     aggregate: None,
@@ -517,6 +518,7 @@ mod tests {
             k: "owner".into(),
             etype: "users".into(),
             link_triples: vec![],
+            rows: vec![],
             entities: vec![node(u1, "users")],
         });
         let qt = query_topics(&fx.attrs, &forms, &result(vec![("todos", vec![parent])]));
@@ -536,6 +538,7 @@ mod tests {
             k: "todos".into(),
             etype: "todos".into(),
             link_triples: vec![],
+            rows: vec![],
             entities: vec![],
         });
         let qt = query_topics(&fx.attrs, &forms, &result(vec![("users", vec![user])]));
