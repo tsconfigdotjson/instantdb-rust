@@ -2416,7 +2416,7 @@ async fn leaf_rows(
         WhereOp::IsNull(b) => vec![(path, LeafEmit::IsNull(*b))],
         WhereOp::Eq(v) => vec![(path, LeafEmit::Eq(vec![v.clone()]))],
         WhereOp::In(vs) => vec![(path, LeafEmit::Eq(vs.clone()))],
-        WhereOp::Cmp(o, v) => vec![(path, LeafEmit::Cmp(*o, v.clone()))],
+        WhereOp::Cmp(o, v) => vec![(path, LeafEmit::Cmp(o, v.clone()))],
         WhereOp::Like(p, ci) => vec![(path, LeafEmit::Like(p.clone(), *ci))],
         WhereOp::EntityIdStartsWith(_) => vec![],
     };

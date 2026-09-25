@@ -1070,3 +1070,73 @@ async fn link_rules_run_for_lookup_values() {
     .unwrap_err();
     assert_eq!(err.error_type, "permission-denied");
 }
+
+/// Issue #45: permissions drop whole join rows (instaql.clj
+/// permissioned-node). A where row through a hidden entity is dropped, a
+/// form left without a viewable top-level row loses every entity, and a
+/// forward link triple to a hidden entity stays (its viewability is the
+/// parent's) while the hidden entity does not.
+#[tokio::test]
+async fn permissions_drop_whole_join_rows() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"view": "data.name != 'hidden'"}}}),
+    )
+    .await;
+    let (alice, hidden) = (Uuid::new_v4(), Uuid::new_v4());
+    let (t1, t2) = (Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", alice, ids.owners_id, alice],
+            ["add-triple", alice, ids.owners_name, "alice"],
+            ["add-triple", hidden, ids.owners_id, hidden],
+            ["add-triple", hidden, ids.owners_name, "hidden"],
+            ["add-triple", t1, ids.todos_id, t1],
+            ["add-triple", t1, ids.todos_owner, alice],
+            ["add-triple", t2, ids.todos_id, t2],
+            ["add-triple", t2, ids.todos_owner, hidden]
+        ]),
+    )
+    .await
+    .unwrap();
+    let auth = AuthCtx::default();
+
+    let res = run_filtered(
+        &pool,
+        app,
+        &auth,
+        json!({"todos": {"$": {"where": {"owner.name": "alice"}}}}),
+    )
+    .await;
+    assert_eq!(res.forms[0].entities.len(), 1);
+    assert!(res.forms[0]
+        .where_rows
+        .iter()
+        .flatten()
+        .any(|t| t.e == alice && t.a == ids.owners_name));
+
+    // the only row runs through the hidden owner: no entity survives
+    let res = run_filtered(
+        &pool,
+        app,
+        &auth,
+        json!({"todos": {"$": {"where": {"owner.name": "hidden"}}}}),
+    )
+    .await;
+    assert!(res.forms[0].entities.is_empty());
+    assert!(res.forms[0].where_rows.is_empty());
+
+    let res = run_filtered(&pool, app, &auth, json!({"todos": {"owner": {}}})).await;
+    let t2_node = res.forms[0].entities.iter().find(|n| n.eid == t2).unwrap();
+    assert_eq!(t2_node.children[0].link_triples.len(), 1);
+    assert!(t2_node.children[0].entities.is_empty());
+    let t1_node = res.forms[0].entities.iter().find(|n| n.eid == t1).unwrap();
+    assert_eq!(t1_node.children[0].entities.len(), 1);
+}
