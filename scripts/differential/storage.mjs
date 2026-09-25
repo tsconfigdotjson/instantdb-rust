@@ -18,7 +18,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { canon, connect, foldFrames, newState, normalize, projectState, psql, settle } from "./lib.mjs";
+import { canon, connect, DIVERGENCE_PREFIXES, describeAllowVerdict, firstDifference, foldFrames, loadAllowlist, newState, normalize, projectState, psql, settle } from "./lib.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appId = process.argv[2];
@@ -313,28 +313,12 @@ async function runAgainst(name) {
 // ---------------------------------------------------------------------------
 // diff + allowlist
 
-const allowlist = JSON.parse(fs.readFileSync(path.join(here, "allowed-divergences.json"), "utf8"));
-const usedAllows = new Set();
-function allowed(p) {
-  for (const entry of allowlist) {
-    if (new RegExp(entry.path).test(p)) {
-      usedAllows.add(entry.path);
-      return true;
-    }
-  }
-  return false;
-}
-
-function firstDiff(a, b, p = "") {
-  if (canon(a) === canon(b)) return null;
-  const isObj = (v) => v !== null && typeof v === "object";
-  if (isObj(a) && isObj(b) && Array.isArray(a) === Array.isArray(b)) {
-    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
-      const d = firstDiff(a?.[k], b?.[k], `${p}.${k}`);
-      if (d) return d;
-    }
-  }
-  return { p, a, b };
+// strict entries (lib.mjs loadAllowlist): this layer owns the storage:
+// paths and fails on any of them that allowed nothing
+const allowlist = loadAllowlist(path.join(here, "allowed-divergences.json"), { prefixes: DIVERGENCE_PREFIXES.storage });
+function pushDiff(p, legacyVal, rustVal) {
+  const verdict = allowlist.check(p, legacyVal, rustVal);
+  diffs.push({ path: p, allowed: !!verdict.entry, verdict, legacy: legacyVal, rust: rustVal });
 }
 
 // url shapes are only comparable when both servers presign S3 URLs (rust
@@ -370,30 +354,32 @@ for (const step of new Set([...Object.keys(results.legacy), ...Object.keys(resul
   if (keys) {
     for (const k of keys) {
       if (canon(l[k]) !== canon(r?.[k])) {
-        const p = `storage:${step}/${k}`;
-        diffs.push({ path: p, allowed: allowed(p), legacy: l[k], rust: r?.[k] });
+        pushDiff(`storage:${step}/${k}`, l[k], r?.[k]);
       }
     }
   } else if (canon(l) !== canon(r)) {
-    const p = `storage:${step}`;
-    diffs.push({ path: p, allowed: allowed(p), legacy: l, rust: r });
+    pushDiff(`storage:${step}`, l, r);
   }
 }
 const blocking = diffs.filter((d) => !d.allowed);
 for (const d of diffs) {
   console.log(`\n[${d.allowed ? "ALLOWED" : "DIVERGENCE"}] ${d.path}`);
-  const fd = firstDiff(d.legacy, d.rust);
+  const fd = firstDifference(d.legacy, d.rust);
   if (fd && fd.p) {
     console.log(`  first differing sub-path: ${fd.p}`);
     console.log("  legacy:", JSON.stringify(fd.a)?.slice(0, 1500));
     console.log("  rust:  ", JSON.stringify(fd.b)?.slice(0, 1500));
+    console.log("  full legacy:", JSON.stringify(d.legacy)?.slice(0, 700));
+    console.log("  full rust:  ", JSON.stringify(d.rust)?.slice(0, 700));
   } else {
     console.log("  legacy:", JSON.stringify(d.legacy)?.slice(0, 1500));
     console.log("  rust:  ", JSON.stringify(d.rust)?.slice(0, 1500));
   }
+  for (const line of describeAllowVerdict(d.verdict)) console.log(line);
 }
-if (blocking.length) {
-  console.error(`\nSTORAGE DIFFERENTIAL FAILED: ${blocking.length} unallowed divergences`);
+const staleAllows = allowlist.reportStale();
+if (blocking.length || staleAllows) {
+  console.error(`\nSTORAGE DIFFERENTIAL FAILED: ${blocking.length} unallowed divergences, ${staleAllows} stale allowlist entries`);
   process.exit(1);
 }
 const steps = Object.keys(results.legacy).length;

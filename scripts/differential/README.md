@@ -52,7 +52,8 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   **client-visible projection** (exactly what `Reactor.js`/`SyncTable.ts`/
   `Stream.ts` read, with volatile server-chosen values normalized) and must
   match byte-for-byte. Key sets per op are compared raw. Remaining diffs must
-  be listed in `allowed-divergences.json` with a client-code citation, and the
+  be listed in `allowed-divergences.json` with a client-code citation and the
+  exact sub-paths and pinned values they allow (see Allowlists below), and the
   run fails on anything unlisted. `DUMP_STEPS=<name,...>` prints the folded
   frames of a step per server; `DUMP_OPS=1` prints the raw op sequence per
   step and connection (which queries a `refresh-ok` recomputed, whether it
@@ -152,6 +153,58 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   reported on their own line, so the percentage measures what a
   self-hosted server can serve. Groups `demo`, `health`, `ws-internal`, `cel-internal` are
   listed but not counted.
+
+## Allowlists
+
+`allowed-divergences.json` (replay, dash and storage layers, keyed by
+`path`) and `errors-allowed.json` (error matrix, keyed by `probe`) share one
+strict entry format, checked by `loadAllowlist` / `allowDivergence` in
+`lib.mjs`. An entry allows one documented difference, not whatever else later
+shows up at the same path:
+
+```json
+{
+  "path": "^dash:38-platform/transferRevoke$",
+  "differs": ["^\\.(status|type|message|hint|keys|body)$"],
+  "legacy": { "status": 500, "type": "unknown", "message": "Something went wrong. Sorry about this!" },
+  "rust": { "status": 200, "body": { "count": 1 } },
+  "reason": "why the difference is safe / decided",
+  "citation": "LEGACY/...:line"
+}
+```
+
+- `path` / `probe`: an anchored (`^...$`) regex over the compared path.
+  Replay paths are `step:<step>/<conn>`, `final/<conn>/<section>` and
+  `keyset/<op>/<key>`; dash paths `dash:<step>/<key>`; storage paths
+  `storage:<step>/<key>`; errors-allowed.json uses probe names.
+- `differs` (required): anchored regexes over sub-paths of the compared value.
+  Object keys and array indexes join with dots, as in the log's "first
+  differing sub-path": `.status`, `.hint.debug-uri`, `.0.status`; `^$` is
+  the whole value, for scalars such as the keyset "present" / "absent". The
+  matcher masks every sub-path that matches on both sides (a key present on
+  only one side counts as differing there), and what is left must be
+  identical.
+- `legacy` / `rust` (optional, but every current entry has both): each side
+  must still match its documented behavior, as a deep subset. Object keys
+  listed must match and extra keys are fine. Arrays must have the same length
+  and match element by element. Scalars compare exactly. The operators are
+  `{"$regex": "..."}`, `{"$type": "string" | "number" | "boolean" | "null" |
+  "array" | "object"}` and `{"$absent": true}`. If either server changes
+  behavior, the entry stops applying and the difference fails.
+- Each layer loads only the entries whose path prefix it owns (replay:
+  `step:` / `final/` / `keyset/`; dash: `dash:`; storage: `storage:`). An
+  entry no layer owns is a load error, and so is a malformed entry or an
+  unknown field. If an owned entry allowed nothing in a run, the layer fails
+  (`[STALE ALLOWLIST]`). The exception is `"flaky": true` with a
+  `"flakyReason"`, which only logs `[STALE ALLOWLIST, flaky]`.
+- Every allowed difference logs `allowed by <entry>; differing sub-paths:
+  ...`. When an entry's path matched but its pins or sub-paths did not, the
+  log says why next to the `DIVERGENCE` / `MISMATCH`.
+
+`schema-allowed.json` is a separate format: `{category, pattern, side?,
+reason}`. `pattern` is a start-anchored regex over a catalog row, and `side`
+(`"legacy"` / `"rust"`) limits the entry to rows that only that database
+has. An entry that allowed nothing fails `schema.mjs`.
 
 This harness found (and pinned as regression coverage) real divergences during
 development: deep-merge null semantics, system-catalog attr visibility,

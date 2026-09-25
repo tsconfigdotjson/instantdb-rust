@@ -1829,24 +1829,16 @@ async function runAgainst(serverName) {
 // ---------------------------------------------------------------------------
 // diff + allowlist
 
-const allowlist = JSON.parse(
-  fs.readFileSync(path.join(here, "allowed-divergences.json"), "utf8"),
-);
-const usedAllows = new Set();
-function allowed(p) {
-  for (const entry of allowlist) {
-    if (new RegExp(entry.path).test(p)) {
-      usedAllows.add(entry.path);
-      return true;
-    }
-  }
-  return false;
-}
+// strict entries (lib.mjs loadAllowlist): this layer owns the step: / final/
+// / keyset/ paths and fails on any of them that allowed nothing
+const { DIVERGENCE_PREFIXES, describeAllowVerdict, loadAllowlist } = await import("./lib.mjs");
+const allowlist = loadAllowlist(path.join(here, "allowed-divergences.json"), { prefixes: DIVERGENCE_PREFIXES.replay });
 
 const diffs = [];
 function record(p, legacyVal, rustVal) {
   if (canon(legacyVal) === canon(rustVal)) return;
-  diffs.push({ path: p, allowed: allowed(p), legacy: legacyVal, rust: rustVal });
+  const verdict = allowlist.check(p, legacyVal, rustVal);
+  diffs.push({ path: p, allowed: !!verdict.entry, verdict, legacy: legacyVal, rust: rustVal });
 }
 
 console.log("replaying against legacy…");
@@ -1906,18 +1898,19 @@ for (const d of diffs) {
       console.log("  legacy (whole):", JSON.stringify(d.legacy)?.slice(0, 20000));
       console.log("  rust   (whole):", JSON.stringify(d.rust)?.slice(0, 20000));
     }
+    if (d.allowed) {
+      console.log("  full legacy:", JSON.stringify(d.legacy)?.slice(0, 1200));
+      console.log("  full rust:  ", JSON.stringify(d.rust)?.slice(0, 1200));
+    }
   } else {
     console.log("  legacy:", JSON.stringify(d.legacy)?.slice(0, 1200));
     console.log("  rust:  ", JSON.stringify(d.rust)?.slice(0, 1200));
   }
+  for (const line of describeAllowVerdict(d.verdict)) console.log(line);
 }
-for (const entry of allowlist) {
-  if (!usedAllows.has(entry.path)) {
-    console.log(`\n[STALE ALLOWLIST] ${entry.path} matched nothing (ok if flaky-path)`);
-  }
-}
-if (blocking.length) {
-  console.error(`\nDIFFERENTIAL REPLAY FAILED: ${blocking.length} unallowed divergences`);
+const staleAllows = allowlist.reportStale();
+if (blocking.length || staleAllows) {
+  console.error(`\nDIFFERENTIAL REPLAY FAILED: ${blocking.length} unallowed divergences, ${staleAllows} stale allowlist entries`);
   process.exit(1);
 }
 console.log(`\nDIFFERENTIAL REPLAY PASSED (${diffs.length} allowed divergences, ${legacy.steps.length} steps)`);
