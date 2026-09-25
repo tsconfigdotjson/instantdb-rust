@@ -10,6 +10,7 @@
 // says otherwise.
 
 import { execSync } from "node:child_process";
+import fs from "node:fs";
 import { noteHttp, noteCel, noteWsFrame, noteWsMessage } from "./coverage-hook.mjs";
 
 export const uuid = () => crypto.randomUUID();
@@ -586,5 +587,248 @@ export function projectState(state) {
   }
   if (state.streams) out.streams = state.streams;
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Strict allowlists (issue #45, blind spot 5).
+//
+// An allowlist entry names exactly what it allows, so a new difference that
+// happens to land on an allowlisted path still fails:
+//
+//   {
+//     "path":    "^dash:38-platform/transferRevoke$",   ("probe" in errors-allowed.json)
+//     "differs": ["^\\.(status|type|message|hint|keys|body)$"],
+//     "legacy":  { "status": 500, "type": "unknown" },  (optional pins)
+//     "rust":    { "status": 200, "body": { "count": 1 } },
+//     "reason":  "...", "citation": "...",
+//     "flaky": true, "flakyReason": "..."               (optional)
+//   }
+//
+// `differs` is a list of anchored regexes over sub-paths of the compared
+// value: `.status`, `.hint.debug-uri`, `.0.status` (array index), or the
+// empty string (`^$`: the whole value, for scalars such as keyset
+// "present"/"absent"). Every sub-path matching one of them is masked on both
+// sides (present on one side only counts as a difference there too); what is
+// left must be identical. `legacy` / `rust` pin each side's documented
+// behavior as a deep subset (see matchPin), so the entry stops applying when
+// either server changes. An owned entry that allowed nothing in a run fails
+// its layer unless it is `flaky` (with a `flakyReason`).
+
+const ALLOW_MASK = "<allowed-divergence>";
+
+// Every compared-path prefix of allowed-divergences.json and the layer that
+// owns it: each layer stale-checks exactly its own entries, and an entry no
+// layer owns is rejected on load.
+export const DIVERGENCE_PREFIXES = {
+  replay: ["step:", "final/", "keyset/"],
+  dash: ["dash:"],
+  storage: ["storage:"],
+};
+
+function anchoredRegex(src, what) {
+  if (typeof src !== "string" || !src.startsWith("^") || !src.endsWith("$") || src.endsWith("\\$")) {
+    throw new Error(`${what}: ${JSON.stringify(src)} must be an anchored regex (^...$)`);
+  }
+  return new RegExp(src);
+}
+
+// Validate and compile one raw entry. `keyField` is "path" (allowed-
+// divergences.json) or "probe" (errors-allowed.json).
+export function compileAllowEntry(raw, keyField = "path") {
+  const label = raw?.[keyField];
+  const where = `allowlist entry ${JSON.stringify(label)}`;
+  const key = anchoredRegex(label, where);
+  if (!Array.isArray(raw.differs) || raw.differs.length === 0) {
+    throw new Error(`${where}: needs a non-empty "differs" list of sub-path regexes`);
+  }
+  const differs = raw.differs.map((d) => anchoredRegex(d, `${where} differs`));
+  if (typeof raw.reason !== "string" || !raw.reason) throw new Error(`${where}: needs a "reason"`);
+  if (raw.flaky !== undefined && raw.flaky !== true) throw new Error(`${where}: "flaky" must be true when set`);
+  if (raw.flaky && (typeof raw.flakyReason !== "string" || !raw.flakyReason)) {
+    throw new Error(`${where}: a flaky entry needs a "flakyReason"`);
+  }
+  const known = new Set([keyField, "differs", "legacy", "rust", "reason", "citation", "flaky", "flakyReason"]);
+  for (const k of Object.keys(raw)) if (!known.has(k)) throw new Error(`${where}: unknown field ${JSON.stringify(k)}`);
+  return { raw, label, key, differs, used: 0 };
+}
+
+const isPlainObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const typeName = (v) => (v === null ? "null" : Array.isArray(v) ? "array" : typeof v);
+
+// Deep-subset match of `value` against a pin. A pin object's keys must match
+// the value's (extra keys in the value are fine); a pin array must match an
+// array of the same length element-wise; scalars compare exactly. Operators:
+// {"$regex": "..."} (a string matching it), {"$type": "string" | "number" |
+// "boolean" | "null" | "array" | "object"}, {"$absent": true} (key not
+// present). Returns null on a match, else a description of the first mismatch.
+export function matchPin(pin, value, p = "") {
+  const at = p || "(whole value)";
+  if (isPlainObj(pin)) {
+    if ("$regex" in pin) {
+      return typeof value === "string" && new RegExp(pin.$regex).test(value)
+        ? null
+        : `${at}: ${JSON.stringify(value)} does not match /${pin.$regex}/`;
+    }
+    if ("$type" in pin) {
+      return typeName(value) === pin.$type ? null : `${at}: expected a ${pin.$type}, got ${JSON.stringify(value)}`;
+    }
+    if ("$absent" in pin) return value === undefined ? null : `${at}: expected absent, got ${JSON.stringify(value)}`;
+    if (!isPlainObj(value)) return `${at}: expected an object, got ${JSON.stringify(value)}`;
+    for (const [k, sub] of Object.entries(pin)) {
+      const m = matchPin(sub, value[k], `${p}.${k}`);
+      if (m) return m;
+    }
+    return null;
+  }
+  if (Array.isArray(pin)) {
+    if (!Array.isArray(value) || value.length !== pin.length) {
+      return `${at}: expected an array of ${pin.length}, got ${JSON.stringify(value)}`;
+    }
+    for (let i = 0; i < pin.length; i++) {
+      const m = matchPin(pin[i], value[i], `${p}.${i}`);
+      if (m) return m;
+    }
+    return null;
+  }
+  return canon(pin) === canon(value) ? null : `${at}: expected ${JSON.stringify(pin)}, got ${JSON.stringify(value)}`;
+}
+
+// Mask every sub-path matching `differs` on both sides; collect the masked
+// sub-paths whose values actually differed.
+function maskAllowed(a, b, differs, p, hits) {
+  if (differs.some((re) => re.test(p))) {
+    if (canon(a) !== canon(b)) hits.push(p);
+    return [ALLOW_MASK, ALLOW_MASK];
+  }
+  const isObj = (v) => v !== null && typeof v === "object";
+  if (!isObj(a) || !isObj(b) || Array.isArray(a) !== Array.isArray(b)) return [a, b];
+  if (Array.isArray(a)) {
+    const oa = [];
+    const ob = [];
+    for (let i = 0; i < Math.max(a.length, b.length); i++) {
+      const [x, y] = maskAllowed(a[i], b[i], differs, `${p}.${i}`, hits);
+      if (x === ALLOW_MASK && y === ALLOW_MASK) {
+        oa.push(x);
+        ob.push(y);
+      } else {
+        if (i < a.length) oa.push(x);
+        if (i < b.length) ob.push(y);
+      }
+    }
+    return [oa, ob];
+  }
+  const oa = {};
+  const ob = {};
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    const [x, y] = maskAllowed(a[k], b[k], differs, `${p}.${k}`, hits);
+    if (x === ALLOW_MASK && y === ALLOW_MASK) {
+      oa[k] = x;
+      ob[k] = y;
+    } else {
+      if (k in a) oa[k] = x;
+      if (k in b) ob[k] = y;
+    }
+  }
+  return [oa, ob];
+}
+
+// The first sub-path (`.a.0.b`; the empty string is the whole value) where
+// two values differ.
+export function firstDifference(a, b, p = "") {
+  if (canon(a) === canon(b)) return null;
+  const isObj = (v) => v !== null && typeof v === "object";
+  if (isObj(a) && isObj(b) && Array.isArray(a) === Array.isArray(b)) {
+    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      const d = firstDifference(a[k], b[k], `${p}.${k}`);
+      if (d) return d;
+    }
+  }
+  return { p, a, b };
+}
+
+// Does `entry` (compiled) allow this legacy/rust pair? The caller has already
+// matched the entry's path. Returns { ok: true, differed: [sub-paths] } or
+// { ok: false, why }.
+export function allowDivergence(entry, legacyVal, rustVal) {
+  for (const [side, val] of [["legacy", legacyVal], ["rust", rustVal]]) {
+    if (entry.raw[side] === undefined) continue;
+    const m = matchPin(entry.raw[side], val);
+    if (m) return { ok: false, why: `${side} no longer matches the pinned behavior: ${m}` };
+  }
+  const differed = [];
+  const [ma, mb] = maskAllowed(legacyVal, rustVal, entry.differs, "", differed);
+  if (canon(ma) !== canon(mb)) {
+    const fd = firstDifference(ma, mb);
+    return {
+      ok: false,
+      why: `differs outside the allowed sub-paths, first at ${fd.p || "(whole value)"}: legacy ${JSON.stringify(fd.a)?.slice(0, 300)} vs rust ${JSON.stringify(fd.b)?.slice(0, 300)}`,
+    };
+  }
+  return { ok: true, differed };
+}
+
+// Load an allowlist file for one layer. `prefixes` (for allowed-
+// divergences.json) keeps the entries whose path starts with `^<prefix>` for
+// one of them, after rejecting entries no layer owns; null keeps every entry
+// (errors-allowed.json, keyed by "probe").
+export function loadAllowlist(file, { keyField = "path", prefixes = null } = {}) {
+  const all = JSON.parse(fs.readFileSync(file, "utf8")).map((raw) => compileAllowEntry(raw, keyField));
+  if (!prefixes) return makeAllowlist(all);
+  const owned = (e, ps) => ps.some((pre) => e.label.startsWith(`^${pre}`));
+  const everyPrefix = Object.values(DIVERGENCE_PREFIXES).flat();
+  for (const e of all) {
+    if (!owned(e, everyPrefix)) {
+      throw new Error(`allowlist entry ${JSON.stringify(e.label)}: path must start with ^ and one of ${everyPrefix.join(" ")}`);
+    }
+  }
+  return makeAllowlist(all.filter((e) => owned(e, prefixes)));
+}
+
+export function makeAllowlist(entries) {
+  return {
+    entries,
+    // { entry, differed, rejected } when an entry allows the pair, else
+    // { entry: null, rejected }; `rejected` lists the entries whose path
+    // matched but whose pins or sub-paths did not, with why
+    check(p, legacyVal, rustVal) {
+      const rejected = [];
+      for (const entry of entries) {
+        if (!entry.key.test(p)) continue;
+        const v = allowDivergence(entry, legacyVal, rustVal);
+        if (v.ok) {
+          entry.used++;
+          return { entry, differed: v.differed, rejected };
+        }
+        rejected.push({ entry, why: v.why });
+      }
+      return { entry: null, rejected };
+    },
+    // print the entries that allowed nothing; returns how many of them are
+    // not flaky (each one fails the layer)
+    reportStale(log = console.log) {
+      let failing = 0;
+      for (const e of entries) {
+        if (e.used) continue;
+        if (e.raw.flaky) {
+          log(`\n[STALE ALLOWLIST, flaky] ${e.label} allowed nothing this run: ${e.raw.flakyReason}`);
+        } else {
+          failing++;
+          log(`\n[STALE ALLOWLIST] ${e.label} allowed nothing this run: drop it, fix its pins, or mark it flaky with a flakyReason`);
+        }
+      }
+      return failing;
+    },
+  };
+}
+
+// Log lines for one compared difference's allowlist verdict (from check()).
+export function describeAllowVerdict(verdict) {
+  const lines = [];
+  if (verdict.entry) {
+    const subs = verdict.differed.map((d) => d || "(whole value)").join(", ");
+    lines.push(`  allowed by ${verdict.entry.label}; differing sub-paths: ${subs}`);
+  }
+  for (const { entry, why } of verdict.rejected ?? []) lines.push(`  allowlist entry ${entry.label} does not apply: ${why}`);
+  return lines;
 }
 

@@ -39,7 +39,20 @@ function rows(db, sql) {
 const allowed = fs.existsSync(path.join(here, "schema-allowed.json"))
   ? JSON.parse(fs.readFileSync(path.join(here, "schema-allowed.json"), "utf8"))
   : [];
-const isAllowed = (category, line) => allowed.find((a) => a.category === category && new RegExp(a.pattern).test(line));
+// each entry is start-anchored and may be limited to the rows only one side
+// has (`side`: "legacy" | "rust"); an entry that allowed nothing fails
+for (const a of allowed) {
+  if (!CATALOG[a.category]) throw new Error(`schema-allowed.json: unknown category ${JSON.stringify(a.category)}`);
+  if (typeof a.pattern !== "string" || !a.pattern.startsWith("^")) throw new Error(`schema-allowed.json: pattern ${JSON.stringify(a.pattern)} must start with ^`);
+  if (a.side !== undefined && a.side !== "legacy" && a.side !== "rust") throw new Error(`schema-allowed.json: side must be "legacy" or "rust"`);
+  a.re = new RegExp(a.pattern);
+  a.hits = 0;
+}
+const isAllowed = (category, side, line) => {
+  const a = allowed.find((x) => x.category === category && (x.side === undefined || x.side === side) && x.re.test(line));
+  if (a) a.hits++;
+  return a;
+};
 
 let failures = 0;
 let allowedHits = 0;
@@ -50,17 +63,22 @@ for (const [category, sql] of Object.entries(CATALOG)) {
   total += legacy.size;
   const onlyLegacy = [...legacy].filter((l) => !rust.has(l));
   const onlyRust = [...rust].filter((l) => !legacy.has(l));
-  for (const [side, lines] of [["only legacy", onlyLegacy], ["only rust", onlyRust]]) {
+  for (const [side, lines] of [["legacy", onlyLegacy], ["rust", onlyRust]]) {
     for (const line of lines) {
-      if (isAllowed(category, line)) {
+      if (isAllowed(category, side, line)) {
         allowedHits++;
         continue;
       }
       failures++;
-      console.error(`SCHEMA DIFF ${category} ${side}: ${line}`);
+      console.error(`SCHEMA DIFF ${category} only ${side}: ${line}`);
     }
   }
   console.log(`${category.padEnd(12)} legacy=${legacy.size} rust=${rust.size} onlyLegacy=${onlyLegacy.length} onlyRust=${onlyRust.length}`);
+}
+for (const a of allowed) {
+  if (a.hits) continue;
+  failures++;
+  console.error(`SCHEMA STALE ALLOWLIST ${a.category}${a.side ? ` (only ${a.side})` : ""} ${a.pattern} allowed nothing: drop or narrow it`);
 }
 if (failures) {
   console.error(`SCHEMA PARITY FAILED: ${failures} unexplained differences (add a citation to schema-allowed.json or port the migration)`);

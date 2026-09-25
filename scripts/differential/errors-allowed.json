@@ -1,17 +1,74 @@
 [
   {
     "probe": "^http/routing/(not-found|method-not-allowed)$",
+    "differs": [
+      "^\\.(status|message|keys)$"
+    ],
+    "legacy": {
+      "status": 200,
+      "type": {
+        "$absent": true
+      },
+      "message": {
+        "$absent": true
+      },
+      "hint": null,
+      "keys": [
+        "<non-json>"
+      ]
+    },
+    "rust": {
+      "status": 404,
+      "type": {
+        "$absent": true
+      },
+      "message": "Oops! We couldn't match this route.",
+      "hint": null,
+      "keys": [
+        "message"
+      ]
+    },
     "reason": "Unmatched /admin paths and wrong methods: the self-hosted legacy image answers with HTTP 200 and a non-JSON body (its core.clj not-found handler with the JSON `Oops! We couldn't match this route.` body is not what the image serves). This server returns that JSON 404, which is what the CLI's error path parses.",
     "citation": "LEGACY/server/src/instant/core.clj:189-190; LEGACY/client/packages/cli/src/lib/http.ts:71-90"
   },
   {
     "probe": "^(http|ws)/validation-failed/query-bad-op$",
+    "differs": [
+      "^\\.(message|hint)$"
+    ],
+    "legacy": {
+      "type": "validation-failed",
+      "message": {
+        "$regex": "^Validation failed for coerced-query"
+      }
+    },
+    "rust": {
+      "type": "validation-failed",
+      "message": {
+        "$regex": "^Validation failed for query: Unsupported where operator `\\$frob`"
+      }
+    },
     "reason": "An unknown where operator fails legacy's `::forms` spec after coercion, so its message is `Validation failed for coerced-query` and the hint carries legacy's internal coerced form (`{k etype option-map child-forms}`) as input with a clojure.spec predicate name as `expected`. This server answers `Validation failed for query: Unsupported where operator ...` with the operator in the hint. Both the message and the hint differ; docs/PARITY.md (wire-level divergences: unknown where operator) records it. No client reads the coerced form and the client surfaces both as an event error.",
     "citation": "LEGACY/server/src/instant/db/instaql.clj:563 (assert-valid! :coerced-query); LEGACY/client/packages/core/src/Reactor.js reads type/message only"
   },
   {
     "probe": "^http/no-error/query-entity-id$",
+    "differs": [
+      "^\\.(status|type|message|hint|keys)$"
+    ],
+    "legacy": {
+      "status": 200
+    },
+    "rust": {
+      "status": 400,
+      "type": "validation-failed",
+      "message": {
+        "$regex": "Unsupported where operator `\\$entityId`"
+      }
+    },
     "reason": "Decided divergence (issue #38 item 10). `$entityId` is accepted by legacy's where-value-valid-keys? (a dashboard hack) but has no spec entry and no SQL branch, so legacy answers a degenerate result instead of an error. This server rejects it as an unsupported where operator. No shipped client sends it; the spec'd `$entityIdStartsWith` is implemented and covered by the fuzz layer. docs/PARITY.md (wire-level divergences: `$entityId` where key).",
-    "citation": "LEGACY/server/src/instant/db/instaql.clj:69-75"
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:69-75",
+    "flaky": true,
+    "flakyReason": "Never observed: the probe sends `$entityId` as a top-level where key (`where: {$entityId: id}`), not as the where-value operator the reason describes (`where: {name: {$entityId: id}}`), and both servers answer it identically (no difference in the last green run on main). Kept, with the pins the reason documents, until the probe sends the operator shape; what legacy answers for that shape (degenerate 200 or a validation error) is not settled from the code."
   }
 ]

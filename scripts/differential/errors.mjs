@@ -14,7 +14,7 @@ import { execSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { canon, connect, makeIdFactory, psql, uuid } from "./lib.mjs";
+import { canon, connect, describeAllowVerdict, loadAllowlist, makeIdFactory, psql, uuid } from "./lib.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appId = process.argv[2];
@@ -184,7 +184,10 @@ probe("http/validation-failed/query-empty-or", async (ctx) =>
   httpView(await admin(ctx, "/admin/query", { query: { probe: { $: { where: { or: [] } } } } })));
 // `$entityId` is in legacy's where-value-valid-keys? (a dashboard hack,
 // instaql.clj:69-75) with no spec entry and no SQL branch: legacy answers a
-// degenerate result, this server rejects it (errors-allowed.json)
+// degenerate result, this server rejects it (errors-allowed.json). This
+// probe sends it as a top-level where key, which both servers answer the
+// same way, so that entry is flaky until a probe sends the operator shape
+// (`{name: {$entityId: ...}}`).
 probe("http/no-error/query-entity-id", async (ctx) =>
   httpView(await admin(ctx, "/admin/query", { query: { probe: { $: { where: { $entityId: FIXED.entity } } } } })));
 // a `$in` set is one array parameter on both servers (datalog.clj in-any),
@@ -527,9 +530,9 @@ async function setup(ctx) {
   if (res.status !== 200) throw new Error(`[${ctx.name}] setup transact failed: ${JSON.stringify(res.body)}`);
 }
 
-const allowed = fs.existsSync(path.join(here, "errors-allowed.json"))
-  ? JSON.parse(fs.readFileSync(path.join(here, "errors-allowed.json"), "utf8"))
-  : [];
+// strict entries keyed by probe name (lib.mjs loadAllowlist); an entry that
+// allowed nothing fails the matrix unless it is flaky
+const allowlist = loadAllowlist(path.join(here, "errors-allowed.json"), { keyField: "probe" });
 
 const results = {};
 for (const [name, cfg] of Object.entries(SERVERS)) {
@@ -572,15 +575,18 @@ for (const p of probes) {
     console.error(`ERROR MATRIX PROBE MISSED ITS TYPE ${p.name}: legacy answered ${JSON.stringify(l)}`);
   }
   if (canon(l) === canon(r)) continue;
-  const rule = allowed.find((a) => new RegExp(a.probe).test(p.name));
-  if (rule) {
+  const verdict = allowlist.check(p.name, l, r);
+  if (verdict.entry) {
     allowedHits++;
-    console.log(`allowed divergence ${p.name}: ${rule.reason.split(".")[0]}.`);
+    console.log(`allowed divergence ${p.name}: ${verdict.entry.raw.reason.split(".")[0]}.`);
+    for (const line of describeAllowVerdict(verdict)) console.log(line);
     continue;
   }
   failures++;
   console.error(`ERROR MATRIX MISMATCH ${p.name}\n  legacy: ${JSON.stringify(l)}\n  rust:   ${JSON.stringify(r)}`);
+  for (const line of describeAllowVerdict(verdict)) console.error(line);
 }
+failures += allowlist.reportStale();
 if (failures) {
   console.error(`ERROR MATRIX FAILED: ${failures} of ${probes.length} probes differ`);
   process.exit(1);

@@ -1,66 +1,358 @@
 [
   {
     "path": "^keyset/init-ok/server-hostname$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": "present",
+    "rust": "absent",
     "reason": "Legacy emits server-hostname/server-port when config/dev? is true (the self-hosted image runs in dev mode); dev-only tooling keys.",
     "citation": "LEGACY/server/src/instant/reactive/session.clj:192-196; unknown keys ignored at Reactor.js:932-934"
   },
   {
     "path": "^keyset/init-ok/server-port$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": "present",
+    "rust": "absent",
     "reason": "Same as server-hostname: dev-mode-only key.",
     "citation": "LEGACY/server/src/instant/reactive/session.clj:192-196; unknown keys ignored at Reactor.js:932-934"
   },
   {
     "path": "^keyset/stream-append/files$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": "present",
+    "rust": "absent",
     "reason": "Legacy serves flushed stream segments as S3 file URLs plus inline content for the buffered tail; this server always inlines content. The reader consumes files-then-content, so delivered bytes are identical (asserted via the folded reader state).",
     "citation": "LEGACY/client/packages/core/src/Stream.ts:1077-1084"
   },
   {
     "path": "^dash:23-errors/badAttr$",
+    "differs": [
+      "^\\.(status|type|message|hint)$"
+    ],
+    "legacy": {
+      "status": 500,
+      "type": "sql-exception",
+      "message": "SQL Exception: syntax-error",
+      "hint": {
+        "condition": "syntax-error"
+      }
+    },
+    "rust": {
+      "status": 400,
+      "type": "validation-failed",
+      "message": "Validation failed for attributes: expected a uuid",
+      "hint": {
+        "data-type": "attributes"
+      }
+    },
     "reason": "An add-attr step whose attr map is garbage (`{id: \"x\"}`) reaches the legacy SQL layer and surfaces as a 500 `sql-exception`; this server rejects it as a 400 `validation-failed` on parse. The CLI never sends such a step (its steps come from @instantdb/platform convertTxSteps) and only prints `message` on failure either way.",
     "citation": "LEGACY/client/packages/cli/src/lib/http.ts:67-101 (error body → message); LEGACY/client/packages/platform/src/migrations.ts:230-252"
   },
   {
     "path": "^dash:24-admin-ref-lookups/queryAfterDelete$",
+    "differs": [
+      "^\\.docs$"
+    ],
+    "legacy": {
+      "status": 200,
+      "docs": [
+        {
+          "title": "d2-renamed",
+          "meta": {
+            "k": 1
+          }
+        },
+        {
+          "title": "d1"
+        }
+      ]
+    },
+    "rust": {
+      "status": 200,
+      "docs": [
+        {
+          "title": "d1"
+        }
+      ]
+    },
     "reason": "Legacy silently drops a `delete` step whose eid is a ref lookup (`lookup(\"primaryOwner.id\", <uuid>)`): admin/model.clj expand-delete emits [:delete-entity [attr value] etype], transaction.clj resolve-lookups-for-delete-entity only keeps steps whose lookup resolved through resolve-lookups, and that resolution comes back empty for ref attrs on the live server (verified: the doc stays, tx-id is still returned; plain lookups and the same ref lookup on update/merge/link all resolve). This server resolves ref lookups with the same resolver for every op, so the delete happens. The admin SDK only reads tx-id from the response either way; the divergence is the entity surviving, which is the legacy defect, not a wire shape.",
     "citation": "LEGACY/server/src/instant/admin/model.clj:236-238 (expand-delete); LEGACY/server/src/instant/db/transaction.clj:229-250, :360-378; LEGACY/client/packages/admin/src/index.ts transact() reads only tx-id"
   },
   {
     "path": "^storage:07-admin-deprecated-routes/list$",
+    "differs": [
+      "^\\.(status|type|message|hint|keys|data)$"
+    ],
+    "legacy": {
+      "status": 500
+    },
+    "rust": {
+      "status": 200,
+      "data": {
+        "$type": "array"
+      }
+    },
     "reason": "Legacy's deprecated GET /admin/storage/files (db.storage.list) 500s on the self-hosted image (files-get re-dispatches the GET request into query-post with no JSON body, admin/routes.clj:719-737); this server returns the documented StorageFile list (key = S3 object key, name, size, etag/last_modified null). The SDK method is deprecated in favor of querying $files."
   },
   {
     "path": "^step:28-admin-http-gates/HTTP_ROUTING$",
+    "differs": [
+      "^\\.[01]\\.(status|message|raw)$"
+    ],
+    "legacy": [
+      {
+        "name": "unknownRoute",
+        "status": 200,
+        "type": null,
+        "message": null,
+        "raw": {
+          "$type": "string"
+        }
+      },
+      {
+        "name": "wrongMethod",
+        "status": 200,
+        "type": null,
+        "message": null,
+        "raw": {
+          "$type": "string"
+        }
+      }
+    ],
+    "rust": [
+      {
+        "name": "unknownRoute",
+        "status": 404,
+        "type": null,
+        "message": "Oops! We couldn't match this route.",
+        "raw": null
+      },
+      {
+        "name": "wrongMethod",
+        "status": 404,
+        "type": null,
+        "message": "Oops! We couldn't match this route.",
+        "raw": null
+      }
+    ],
     "reason": "Unmatched /admin paths and wrong methods: the self-hosted legacy image answers with HTTP 200 and a non-JSON body (observed in the differential replay; its core.clj not-found handler with the JSON `Oops! We couldn't match this route.` body is not what the image serves). This server returns that JSON 404, which is what the CLI's error path parses.",
     "citation": "LEGACY/server/src/instant/core.clj:189-190; LEGACY/client/packages/cli/src/lib/http.ts:71-90 (JSON error body -> message, else generic failure text)"
   },
   {
-    "path": "^dash:38-platform/transferRevoke(Again)?$",
+    "path": "^dash:38-platform/transferRevoke$",
+    "differs": [
+      "^\\.(status|type|message|hint|keys|body)$"
+    ],
+    "legacy": {
+      "status": 500,
+      "type": "unknown",
+      "message": "Something went wrong. Sorry about this!"
+    },
+    "rust": {
+      "status": 200,
+      "body": {
+        "count": 1
+      }
+    },
     "reason": "Legacy's app-transfer revoke 500s: `make-reject-by-email-and-role-q` binds the role to a `:?email` placeholder that the caller never supplies (member_invites.clj:205-229), so the query can't be formatted. This server revokes the pending creator invite and answers `{count}` as the handler intends.",
     "citation": "LEGACY/server/src/instant/model/member_invites.clj:205-229; superadmin/routes.clj:235-245"
   },
   {
+    "path": "^dash:38-platform/transferRevokeAgain$",
+    "differs": [
+      "^\\.(status|type|message|hint|keys|body)$"
+    ],
+    "legacy": {
+      "status": 500,
+      "type": "unknown",
+      "message": "Something went wrong. Sorry about this!"
+    },
+    "rust": {
+      "status": 200,
+      "body": {
+        "count": 0
+      }
+    },
+    "reason": "Same as transferRevoke: legacy 500s on every revoke; this server's second revoke finds no pending creator invite left and answers `{count: 0}`.",
+    "citation": "LEGACY/server/src/instant/model/member_invites.clj:205-229; superadmin/routes.clj:235-245"
+  },
+  {
     "path": "^dash:38-platform/secretCreateUnknownClient$",
+    "differs": [
+      "^\\.(status|type|message|hint)$"
+    ],
+    "legacy": {
+      "status": 500,
+      "type": "sql-exception",
+      "message": "SQL Exception: not-null-violation",
+      "hint": {
+        "condition": "not-null-violation",
+        "table": "instant_oauth_app_client_secrets"
+      }
+    },
+    "rust": {
+      "status": 400,
+      "type": "record-not-found",
+      "message": "Record not found: oauth-app-client-secrets",
+      "hint": {
+        "record-type": "oauth-app-client-secrets"
+      }
+    },
     "reason": "Legacy creates a client secret with the client-id as a sub-select; for a client id that is not one of the app's, the sub-select is NULL and Postgres answers not-null-violation before `assert-record!` runs, so legacy 500s with an sql-exception. This server answers the record-not-found the handler intends.",
     "citation": "LEGACY/server/src/instant/model/oauth_app.clj:312-335"
   },
   {
     "path": "^dash:38-platform/transferWithAccessToken$",
+    "differs": [
+      "^\\.(status|type|message|hint|keys)$"
+    ],
+    "legacy": {
+      "status": 500,
+      "type": "unknown",
+      "message": "Something went wrong. Sorry about this!"
+    },
+    "rust": {
+      "status": 400,
+      "type": "permission-denied",
+      "message": "You are missing the apps-transfer scope",
+      "hint": {
+        "required-scope": "apps-transfer"
+      }
+    },
     "reason": "Legacy maps `:apps/transfer` to the unused scope string `apps-transfer` and then asks `satisfies-scope?`, whose `condp` has no clause for it, so a platform access token on the transfer routes raises `No matching clause` (a 500) instead of the intended missing-scope permission-denied. This server answers `You are missing the apps-transfer scope`.",
     "citation": "LEGACY/server/src/instant/superadmin/routes.clj:44-57; model/oauth_app.clj:34-46"
   },
   {
-    "path": "^dash:38-platform/deny(WrongGrant|AfterWrongGrant|AfterWrongCookie)$",
+    "path": "^dash:38-platform/denyWrongGrant$",
+    "differs": [
+      "^\\.(status|params|type|message|hint|keys)$"
+    ],
+    "legacy": {
+      "status": 302,
+      "params": {
+        "error": "access_denied",
+        "state": "xyz"
+      }
+    },
+    "rust": {
+      "status": 400,
+      "type": "record-not-found",
+      "message": "Record not found: oauth-app-redirect",
+      "hint": {
+        "record-type": "oauth-app-redirect"
+      }
+    },
     "reason": "Hardening (issue #38 item 11). Legacy's deny-redirect! deletes the redirect by id before it checks anything and never compares the grant token, so a deny with a wrong grant token succeeds and a deny with a wrong cookie still burns the redirect (the real deny that follows is then record-not-found). This server checks the grant token (record-not-found, like grant) and the cookie before deleting, so the rightful deny after either bad attempt still redirects with access_denied.",
     "citation": "LEGACY/server/src/instant/oauth_apps/routes.clj:318-338; model/oauth_app.clj deny-redirect!"
   },
   {
-    "path": "^dash:40-dash-login/cliClaimOtherUser(SignsIn)?$",
+    "path": "^dash:38-platform/denyAfterWrong(Grant|Cookie)$",
+    "differs": [
+      "^\\.(status|params|type|message|hint|keys)$"
+    ],
+    "legacy": {
+      "status": 400,
+      "type": "record-not-found",
+      "message": "Record not found: oauth-app-redirect",
+      "hint": {
+        "record-type": "oauth-app-redirect"
+      }
+    },
+    "rust": {
+      "status": 302,
+      "params": {
+        "error": "access_denied",
+        "state": "xyz"
+      }
+    },
+    "reason": "Same hardening as denyWrongGrant, seen from the rightful deny that follows a bad one: legacy's bad deny (wrong grant token or wrong cookie) already deleted the redirect, so the rightful deny is record-not-found; here the redirect survived and the rightful deny redirects with access_denied.",
+    "citation": "LEGACY/server/src/instant/oauth_apps/routes.clj:318-338; model/oauth_app.clj deny-redirect!"
+  },
+  {
+    "path": "^dash:40-dash-login/cliClaimOtherUser$",
+    "differs": [
+      "^\\.(status|body|type|message|hint|keys)$"
+    ],
+    "legacy": {
+      "status": 200,
+      "body": {
+        "ticket": "<uuid>"
+      }
+    },
+    "rust": {
+      "status": 400,
+      "type": "validation-failed",
+      "message": "Validation failed for instant-cli-login: This request has already been claimed",
+      "hint": {
+        "errors": [
+          {
+            "issue": "user-already-claimed"
+          }
+        ]
+      }
+    },
     "reason": "Hardening (issue #38 item 11). Legacy's claim! overwrites user_id on a ticket someone already claimed, so a second dashboard user who learns the ticket id re-points the CLI login at themselves. This server refuses the second claim (validation-failed, issue user-already-claimed) and the CLI signs in the first claimant. The CLI only polls check, and a same-user re-claim still succeeds.",
     "citation": "LEGACY/server/src/instant/model/instant_cli_login.clj claim!; dash/routes.clj cli-auth-claim-post"
   },
   {
+    "path": "^dash:40-dash-login/cliClaimOtherUserSignsIn$",
+    "differs": [
+      "^\\.firstClaimant$"
+    ],
+    "legacy": {
+      "firstClaimant": false
+    },
+    "rust": {
+      "firstClaimant": true
+    },
+    "reason": "Same hardening as cliClaimOtherUser, seen from the CLI's check: legacy signs the CLI in as the second claimant, this server as the first.",
+    "citation": "LEGACY/server/src/instant/model/instant_cli_login.clj claim!; dash/routes.clj cli-auth-claim-post"
+  },
+  {
     "path": "^dash:37-teams/orgRevokeForeignInvite$",
-    "reason": "Decided divergence (issue #38 item 10): legacy's reject-by-id-and-foreign-key formats the id-only query, so an org admin can revoke any pending invite by id, including another app's. This server scopes the revoke to the org in the path, so the app's invite stays pending. docs/PARITY.md (wire-level divergences: invite revoke scope).",
+    "differs": [
+      "^\\.invites\\.0\\.status$"
+    ],
+    "legacy": {
+      "setup": {
+        "org": 200,
+        "send": 200,
+        "inviteFound": true
+      },
+      "revoke": {
+        "status": 200,
+        "body": {}
+      },
+      "invites": [
+        {
+          "email": "orgforeign@example.com",
+          "status": "revoked"
+        }
+      ]
+    },
+    "rust": {
+      "setup": {
+        "org": 200,
+        "send": 200,
+        "inviteFound": true
+      },
+      "revoke": {
+        "status": 200,
+        "body": {}
+      },
+      "invites": [
+        {
+          "email": "orgforeign@example.com",
+          "status": "pending"
+        }
+      ]
+    },
+    "reason": "Decided divergence (issue #38 item 10): legacy's reject-by-id-and-foreign-key formats the id-only query (reject-by-id-qs) against the route's invite table, so an org admin revoking through their own org's path revokes a pending invite of any other org by id (probed with an invite of a second org, revoked through the team org's path; an app invite revoked through an org path stays pending on both servers because the org table has no such id). This server scopes the revoke to the org in the path, so the other org's invite stays pending. docs/PARITY.md (wire-level divergences: invite revoke scope).",
     "citation": "LEGACY/server/src/instant/model/member_invites.clj:166-172"
   }
 ]

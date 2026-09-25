@@ -1,37 +1,43 @@
 [
   {
     "category": "columns",
-    "pattern": "^schema_migrations\\.",
+    "pattern": "^schema_migrations\\.(version|dirty|applied_at) ",
     "reason": "Migration bookkeeping: golang-migrate (legacy image) keeps schema_migrations(version bigint, dirty boolean); scripts/apply-migrations.sh keeps schema_migrations(version int, applied_at). Same migration files are applied either way."
   },
   {
     "category": "tables",
-    "pattern": "^rust_",
-    "reason": "This server's own tables (rust_server_config, rust_tx_changes, rust_rate_limit_buckets, rust_blobs): the tx-change log replaces legacy's logical-replication WAL consumer and the blob table is the local storage backend. Prefixed so they can never collide with an upstream migration."
+    "side": "rust",
+    "pattern": "^rust_\\S+ ",
+    "reason": "This server's own tables (rust_server_config, rust_tx_changes, rust_rate_limit_buckets, rust_blobs, ...): the tx-change log replaces legacy's logical-replication WAL consumer and the blob table is the local storage backend. Prefixed so they can never collide with an upstream migration."
   },
   {
     "category": "columns",
-    "pattern": "^rust_",
+    "side": "rust",
+    "pattern": "^rust_\\S+\\.",
     "reason": "Columns of this server's own rust_* tables."
   },
   {
     "category": "constraints",
-    "pattern": "^rust_",
-    "reason": "Constraints of this server's own rust_* tables."
+    "side": "rust",
+    "pattern": "^rust_\\S+ ",
+    "reason": "Constraints of this server's own rust_* tables (the row starts with the constrained table)."
   },
   {
     "category": "indexes",
-    "pattern": "^rust_",
-    "reason": "Indexes of this server's own rust_* tables."
+    "side": "rust",
+    "pattern": "^rust_\\S+ ",
+    "reason": "Indexes of this server's own rust_* tables (the row starts with the indexed table)."
   },
   {
     "category": "functions",
-    "pattern": "^rust_",
-    "reason": "rust_capture_triple_change: the trigger function feeding rust_tx_changes."
+    "side": "rust",
+    "pattern": "^rust_\\S+\\(",
+    "reason": "This server's own functions (rust_capture_triple_change: the trigger function feeding rust_tx_changes; the change-notification trigger functions)."
   },
   {
     "category": "triggers",
-    "pattern": "rust_",
-    "reason": "The triples triggers feeding rust_tx_changes."
+    "side": "rust",
+    "pattern": "^(rust_\\S+ \\S+|\\S+ rust_\\S+) ",
+    "reason": "This server's own triggers, named rust_* (the triples triggers feeding rust_tx_changes; the rules / apps / webhooks change-notification triggers), or on its own rust_* tables. The row is `<table> <trigger name> ...`."
   }
 ]
