@@ -6,7 +6,6 @@ import { Compatible } from "./sections/Compatible";
 import { Features } from "./sections/Features";
 import { Performance } from "./sections/Performance";
 import { Parity } from "./sections/Parity";
-import { SelfHost } from "./sections/SelfHost";
 import { Demo } from "./sections/Demo";
 import { Footer } from "./sections/Footer";
 
@@ -22,7 +21,6 @@ export function App() {
           <Features />
           <Performance />
           <Parity />
-          <SelfHost />
           <Demo />
         </main>
         <Footer />

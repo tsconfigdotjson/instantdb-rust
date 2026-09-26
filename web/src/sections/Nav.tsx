@@ -8,7 +8,6 @@ const links = [
   { href: "#compatible", label: "Compatibility" },
   { href: "#speed", label: "Performance" },
   { href: "#parity", label: "Parity" },
-  { href: "#self-host", label: "Self-host" },
 ];
 
 export function Nav() {
