@@ -3,6 +3,7 @@ import { motion, useInView } from "motion/react";
 import { Heading } from "../components/Section";
 import { INK, RoughOverlay, Sketch } from "../components/rough";
 import { CountUp, Scrawl } from "../components/type";
+import { CrabWalk } from "../components/CrabWalk";
 import { doc } from "../config";
 
 const stats = [
@@ -95,6 +96,7 @@ export function Performance() {
           .
         </p>
 
+        <CrabWalk />
         <Architecture />
       </div>
       <TornEdge className="absolute inset-x-0 bottom-0 translate-y-px rotate-180" />
@@ -104,7 +106,7 @@ export function Performance() {
 
 function Architecture() {
   return (
-    <div className="mt-32 grid items-center gap-14 lg:grid-cols-[1fr_1.05fr] lg:gap-20">
+    <div className="grid items-center gap-14 lg:grid-cols-[1fr_1.05fr] lg:gap-20">
       <div>
         <Heading kicker="no sticky sessions" title="Stateless, so it" accent="scales sideways." />
         <p className="mt-8 max-w-xl text-lg leading-relaxed text-peach-200/85">

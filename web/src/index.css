@@ -124,15 +124,35 @@
   animation: flap 0.9s ease-in-out infinite;
 }
 
-@keyframes marquee { to { transform: translateX(-50%); } }
-.marquee { animation: marquee 70s linear infinite; }
-.marquee-reverse { animation: marquee 80s linear infinite reverse; }
-
 @keyframes wobble {
   0%, 100% { transform: rotate(-2deg); }
   50% { transform: rotate(2deg); }
 }
 .wobble { animation: wobble 5s ease-in-out infinite; }
+
+@keyframes legs {
+  0%, 100% { transform: rotate(-9deg); }
+  50% { transform: rotate(9deg); }
+}
+.crab-legs-a { animation: legs 0.7s ease-in-out infinite; }
+.crab-legs-b { animation: legs 0.7s ease-in-out infinite reverse; }
+
+/* Embers drifting up through the footer. */
+@keyframes ember-rise {
+  0% { transform: translate(0, 0) scale(1); opacity: 0; }
+  12% { opacity: 1; }
+  50% { transform: translate(var(--sway), -190px) scale(0.8); }
+  100% { transform: translate(calc(var(--sway) * -0.6), -380px) scale(0.3); opacity: 0; }
+}
+.ember {
+  position: absolute;
+  bottom: -12px;
+  border-radius: 9999px;
+  background: #ffb77f;
+  box-shadow: 0 0 10px 3px rgba(255, 122, 47, 0.65);
+  animation: ember-rise var(--dur) linear infinite;
+  animation-delay: var(--delay);
+}
 
 @media (prefers-reduced-motion: reduce) {
   .grain::after,
@@ -141,10 +161,11 @@
   .shimmer,
   .drift,
   .flap,
-  .marquee,
-  .marquee-reverse,
-  .wobble {
+  .wobble,
+  .crab-legs-a,
+  .crab-legs-b {
     animation: none;
   }
+  .ember { display: none; }
   html { scroll-behavior: auto; }
 }

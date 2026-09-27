@@ -1,3 +1,4 @@
+import { useMemo, type CSSProperties } from "react";
 import { LogoMark } from "../components/doodles";
 import { Scrawl } from "../components/type";
 import { DASH_URL, doc, GITHUB_URL, SUNSET_ESSAY_URL } from "../config";
@@ -25,8 +26,9 @@ const columns = [
 
 export function Footer() {
   return (
-    <footer className="relative bg-plum-950 px-4 pt-20 pb-12 sm:px-8">
-      <div className="mx-auto grid max-w-7xl gap-14 lg:grid-cols-[1.4fr_1fr_1fr]">
+    <footer className="relative isolate overflow-hidden bg-plum-950 px-4 pt-20 pb-12 sm:px-8">
+      <Embers />
+      <div className="relative mx-auto grid max-w-7xl gap-14 lg:grid-cols-[1.4fr_1fr_1fr]">
         <div>
           <div className="flex items-center gap-3">
             <LogoMark className="h-10 w-14" />
@@ -63,5 +65,27 @@ export function Footer() {
         ))}
       </div>
     </footer>
+  );
+}
+
+/** Sparks drifting up through the footer, like the last embers of a campfire. */
+function Embers() {
+  const embers = useMemo(() => {
+    let seed = 17;
+    const r = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296);
+    return Array.from({ length: 28 }, () => ({
+      left: `${r() * 100}%`,
+      size: 2 + r() * 4,
+      "--dur": `${7 + r() * 8}s`,
+      "--delay": `${-r() * 15}s`,
+      "--sway": `${(r() - 0.5) * 120}px`,
+    }));
+  }, []);
+  return (
+    <div className="pointer-events-none absolute inset-0 -z-10" aria-hidden="true">
+      {embers.map(({ left, size, ...vars }, i) => (
+        <span key={i} className="ember" style={{ left, width: size, height: size, ...(vars as CSSProperties) }} />
+      ))}
+    </div>
   );
 }

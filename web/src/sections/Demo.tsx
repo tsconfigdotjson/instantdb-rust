@@ -9,7 +9,7 @@ import { DASH_URL } from "../config";
 const notes = [
   { big: "3", small: "apps per account", rotate: -4, tape: 8 },
   { big: "10 MB", small: "per app", rotate: 3, tape: -6 },
-  { big: "2 h", small: "until a deleted app is purged", rotate: -2, tape: 4 },
+  { big: "$0", small: "every paid feature switched on", rotate: -2, tape: 4 },
 ];
 
 /** The closing act: the sun comes back up over the demo server. */
@@ -34,8 +34,8 @@ export function Demo() {
       <div className="mx-auto w-full max-w-5xl px-4 pt-28 pb-16 text-center sm:px-8 sm:pt-36 sm:pb-20">
         <Heading kicker="good morning" title="Kick the tires on the" accent="demo server." center />
         <p className="mx-auto mt-8 max-w-2xl text-lg leading-relaxed text-peach-200/90 sm:text-xl">
-          We run a public InstantDB Rust server with every paid-tier feature switched on. Sign in to the dashboard,
-          create an app, and point a client at it before you move anything real.
+          We run a public InstantDB Rust server so you can try it before moving anything real. Sign in to the
+          dashboard, create an app, and point a client at it.
         </p>
 
         <div className="mt-14 flex flex-wrap items-start justify-center gap-x-4 gap-y-6 sm:gap-10">

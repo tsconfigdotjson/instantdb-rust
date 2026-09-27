@@ -3,6 +3,7 @@ import { motion, useScroll, useTransform } from "motion/react";
 import { Horizon } from "../components/Horizon";
 import { Gulls, Stars } from "../components/Sky";
 import { HandButton, PenArrow } from "../components/doodles";
+import { RustStamp } from "../components/RustStamp";
 import { RevealWords, Scrawl, Underlined } from "../components/type";
 import { DASH_URL, GITHUB_URL } from "../config";
 
@@ -49,6 +50,11 @@ export function Hero() {
           />
         </div>
 
+        <RustStamp
+          show={ready}
+          delay={1.5}
+          className="absolute top-[9.5rem] right-[1%] hidden h-52 w-52 lg:block xl:right-[4%]"
+        />
         <h1 className="display text-[clamp(3.5rem,11vw,9.75rem)] leading-[0.86] font-medium text-ember-400">
           <RevealWords text="Instant," show={ready} delay={0.1} />
           <br />
@@ -73,7 +79,8 @@ export function Hero() {
           transition={{ duration: 0.9, delay: 0.8 }}
           className="mt-8 max-w-2xl text-lg leading-relaxed text-peach-200/90 sm:text-xl"
         >
-          InstantDB Rust is an open-source, wire-compatible rewrite of the Instant sync engine. Your existing{" "}
+          The Instant sync engine, rewritten from scratch in <strong className="font-semibold text-ember-300">Rust</strong>{" "}
+          and open source. Your existing{" "}
           <code className="rounded bg-plum-800/70 px-1.5 py-0.5 font-mono text-[0.85em] text-ember-300">@instantdb</code>{" "}
           clients connect unmodified: to your own Postgres, on your own servers.
         </motion.p>
@@ -91,6 +98,7 @@ export function Hero() {
             Read the source
           </HandButton>
         </motion.div>
+        <RustStamp show={ready} delay={1.8} className="mt-10 h-36 w-36 lg:hidden" />
       </motion.div>
 
       <Horizon

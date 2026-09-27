@@ -7,11 +7,8 @@ import { doc } from "../config";
 const covered: string[] = baseline.covered;
 
 export function Parity() {
-  const half = Math.ceil(covered.length / 2);
-  const rows = [covered.slice(0, half), covered.slice(half)];
-
   return (
-    <section id="parity" className="relative scroll-mt-24 py-28 sm:py-36">
+    <section id="parity" className="relative scroll-mt-24 pt-28 pb-16 sm:pt-36 sm:pb-24">
       <div className="mx-auto grid max-w-7xl items-center gap-16 px-4 sm:px-8 lg:grid-cols-[1.3fr_1fr] lg:gap-24">
         <div>
           <Heading kicker="the parity harness" title="We don't assume parity." accent="We diff it." />
@@ -44,21 +41,6 @@ export function Parity() {
         </div>
       </div>
 
-      <div className="mt-24 space-y-4 overflow-hidden py-2 [mask-image:linear-gradient(90deg,transparent,black_12%,black_88%,transparent)]" aria-hidden="true">
-        {rows.map((row, r) => (
-          <div key={r} className={`flex w-max gap-3 ${r ? "marquee-reverse" : "marquee"}`}>
-            {[...row, ...row].map((item, i) => (
-              <span
-                key={i}
-                className="flex items-center gap-2 rounded-full border border-dashed border-plum-500/70 px-4 py-1.5 font-mono text-[13px] whitespace-nowrap text-peach-200/75"
-              >
-                <span className="text-ember-400">✓</span>
-                {item}
-              </span>
-            ))}
-          </div>
-        ))}
-      </div>
     </section>
   );
 }
