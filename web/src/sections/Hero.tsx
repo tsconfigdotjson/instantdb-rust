@@ -47,40 +47,31 @@ export function Hero() {
             <RevealWords text="Instant," show={ready} delay={0.1} />
             <br />
             <RevealWords text="after the" show={ready} delay={0.25} />{" "}
-            <span className="relative inline-block">
-              <span className="inline-block overflow-hidden pb-[0.14em] -mb-[0.14em] pr-[0.08em] align-bottom">
-                <motion.span
-                  className="inline-block"
-                  initial={{ y: "115%", rotate: 4 }}
-                  animate={ready ? { y: "0%", rotate: 0 } : undefined}
-                  transition={{ duration: 0.9, delay: 0.45, ease: [0.2, 0.75, 0.2, 1] }}
-                >
-                  <Underlined delay={1.3} width={4} className="display-italic text-ember-500">
-                    sunset.
-                  </Underlined>
-                </motion.span>
-              </span>
-              {/* the crab drops onto the end of the underline once it's drawn */}
+            <span className="inline-block overflow-hidden pb-[0.14em] -mb-[0.14em] pr-[0.08em] align-bottom">
               <motion.span
-                className="absolute right-[-0.46em] bottom-[-0.06em] w-[0.52em]"
-                initial={{ y: "-160%", opacity: 0, rotate: -25 }}
-                animate={ready ? { y: "0%", opacity: 1, rotate: 0 } : undefined}
-                transition={{ type: "spring", stiffness: 260, damping: 13, delay: 2.1 }}
-                aria-hidden="true"
+                className="inline-block"
+                initial={{ y: "115%", rotate: 4 }}
+                animate={ready ? { y: "0%", rotate: 0 } : undefined}
+                transition={{ duration: 0.9, delay: 0.45, ease: [0.2, 0.75, 0.2, 1] }}
               >
-                <Crab className="w-full" wiggle show={ready} />
+                <Underlined delay={1.3} width={4} className="display-italic text-ember-500">
+                  sunset.
+                </Underlined>
               </motion.span>
             </span>
           </h1>
           <div className="pointer-events-none absolute top-[1.25rem] left-[calc(50%+11rem)] hidden rotate-[5deg] text-left lg:block xl:left-[calc(50%+16rem)]">
-            <Scrawl className="text-[3.1rem] leading-[0.95] text-ember-300" delay={1.7}>
-              rewritten
-              <br />
-              in{" "}
-              <Underlined delay={2.6} width={2.6} color="#ff9a55">
-                Rust!
-              </Underlined>
-            </Scrawl>
+            <div className="relative inline-block">
+              <Scrawl className="text-[3.1rem] leading-[0.95] text-ember-300" delay={1.7}>
+                rewritten
+                <br />
+                in{" "}
+                <Underlined delay={2.6} width={2.6} color="#ff9a55">
+                  Rust!
+                </Underlined>
+              </Scrawl>
+              <PopCrab show={ready} className="bottom-0.5 left-full -ml-4 w-[4.5rem]" />
+            </div>
             <PenArrow
               className="-mt-1 -ml-10 h-20 w-32"
               delay={2.4}
@@ -89,12 +80,15 @@ export function Hero() {
             />
           </div>
         </div>
-        <Scrawl className="mt-5 -rotate-2 text-4xl text-ember-300 lg:hidden" delay={1.7}>
-          rewritten in{" "}
-          <Underlined delay={2.6} width={2.4} color="#ff9a55">
-            Rust!
-          </Underlined>
-        </Scrawl>
+        <div className="relative mt-5 -rotate-2 lg:hidden">
+          <Scrawl className="text-4xl text-ember-300" delay={1.7}>
+            rewritten in{" "}
+            <Underlined delay={2.6} width={2.4} color="#ff9a55">
+              Rust!
+            </Underlined>
+          </Scrawl>
+          <PopCrab show={ready} className="bottom-1 left-full w-11" />
+        </div>
 
         <motion.p
           initial={{ opacity: 0, y: 24 }}
@@ -130,5 +124,20 @@ export function Hero() {
         className="pointer-events-none relative -z-10 mt-auto -mb-px block h-[clamp(300px,48svh,560px)] w-full overflow-visible sm:-mt-8"
       />
     </section>
+  );
+}
+
+/** The crab hops in beside "Rust!" once the note has finished writing itself. */
+function PopCrab({ show, className }: { show: boolean; className: string }) {
+  return (
+    <motion.span
+      className={`absolute ${className}`}
+      initial={{ scale: 0, y: 14, rotate: -30, opacity: 0 }}
+      animate={show ? { scale: 1, y: 0, rotate: 0, opacity: 1 } : undefined}
+      transition={{ type: "spring", stiffness: 380, damping: 11, delay: 3 }}
+      aria-hidden="true"
+    >
+      <Crab className="w-full" wiggle show={show} />
+    </motion.span>
   );
 }
