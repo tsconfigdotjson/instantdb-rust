@@ -2577,6 +2577,8 @@ pub async fn permissioned_transact_checked(
             EidRef::Lookup(..) => None,
         })
         .collect();
+    // the system-catalog guards come first in legacy too
+    tx::validate_system_steps(attrs, &steps, &TxOptions::default())?;
     if !pre_checks.is_empty() {
         sqlx::query("SAVEPOINT instant_pre_checks")
             .execute(&mut *conn)

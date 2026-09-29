@@ -522,32 +522,14 @@ fn tx_step_validation_err(step: &TxStep, message: String) -> InstantError {
     )
 }
 
-/// Execute tx-steps inside the given open DB transaction. The caller commits.
-/// `attrs` must be the app's current attr map; it is updated in place with
-/// attr-level changes.
-pub async fn transact(
-    conn: &mut PgConnection,
-    app_id: Uuid,
-    attrs: &mut AttrMap,
-    steps: Vec<TxStep>,
-    opts: &TxOptions,
-) -> Result<TxReport> {
-    // First write: the transactions row (tx-id + WAL ordering anchor).
-    // ...and tag the triple writes of this tx for the change-capture trigger
-    // (sync tables, topics) in the same round trip.
-    let row = sqlx::query(
-        "WITH t AS (INSERT INTO transactions (app_id) VALUES ($1) RETURNING id)
-         SELECT id, set_config('instant.rust_tx_id', id::text, true) AS tag FROM t",
-    )
-    .bind(app_id)
-    .fetch_one(&mut *conn)
-    .await?;
-    let tx_id: i64 = row.get("id");
-
+/// Legacy's system-catalog guards (permissioned_transaction.clj:44-79
+/// validate-system-delete-entity! / validate-system-triple-op!), which run
+/// while the steps are coerced, before any permission check or write.
+pub fn validate_system_steps(attrs: &AttrMap, steps: &[TxStep], opts: &TxOptions) -> Result<()> {
     // legacy validate-system-triple-op! (permissioned_transaction.clj:72-79):
     // stream-backed file paths are never editable, admins included
     if !opts.allow_system_catalog_writes {
-        for step in &steps {
+        for step in steps {
             if let TxStep::AddTriple { attr_id, value, .. }
             | TxStep::DeepMergeTriple { attr_id, value, .. } = step
             {
@@ -566,7 +548,7 @@ pub async fn transact(
     }
     // Guard system-catalog triple writes unless explicitly allowed.
     if !opts.allow_system_catalog_writes {
-        for step in &steps {
+        for step in steps {
             let attr_id = match step {
                 TxStep::AddTriple { attr_id, .. }
                 | TxStep::DeepMergeTriple { attr_id, .. }
@@ -604,6 +586,32 @@ pub async fn transact(
             }
         }
     }
+    Ok(())
+}
+
+/// Execute tx-steps inside the given open DB transaction. The caller commits.
+/// `attrs` must be the app's current attr map; it is updated in place with
+/// attr-level changes.
+pub async fn transact(
+    conn: &mut PgConnection,
+    app_id: Uuid,
+    attrs: &mut AttrMap,
+    steps: Vec<TxStep>,
+    opts: &TxOptions,
+) -> Result<TxReport> {
+    // First write: the transactions row (tx-id + WAL ordering anchor).
+    // ...and tag the triple writes of this tx for the change-capture trigger
+    // (sync tables, topics) in the same round trip.
+    let row = sqlx::query(
+        "WITH t AS (INSERT INTO transactions (app_id) VALUES ($1) RETURNING id)
+         SELECT id, set_config('instant.rust_tx_id', id::text, true) AS tag FROM t",
+    )
+    .bind(app_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let tx_id: i64 = row.get("id");
+
+    validate_system_steps(attrs, &steps, opts)?;
 
     // legacy validate-mode (transaction.clj:283-358): one pre-pass over the
     // pre-tx state before any step runs
