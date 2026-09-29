@@ -422,6 +422,19 @@ console.log("running against rust…");
 const rust = await runOn("rust", plan);
 
 let mismatches = 0;
+// what differs between two projected results, small enough for a CI log:
+// the triples only one side has, and the page-info of each side
+function resultDiff(lv, rv, indent) {
+  const lt = lv?.triples ?? lv?.result?.triples, rt = rv?.triples ?? rv?.result?.triples;
+  if (!Array.isArray(lt) || !Array.isArray(rt)) return;
+  const key = (t) => canon(t.slice(0, 3));
+  const ls = new Set(lt.map(key)), rs = new Set(rt.map(key));
+  console.error(`${indent}only legacy: ${JSON.stringify(lt.filter((t) => !rs.has(key(t))).map((t) => t.slice(0, 3)))}`);
+  console.error(`${indent}only rust:   ${JSON.stringify(rt.filter((t) => !ls.has(key(t))).map((t) => t.slice(0, 3)))}`);
+  const lp = lv?.["page-info"] ?? lv?.result?.["page-info"], rp = rv?.["page-info"] ?? rv?.result?.["page-info"];
+  if (canon(lp) !== canon(rp)) console.error(`${indent}page-info legacy ${JSON.stringify(lp)} rust ${JSON.stringify(rp)}`);
+}
+
 const n = Math.max(legacy.length, rust.length);
 for (let k = 0; k < n; k++) {
   const l = legacy[k], r = rust[k];
@@ -440,6 +453,7 @@ for (let k = 0; k < n; k++) {
           console.error(`  ${s} subscription ${key}:`);
           console.error(`    legacy: ${JSON.stringify(lv)?.slice(0, 2500)}`);
           console.error(`    rust:   ${JSON.stringify(rv)?.slice(0, 2500)}`);
+          resultDiff(lv, rv, "    ");
         }
       }
       const le = l?.state?.[s]?.refreshErrors, re = r?.state?.[s]?.refreshErrors;
@@ -448,6 +462,7 @@ for (let k = 0; k < n; k++) {
   } else {
     console.error(`  legacy: ${JSON.stringify(l)?.slice(0, 2500)}`);
     console.error(`  rust:   ${JSON.stringify(r)?.slice(0, 2500)}`);
+    resultDiff(l, r, "  ");
   }
 }
 const txTotal = legacy.filter((o) => o.kind === "tx").length;

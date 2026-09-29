@@ -1722,12 +1722,15 @@ function buildScenario() {
           const r = await env.conns.ADMIN.waitFor((m) => (m.op === "transact-ok" || m.op === "error") && m["client-event-id"] === ceid);
           if (r.op === "error") throw new Error(`37 tx failed on ${env.serverName}: ${JSON.stringify(r).slice(0, 500)}`);
         };
-        await tx([rlAttr(ids.rlId, "rl", "id"), rlAttr(ids.rlTitle, "rl", "title"), rlAttr(ids.rlfId, "rlfree", "id"), rlAttr(ids.rlfTitle, "rlfree", "title")]);
-        // let every session take the new attrs before the triples below
-        // infer their types (an inferred-type change reaches only sessions
-        // with stale queries, so which snapshot a session keeps is timing).
-        // settle() alone returns at once when every session was already
-        // quiet, before the refresh arrives.
+        // attrs and their first triples in one tx: the schema refresh every
+        // session gets then already carries the inferred types. With two
+        // txs, legacy answers the second one's refresh from its attr cache
+        // before the inferred-type update reaches it, so which snapshot a
+        // session keeps is a legacy race.
+        await tx([
+          rlAttr(ids.rlId, "rl", "id"), rlAttr(ids.rlTitle, "rl", "title"), rlAttr(ids.rlfId, "rlfree", "id"), rlAttr(ids.rlfTitle, "rlfree", "title"),
+          ["add-triple", ids.rl1, ids.rlId, ids.rl1], ["add-triple", ids.rl1, ids.rlTitle, "t1"], ["add-triple", ids.rlf1, ids.rlfId, ids.rlf1], ["add-triple", ids.rlf1, ids.rlfTitle, "t1"],
+        ]);
         await Promise.all(
           Object.values(env.conns)
             .filter((c) => c.waitFor && c.frames?.some((f) => f.op === "init-ok"))
@@ -1736,7 +1739,6 @@ function buildScenario() {
             ),
         );
         await settle(Object.values(env.conns), 700);
-        await tx([["add-triple", ids.rl1, ids.rlId, ids.rl1], ["add-triple", ids.rl1, ids.rlTitle, "t1"], ["add-triple", ids.rlf1, ids.rlfId, ids.rlf1], ["add-triple", ids.rlf1, ids.rlfTitle, "t1"]]);
         for (const name of ["RL1", "RL2"]) {
           env.conns[name] = connect(env.url, env.appId, `${env.serverName}:${name}`);
           await env.conns[name].open;
