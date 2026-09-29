@@ -1723,6 +1723,10 @@ function buildScenario() {
           if (r.op === "error") throw new Error(`37 tx failed on ${env.serverName}: ${JSON.stringify(r).slice(0, 500)}`);
         };
         await tx([rlAttr(ids.rlId, "rl", "id"), rlAttr(ids.rlTitle, "rl", "title"), rlAttr(ids.rlfId, "rlfree", "id"), rlAttr(ids.rlfTitle, "rlfree", "title")]);
+        // let every session take the new attrs before the triples below
+        // infer their types (an inferred-type change reaches only sessions
+        // with stale queries, so which snapshot a session keeps is timing)
+        await settle(Object.values(env.conns), 700);
         await tx([["add-triple", ids.rl1, ids.rlId, ids.rl1], ["add-triple", ids.rl1, ids.rlTitle, "t1"], ["add-triple", ids.rlf1, ids.rlfId, ids.rlf1], ["add-triple", ids.rlf1, ids.rlfTitle, "t1"]]);
         for (const name of ["RL1", "RL2"]) {
           env.conns[name] = connect(env.url, env.appId, `${env.serverName}:${name}`);

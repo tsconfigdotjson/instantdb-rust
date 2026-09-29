@@ -147,6 +147,10 @@ pub struct PageInfoOut {
     pub end_cursor: Option<Value>,
     pub has_next_page: bool,
     pub has_previous_page: bool,
+    /// every row's cursor triple, in display order: permissions re-derive
+    /// the start and end cursors from the viewable ones (legacy
+    /// page-info-rows, instaql.clj permissioned-node)
+    pub rows: Vec<TripleOut>,
 }
 
 #[derive(Debug, Clone)]
@@ -560,6 +564,10 @@ struct SqlCtx<'a> {
     /// the where path currently being compiled (set by push_leaf; a Mutex
     /// only so the ctx stays Sync inside the query futures)
     cur_where: std::sync::Mutex<Vec<String>>,
+    /// compiling for entities known to have no `id` triple (see
+    /// [`idless_matches`]): the leaves legacy anchors on the entity's own id
+    /// triple can't match
+    idless_top: bool,
 }
 
 impl SqlCtx<'_> {
@@ -896,6 +904,11 @@ impl<'a> SqlCtx<'a> {
         *self.cur_where.lock().unwrap() = path.to_vec();
         // $entityIdStartsWith special label
         if path.len() == 1 && path[0] == "$entityIdStartsWith" {
+            if self.idless_top && depth == 0 {
+                // legacy's pattern is on the entity's id triple
+                qb.push("FALSE");
+                return Ok(Ok(()));
+            }
             if let WhereOp::Eq(Value::String(prefix)) = op {
                 let clean: String = prefix
                     .chars()
@@ -982,6 +995,58 @@ impl<'a> SqlCtx<'a> {
         }
     }
 
+    /// The attrs through which an entity without an `id` triple can match
+    /// `cond`, as (attr id, reverse?): a leaf matches through its first path
+    /// segment's triple, except `$isNull` and `$entityIdStartsWith` on the
+    /// entity itself, which legacy anchors on its id triple (None: nothing
+    /// without an id triple can match).
+    fn idless_anchors(&self, etype: &str, cond: &WhereCond) -> Option<Vec<(Uuid, bool)>> {
+        let first_hop = |seg: &str| match resolve_seg(self.attrs, etype, seg) {
+            Ok(PathStep::Forward(a)) => vec![(a.id, false)],
+            Ok(PathStep::Reverse(a)) => vec![(a.id, true)],
+            Err(_) => vec![],
+        };
+        match cond {
+            // every clause must match; any one clause's anchors bound the set
+            WhereCond::And(cs) => {
+                let mut anchors = None;
+                for c in cs {
+                    let a = self.idless_anchors(etype, c)?;
+                    anchors.get_or_insert(a);
+                }
+                Some(anchors.unwrap_or_default())
+            }
+            WhereCond::Or(cs) => {
+                let mut out = vec![];
+                let mut any = false;
+                for c in cs {
+                    // push_cond's `{$isNull: true}` -> `{in [nil]}` fold: a
+                    // value pattern, not an id one
+                    let a = match c {
+                        WhereCond::Cond {
+                            path,
+                            op: WhereOp::IsNull(true),
+                        } if self.final_attr_indexed(etype, path) => Some(first_hop(&path[0])),
+                        c => self.idless_anchors(etype, c),
+                    };
+                    if let Some(a) = a {
+                        any = true;
+                        out.extend(a);
+                    }
+                }
+                any.then_some(out)
+            }
+            WhereCond::Cond { path, op } => {
+                if path.len() == 1
+                    && (path[0] == "$entityIdStartsWith" || matches!(op, WhereOp::IsNull(_)))
+                {
+                    return None;
+                }
+                Some(first_hop(&path[0]))
+            }
+        }
+    }
+
     fn final_attr_indexed(&self, etype: &str, path: &[String]) -> bool {
         let mut etype = etype.to_string();
         for (i, seg) in path.iter().enumerate() {
@@ -1016,6 +1081,12 @@ impl<'a> SqlCtx<'a> {
         let step = resolve_seg(self.attrs, etype, seg)?;
         let alias = format!("w{depth}");
         if path.len() == 1 {
+            if self.idless_top && depth == 0 && matches!(emit, LeafEmit::IsNull(_)) {
+                // legacy's `$isNull` pattern is on the entity's id triple
+                // (instaql.clj where-cond->patterns)
+                qb.push("FALSE");
+                return Ok(Ok(()));
+            }
             // Final segment
             match step {
                 PathStep::Forward(attr) if attr.value_type == ValueType::Blob => {
@@ -1458,6 +1529,7 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
         root: &form.root,
         path: &form.path,
         cur_where: Default::default(),
+        idless_top: false,
     };
     let id_attr = match ctx.attrs.id_attr_of(&form.etype) {
         Some(a) => a.clone(),
@@ -1830,13 +1902,25 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
             end_cursor: end,
             has_next_page: has_next,
             has_previous_page: has_prev,
+            rows: matched
+                .iter()
+                .map(|row| TripleOut {
+                    e: row.eid,
+                    a: order_attr.id,
+                    v: row.order_v.clone(),
+                    t: row.order_t,
+                })
+                .collect(),
         })
     } else {
         None
     };
 
     // ---- entity fetch + children ----
-    let eids: Vec<Uuid> = matched.iter().map(|m| m.eid).collect();
+    let mut eids: Vec<Uuid> = matched.iter().map(|m| m.eid).collect();
+    if let (Some(w), false) = (&form.opts.where_conds, paginated) {
+        eids.extend(idless_matches(conn, &sql_ctx, &form.etype, &id_attr, w).await?);
+    }
     let where_rows = match &form.opts.where_conds {
         Some(w) if !eids.is_empty() => {
             let mut by_eid = where_rows(conn, &sql_ctx, &form.etype, w, &eids).await?;
@@ -2164,6 +2248,7 @@ fn attach_children<'a>(
                 root: &child_form.root,
                 path: &child_form.path,
                 cur_where: Default::default(),
+                idless_top: false,
             };
             let candidates: Vec<Uuid> = all_children.iter().cloned().collect();
             if candidates.is_empty() {
@@ -2229,6 +2314,7 @@ fn attach_children<'a>(
                     root: &child_form.root,
                     path: &child_form.path,
                     cur_where: Default::default(),
+                    idless_top: false,
                 };
                 Some(where_rows(conn, &sql_ctx, &child_etype, w, &kept_vec).await?)
             }
@@ -2276,6 +2362,66 @@ fn attach_children<'a>(
         }
         Ok(())
     })
+}
+
+// ---------------------------------------------------------------------------
+// Entities without an id triple
+
+/// The entities without an `id` triple that match `cond`.
+///
+/// Without a where, legacy scans the etype's id attr (instaql.clj
+/// ->all-ids-attr-pat), but a where clause's patterns stand alone
+/// (where-query), so an entity that has no `id` triple (one a link step
+/// brought into being, say) matches a value or link leaf all the same. The
+/// main match anchors every entity on its id triple; this finds the rest,
+/// starting from the triples a where leaf could match through.
+async fn idless_matches(
+    conn: &mut PgConnection,
+    sql_ctx: &SqlCtx<'_>,
+    etype: &str,
+    id_attr: &Attr,
+    cond: &WhereCond,
+) -> Result<Vec<Uuid>> {
+    let anchors = match sql_ctx.idless_anchors(etype, cond) {
+        Some(a) if !a.is_empty() => a,
+        _ => return Ok(vec![]),
+    };
+    let ctx = SqlCtx {
+        app_id: sql_ctx.app_id,
+        attrs: sql_ctx.attrs,
+        root: sql_ctx.root,
+        path: sql_ctx.path,
+        cur_where: Default::default(),
+        idless_top: true,
+    };
+    let mut qb = QueryBuilder::new("SELECT DISTINCT c.eid FROM (");
+    for (i, (attr_id, reverse)) in anchors.iter().enumerate() {
+        if i > 0 {
+            qb.push(" UNION ");
+        }
+        qb.push(if *reverse {
+            "SELECT json_uuid_to_uuid(a.value) AS eid FROM triples a WHERE a.vae AND a.app_id = "
+        } else {
+            "SELECT a.entity_id AS eid FROM triples a WHERE a.app_id = "
+        });
+        qb.push_bind(ctx.app_id);
+        qb.push(" AND a.attr_id = ");
+        qb.push_bind(*attr_id);
+    }
+    qb.push(
+        ") c WHERE c.eid IS NOT NULL AND NOT EXISTS (SELECT 1 FROM triples i WHERE i.app_id = ",
+    );
+    qb.push_bind(ctx.app_id);
+    qb.push(" AND i.attr_id = ");
+    qb.push_bind(id_attr.id);
+    qb.push(" AND i.entity_id = c.eid AND i.ea) AND ");
+    match ctx.push_cond(&mut qb, etype, "c.eid", cond, 0) {
+        Ok(r) => r?,
+        Err(MissingAttr) => return Ok(vec![]),
+    }
+    qb.push(" ORDER BY c.eid");
+    let rows = qb.build().fetch_all(&mut *conn).await?;
+    Ok(rows.iter().map(|r| r.get("eid")).collect())
 }
 
 // ---------------------------------------------------------------------------

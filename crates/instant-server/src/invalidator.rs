@@ -339,8 +339,13 @@ async fn load_tx_topics(
             a: r.get("attr_id"),
             v: r.get("value"),
         })),
-        Ok(_) if !changed_attrs.is_empty() => TxTopics::default(),
-        Ok(_) => return TxTopics::catch_all(),
+        // no logged change: the tx rewrote values unchanged (the capture
+        // trigger skips those) or only touched attr rows. Legacy's topics
+        // for an unchanged rewrite match only queries on that very triple,
+        // whose results can't have moved, so nothing goes stale; staling
+        // every query instead would recompute them and charge `rateLimit`
+        // view buckets legacy never charges.
+        Ok(_) => TxTopics::default(),
         Err(e) => {
             tracing::warn!("refresh: failed to load tx changes: {e}");
             return TxTopics::catch_all();

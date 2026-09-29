@@ -644,6 +644,8 @@ pub async fn transact(
     };
     // eid -> etype for entities created in this tx (for null backfill)
     let mut created_etypes: HashMap<Uuid, String> = HashMap::new();
+    // entities whose indexed nulls are already written
+    let mut backfilled: HashSet<Uuid> = HashSet::new();
 
     for (op, group) in groups {
         match op {
@@ -973,14 +975,19 @@ pub async fn transact(
             }
             _ => unreachable!(),
         }
+        // legacy writes a new entity's indexed nulls in the same statement
+        // that creates it (triple.clj insert-multi! / deep-merge-multi!
+        // indexed-null-inserts), so a later delete-entity step in the tx
+        // removes them along with the rest of the entity
+        let fresh: Vec<(Uuid, String)> = created_etypes
+            .iter()
+            .filter(|(e, _)| backfilled.insert(**e))
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        backfill_indexed_nulls(&mut *conn, app_id, attrs, &fresh).await?;
     }
 
-    let new_entities: Vec<(Uuid, String)> = created_etypes
-        .iter()
-        .map(|(k, v)| (*k, v.clone()))
-        .collect();
-    backfill_indexed_nulls(&mut *conn, app_id, attrs, &new_entities).await?;
-    report.created = new_entities;
+    report.created = created_etypes.into_iter().collect();
 
     let touched = report.touched.clone();
     validate_required(&mut *conn, app_id, attrs, &touched).await?;

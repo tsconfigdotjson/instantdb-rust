@@ -62,13 +62,13 @@
       "status": 200,
       "docs": [
         {
+          "title": "d1"
+        },
+        {
           "title": "d2-renamed",
           "meta": {
             "k": 1
           }
-        },
-        {
-          "title": "d1"
         }
       ]
     },

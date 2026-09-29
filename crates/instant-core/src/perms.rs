@@ -297,6 +297,53 @@ impl<'a> EvalEnv<'a> {
     }
 }
 
+/// A legacy pre-check replayed when the steps fail: (action, (eid, etype),
+/// pre-tx `data`, `newData`).
+type PreCheck = (
+    &'static str,
+    (Uuid, String),
+    Map<String, Value>,
+    Option<Value>,
+);
+
+/// One triple step as legacy applies it to the pre-tx entity.
+enum LocalStep {
+    Assoc(String, Value),
+    Merge(String, Value),
+    Dissoc(String),
+}
+
+/// Legacy's `newData` for an update check is not the stored post-tx
+/// entity but the pre-tx one with the tx's triple steps applied in order
+/// (permissioned_transaction.clj updated-entities-map): an add sets the
+/// label, a merge deep-merges into it, and a retract drops the label
+/// whatever value it named.
+fn apply_local_steps(
+    old: &Map<String, Value>,
+    steps: &[((Uuid, String), LocalStep)],
+    key: &(Uuid, String),
+) -> Map<String, Value> {
+    let mut new = old.clone();
+    for (k, step) in steps {
+        if k != key {
+            continue;
+        }
+        match step {
+            LocalStep::Assoc(label, v) => {
+                new.insert(label.clone(), v.clone());
+            }
+            LocalStep::Merge(label, v) => {
+                let merged = crate::triple::deep_merge(new.get(label).unwrap_or(&Value::Null), v);
+                new.insert(label.clone(), merged);
+            }
+            LocalStep::Dissoc(label) => {
+                new.remove(label);
+            }
+        }
+    }
+    new
+}
+
 /// Legacy `get-modified-fields-for-eid` (permissioned_transaction.clj:262-279):
 /// the forward labels of every add-triple / deep-merge-triple step aimed at
 /// `eid` anywhere in the tx, in step order, distinct, without `id`;
@@ -1806,6 +1853,17 @@ impl<'a> PermsFilter<'a> {
         }
         self.evaluate(conn, app_id, attrs, &todo, &mut memo).await?;
         for form in &mut result.forms {
+            // the cursors come from the first and last rows whose cursor
+            // triple is viewable; has-next / has-previous stay as computed
+            if let Some(pi) = form.page_info.as_mut() {
+                let viewable: Vec<_> = pi
+                    .rows
+                    .iter()
+                    .filter(|t| memo.triple_ok(attrs, t))
+                    .collect();
+                pi.start_cursor = viewable.first().map(|t| t.to_json());
+                pi.end_cursor = viewable.last().map(|t| t.to_json());
+            }
             let had_where = !form.where_rows.is_empty();
             form.where_rows
                 .retain(|row| row.iter().all(|t| memo.triple_ok(attrs, t)));
@@ -2153,6 +2211,9 @@ pub async fn permissioned_transact_checked(
 ) -> Result<(TxReport, Vec<Value>)> {
     // ---- pre-pass: snapshot old entity data + note link targets ----
     let mut old_maps: HashMap<(Uuid, String), Option<Map<String, Value>>> = HashMap::new();
+    // the triple steps per (eid, etype), for legacy's approximated
+    // post-tx entity (see `apply_local_steps`)
+    let mut local_steps: Vec<((Uuid, String), LocalStep)> = vec![];
     let mut link_targets: Vec<(Uuid, String)> = vec![]; // entities linked-to (view check)
     let mut delete_seeds: Vec<(Uuid, String)> = vec![];
     // explicit link/unlink checks; (eid, etype) pairs whose only touches are
@@ -2211,6 +2272,16 @@ pub async fn permissioned_transact_checked(
                 };
                 if let Some(e) = peek_eid(conn, app_id, attrs, eid).await? {
                     let key = (e, attr.etype.clone());
+                    let local = match step {
+                        TxStep::AddTriple { .. } => {
+                            LocalStep::Assoc(attr.label.clone(), value.clone())
+                        }
+                        TxStep::DeepMergeTriple { .. } => {
+                            LocalStep::Merge(attr.label.clone(), value.clone())
+                        }
+                        _ => LocalStep::Dissoc(attr.label.clone()),
+                    };
+                    local_steps.push((key.clone(), local));
                     if let std::collections::hash_map::Entry::Vacant(slot) = old_maps.entry(key) {
                         let m = fetch_entity_map(conn, app_id, attrs, &attr.etype, e).await?;
                         slot.insert(m);
@@ -2447,7 +2518,110 @@ pub async fn permissioned_transact_checked(
     };
 
     // ---- execute ----
-    let report = tx::transact(conn, app_id, attrs, steps, &TxOptions::default()).await?;
+    // Legacy runs the update / delete pre-checks before any step does
+    // (permissioned_transaction.clj transact!: pre-checks, then
+    // transact-without-tx-conn: validate-mode, the writes, checked types,
+    // required attrs), so a tx that fails a pre-check AND errors while
+    // running is permission-denied. Here the checks run after the steps;
+    // when the steps fail, the pre-checks are replayed on the pre-tx
+    // snapshots from a savepoint.
+    let pre_checks: Vec<PreCheck> = if fail_fast {
+        let mut out = vec![];
+        let mut seen = HashSet::new();
+        for (key, step) in &local_steps {
+            if matches!(step, LocalStep::Dissoc(_))
+                || (explicit_ref_touch.contains(key) && !other_touch.contains(key))
+                || !seen.insert(key.clone())
+            {
+                continue;
+            }
+            let Some(Some(old)) = old_maps.get(key) else {
+                continue;
+            };
+            if rules.program(&key.1, "update").is_true() {
+                continue;
+            }
+            let new = Value::Object(apply_local_steps(old, &local_steps, key));
+            out.push(("update", key.clone(), old.clone(), Some(new)));
+        }
+        for key in &delete_set {
+            if rules.program(&key.1, "delete").is_true() {
+                continue;
+            }
+            let old = old_maps
+                .get(key)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| base_entity_map(attrs, &key.1, key.0));
+            out.push(("delete", key.clone(), old, None));
+        }
+        out
+    } else {
+        vec![]
+    };
+    let step_rule_params: HashMap<(Uuid, String), Value> = steps
+        .iter()
+        .filter_map(|s| match s {
+            TxStep::RuleParams {
+                eid: EidRef::Id(e),
+                etype: Some(et),
+                params,
+            } => Some(((*e, et.clone()), params.clone())),
+            _ => None,
+        })
+        .collect();
+    let pre_writes: Vec<(Uuid, Uuid)> = write_refs
+        .iter()
+        .filter_map(|(eid, attr_id)| match eid {
+            EidRef::Id(id) => Some((*id, *attr_id)),
+            EidRef::Lookup(..) => None,
+        })
+        .collect();
+    if !pre_checks.is_empty() {
+        sqlx::query("SAVEPOINT instant_pre_checks")
+            .execute(&mut *conn)
+            .await?;
+    }
+    let report = match tx::transact(conn, app_id, attrs, steps, &TxOptions::default()).await {
+        Ok(report) => report,
+        Err(e) if pre_checks.is_empty() => return Err(e),
+        Err(e) => {
+            sqlx::query("ROLLBACK TO SAVEPOINT instant_pre_checks")
+                .execute(&mut *conn)
+                .await?;
+            for (action, (eid, etype), old, new) in &pre_checks {
+                let program = rules.program(etype, action);
+                let mut rp = match global_rule_params {
+                    Value::Object(m) => m.clone(),
+                    _ => Map::new(),
+                };
+                if let Some(Value::Object(step_rp)) = step_rule_params.get(&(*eid, etype.clone())) {
+                    rp.extend(step_rp.clone());
+                }
+                let auth_val = match &pre_auth {
+                    Some(v) => v.clone(),
+                    None => build_auth_value(conn, app_id, attrs, auth, &[&program]).await?,
+                };
+                let mut env = EvalEnv::new(app_id, rules, &auth.request);
+                if *action == "update" {
+                    env = env.with_modified_fields(modified_fields_for(&pre_writes, attrs, *eid));
+                }
+                let ok = eval_program(
+                    &program,
+                    &Value::Object(old.clone()),
+                    new.as_ref(),
+                    &auth_val,
+                    &Value::Object(rp),
+                    &env,
+                )
+                .await?;
+                if !ok {
+                    return Err(object_denied(etype));
+                }
+            }
+            return Err(e);
+        }
+    };
     let writes: Vec<(Uuid, Uuid)> = write_refs
         .into_iter()
         .filter_map(|(eid, attr_id)| match eid {
@@ -2487,10 +2661,21 @@ pub async fn permissioned_transact_checked(
             old,
         });
     }
+    // legacy's pre-checks run an update check for every add / merge step on
+    // an entity that existed before the tx, even when a later step of the
+    // tx deletes it (permissioned_transaction.clj pre-checks)
+    let written: HashSet<&(Uuid, String)> = local_steps
+        .iter()
+        .filter(|(_, s)| !matches!(s, LocalStep::Dissoc(_)))
+        .map(|(k, _)| k)
+        .collect();
     let mut update_seen = HashSet::new();
     for (e, et) in &report.touched {
         let key = (*e, et.clone());
-        if created.contains(&key) || deleted.contains(&key) || !update_seen.insert(key.clone()) {
+        if created.contains(&key)
+            || (deleted.contains(&key) && !written.contains(&key))
+            || !update_seen.insert(key.clone())
+        {
             continue;
         }
         if explicit_ref_touch.contains(&key) && !other_touch.contains(&key) {
@@ -2560,9 +2745,7 @@ pub async fn permissioned_transact_checked(
                 ("create", etype.clone(), *eid, Value::Object(new), None)
             }
             Check::Update { etype, eid, old } => {
-                let new = fetch_entity_map(conn, app_id, attrs, etype, *eid)
-                    .await?
-                    .unwrap_or_else(|| base_entity_map(attrs, etype, *eid));
+                let new = apply_local_steps(old, &local_steps, &(*eid, etype.clone()));
                 (
                     "update",
                     etype.clone(),
