@@ -363,6 +363,7 @@ pub async fn handle_remove_sync(
 /// Push sync-update-triples for all of a session's subs up to `latest`.
 /// Called from the invalidator on each tx notification.
 pub async fn push_updates(state: &AppState, session: &Arc<Session>, app_id: Uuid, latest: i64) {
+    let _serial = session.sync_push.lock().await;
     let subs: Vec<(Uuid, SyncSub)> = {
         let st = session.state.lock().await;
         if st.app_id != Some(app_id) {

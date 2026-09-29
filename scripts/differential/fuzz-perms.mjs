@@ -290,17 +290,41 @@ async function runOn(serverName, plan) {
   await new Promise((r) => setTimeout(r, RULES_SETTLE_MS));
 
   const conns = {};
-  for (const s of SESSIONS) {
-    conns[s] = connect(url, appId, `${serverName}:pz:${s}`);
-    await conns[s].open;
+  // a second connection per session, same auth, that holds no
+  // subscriptions: at every one-shot query and checkpoint it asks the same
+  // question afresh, so a result the session was served can be told apart
+  // from what the server holds at that moment
+  const probes = {};
+  const open = async (s, tag) => {
+    const c = connect(url, appId, `${serverName}:pz:${s}${tag}`);
+    await c.open;
     const init = { "client-event-id": uuid(), op: "init", "app-id": appId, versions: { "@instantdb/core": "v0.21.0" } };
     if (s === "ADM") init["__admin-token"] = adminToken;
     if (EMAILS[s]) init["refresh-token"] = await mintRefreshToken(url, appId, EMAILS[s]);
-    conns[s].send(init);
-    const ok = await conns[s].waitFor((m) => m.op === "init-ok" || m.op === "error");
-    if (ok.op !== "init-ok") throw new Error(`[${serverName}] init ${s} failed: ${JSON.stringify(ok).slice(0, 400)}`);
+    c.send(init);
+    const ok = await c.waitFor((m) => m.op === "init-ok" || m.op === "error");
+    if (ok.op !== "init-ok") throw new Error(`[${serverName}] init ${s}${tag} failed: ${JSON.stringify(ok).slice(0, 400)}`);
+    return c;
+  };
+  for (const s of SESSIONS) {
+    conns[s] = await open(s, "");
+    probes[s] = await open(s, ":probe");
   }
   const all = Object.values(conns);
+  const probe = async (s, q) => {
+    const c = probes[s];
+    const ceid = c.send({ "client-event-id": uuid(), op: "add-query", q });
+    const r = await c.waitFor(
+      (m) => (m.op === "add-query-ok" && canon(m.q) === canon(q)) || (m.op === "error" && m["client-event-id"] === ceid),
+      20000,
+    );
+    if (r.op !== "add-query-ok") return errView(r);
+    c.send({ "client-event-id": uuid(), op: "remove-query", q });
+    await c.waitFor((m) => m.op === "remove-query-ok" && canon(m.q) === canon(q));
+    return projectAnyResult(r.result);
+  };
+  // op index -> the probe's answers (not part of the compared outcomes)
+  const fresh = {};
   const send = (s, m) => conns[s].send({ "client-event-id": uuid(), ...m });
   const txReply = (s, ceid) =>
     conns[s].waitFor((m) => ["transact-ok", "error"].includes(m.op) && m["client-event-id"] === ceid, 20000);
@@ -322,6 +346,8 @@ async function runOn(serverName, plan) {
   // refresh errors seen since the last checkpoint. Frames are consumed in
   // arrival order at every checkpoint.
   const subs = Object.fromEntries(SESSIONS.map((s) => [s, new Map()]));
+  // canonical key -> the query as sent, per session (for the probe)
+  const subQ = Object.fromEntries(SESSIONS.map((s) => [s, new Map()]));
   const refreshErrors = Object.fromEntries(SESSIONS.map((s) => [s, []]));
   const cursors = Object.fromEntries(SESSIONS.map((s) => [s, conns[s].frames.length]));
   const fold = () => {
@@ -368,9 +394,11 @@ async function runOn(serverName, plan) {
         await conns[op.session].waitFor((m) => m.op === "remove-query-ok" && canon(m.q) === canon(op.q));
       }
       outcomes.push({ i, kind: op.kind, session: op.session, q: op.q, ...(r.op === "add-query-ok" ? { result: projectAnyResult(r.result) } : r.op === "error" ? errView(r) : { op: r.op }) });
+      if (r.op === "add-query-ok") fresh[i] = await probe(op.session, op.q);
     } else if (op.kind === "subscribe") {
       fold();
       subs[op.session].set(canon(normalize(op.q)), null);
+      subQ[op.session].set(canon(normalize(op.q)), op.q);
       const ceid = send(op.session, { op: "add-query", q: op.q });
       const r = await queryReply(op.session, ceid, op.q);
       if (r.op !== "add-query-ok") subs[op.session].delete(canon(normalize(op.q)));
@@ -390,6 +418,7 @@ async function runOn(serverName, plan) {
       if (op.subscribe) {
         fold();
         subs[s].set(canon(normalize(op.q)), null);
+        subQ[s].set(canon(normalize(op.q)), op.q);
       }
       const c1 = send(s, { op: "transact", "tx-steps": op.first });
       const cq = send(s, { op: "add-query", q: op.q });
@@ -406,20 +435,55 @@ async function runOn(serverName, plan) {
       outcomes.push({ i, kind: op.kind, session: s, first: txOutcome(r1), query: rq.op === "error" ? errView(rq) : { ok: true }, second: txOutcome(r2) });
     } else if (op.kind === "checkpoint") {
       await settle(all, CHECKPOINT_QUIET_MS);
-      outcomes.push({ i, kind: "checkpoint", state: snapshot() });
+      const state = snapshot();
+      outcomes.push({ i, kind: "checkpoint", state });
+      fresh[i] = {};
+      for (const s of SESSIONS) {
+        fresh[i][s] = {};
+        for (const key of Object.keys(state[s].subs)) {
+          const q = subQ[s].get(key);
+          if (q) fresh[i][s][key] = await probe(s, q);
+        }
+      }
     }
   }
-  for (const c of all) c.close();
-  return outcomes;
+  for (const c of [...all, ...Object.values(probes)]) c.close();
+  return { outcomes, fresh };
 }
 
 const plan = buildScript();
 console.log(`fuzz-perms: seed=${seed} rounds=${rounds} ops=${plan.script.length}`);
 console.log(`rules: ${JSON.stringify(plan.rules)}`);
 console.log("running against legacy…");
-const legacy = await runOn("legacy", plan);
+const { outcomes: legacy, fresh: legacyFresh } = await runOn("legacy", plan);
 console.log("running against rust…");
-const rust = await runOn("rust", plan);
+const { outcomes: rust, fresh: rustFresh } = await runOn("rust", plan);
+
+// A mismatch is legacy serving a stale result when, at that moment, a fresh
+// legacy session with the same auth answered exactly what rust served, and
+// rust's own fresh answer agreed. Legacy caches query results per session
+// and misses some invalidations; the server's data still matched.
+const same = (a, b) => a !== undefined && b !== undefined && canon(a) === canon(b);
+function legacyStale(l, r) {
+  if (!l || !r || l.i !== r.i) return false;
+  const lf = legacyFresh[l.i], rf = rustFresh[r.i];
+  if (l.kind === "query") {
+    if (canon({ ...l, result: undefined }) !== canon({ ...r, result: undefined })) return false;
+    return same(lf, r.result) && same(rf, r.result);
+  }
+  if (l.kind !== "checkpoint") return false;
+  for (const s of SESSIONS) {
+    const ls = l.state?.[s], rs = r.state?.[s];
+    if (canon(ls?.refreshErrors) !== canon(rs?.refreshErrors)) return false;
+    for (const key of new Set([...Object.keys(ls?.subs ?? {}), ...Object.keys(rs?.subs ?? {})])) {
+      const lv = ls?.subs?.[key], rv = rs?.subs?.[key];
+      if (canon(lv) === canon(rv)) continue;
+      if (!(same(lf?.[s]?.[key], rv) && same(rf?.[s]?.[key], rv))) return false;
+    }
+  }
+  return true;
+}
+let staleLegacy = 0;
 
 let mismatches = 0;
 // what differs between two projected results, small enough for a CI log:
@@ -439,6 +503,11 @@ const n = Math.max(legacy.length, rust.length);
 for (let k = 0; k < n; k++) {
   const l = legacy[k], r = rust[k];
   if (canon(l) === canon(r)) continue;
+  if (legacyStale(l, r)) {
+    staleLegacy++;
+    console.log(`legacy served a stale result at op ${l.i} (${l.kind}); a fresh legacy session agreed with rust`);
+    continue;
+  }
   mismatches++;
   if (mismatches > 12) continue;
   const op = plan.script[l?.i ?? r?.i];
@@ -476,4 +545,4 @@ if (mismatches) {
   console.error(`FUZZ-PERMS FAILED: ${mismatches} mismatches (seed ${seed})`);
   process.exit(1);
 }
-console.log(`FUZZ-PERMS PASSED: ${plan.script.length} ops, ${legacy.filter((o) => o.kind === "checkpoint").length} checkpoints identical (seed ${seed})`);
+console.log(`FUZZ-PERMS PASSED: ${plan.script.length} ops, ${legacy.filter((o) => o.kind === "checkpoint").length} checkpoints identical, ${staleLegacy} stale legacy results (seed ${seed})`);

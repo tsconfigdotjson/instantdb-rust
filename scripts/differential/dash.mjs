@@ -573,7 +573,11 @@ async function runAgainst(name) {
   const txView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort() } : errView(res));
   const queryView = (res) => {
     if (res.status !== 200) return errView(res);
-    const rows = (res.body.docs ?? []).map((d) => norm(d)).sort((a, c) => (canon(a) < canon(c) ? -1 : 1));
+    // by title first: ids normalize differently depending on which app's id
+    // prefix is current, which would reorder rows between runs
+    const rows = (res.body.docs ?? [])
+      .map((d) => norm(d))
+      .sort((a, c) => String(a.title).localeCompare(String(c.title)) || (canon(a) < canon(c) ? -1 : 1));
     return { status: 200, docs: rows };
   };
   const ids24 = { owner1: mk(), owner2: mk(), doc1: mk() };

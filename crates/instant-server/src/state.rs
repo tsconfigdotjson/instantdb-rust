@@ -273,6 +273,9 @@ pub struct Session {
     pub overflowed: AtomicBool,
     /// per-session op lanes (legacy group keys)
     pub scheduler: crate::scheduler::Scheduler,
+    /// serializes sync-table pushes: each refresh batch spawns one, and two
+    /// overlapping ones would both send the txes after the same `last_tx`
+    pub sync_push: Mutex<()>,
 }
 
 impl Session {
@@ -286,6 +289,7 @@ impl Session {
             max_queued,
             overflowed: AtomicBool::new(false),
             scheduler: Default::default(),
+            sync_push: Mutex::new(()),
         }
     }
 
