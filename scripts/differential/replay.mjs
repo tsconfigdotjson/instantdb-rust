@@ -1725,7 +1725,16 @@ function buildScenario() {
         await tx([rlAttr(ids.rlId, "rl", "id"), rlAttr(ids.rlTitle, "rl", "title"), rlAttr(ids.rlfId, "rlfree", "id"), rlAttr(ids.rlfTitle, "rlfree", "title")]);
         // let every session take the new attrs before the triples below
         // infer their types (an inferred-type change reaches only sessions
-        // with stale queries, so which snapshot a session keeps is timing)
+        // with stale queries, so which snapshot a session keeps is timing).
+        // settle() alone returns at once when every session was already
+        // quiet, before the refresh arrives.
+        await Promise.all(
+          Object.values(env.conns)
+            .filter((c) => c.waitFor && c.frames?.some((f) => f.op === "init-ok"))
+            .map((c) =>
+              c.waitFor((m) => m.op === "refresh-ok" && (m.attrs ?? []).some((a) => a.id === ids.rlId), 5000).catch(() => {}),
+            ),
+        );
         await settle(Object.values(env.conns), 700);
         await tx([["add-triple", ids.rl1, ids.rlId, ids.rl1], ["add-triple", ids.rl1, ids.rlTitle, "t1"], ["add-triple", ids.rlf1, ids.rlfId, ids.rlf1], ["add-triple", ids.rlf1, ids.rlfTitle, "t1"]]);
         for (const name of ["RL1", "RL2"]) {

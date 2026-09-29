@@ -2214,6 +2214,9 @@ pub async fn permissioned_transact_checked(
     // the triple steps per (eid, etype), for legacy's approximated
     // post-tx entity (see `apply_local_steps`)
     let mut local_steps: Vec<((Uuid, String), LocalStep)> = vec![];
+    // entities a ref retract-triple names (legacy's unlink fallback is an
+    // update check; a plain retract has no pre-check at all)
+    let mut ref_retracted: HashSet<(Uuid, String)> = HashSet::new();
     let mut link_targets: Vec<(Uuid, String)> = vec![]; // entities linked-to (view check)
     let mut delete_seeds: Vec<(Uuid, String)> = vec![];
     // explicit link/unlink checks; (eid, etype) pairs whose only touches are
@@ -2279,7 +2282,12 @@ pub async fn permissioned_transact_checked(
                         TxStep::DeepMergeTriple { .. } => {
                             LocalStep::Merge(attr.label.clone(), value.clone())
                         }
-                        _ => LocalStep::Dissoc(attr.label.clone()),
+                        _ => {
+                            if attr.value_type == ValueType::Ref {
+                                ref_retracted.insert(key.clone());
+                            }
+                            LocalStep::Dissoc(attr.label.clone())
+                        }
                     };
                     local_steps.push((key.clone(), local));
                     if let std::collections::hash_map::Entry::Vacant(slot) = old_maps.entry(key) {
@@ -2637,9 +2645,21 @@ pub async fn permissioned_transact_checked(
 
     // ---- collect checks ----
     let mut checks: Vec<Check> = vec![];
-    let created: HashSet<(Uuid, String)> = report.created.iter().cloned().collect();
+    // legacy decides create vs update from the pre-tx entity
+    // (post-create-checks `create?`, pre-checks `when entity`): an entity
+    // the tx deletes and then writes again is updated, not created
+    let existed = |key: &(Uuid, String)| matches!(old_maps.get(key), Some(Some(_)));
+    let created: HashSet<(Uuid, String)> = report
+        .created
+        .iter()
+        .filter(|k| !existed(k))
+        .cloned()
+        .collect();
     for (e, et) in &report.created {
         let key = (*e, et.clone());
+        if !created.contains(&key) {
+            continue;
+        }
         if explicit_ref_touch.contains(&key) && !other_touch.contains(&key) {
             // an entity brought into being by a link step alone runs the
             // link rule (with actions.data == "create"), not the create rule
@@ -2650,7 +2670,6 @@ pub async fn permissioned_transact_checked(
             eid: *e,
         });
     }
-    let deleted: HashSet<(Uuid, String)> = report.deleted.iter().cloned().collect();
     for (e, et) in &report.deleted {
         let old = old_maps
             .get(&(*e, et.clone()))
@@ -2671,11 +2690,15 @@ pub async fn permissioned_transact_checked(
         .filter(|(_, s)| !matches!(s, LocalStep::Dissoc(_)))
         .map(|(k, _)| k)
         .collect();
+    // legacy's update pre-check: an add / merge step, or a ref retract
+    // without an unlink rule, on an entity that existed before the tx
+    // (permissioned_transaction.clj pre-checks); plain retracts and the
+    // entities a delete unlinks get none
     let mut update_seen = HashSet::new();
     for (e, et) in &report.touched {
         let key = (*e, et.clone());
-        if created.contains(&key)
-            || (deleted.contains(&key) && !written.contains(&key))
+        if !existed(&key)
+            || !(written.contains(&key) || ref_retracted.contains(&key))
             || !update_seen.insert(key.clone())
         {
             continue;
