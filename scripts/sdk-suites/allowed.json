@@ -1,0 +1,7 @@
+[
+  {
+    "suite": "core",
+    "test": "__tests__/src/infiniteQuery.e2e.test.ts > infinite scroll number line > adding negative numbers",
+    "reason": "Timing-flaky upstream test, not a parity difference: it polls 10s for the loaded window to grow to [-1, 0, 1, 2, 3] and intermittently stays at [-1, 0, 1, 2] on either server. PR #46's CI saw it fail on legacy alone (run 36626612399) and on rust alone (run 36628245410), passing on the other side both times."
+  }
+]

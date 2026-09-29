@@ -273,6 +273,9 @@ pub struct Session {
     pub overflowed: AtomicBool,
     /// per-session op lanes (legacy group keys)
     pub scheduler: crate::scheduler::Scheduler,
+    /// serializes sync-table pushes: each refresh batch spawns one, and two
+    /// overlapping ones would both send the txes after the same `last_tx`
+    pub sync_push: Mutex<()>,
 }
 
 impl Session {
@@ -286,6 +289,7 @@ impl Session {
             max_queued,
             overflowed: AtomicBool::new(false),
             scheduler: Default::default(),
+            sync_push: Mutex::new(()),
         }
     }
 
@@ -348,10 +352,10 @@ pub struct QueryCacheEntry {
     pub created: std::time::Instant,
 }
 
-/// (app id, canonical query, admin?, user id)
-/// (app, query, admin?, user, request.ip, request.origin): rules may read
-/// `request.ip` / `request.origin`, so results are only shared between
-/// sessions with the same request facts.
+/// (app, query, admin?, user, request.ip, request.origin, rules hash):
+/// rules may read `request.ip` / `request.origin`, so results are only
+/// shared between sessions with the same request facts, and a rules change
+/// (which commits no tx) keys new entries.
 pub type QueryCacheKey = (
     Uuid,
     String,
@@ -359,6 +363,7 @@ pub type QueryCacheKey = (
     Option<Uuid>,
     Option<String>,
     Option<String>,
+    u64,
 );
 
 /// Entries older than this are never served (bounds the staleness of results

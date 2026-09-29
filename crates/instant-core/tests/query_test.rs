@@ -782,3 +782,85 @@ async fn ws_result_shape() {
     assert!(pi["has-next-page?"].is_boolean());
     assert!(arr[0]["child-nodes"].as_array().unwrap().is_empty());
 }
+
+/// (e, a, v) of every triple in the flattened ws result.
+fn ws_triples(res: &instant_core::instaql::QueryResult) -> Vec<(Uuid, Uuid, Value)> {
+    let ws = res.to_ws_result();
+    ws[0]["data"]["datalog-result"]["join-rows"][0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| {
+            (
+                Uuid::parse_str(t[0].as_str().unwrap()).unwrap(),
+                Uuid::parse_str(t[1].as_str().unwrap()).unwrap(),
+                t[2].clone(),
+            )
+        })
+        .collect()
+}
+
+/// Issue #45: legacy's where patterns are part of the form's datalog query,
+/// so the triples they matched ship with the result even when `fields`
+/// leaves the attr out or they belong to a linked entity.
+#[tokio::test]
+async fn where_pattern_triples_ship_with_the_result() {
+    let pool = pool().await;
+    let fx = fixture(&pool).await;
+    let attrs = attrs_of(&pool, fx.app).await;
+    let age = attrs.by_fwd_name("users", "age").unwrap().id;
+    let author = attrs.by_fwd_name("posts", "author").unwrap().id;
+    let (alice, bob, carol) = (fx.users["alice"], fx.users["bob"], fx.users["carol"]);
+
+    // a comparison on an attr the projection leaves out
+    let res = run_query(
+        &pool,
+        fx.app,
+        json!({"users": {"$": {"fields": ["handle"], "where": {"age": {"$gt": 26}}}}}),
+    )
+    .await;
+    let ts = ws_triples(&res);
+    assert!(ts.contains(&(alice, age, json!(30))));
+    assert!(ts.contains(&(carol, age, json!(35))));
+    assert!(!ts.iter().any(|t| t.0 == bob));
+    // the entity nodes themselves stay projected
+    let maps = entity_maps(&res, &attrs, "users");
+    assert!(maps.iter().all(|m| !m.contains_key("age")));
+
+    // a dotted path: the link triple and the linked entity's matched triple
+    let res = run_query(
+        &pool,
+        fx.app,
+        json!({"posts": {"$": {"fields": ["title"], "where": {"author.handle": "bob"}}}}),
+    )
+    .await;
+    let ts = ws_triples(&res);
+    let p3 = fx.posts["p3"];
+    assert!(ts.contains(&(p3, author, json!(bob.to_string()))));
+    assert!(ts.contains(&(bob, fx.users_handle, json!("bob"))));
+    assert!(!ts.iter().any(|t| t.0 == alice));
+
+    // `or`: only the branches an entity satisfies contribute
+    let res = run_query(
+        &pool,
+        fx.app,
+        json!({"users": {"$": {"fields": ["nickname"], "where": {"or": [{"age": {"$gt": 33}}, {"handle": "bob"}]}}}}),
+    )
+    .await;
+    let ts = ws_triples(&res);
+    assert!(ts.contains(&(carol, age, json!(35))));
+    assert!(ts.contains(&(bob, fx.users_handle, json!("bob"))));
+    assert!(!ts.contains(&(bob, age, json!(25))));
+    assert!(!ts.contains(&(carol, fx.users_handle, json!("carol"))));
+
+    // a child form's where rows come with its link triples
+    let res = run_query(
+        &pool,
+        fx.app,
+        json!({"users": {"$": {"fields": ["handle"]}, "posts": {"$": {"fields": ["id"], "where": {"author.age": {"$lt": 28}}}}}}),
+    )
+    .await;
+    let ts = ws_triples(&res);
+    assert!(ts.contains(&(bob, age, json!(25))));
+    assert!(ts.contains(&(p3, author, json!(bob.to_string()))));
+}

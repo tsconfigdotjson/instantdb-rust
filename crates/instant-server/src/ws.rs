@@ -200,7 +200,7 @@ fn required_str<'a>(msg: &'a Value, key: &str) -> Result<&'a str, InstantError> 
 /// Error frame matching legacy handle-error! key-for-key (session.clj:589-616):
 /// status/client-event-id/original-event/type/message/hint are always present,
 /// null when unknown.
-fn err_msg(original: &Value, e: &InstantError) -> Value {
+pub(crate) fn err_msg(original: &Value, e: &InstantError) -> Value {
     // legacy session.clj:1040-1060 sends every request-scoped error type,
     // rate-limited and timeout included, with status 400 on the socket (429
     // is HTTP-only, util/http.clj:188-199)
@@ -518,11 +518,20 @@ async fn handle_add_query(
         st.inference
     };
     let started = std::time::Instant::now();
-    // the shared cache holds join-rows frames; tree subscribers are few
+    let rules = if perms.admin {
+        None
+    } else {
+        let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
+        Some(instant_core::perms::Rules::load(&mut conn, app_id).await?)
+    };
+    // the shared cache holds join-rows frames; tree subscribers are few. A
+    // rule that calls rateLimit charges its bucket on every evaluation
+    // (legacy has no result cache), so those results are never shared.
     let cacheable = !tree
         && perms.user_map.is_none()
         && perms.rule_params.is_none()
-        && q.get("$$ruleParams").is_none();
+        && q.get("$$ruleParams").is_none()
+        && !rules.as_ref().is_some_and(|r| r.uses_rate_limits());
     let cache_key: QueryCacheKey = (
         app_id,
         key.clone(),
@@ -530,6 +539,7 @@ async fn handle_add_query(
         perms.user_id,
         perms.ip.clone(),
         perms.origin.clone(),
+        rules.as_ref().map(|r| value_hash(&r.code)).unwrap_or(0),
     );
     // Compute, register, then re-read the watermark: a tx that committed
     // after the query ran but was refreshed before the query was
@@ -564,7 +574,8 @@ async fn handle_add_query(
                 crate::metrics::METRICS.query_cache_misses_total.inc();
                 let attrs = service::load_attrs(state, app_id).await?;
                 let outcome =
-                    service::run_query_full(state, app_id, &attrs, &perms, &q, None).await?;
+                    service::run_query_full(state, app_id, &attrs, &perms, &q, rules.as_ref())
+                        .await?;
                 let (wire, meta, hash) =
                     format_query_result(&outcome.result, &attrs, &q, tree, inference);
                 result_meta = meta;

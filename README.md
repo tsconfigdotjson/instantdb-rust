@@ -246,4 +246,8 @@ The core product surface — sync protocol, queries, transactions, permissions,
 auth, presence, admin API, storage — is implemented and exercised against the
 unmodified official clients (browser-validated React app, admin SDK suite).
 Known gaps (experimental/rarely-used legacy features) are tracked in
-[docs/PARITY.md](docs/PARITY.md).
+[docs/PARITY.md](docs/PARITY.md). The differential harness
+(`scripts/differential/`) runs every counted legacy surface item against the
+official legacy server; that proves every surface item matches on the
+scripted and probed paths plus what the seeded fuzz layers reach, not that
+every possible input matches — see "What the harness proves" in PARITY.md.

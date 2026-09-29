@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
-use crate::attr::{Attr, AttrMap};
+use crate::attr::{Attr, AttrMap, ValueType};
 use crate::error::{InstantError, Result};
 use crate::system_catalog;
 use crate::triple::{
@@ -482,6 +482,10 @@ pub struct TxReport {
     /// catalog; other attr updates (flags, inferred types) only reach
     /// sessions whose queries went stale anyway
     pub schema_changed: bool,
+    /// restoring a blob attr stales every query: legacy
+    /// topics-for-attr-upsert adds `[#{:ea} _ _ _]` for an object attr's
+    /// restoration (reactive/topics.clj:151-165)
+    pub requery_all: bool,
     /// attrs whose rows this tx wrote (added, updated, deleted, restored,
     /// inferred types): legacy derives a `[_ #{attr-id} _]` topic from every
     /// attrs-row change (reactive/topics.clj topics-for-attr-upsert), so any
@@ -518,32 +522,14 @@ fn tx_step_validation_err(step: &TxStep, message: String) -> InstantError {
     )
 }
 
-/// Execute tx-steps inside the given open DB transaction. The caller commits.
-/// `attrs` must be the app's current attr map; it is updated in place with
-/// attr-level changes.
-pub async fn transact(
-    conn: &mut PgConnection,
-    app_id: Uuid,
-    attrs: &mut AttrMap,
-    steps: Vec<TxStep>,
-    opts: &TxOptions,
-) -> Result<TxReport> {
-    // First write: the transactions row (tx-id + WAL ordering anchor).
-    // ...and tag the triple writes of this tx for the change-capture trigger
-    // (sync tables, topics) in the same round trip.
-    let row = sqlx::query(
-        "WITH t AS (INSERT INTO transactions (app_id) VALUES ($1) RETURNING id)
-         SELECT id, set_config('instant.rust_tx_id', id::text, true) AS tag FROM t",
-    )
-    .bind(app_id)
-    .fetch_one(&mut *conn)
-    .await?;
-    let tx_id: i64 = row.get("id");
-
+/// Legacy's system-catalog guards (permissioned_transaction.clj:44-79
+/// validate-system-delete-entity! / validate-system-triple-op!), which run
+/// while the steps are coerced, before any permission check or write.
+pub fn validate_system_steps(attrs: &AttrMap, steps: &[TxStep], opts: &TxOptions) -> Result<()> {
     // legacy validate-system-triple-op! (permissioned_transaction.clj:72-79):
     // stream-backed file paths are never editable, admins included
     if !opts.allow_system_catalog_writes {
-        for step in &steps {
+        for step in steps {
             if let TxStep::AddTriple { attr_id, value, .. }
             | TxStep::DeepMergeTriple { attr_id, value, .. } = step
             {
@@ -562,7 +548,7 @@ pub async fn transact(
     }
     // Guard system-catalog triple writes unless explicitly allowed.
     if !opts.allow_system_catalog_writes {
-        for step in &steps {
+        for step in steps {
             let attr_id = match step {
                 TxStep::AddTriple { attr_id, .. }
                 | TxStep::DeepMergeTriple { attr_id, .. }
@@ -600,6 +586,32 @@ pub async fn transact(
             }
         }
     }
+    Ok(())
+}
+
+/// Execute tx-steps inside the given open DB transaction. The caller commits.
+/// `attrs` must be the app's current attr map; it is updated in place with
+/// attr-level changes.
+pub async fn transact(
+    conn: &mut PgConnection,
+    app_id: Uuid,
+    attrs: &mut AttrMap,
+    steps: Vec<TxStep>,
+    opts: &TxOptions,
+) -> Result<TxReport> {
+    // First write: the transactions row (tx-id + WAL ordering anchor).
+    // ...and tag the triple writes of this tx for the change-capture trigger
+    // (sync tables, topics) in the same round trip.
+    let row = sqlx::query(
+        "WITH t AS (INSERT INTO transactions (app_id) VALUES ($1) RETURNING id)
+         SELECT id, set_config('instant.rust_tx_id', id::text, true) AS tag FROM t",
+    )
+    .bind(app_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let tx_id: i64 = row.get("id");
+
+    validate_system_steps(attrs, &steps, opts)?;
 
     // legacy validate-mode (transaction.clj:283-358): one pre-pass over the
     // pre-tx state before any step runs
@@ -633,12 +645,15 @@ pub async fn transact(
         id_retracted: vec![],
         attrs_changed: false,
         schema_changed: false,
+        requery_all: false,
         changed_attrs: vec![],
         rule_params: HashMap::new(),
         resolved_lookups: HashMap::new(),
     };
     // eid -> etype for entities created in this tx (for null backfill)
     let mut created_etypes: HashMap<Uuid, String> = HashMap::new();
+    // entities whose indexed nulls are already written
+    let mut backfilled: HashSet<Uuid> = HashSet::new();
 
     for (op, group) in groups {
         match op {
@@ -750,6 +765,7 @@ pub async fn transact(
                     .collect();
                 let restored = crate::attr::restore(&mut *conn, app_id, &ids).await?;
                 for attr in restored {
+                    report.requery_all |= attr.value_type != ValueType::Ref;
                     report.changed_attrs.push(attr.id);
                     attrs.remove(&attr.id);
                     attrs.insert(attr);
@@ -967,14 +983,19 @@ pub async fn transact(
             }
             _ => unreachable!(),
         }
+        // legacy writes a new entity's indexed nulls in the same statement
+        // that creates it (triple.clj insert-multi! / deep-merge-multi!
+        // indexed-null-inserts), so a later delete-entity step in the tx
+        // removes them along with the rest of the entity
+        let fresh: Vec<(Uuid, String)> = created_etypes
+            .iter()
+            .filter(|(e, _)| backfilled.insert(**e))
+            .map(|(k, v)| (*k, v.clone()))
+            .collect();
+        backfill_indexed_nulls(&mut *conn, app_id, attrs, &fresh).await?;
     }
 
-    let new_entities: Vec<(Uuid, String)> = created_etypes
-        .iter()
-        .map(|(k, v)| (*k, v.clone()))
-        .collect();
-    backfill_indexed_nulls(&mut *conn, app_id, attrs, &new_entities).await?;
-    report.created = new_entities;
+    report.created = created_etypes.into_iter().collect();
 
     let touched = report.touched.clone();
     validate_required(&mut *conn, app_id, attrs, &touched).await?;

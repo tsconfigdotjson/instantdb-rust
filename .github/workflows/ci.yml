@@ -276,8 +276,14 @@ jobs:
           echo "rust server failed to boot"; cat /tmp/rust-server.log; exit 1
       - name: Differential replay + fuzz vs legacy server
         env:
-          FUZZ_SEEDS: ${{ github.event_name == 'schedule' && '1 2 3 4 5 6 7 8 9 10' || '42 99' }}
-          FUZZ_ROUNDS: ${{ github.event_name == 'schedule' && '250' || '80' }}
+          # PRs and main run the nightly's original seeds at nightly depth
+          # (a 250-round seed takes ~10s); the nightly adds a fresh window
+          # of 40 seeds every day (FUZZ_SEED_WINDOW, see run.sh), deeper.
+          FUZZ_SEEDS: "42 99 1 2 3 4 5 6 7 8 9 10"
+          FUZZ_ROUNDS: ${{ github.event_name == 'schedule' && '400' || '250' }}
+          FUZZ_SEED_WINDOW: ${{ github.event_name == 'schedule' && '40' || '0' }}
+          FUZZ_PERMS_SEEDS: ${{ github.event_name == 'schedule' && '7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22' || '7 8 9' }}
+          FUZZ_PERMS_ROUNDS: ${{ github.event_name == 'schedule' && '300' || '120' }}
         run: KEEP=1 ./scripts/differential/run.sh
       - name: Server logs
         if: failure()
@@ -285,11 +291,15 @@ jobs:
           echo "=== rust server ==="; cat /tmp/rust-server.log || true
           echo "=== legacy server ==="; docker compose -f scripts/differential/docker-compose.yml logs legacy-server | tail -100 || true
 
-  # The legacy CLI's own end-to-end suite (LEGACY/client/packages/cli
-  # __tests__/e2e) pointed at this server via INSTANT_CLI_API_URI: the
-  # published instant-cli must work unchanged against it.
-  sdk-e2e:
-    name: legacy SDK e2e (instant-cli)
+  # The official SDK runtime suites, unchanged, against BOTH the legacy server
+  # (self-hosting images, :8891) and this server (:8888): @instantdb/core's
+  # browser e2e project (vitest + playwright chromium) and instant-cli's e2e
+  # project. compare.mjs then requires every test to have the same outcome on
+  # both servers and no test to fail on both (scripts/sdk-suites/README.md).
+  # @instantdb/react and @instantdb/admin ship no runtime suites; platform's
+  # and mcp's e2e tests are hardwired to production and are not run.
+  sdk-suites:
+    name: official SDK suites vs legacy + rust
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -308,8 +318,14 @@ jobs:
           --health-retries 20
     env:
       DATABASE_URL: postgres://instant:instant@localhost:5432/instant
+      LEGACY_URL: http://localhost:8891
+      RUST_URL: http://localhost:8888
+      SDK_REPORT_DIR: ${{ github.workspace }}/sdk-suite-reports
     steps:
       - uses: actions/checkout@v4
+      # boots while the rust server and the SDKs build; waited on below
+      - name: Start legacy server stack
+        run: docker compose -f scripts/differential/docker-compose.yml up -d --quiet-pull
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -333,27 +349,77 @@ jobs:
             sleep 1
           done
           echo "rust server failed to boot"; cat /tmp/rust-server.log; exit 1
-      - name: Cache CLI dist
-        id: cli-dist
+
+      # frozen reference code: cache the build output, skip the compile on a hit
+      - name: Cache SDK dist
+        id: sdk-dist
         uses: actions/cache@v4
         with:
           path: LEGACY/client/packages/*/dist
-          key: cli-dist-${{ hashFiles('LEGACY/client/pnpm-lock.yaml', 'LEGACY/client/packages/**/src/**', 'LEGACY/client/packages/**/package.json') }}
-      - name: Build instant-cli
+          key: sdk-suites-dist-${{ hashFiles('LEGACY/client/pnpm-lock.yaml', 'LEGACY/client/packages/**/src/**', 'LEGACY/client/packages/**/package.json') }}
+      # the workspace root (instant-local-monorepo) carries msw, which core's
+      # e2e fixtures import
+      - name: Install + build @instantdb/core and instant-cli
         working-directory: LEGACY/client
         run: |
-          pnpm install --frozen-lockfile --filter "instant-cli..."
-          if [ "${{ steps.cli-dist.outputs.cache-hit }}" != "true" ]; then
-            pnpm --filter "instant-cli..." run build
+          pnpm install --frozen-lockfile --filter instant-local-monorepo --filter "@instantdb/core..." --filter "instant-cli..."
+          if [ "${{ steps.sdk-dist.outputs.cache-hit }}" != "true" ]; then
+            pnpm --filter "@instantdb/core..." --filter "instant-cli..." run build
           fi
-      - name: "instant-cli e2e suite against this server"
-        working-directory: LEGACY/client/packages/cli
-        env:
-          INSTANT_CLI_API_URI: http://localhost:8888
-        run: pnpm exec vitest run --project e2e
-      - name: Server log
+      - name: Cache playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('LEGACY/client/pnpm-lock.yaml') }}
+      - name: Install playwright chromium
+        working-directory: LEGACY/client/packages/core
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Wait for legacy server
+        run: |
+          for i in $(seq 1 180); do
+            if curl -sf "$LEGACY_URL/" > /dev/null 2>&1; then
+              echo "legacy server is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "legacy server failed to come up"
+          docker compose -f scripts/differential/docker-compose.yml logs legacy-server | tail -200
+          exit 1
+
+      # Each run writes $SDK_REPORT_DIR/<suite>-<server>.json; a failing run
+      # must not stop the others — compare.mjs decides (and fails on a
+      # missing report).
+      - name: "core e2e vs legacy"
+        continue-on-error: true
+        timeout-minutes: 10
+        run: ./scripts/sdk-suites/run-suite.sh core legacy "$LEGACY_URL"
+      - name: "core e2e vs rust"
+        continue-on-error: true
+        timeout-minutes: 10
+        run: ./scripts/sdk-suites/run-suite.sh core rust "$RUST_URL"
+      - name: "instant-cli e2e vs legacy"
+        continue-on-error: true
+        timeout-minutes: 10
+        run: ./scripts/sdk-suites/run-suite.sh cli legacy "$LEGACY_URL"
+      - name: "instant-cli e2e vs rust"
+        continue-on-error: true
+        timeout-minutes: 10
+        run: ./scripts/sdk-suites/run-suite.sh cli rust "$RUST_URL"
+      - name: Compare outcomes (legacy vs rust)
+        run: node scripts/sdk-suites/compare.mjs --dir "$SDK_REPORT_DIR"
+      - name: Upload suite reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-suite-reports
+          path: sdk-suite-reports/
+          if-no-files-found: ignore
+      - name: Server logs
         if: failure()
-        run: cat /tmp/rust-server.log || true
+        run: |
+          echo "=== rust server ==="; cat /tmp/rust-server.log || true
+          echo "=== legacy server ==="; docker compose -f scripts/differential/docker-compose.yml logs legacy-server | tail -200 || true
 
   docker:
     name: docker build

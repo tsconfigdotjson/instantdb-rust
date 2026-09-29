@@ -999,6 +999,7 @@ async fn update_attr(
             tx_id,
             attrs_changed: true,
             schema_changed: false,
+            requery_all: false,
             changed_attrs: vec![job.attr_id],
         },
     )

@@ -17,7 +17,7 @@ import { execSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { canon, connectSse, makeIdFactory } from "./lib.mjs";
+import { canon, connectSse, DIVERGENCE_PREFIXES, describeAllowVerdict, firstDifference, loadAllowlist, makeIdFactory } from "./lib.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appId = process.argv[2];
@@ -573,7 +573,11 @@ async function runAgainst(name) {
   const txView = (res) => (res.status === 200 ? { status: 200, keys: Object.keys(res.body).sort() } : errView(res));
   const queryView = (res) => {
     if (res.status !== 200) return errView(res);
-    const rows = (res.body.docs ?? []).map((d) => norm(d)).sort((a, c) => (canon(a) < canon(c) ? -1 : 1));
+    // by title first: ids normalize differently depending on which app's id
+    // prefix is current, which would reorder rows between runs
+    const rows = (res.body.docs ?? [])
+      .map((d) => norm(d))
+      .sort((a, c) => String(a.title).localeCompare(String(c.title)) || (canon(a) < canon(c) ? -1 : 1));
     return { status: 200, docs: rows };
   };
   const ids24 = { owner1: mk(), owner2: mk(), doc1: mk() };
@@ -1093,10 +1097,7 @@ async function runAgainst(name) {
     r37.orgRemoveOwnerByCollaborator = errView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/members/remove`, { token: inviteeToken, body: { id: orgOwnerId } }));
     r37.orgMemberRemove = plainView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/members/remove`, { token: userToken, body: { id: orgMemberId } }));
     r37.orgAfterRemove = await orgView();
-    // org invite revoke: gates, then the revoke itself. Revoking the app's
-    // pending invite through the org path is the scoping divergence (legacy
-    // revokes any invite by id, member_invites.clj:166-172; here the revoke
-    // is scoped to the org in the path).
+    // org invite revoke: gates, then the revoke itself
     await call(base, "POST", `/dash/orgs/${teamOrgId}/invite/send`, { token: userToken, body: { "invitee-email": "orgthird@example.com", role: "collaborator" } });
     orgGot = await call(base, "GET", `/dash/orgs/${teamOrgId}`, { token: userToken });
     const orgThirdInvite = (orgGot.body?.invites ?? []).find((i) => i.email === "orgthird@example.com")?.id;
@@ -1105,12 +1106,39 @@ async function runAgainst(name) {
     r37.orgRevokeNoAuth = errView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/invite/revoke`, { token: null, body: { "invite-id": orgThirdInvite } }));
     r37.orgRevoke = plainView(await call(base, "DELETE", `/dash/orgs/${teamOrgId}/invite/revoke`, { token: userToken, body: { "invite-id": orgThirdInvite } }));
     r37.orgAfterRevoke = await orgView();
+    // An app invite revoked through an org path stays pending on both
+    // servers: legacy's reject-by-id-and-foreign-key picks the table from
+    // the route's type (member_invites.clj:166-172 formats reject-by-id-qs
+    // for :org, i.e. org_member_invites), so the app invite's id matches no
+    // row there.
     await call(base, "POST", `/dash/apps/${appId}/invite/send`, { token: userToken, body: { "invitee-email": "appfourth@example.com", role: "collaborator" } });
     appRow = await invitesOf(userToken);
     const appFourthInvite = (appRow.invites ?? []).find((i) => i.email === "appfourth@example.com")?.id;
-    await call(base, "DELETE", `/dash/orgs/${teamOrgId}/invite/revoke`, { token: userToken, body: { "invite-id": appFourthInvite } });
+    const orgPathAppRevoke = await call(base, "DELETE", `/dash/orgs/${teamOrgId}/invite/revoke`, { token: userToken, body: { "invite-id": appFourthInvite } });
     appRow = await invitesOf(userToken);
-    r37.orgRevokeForeignInvite = norm((appRow.invites ?? []).filter((i) => i.email === "appfourth@example.com").map((i) => ({ email: i.email, status: i.status })));
+    r37.orgPathRevokeAppInvite = {
+      revoke: plainView(orgPathAppRevoke),
+      invites: norm((appRow.invites ?? []).filter((i) => i.email === "appfourth@example.com").map((i) => ({ email: i.email, status: i.status }))),
+    };
+    // The scoping divergence (allowed-divergences.json): an invite of another
+    // org the caller also admins, revoked through this org's path. Legacy's
+    // query drops the foreign-key predicate, so it revokes the other org's
+    // invite by id; this server scopes the revoke to the org in the path and
+    // the invite stays pending.
+    const foreignOrg = await call(base, "POST", "/dash/orgs", { token: userToken, body: { title: "foreign org" } });
+    const foreignOrgId = foreignOrg.body?.org?.id;
+    const foreignSend = await call(base, "POST", `/dash/orgs/${foreignOrgId}/invite/send`, { token: userToken, body: { "invitee-email": "orgforeign@example.com", role: "collaborator" } });
+    const foreignInvites = async () => {
+      const g = await call(base, "GET", `/dash/orgs/${foreignOrgId}`, { token: userToken });
+      return (g.body?.invites ?? []).filter((i) => i.email === "orgforeign@example.com");
+    };
+    const foreignInviteId = (await foreignInvites())[0]?.id;
+    const foreignRevoke = await call(base, "DELETE", `/dash/orgs/${teamOrgId}/invite/revoke`, { token: userToken, body: { "invite-id": foreignInviteId } });
+    r37.orgRevokeForeignInvite = {
+      setup: { org: foreignOrg.status, send: foreignSend.status, inviteFound: !!foreignInviteId },
+      revoke: plainView(foreignRevoke),
+      invites: norm((await foreignInvites()).map((i) => ({ email: i.email, role: i.role, status: i.status }))),
+    };
     // transfer an app into the org
     const tApp = mk();
     await call(base, "POST", "/dash/apps", { token: userToken, body: { id: tApp, title: "to transfer", admin_token: mk() } });
@@ -1616,28 +1644,12 @@ async function runAgainst(name) {
 // ---------------------------------------------------------------------------
 // diff + allowlist
 
-const allowlist = JSON.parse(fs.readFileSync(path.join(here, "allowed-divergences.json"), "utf8"));
-const usedAllows = new Set();
-function allowed(p) {
-  for (const entry of allowlist) {
-    if (new RegExp(entry.path).test(p)) {
-      usedAllows.add(entry.path);
-      return true;
-    }
-  }
-  return false;
-}
-
-function firstDiff(a, b, p = "") {
-  if (canon(a) === canon(b)) return null;
-  const isObj = (v) => v !== null && typeof v === "object";
-  if (isObj(a) && isObj(b) && Array.isArray(a) === Array.isArray(b)) {
-    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
-      const d = firstDiff(a?.[k], b?.[k], `${p}.${k}`);
-      if (d) return d;
-    }
-  }
-  return { p, a, b };
+// strict entries (lib.mjs loadAllowlist): this layer owns the dash: paths
+// and fails on any of them that allowed nothing
+const allowlist = loadAllowlist(path.join(here, "allowed-divergences.json"), { prefixes: DIVERGENCE_PREFIXES.dash });
+function pushDiff(p, legacyVal, rustVal) {
+  const verdict = allowlist.check(p, legacyVal, rustVal);
+  diffs.push({ path: p, allowed: !!verdict.entry, verdict, legacy: legacyVal, rust: rustVal });
 }
 
 const only = process.env.ONLY;
@@ -1657,19 +1669,17 @@ for (const step of new Set([...Object.keys(results.legacy), ...Object.keys(resul
   if (keys) {
     for (const k of keys) {
       if (canon(l[k]) !== canon(r?.[k])) {
-        const p = `dash:${step}/${k}`;
-        diffs.push({ path: p, allowed: allowed(p), legacy: l[k], rust: r?.[k] });
+        pushDiff(`dash:${step}/${k}`, l[k], r?.[k]);
       }
     }
   } else if (canon(l) !== canon(r)) {
-    const p = `dash:${step}`;
-    diffs.push({ path: p, allowed: allowed(p), legacy: l, rust: r });
+    pushDiff(`dash:${step}`, l, r);
   }
 }
 const blocking = diffs.filter((d) => !d.allowed);
 for (const d of diffs) {
   console.log(`\n[${d.allowed ? "ALLOWED" : "DIVERGENCE"}] ${d.path}`);
-  const fd = firstDiff(d.legacy, d.rust);
+  const fd = firstDifference(d.legacy, d.rust);
   if (fd && fd.p) {
     console.log(`  first differing sub-path: ${fd.p}`);
     console.log("  legacy:", JSON.stringify(fd.a)?.slice(0, 1500));
@@ -1680,9 +1690,11 @@ for (const d of diffs) {
     console.log("  legacy:", JSON.stringify(d.legacy)?.slice(0, 1500));
     console.log("  rust:  ", JSON.stringify(d.rust)?.slice(0, 1500));
   }
+  for (const line of describeAllowVerdict(d.verdict)) console.log(line);
 }
-if (blocking.length) {
-  console.error(`\nDASH DIFFERENTIAL FAILED: ${blocking.length} unallowed divergences`);
+const staleAllows = allowlist.reportStale();
+if (blocking.length || staleAllows) {
+  console.error(`\nDASH DIFFERENTIAL FAILED: ${blocking.length} unallowed divergences, ${staleAllows} stale allowlist entries`);
   process.exit(1);
 }
 console.log(`\nDASH DIFFERENTIAL PASSED (${diffs.length} allowed divergences, ${Object.keys(results.legacy).length} steps)`);

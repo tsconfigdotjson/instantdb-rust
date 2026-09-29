@@ -86,6 +86,10 @@ function buildScenario() {
     dynAttrOk: mk(), dynAttrDenied: mk(), m1: mk(), m2: mk(),
     // runtime SSE (issue #38, step 35)
     rtSseTodo: mk(),
+    // issue #45 (steps 36-37)
+    wqId: mk(), wqNum: mk(), wqStr: mk(), wqPlain: mk(), wqOwner: mk(), wqoId: mk(), wqoName: mk(),
+    w1: mk(), w2: mk(), w3: mk(), w4: mk(), wo1: mk(), wo2: mk(),
+    rlId: mk(), rlTitle: mk(), rlfId: mk(), rlfTitle: mk(), rl1: mk(), rlf1: mk(),
     // stream ids must be v4-shaped uuids on both servers
     stream2Token: "00000000-0000-4000-8000-00000000a5ee",
   };
@@ -1610,6 +1614,168 @@ function buildScenario() {
         rec("ssePushUnknownSession", await post(`/runtime/sse?app_id=${env.appId}`, { machine_id: ids.m1, session_id: ids.m2, sse_token: ids.m1, messages: [] }));
       },
     },
+    {
+      // issue #45 divergence 1 (nightly fuzz, seed 1): legacy's where
+      // patterns are part of the form's own datalog query, so the triples
+      // they matched ship in its join rows even when a `fields` projection
+      // leaves the attr out or they belong to a linked entity
+      // (datalog.clj accumulate-results), and permissions drop whole rows
+      // (instaql.clj permissioned-node: a form left without a viewable row
+      // loses every entity). The first two queries are the nightly's.
+      name: "36-where-pattern-triples",
+      run: async (env) => {
+        const rules = {
+          wqowner: { allow: { view: "data.name != 'hidden'" } },
+          wq: { allow: { view: "true" }, fields: { str: "data.num == null || data.num < 5" } },
+        };
+        psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(rules)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
+        await sleep(RULES_SETTLE_MS);
+        const blob = (id, etype, label, extra = {}) => [
+          "add-attr",
+          { id, "forward-identity": [id, etype, label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true, ...extra },
+        ];
+        const tx = async (conn, steps) => {
+          const ceid = msg(conn, { op: "transact", "tx-steps": steps });
+          const r = await conn.waitFor((m) => (m.op === "transact-ok" || m.op === "error") && m["client-event-id"] === ceid);
+          if (r.op === "error") throw new Error(`36 seed tx failed on ${env.serverName}: ${JSON.stringify(r).slice(0, 500)}`);
+        };
+        await tx(env.conns.ADMIN, [
+          blob(ids.wqId, "wq", "id"),
+          blob(ids.wqNum, "wq", "num", { "index?": true, "checked-data-type": "number" }),
+          blob(ids.wqStr, "wq", "str", { "index?": true, "checked-data-type": "string" }),
+          blob(ids.wqPlain, "wq", "plain"),
+          blob(ids.wqoId, "wqowner", "id"),
+          blob(ids.wqoName, "wqowner", "name", { "index?": true, "checked-data-type": "string" }),
+          ["add-attr", { id: ids.wqOwner, "forward-identity": [ids.wqOwner, "wq", "owner"], "reverse-identity": [mk(), "wqowner", "items"], "value-type": "ref", cardinality: "one", "unique?": false, "index?": false, isUnsynced: true }],
+        ]);
+        const ent = (e, fields) => [["add-triple", e, ids.wqId, e], ...Object.entries(fields).map(([a, v]) => ["add-triple", e, a, v])];
+        await tx(env.conns.ADMIN, [
+          ["add-triple", ids.wo1, ids.wqoId, ids.wo1], ["add-triple", ids.wo1, ids.wqoName, "ann"],
+          ["add-triple", ids.wo2, ids.wqoId, ids.wo2], ["add-triple", ids.wo2, ids.wqoName, "hidden"],
+          ...ent(ids.w1, { [ids.wqNum]: 0, [ids.wqStr]: "gamma", [ids.wqPlain]: "p1", [ids.wqOwner]: ids.wo1 }),
+          ...ent(ids.w2, { [ids.wqNum]: 3, [ids.wqStr]: "beta", [ids.wqPlain]: { k: 1 }, [ids.wqOwner]: ids.wo2 }),
+          ...ent(ids.w3, { [ids.wqNum]: 9, [ids.wqStr]: "alpha", [ids.wqPlain]: "p3" }),
+          ...ent(ids.w4, { [ids.wqStr]: "gamma", [ids.wqPlain]: "p4", [ids.wqOwner]: ids.wo1 }),
+        ]);
+        const queries = [
+          { wq: { $: { where: { str: { in: ["beta", "gamma", "a"] } }, fields: ["plain", "owner"] } } },
+          { wq: { $: { where: { num: { $lt: 7 } }, fields: ["plain", "owner"] } } },
+          { wq: { $: { where: { "owner.name": "ann" } } } },
+          { wq: { $: { where: { "owner.name": "hidden" } } } },
+          { wq: { $: { where: { or: [{ num: { $gt: 5 } }, { "owner.name": "hidden" }] }, fields: ["plain"] } } },
+          { wq: { $: { where: { and: [{ num: { $gte: 0 } }, { "owner.name": "ann" }] }, fields: ["plain"] } } },
+          { wq: { $: { where: { str: { $not: "beta" } }, fields: ["plain"] } } },
+          { wq: { $: { where: { num: { $isNull: true } }, fields: ["plain"] } } },
+          { wq: { $: { where: { "owner.name": { $isNull: true } }, fields: ["plain"] } } },
+          { wq: { $: { where: { owner: ids.wo1 }, fields: ["plain"] } } },
+          { wq: { $: { where: { str: "alpha" } } } },
+          { wq: { $: { where: { $entityIdStartsWith: ids.w2.slice(0, 30) }, fields: ["plain"] } } },
+          { wq: { $: { where: { num: { $gte: 0 } }, order: { num: "asc" }, limit: 2, fields: ["plain"] } } },
+          { wq: { owner: {} } },
+          { wq: { owner: { $: { fields: ["id"] } } } },
+          { wqowner: { $: { where: { "items.num": { $gt: -1 } } } } },
+          { wqowner: { items: { $: { where: { str: "gamma" }, fields: ["plain"] } } } },
+        ];
+        // the same queries as a guest (rules apply) and as admin (no rules)
+        for (const conn of [env.conns.A, env.conns.ADMIN]) {
+          for (const q of queries) {
+            const ceid = msg(conn, { op: "add-query", q });
+            const r = await conn.waitFor(
+              (m) => (m.op === "add-query-ok" && JSON.stringify(m.q) === JSON.stringify(q)) || (m.op === "error" && m["client-event-id"] === ceid),
+            );
+            if (r.op === "error") continue;
+            msg(conn, { op: "remove-query", q });
+            await conn.waitFor((m) => m.op === "remove-query-ok" && JSON.stringify(m.q) === JSON.stringify(q));
+          }
+        }
+        // a subscribed where-on-link query refreshes when the linked
+        // entity's matched attr changes
+        const live = { wq: { $: { where: { "owner.name": "ann" }, fields: ["plain"] } } };
+        msg(env.conns.B, { op: "add-query", q: live });
+        await env.conns.B.waitFor((m) => m.op === "add-query-ok" && JSON.stringify(m.q) === JSON.stringify(live));
+        await tx(env.conns.ADMIN, [["add-triple", ids.w3, ids.wqOwner, ids.wo1]]);
+        await env.conns.B.waitFor((m) => m.op === "refresh-ok" && (m.computations ?? []).some((c) => JSON.stringify(c["instaql-query"]) === JSON.stringify(live)));
+      },
+    },
+    {
+      // issue #45 divergence 2: a refresh whose recomputation throws — here
+      // a view rule's rateLimit bucket running dry — fails the session's
+      // whole refresh like legacy's handle-refresh! (one `pmap` over the
+      // stale queries): the failing query is unsubscribed
+      // (query.clj instaql-query-reactive! -> rs/remove-query!), the other
+      // recomputations are recorded but not sent, and the client gets an
+      // `error` whose original-event is the refresh. Each session's refresh
+      // charges the bucket (legacy recomputes per session).
+      name: "37-refresh-errors",
+      run: async (env) => {
+        const rlAttr = (id, etype, label) => [
+          "add-attr",
+          { id, "forward-identity": [id, etype, label], "value-type": "blob", cardinality: "one", "unique?": label === "id", "index?": label === "id", isUnsynced: true },
+        ];
+        // one bucket, 4 tokens, no refill within the run; merged into the
+        // existing $rateLimits (step 21's buckets stay configured)
+        const bucket = { limits: [{ capacity: 4, refill: { amount: 4, period: "1 hour", type: "interval" } }] };
+        psql(env.db, `UPDATE rules SET code = jsonb_set(code, '{$rateLimits,rlviews}', $rules$${JSON.stringify(bucket)}$rules$::jsonb) || $rules$${JSON.stringify({ rl: { allow: { view: "rateLimit.rlviews.limit('k')" } } })}$rules$::jsonb WHERE app_id = '${env.appId}'`);
+        await sleep(RULES_SETTLE_MS);
+        const tx = async (steps) => {
+          const ceid = msg(env.conns.ADMIN, { op: "transact", "tx-steps": steps });
+          const r = await env.conns.ADMIN.waitFor((m) => (m.op === "transact-ok" || m.op === "error") && m["client-event-id"] === ceid);
+          if (r.op === "error") throw new Error(`37 tx failed on ${env.serverName}: ${JSON.stringify(r).slice(0, 500)}`);
+        };
+        // attrs and their first triples in one tx: the schema refresh every
+        // session gets then already carries the inferred types. With two
+        // txs, legacy answers the second one's refresh from its attr cache
+        // before the inferred-type update reaches it, so which snapshot a
+        // session keeps is a legacy race.
+        await tx([
+          rlAttr(ids.rlId, "rl", "id"), rlAttr(ids.rlTitle, "rl", "title"), rlAttr(ids.rlfId, "rlfree", "id"), rlAttr(ids.rlfTitle, "rlfree", "title"),
+          ["add-triple", ids.rl1, ids.rlId, ids.rl1], ["add-triple", ids.rl1, ids.rlTitle, "t1"], ["add-triple", ids.rlf1, ids.rlfId, ids.rlf1], ["add-triple", ids.rlf1, ids.rlfTitle, "t1"],
+        ]);
+        await Promise.all(
+          Object.values(env.conns)
+            .filter((c) => c.waitFor && c.frames?.some((f) => f.op === "init-ok"))
+            .map((c) =>
+              c.waitFor((m) => m.op === "refresh-ok" && (m.attrs ?? []).some((a) => a.id === ids.rlId), 5000).catch(() => {}),
+            ),
+        );
+        await settle(Object.values(env.conns), 700);
+        for (const name of ["RL1", "RL2"]) {
+          env.conns[name] = connect(env.url, env.appId, `${env.serverName}:${name}`);
+          await env.conns[name].open;
+          msg(env.conns[name], { op: "init", "app-id": env.appId, versions: { "@instantdb/core": "v0.21.0" } });
+          await env.conns[name].waitFor((m) => m.op === "init-ok");
+        }
+        const RL1 = env.conns.RL1, RL2 = env.conns.RL2;
+        const rlQ = { rl: {} }, freeQ = { rlfree: {} };
+        const sameQ = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+        // tokens: RL1 add-query 1, RL2 add-query 1
+        msg(RL1, { op: "add-query", q: rlQ });
+        await RL1.waitFor((m) => m.op === "add-query-ok" && sameQ(m.q, rlQ));
+        msg(RL1, { op: "add-query", q: freeQ });
+        await RL1.waitFor((m) => m.op === "add-query-ok" && sameQ(m.q, freeQ));
+        msg(RL2, { op: "add-query", q: rlQ });
+        await RL2.waitFor((m) => m.op === "add-query-ok" && sameQ(m.q, rlQ));
+        const count = (conn, pred) => conn.frames.filter(pred).length;
+        const refreshes = (conn) => count(conn, (m) => m.op === "refresh-ok");
+        // refresh 1: both sessions recompute (2 more tokens) and succeed
+        await tx([["add-triple", ids.rl1, ids.rlTitle, "t2"], ["add-triple", ids.rlf1, ids.rlfTitle, "t2"]]);
+        await RL1.waitFor((m) => m.op === "refresh-ok" && (m.computations ?? []).some((c) => sameQ(c["instaql-query"], rlQ)));
+        await RL2.waitFor((m) => m.op === "refresh-ok" && (m.computations ?? []).some((c) => sameQ(c["instaql-query"], rlQ)));
+        await settle([RL1, RL2], 700);
+        // refresh 2: the bucket is dry; both refreshes fail
+        await tx([["add-triple", ids.rl1, ids.rlTitle, "t3"], ["add-triple", ids.rlf1, ids.rlfTitle, "t3"]]);
+        await RL1.waitFor((m) => m.op === "error" && m["original-event"]?.op === "refresh");
+        await RL2.waitFor((m) => m.op === "error" && m["original-event"]?.op === "refresh");
+        await settle([RL1, RL2], 700);
+        // refresh 3: rl was unsubscribed; RL1 gets only the free query,
+        // RL2 has nothing left to refresh
+        const before = refreshes(RL2);
+        await tx([["add-triple", ids.rl1, ids.rlTitle, "t4"], ["add-triple", ids.rlf1, ids.rlfTitle, "t4"]]);
+        await RL1.waitFor((m) => m.op === "refresh-ok" && (m.computations ?? []).some((c) => sameQ(c["instaql-query"], freeQ)));
+        await settle([RL1, RL2], 900);
+        env.conns.HTTP?.record?.({ name: "rl2RefreshesAfterUnsubscribe", count: refreshes(RL2) - before });
+      },
+    },
   ];
   return steps;
 }
@@ -1678,24 +1844,16 @@ async function runAgainst(serverName) {
 // ---------------------------------------------------------------------------
 // diff + allowlist
 
-const allowlist = JSON.parse(
-  fs.readFileSync(path.join(here, "allowed-divergences.json"), "utf8"),
-);
-const usedAllows = new Set();
-function allowed(p) {
-  for (const entry of allowlist) {
-    if (new RegExp(entry.path).test(p)) {
-      usedAllows.add(entry.path);
-      return true;
-    }
-  }
-  return false;
-}
+// strict entries (lib.mjs loadAllowlist): this layer owns the step: / final/
+// / keyset/ paths and fails on any of them that allowed nothing
+const { DIVERGENCE_PREFIXES, describeAllowVerdict, loadAllowlist } = await import("./lib.mjs");
+const allowlist = loadAllowlist(path.join(here, "allowed-divergences.json"), { prefixes: DIVERGENCE_PREFIXES.replay });
 
 const diffs = [];
 function record(p, legacyVal, rustVal) {
   if (canon(legacyVal) === canon(rustVal)) return;
-  diffs.push({ path: p, allowed: allowed(p), legacy: legacyVal, rust: rustVal });
+  const verdict = allowlist.check(p, legacyVal, rustVal);
+  diffs.push({ path: p, allowed: !!verdict.entry, verdict, legacy: legacyVal, rust: rustVal });
 }
 
 console.log("replaying against legacy…");
@@ -1755,18 +1913,19 @@ for (const d of diffs) {
       console.log("  legacy (whole):", JSON.stringify(d.legacy)?.slice(0, 20000));
       console.log("  rust   (whole):", JSON.stringify(d.rust)?.slice(0, 20000));
     }
+    if (d.allowed) {
+      console.log("  full legacy:", JSON.stringify(d.legacy)?.slice(0, 1200));
+      console.log("  full rust:  ", JSON.stringify(d.rust)?.slice(0, 1200));
+    }
   } else {
     console.log("  legacy:", JSON.stringify(d.legacy)?.slice(0, 1200));
     console.log("  rust:  ", JSON.stringify(d.rust)?.slice(0, 1200));
   }
+  for (const line of describeAllowVerdict(d.verdict)) console.log(line);
 }
-for (const entry of allowlist) {
-  if (!usedAllows.has(entry.path)) {
-    console.log(`\n[STALE ALLOWLIST] ${entry.path} matched nothing (ok if flaky-path)`);
-  }
-}
-if (blocking.length) {
-  console.error(`\nDIFFERENTIAL REPLAY FAILED: ${blocking.length} unallowed divergences`);
+const staleAllows = allowlist.reportStale();
+if (blocking.length || staleAllows) {
+  console.error(`\nDIFFERENTIAL REPLAY FAILED: ${blocking.length} unallowed divergences, ${staleAllows} stale allowlist entries`);
   process.exit(1);
 }
 console.log(`\nDIFFERENTIAL REPLAY PASSED (${diffs.length} allowed divergences, ${legacy.steps.length} steps)`);
