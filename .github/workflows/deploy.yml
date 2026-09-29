@@ -1,8 +1,9 @@
 name: Deploy
 
-# Builds the server + dashboard images and rolls the demo VPS to them.
+# Builds the server + dashboard images and the marketing site (web/), and rolls
+# the demo VPS to them.
 # Runs after CI passes on main, or by hand (Actions → Deploy → Run workflow).
-# PRs touching the images or the stack build both images without pushing.
+# PRs touching the images, the site or the stack build them without deploying.
 #
 # Setup (once), in the `production` environment: variables VPS_HOST,
 # API_DOMAIN; secrets VPS_SSH_KEY
@@ -21,6 +22,7 @@ on:
       - .dockerignore
       - LEGACY/client/**
       - deploy/**
+      - web/**
       - .github/workflows/deploy.yml
 
 concurrency:
@@ -32,7 +34,7 @@ permissions:
   packages: write
 
 env:
-  IMAGE_REPO: ghcr.io/gratefulworkspace/instantdb-rust
+  IMAGE_REPO: ghcr.io/tsconfigdotjson/instantdb-rust
   SHA: ${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha || github.sha }}
 
 jobs:
@@ -72,8 +74,32 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: ${{ github.event_name != 'pull_request' && format('type=gha,mode=max,scope={0}', matrix.image) || '' }}
 
+  site:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: web/dist
+          retention-days: 7
+
   deploy:
-    needs: build
+    needs: [build, site]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -93,6 +119,13 @@ jobs:
           printf 'Host vps\n  HostName %s\n  User deploy\n  IdentityFile ~/.ssh/id_deploy\n' "${{ vars.VPS_HOST }}" > ~/.ssh/config
       - name: Upload stack files
         run: scp deploy/compose.yml deploy/Caddyfile deploy/postgresql.conf deploy/deploy.sh deploy/backup.sh vps:/opt/instant/
+      - uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: site
+      - name: Upload site
+        # In place (not a directory swap): Caddy bind-mounts ./site.
+        run: rsync -rz --delete-after --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r site/ vps:/opt/instant/site/
       - name: Roll the stack
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}

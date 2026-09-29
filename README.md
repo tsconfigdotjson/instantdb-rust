@@ -1,6 +1,6 @@
 # Instant Sync Engine — Rust
 
-[![CI](https://github.com/GratefulWorkspace/instantdb-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/GratefulWorkspace/instantdb-rust/actions/workflows/ci.yml)
+[![CI](https://github.com/tsconfigdotjson/instantdb-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/tsconfigdotjson/instantdb-rust/actions/workflows/ci.yml)
 
 A from-scratch, wire-compatible reimplementation of the
 [InstantDB](https://instantdb.com) sync engine in Rust. It plugs into a
@@ -238,7 +238,8 @@ Layout:
 - `docs/` — protocol and subsystem specs extracted from the legacy codebase
   (`PROTOCOL.md`, `QUERY.md`, `DATAMODEL.md`, `PERMS.md`, `AUTH.md`,
   `ADMIN.md`, `SERVER-SYNC.md`) plus `PARITY.md` for coverage status.
-- `web/` — the project's marketing site (React + Vite, static build).
+- `web/` — the project's marketing site (React + Vite, static build), live at
+  https://instantdbrust.com.
 - `LEGACY/` — the original Clojure/TypeScript codebase, kept as reference.
 
 ## Parity status
