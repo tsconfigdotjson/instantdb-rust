@@ -1,0 +1,171 @@
+@import "@fontsource-variable/fraunces/full.css";
+@import "@fontsource-variable/fraunces/full-italic.css";
+@import "@fontsource-variable/dm-sans";
+@import "@fontsource-variable/caveat";
+@import "@fontsource-variable/jetbrains-mono";
+@import "tailwindcss";
+
+@theme {
+  --color-plum-950: #12051f;
+  --color-plum-900: #1c0932;
+  --color-plum-850: #2a0f4b;
+  --color-plum-800: #2d1150;
+  --color-plum-700: #3e1a6b;
+  --color-plum-600: #552689;
+  --color-plum-500: #7340ad;
+  --color-plum-400: #9a6fd0;
+  --color-dusk: #6b2172;
+
+  --color-ember-600: #e85d1a;
+  --color-ember-500: #ff7a2f;
+  --color-ember-400: #ff9a55;
+  --color-ember-300: #ffb77f;
+  --color-peach-200: #ffd6b0;
+  --color-cream-100: #fff1e2;
+
+  --font-display: "Fraunces Variable", ui-serif, Georgia, serif;
+  --font-sans: "DM Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-hand: "Caveat Variable", "Comic Sans MS", cursive;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    background: var(--color-plum-900);
+    color: var(--color-peach-200);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    scroll-behavior: smooth;
+    overflow-x: clip;
+  }
+  body {
+    background: var(--color-plum-900);
+    min-height: 100svh;
+    overflow-x: clip;
+  }
+  ::selection {
+    background: var(--color-ember-500);
+    color: var(--color-plum-950);
+  }
+  :focus-visible {
+    outline: 2px dashed var(--color-ember-400);
+    outline-offset: 4px;
+    border-radius: 6px;
+  }
+}
+
+/* Fraunces with its soft, wonky axes turned up: the display voice. */
+.display {
+  font-family: var(--font-display);
+  font-variation-settings: "SOFT" 100, "WONK" 1, "opsz" 144;
+  letter-spacing: -0.02em;
+}
+.display-italic {
+  font-style: italic;
+  font-variation-settings: "SOFT" 100, "WONK" 1, "opsz" 144;
+}
+
+/* Paper grain over everything, so flat purple reads like a printed page. */
+.grain::after {
+  content: "";
+  position: fixed;
+  inset: -50%;
+  pointer-events: none;
+  z-index: 60;
+  opacity: 0.09;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 .85 0 0 0 0 .7 0 0 0 .9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  animation: grain 1.2s steps(4) infinite;
+}
+@keyframes grain {
+  0% { transform: translate(0, 0); }
+  25% { transform: translate(-3%, 2%); }
+  50% { transform: translate(2%, -3%); }
+  75% { transform: translate(-1%, -2%); }
+  100% { transform: translate(0, 0); }
+}
+
+/* `?still` snapshots: motion's skipAnimations leaves clip-path wipes closed. */
+.still [data-wipe] {
+  clip-path: none !important;
+}
+
+@keyframes twinkle {
+  0%, 100% { opacity: 0.25; transform: scale(0.7); }
+  50% { opacity: 1; transform: scale(1); }
+}
+.twinkle {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: twinkle 3.4s ease-in-out infinite;
+}
+
+@keyframes spin-slow { to { transform: rotate(360deg); } }
+.spin-slow { animation: spin-slow 90s linear infinite; }
+
+@keyframes shimmer {
+  0%, 100% { transform: translateX(-6px); opacity: 0.35; }
+  50% { transform: translateX(6px); opacity: 0.9; }
+}
+.shimmer { animation: shimmer 4s ease-in-out infinite; }
+
+@keyframes drift {
+  from { transform: translate(-10vw, 0); }
+  to { transform: translate(110vw, -40px); }
+}
+.drift { animation: drift 38s linear infinite; }
+
+@keyframes flap {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.55); }
+}
+.flap {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: flap 0.9s ease-in-out infinite;
+}
+
+@keyframes wobble {
+  0%, 100% { transform: rotate(-2deg); }
+  50% { transform: rotate(2deg); }
+}
+.wobble { animation: wobble 5s ease-in-out infinite; }
+
+@keyframes legs {
+  0%, 100% { transform: rotate(-9deg); }
+  50% { transform: rotate(9deg); }
+}
+.crab-legs-a { animation: legs 0.7s ease-in-out infinite; }
+.crab-legs-b { animation: legs 0.7s ease-in-out infinite reverse; }
+
+/* Embers drifting up through the footer. */
+@keyframes ember-rise {
+  0% { transform: translate(0, 0) scale(1); opacity: 0; }
+  12% { opacity: 1; }
+  50% { transform: translate(var(--sway), -190px) scale(0.8); }
+  100% { transform: translate(calc(var(--sway) * -0.6), -380px) scale(0.3); opacity: 0; }
+}
+.ember {
+  position: absolute;
+  bottom: -12px;
+  border-radius: 9999px;
+  background: #ffb77f;
+  box-shadow: 0 0 10px 3px rgba(255, 122, 47, 0.65);
+  animation: ember-rise var(--dur) linear infinite;
+  animation-delay: var(--delay);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .grain::after,
+  .twinkle,
+  .spin-slow,
+  .shimmer,
+  .drift,
+  .flap,
+  .wobble,
+  .crab-legs-a,
+  .crab-legs-b {
+    animation: none;
+  }
+  .ember { display: none; }
+  html { scroll-behavior: auto; }
+}

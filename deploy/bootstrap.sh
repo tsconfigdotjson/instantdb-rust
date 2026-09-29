@@ -47,12 +47,13 @@ install -d -o deploy -g deploy "$APP_DIR" "$APP_DIR/backups"
 if [ ! -f "$APP_DIR/.env" ]; then
   pw=$(openssl rand -hex 24)
   cat > "$APP_DIR/.env" <<ENV
+SITE_DOMAIN=
 DASH_DOMAIN=
 API_DOMAIN=
 ACME_EMAIL=
 POSTGRES_PASSWORD=$pw
 IMAGE_TAG=latest
-IMAGE_REPO=ghcr.io/gratefulworkspace/instantdb-rust
+IMAGE_REPO=ghcr.io/tsconfigdotjson/instantdb-rust
 INSTANT_SUPERUSER_EMAIL=
 INSTANT_DASHBOARD_SIGNUP_MODE=restricted
 INSTANT_DASHBOARD_ALLOWED_EMAILS=
