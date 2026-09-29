@@ -290,11 +290,11 @@ async function runOn(serverName, plan) {
   await new Promise((r) => setTimeout(r, RULES_SETTLE_MS));
 
   const conns = {};
-  // a second connection per session, same auth, that holds no
-  // subscriptions: at every one-shot query and checkpoint it asks the same
-  // question afresh, so a result the session was served can be told apart
-  // from what the server holds at that moment
-  const probes = {};
+  // at every one-shot query and checkpoint the same question is also asked
+  // on a brand-new connection with the session's auth, so a result the
+  // session was served can be told apart from what the server holds at that
+  // moment (legacy caches datalog results per session, so the probe can't
+  // be a long-lived connection either)
   const open = async (s, tag) => {
     const c = connect(url, appId, `${serverName}:pz:${s}${tag}`);
     await c.open;
@@ -308,31 +308,52 @@ async function runOn(serverName, plan) {
   };
   for (const s of SESSIONS) {
     conns[s] = await open(s, "");
-    probes[s] = await open(s, ":probe");
   }
   const all = Object.values(conns);
-  const probe = async (s, q) => {
-    const c = probes[s];
-    const ceid = c.send({ "client-event-id": uuid(), op: "add-query", q });
-    const r = await c.waitFor(
-      (m) => (m.op === "add-query-ok" && canon(m.q) === canon(q)) || (m.op === "error" && m["client-event-id"] === ceid),
-      20000,
+  // legacy shares datalog results across sessions (reactive/query.clj
+  // datalog-query-reactive!), so a new connection asking the same query can
+  // still be handed a cached result; the probe asks an equivalent one that
+  // compiles to a different datalog query: every top-level form also
+  // requires `id` to be present, which every entity with an id triple
+  // satisfies (the forms without a where scan the id attr anyway)
+  const variant = (q) =>
+    Object.fromEntries(
+      Object.entries(q).map(([k, form]) => {
+        if (k.startsWith("$$")) return [k, form];
+        const opts = { ...(form.$ ?? {}) };
+        const idCond = { id: { $isNull: false } };
+        opts.where = opts.where ? { and: [opts.where, idCond] } : idCond;
+        return [k, { ...form, $: opts }];
+      }),
     );
-    if (r.op !== "add-query-ok") return errView(r);
-    c.send({ "client-event-id": uuid(), op: "remove-query", q });
-    await c.waitFor((m) => m.op === "remove-query-ok" && canon(m.q) === canon(q));
-    return projectAnyResult(r.result);
+  const probe = async (s, q0) => {
+    const q = variant(q0);
+    const c = await open(s, ":probe");
+    try {
+      const ceid = c.send({ "client-event-id": uuid(), op: "add-query", q });
+      const r = await c.waitFor((m) => ["add-query-ok", "error"].includes(m.op) && m["client-event-id"] === ceid, 20000);
+      return r.op === "add-query-ok" ? projectAnyResult(r.result) : errView(r);
+    } finally {
+      c.close();
+    }
   };
   // op index -> the probe's answers (not part of the compared outcomes)
   const fresh = {};
   const send = (s, m) => conns[s].send({ "client-event-id": uuid(), ...m });
   const txReply = (s, ceid) =>
     conns[s].waitFor((m) => ["transact-ok", "error"].includes(m.op) && m["client-event-id"] === ceid, 20000);
-  const queryReply = (s, ceid, q) =>
+  // replies are matched by client-event-id: waitFor also sees frames that
+  // arrived before the request, and a query asked twice would otherwise take
+  // the first answer
+  const queryReply = (s, ceid, _q) =>
     conns[s].waitFor(
-      (m) => ((m.op === "add-query-ok" || m.op === "add-query-exists") && canon(m.q) === canon(q)) || (m.op === "error" && m["client-event-id"] === ceid),
+      (m) => ["add-query-ok", "add-query-exists", "error"].includes(m.op) && m["client-event-id"] === ceid,
       20000,
     );
+  const removeQuery = async (s, q) => {
+    const ceid = send(s, { op: "remove-query", q });
+    await conns[s].waitFor((m) => m.op === "remove-query-ok" && m["client-event-id"] === ceid);
+  };
   const txOutcome = (r) => (r.op === "transact-ok" ? { ok: true } : errView(r));
 
   for (const steps of [plan.schema, plan.seedData]) {
@@ -383,6 +404,8 @@ async function runOn(serverName, plan) {
 
   const outcomes = [];
   for (const [i, op] of plan.script.entries()) {
+    // debugging: stop after op STOP_AT, leaving the data as it was then
+    if (process.env.STOP_AT && i > Number(process.env.STOP_AT)) break;
     if (op.kind === "tx") {
       const r = await txReply(op.session, send(op.session, { op: "transact", "tx-steps": op.steps }));
       outcomes.push({ i, kind: op.kind, session: op.session, ...txOutcome(r) });
@@ -390,8 +413,7 @@ async function runOn(serverName, plan) {
       const ceid = send(op.session, { op: "add-query", q: op.q });
       const r = await queryReply(op.session, ceid, op.q);
       if (r.op === "add-query-ok") {
-        send(op.session, { op: "remove-query", q: op.q });
-        await conns[op.session].waitFor((m) => m.op === "remove-query-ok" && canon(m.q) === canon(op.q));
+        await removeQuery(op.session, op.q);
       }
       outcomes.push({ i, kind: op.kind, session: op.session, q: op.q, ...(r.op === "add-query-ok" ? { result: projectAnyResult(r.result) } : r.op === "error" ? errView(r) : { op: r.op }) });
       if (r.op === "add-query-ok") fresh[i] = await probe(op.session, op.q);
@@ -406,8 +428,7 @@ async function runOn(serverName, plan) {
     } else if (op.kind === "unsubscribe") {
       fold();
       subs[op.session].delete(canon(normalize(op.q)));
-      send(op.session, { op: "remove-query", q: op.q });
-      await conns[op.session].waitFor((m) => m.op === "remove-query-ok" && canon(m.q) === canon(op.q));
+      await removeQuery(op.session, op.q);
       outcomes.push({ i, kind: op.kind, session: op.session });
     } else if (op.kind === "burst") {
       const pending = op.ops.map((o) => txReply(o.session, send(o.session, { op: "transact", "tx-steps": o.steps })));
@@ -425,8 +446,13 @@ async function runOn(serverName, plan) {
       const c2 = send(s, { op: "transact", "tx-steps": op.second });
       const [r1, rq, r2] = await Promise.all([txReply(s, c1), queryReply(s, cq, op.q), txReply(s, c2)]);
       if (!op.subscribe && rq.op === "add-query-ok") {
-        send(s, { op: "remove-query", q: op.q });
-        await conns[s].waitFor((m) => m.op === "remove-query-ok" && canon(m.q) === canon(op.q));
+        // let the second transact's refresh land first: legacy's refresh
+        // re-registers a query removed while it recomputes it
+        // (query.clj instaql-query-reactive! -> bump-instaql-version!), so
+        // the query would stay subscribed and a later add-query of it
+        // answers add-query-exists
+        await settle([conns[s]], 400);
+        await removeQuery(s, op.q);
       }
       if (op.subscribe && rq.op !== "add-query-ok") subs[s].delete(canon(normalize(op.q)));
       // the query's own result depends on where it lands between the two
@@ -447,7 +473,7 @@ async function runOn(serverName, plan) {
       }
     }
   }
-  for (const c of [...all, ...Object.values(probes)]) c.close();
+  for (const c of all) c.close();
   return { outcomes, fresh };
 }
 
@@ -488,15 +514,15 @@ let staleLegacy = 0;
 let mismatches = 0;
 // what differs between two projected results, small enough for a CI log:
 // the triples only one side has, and the page-info of each side
-function resultDiff(lv, rv, indent) {
+function resultDiff(lv, rv, indent, [ln, rn] = ["legacy", "rust"]) {
   const lt = lv?.triples ?? lv?.result?.triples, rt = rv?.triples ?? rv?.result?.triples;
   if (!Array.isArray(lt) || !Array.isArray(rt)) return;
   const key = (t) => canon(t.slice(0, 3));
   const ls = new Set(lt.map(key)), rs = new Set(rt.map(key));
-  console.error(`${indent}only legacy: ${JSON.stringify(lt.filter((t) => !rs.has(key(t))).map((t) => t.slice(0, 3)))}`);
-  console.error(`${indent}only rust:   ${JSON.stringify(rt.filter((t) => !ls.has(key(t))).map((t) => t.slice(0, 3)))}`);
+  console.error(`${indent}only ${ln}: ${JSON.stringify(lt.filter((t) => !rs.has(key(t))).map((t) => t.slice(0, 3)))}`);
+  console.error(`${indent}only ${rn}: ${JSON.stringify(rt.filter((t) => !ls.has(key(t))).map((t) => t.slice(0, 3)))}`);
   const lp = lv?.["page-info"] ?? lv?.result?.["page-info"], rp = rv?.["page-info"] ?? rv?.result?.["page-info"];
-  if (canon(lp) !== canon(rp)) console.error(`${indent}page-info legacy ${JSON.stringify(lp)} rust ${JSON.stringify(rp)}`);
+  if (canon(lp) !== canon(rp)) console.error(`${indent}page-info ${ln} ${JSON.stringify(lp)} ${rn} ${JSON.stringify(rp)}`);
 }
 
 const n = Math.max(legacy.length, rust.length);
@@ -523,6 +549,18 @@ for (let k = 0; k < n; k++) {
           console.error(`    legacy: ${JSON.stringify(lv)?.slice(0, 2500)}`);
           console.error(`    rust:   ${JSON.stringify(rv)?.slice(0, 2500)}`);
           resultDiff(lv, rv, "    ");
+          // what each server answered afresh at that moment, against what
+          // its own session was holding (a non-empty diff: the session was
+          // served a stale result)
+          const lf = legacyFresh[l?.i]?.[s]?.[key], rf = rustFresh[r?.i]?.[s]?.[key];
+          if (canon(lf) !== canon(lv)) {
+            console.error(`    legacy fresh vs legacy session:`);
+            resultDiff(lf, lv, "      ", ["fresh", "session"]);
+          }
+          if (canon(rf) !== canon(rv)) {
+            console.error(`    rust fresh vs rust session:`);
+            resultDiff(rf, rv, "      ", ["fresh", "session"]);
+          }
         }
       }
       const le = l?.state?.[s]?.refreshErrors, re = r?.state?.[s]?.refreshErrors;
