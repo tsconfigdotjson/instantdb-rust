@@ -1,4 +1,4 @@
-//! Magic-code email delivery (docs/AUTH.md §4, legacy magic_code_auth.clj).
+//! Magic-code email delivery (legacy magic_code_auth.clj).
 //!
 //! Delivery is a provider seam selected by `EMAIL_PROVIDER`:
 //!   - `log` (default): print the code to the server log, as before.

@@ -1,6 +1,6 @@
 # Official SDK suites vs legacy + rust
 
-The `sdk-suites` CI job (issue #45) runs the vendored Instant SDKs' own
+The `sdk-suites` CI job runs the vendored Instant SDKs' own
 runtime test suites, unchanged, against **both** the legacy server (the
 official self-hosting images from `scripts/differential/docker-compose.yml`,
 host :8891) and this repo's rust server (:8888), then compares the outcomes

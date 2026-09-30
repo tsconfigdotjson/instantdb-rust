@@ -1,5 +1,5 @@
 //! /runtime/session websocket handler — the client sync protocol
-//! (see docs/PROTOCOL.md).
+//! (client `Reactor.js`, LEGACY reactive/session.clj).
 
 use std::sync::Arc;
 

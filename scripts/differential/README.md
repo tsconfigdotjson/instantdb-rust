@@ -1,6 +1,6 @@
 # Differential harness: legacy server vs rust server
 
-Proves wire parity instead of assuming it (issue #12). Boots the **official
+Proves wire parity instead of assuming it. Boots the **official
 legacy Instant server** (self-hosting images) beside this repo's rust server,
 replays byte-identical op scripts against both, and diffs what a client would
 compute from each server's frames.
@@ -28,17 +28,17 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   last, fields projection, dot-paths), authed sessions + permissions (real
   refresh-token init, bind rules, view-rule filtering, $users defaults,
   allowed/denied writes), the error matrix, rooms and presence, sync tables,
-  streams, and the issue #10 polish: `app-status-changed` pushes with the
+  streams, `app-status-changed` pushes with the
   read-only / disabled gates, linked-guest `$users` access after a magic-code
   upgrade, `delete-attr` / `restore-attr` round trips, `request.*` rule
   bindings (origin / x-forwarded-for ride on the upgrade request), `$rateLimits`
   buckets, the system-column / system-entity guards, and the admin SSE
-  transports (issue #8): `POST /admin/subscribe-query` sessions (admin and
+  transports: `POST /admin/subscribe-query` sessions (admin and
   `as-token`-impersonated, object-tree `add-query-ok` / `refresh-ok` with
   `result-meta` page-info compared whole) and the generic `POST /admin/sse` +
   `/admin/sse/push` session driving join-rows queries, transacts and a stream a
   socket subscriber tails (`connectSse` in lib.mjs mirrors the SDK's
-  transports); and the issue #29 items (steps 29-34): the cel-java strings /
+  transports); steps 29-34 the cel-java strings /
   math extensions and `getTime` / `timestamp` overloads in binds and every
   rule kind, view + field rules under a `fields` projection, `$isNull` inside
   `or`, link-rule `actions` / `linkedData.ref` / link-on-create and pre-tx
@@ -49,7 +49,7 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   browser's SSE fallback transport (`GET` / `POST /runtime/sse`) and
   `POST /runtime/signout`; step 36 the triples a where clause matched under
   `fields` projections, link paths, `or` / `and` / `$not` / `$isNull` and
-  view / field rules (issue #45), step 37 a refresh whose view rule's
+  view / field rules, step 37 a refresh whose view rule's
   `rateLimit` runs dry (the session's error frame, the unsubscribed query).
   `inferred-types` on
   attrs is compared for real (it used to be normalized away). Frames are folded into the
@@ -63,10 +63,10 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   step and connection (which queries a `refresh-ok` recomputed, whether it
   carried attrs) — the quickest way to see why one server refreshed a session
   the other did not.
-- `dash.mjs` — the `/dash/*` routes `instant-cli` uses (issue #6): schema
+- `dash.mjs` — the `/dash/*` routes `instant-cli` uses: schema
   pull, `schema/steps/apply` with the exact add-attr + unique/index/required/
   check-data-type job steps `@instantdb/platform` emits, indexing-job polling
-  (issue #5: every job type's success and error path — too-large values,
+  (every job type's success and error path — too-large values,
   duplicate values, invalid / date type checks, required with nulls, the
   `remove-*` jobs — with job stages, error codes, samples and estimates
   compared, and the pulled attrs checked for lingering in-flight markers)
@@ -76,14 +76,14 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   SSE routes (auth / query / push-envelope errors, `session-missing` and
   `member-missing` against a live session), and — with `DASH_USER_TOKEN`
   (a dashboard refresh token `provision.sh` seeds on both servers for the
-  app's creator) — the CLI's app / info / claim / auth / email routes
-  (issue #29): `/dash/me`, `/dash`, app create / get / delete, orgs, OAuth
+  app's creator) — the CLI's app / info / claim / auth / email routes:
+  `/dash/me`, `/dash`, app create / get / delete, orgs, OAuth
   providers / clients / redirect origins and the `/auth` summary, email
   templates and status, direct indexing-job creation with its validation
   matrix, ephemeral apps and `claim`. Responses are folded to
   what the CLI reads (server-chosen ids, timestamps and CEL diagnostics
   normalized) and must match. `node dash.mjs <app> <token> [<app2> <token2>]`.
-- `storage.mjs` — the storage surface (issue #9): every `db.storage.*`
+- `storage.mjs` — the storage surface: every `db.storage.*`
   admin route and browser `StorageAPI` route (uploads with / without
   metadata headers, the `create`/`delete`/`view` rules for refresh-token
   and impersonated callers, single and bulk deletes, the deprecated

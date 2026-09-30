@@ -352,7 +352,7 @@
         }
       ]
     },
-    "reason": "Decided divergence (issue #38 item 10): legacy's reject-by-id-and-foreign-key formats the id-only query (reject-by-id-qs) against the route's invite table, so an org admin revoking through their own org's path revokes a pending invite of any other org by id (probed with an invite of a second org, revoked through the team org's path; an app invite revoked through an org path stays pending on both servers because the org table has no such id). This server scopes the revoke to the org in the path, so the other org's invite stays pending. docs/PARITY.md (wire-level divergences: invite revoke scope).",
+    "reason": "Decided divergence: legacy's reject-by-id-and-foreign-key formats the id-only query (reject-by-id-qs) against the route's invite table, so an org admin revoking through their own org's path revokes a pending invite of any other org by id (probed with an invite of a second org, revoked through the team org's path; an app invite revoked through an org path stays pending on both servers because the org table has no such id). This server scopes the revoke to the org in the path, so the other org's invite stays pending. docs/PARITY.md (wire-level divergences: invite revoke scope).",
     "citation": "LEGACY/server/src/instant/model/member_invites.clj:166-172"
   }
 ]

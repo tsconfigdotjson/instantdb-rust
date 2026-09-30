@@ -1,5 +1,5 @@
 //! Sync tables: full-table replication of one namespace to the client with
-//! per-tx incremental updates (PROTOCOL.md §2.9/§3.13). Change capture comes
+//! per-tx incremental updates (client `SyncTable.ts`). Change capture comes
 //! from the rust_tx_changes trigger log; subscriptions persist in the legacy
 //! sync_subs table so resync works across sessions and nodes.
 

@@ -328,7 +328,7 @@ impl Attr {
         })
     }
 
-    /// Triple index flags derived from this attr (see DATAMODEL.md §3).
+    /// Triple index flags derived from this attr.
     pub fn flags(&self) -> TripleFlags {
         let is_ref = self.value_type == ValueType::Ref;
         TripleFlags {

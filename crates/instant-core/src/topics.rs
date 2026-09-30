@@ -1,4 +1,4 @@
-//! Topic-based invalidation narrowing (docs/QUERY.md §6).
+//! Topic-based invalidation narrowing.
 //!
 //! A registered query produces a set of coarse *topics*: `[e-part, attr-set,
 //! v-part]` triples where each part is either a wildcard or a set of concrete

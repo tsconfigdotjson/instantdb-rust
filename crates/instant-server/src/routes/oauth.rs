@@ -1,5 +1,5 @@
 //! /runtime/oauth/* — OAuth/OIDC sign-in (Google via generic OIDC discovery).
-//! See docs/AUTH.md §1.6-1.10, §2.
+//! Port of LEGACY runtime/routes.clj + auth/oauth.clj.
 
 use std::collections::HashMap;
 use std::sync::Arc;

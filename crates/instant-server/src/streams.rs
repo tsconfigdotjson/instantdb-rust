@@ -1,5 +1,5 @@
-//! Streams: append-only text streams with live tailing (PROTOCOL.md §2.10 /
-//! §3.14). Stream metadata lives in the $streams system namespace; bytes live
+//! Streams: append-only text streams with live tailing (client
+//! `Stream.ts`). Stream metadata lives in the $streams system namespace; bytes live
 //! in the storage dir; live fan-out crosses nodes via pg NOTIFY.
 
 use std::sync::Arc;

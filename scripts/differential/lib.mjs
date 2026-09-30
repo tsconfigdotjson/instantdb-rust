@@ -3,7 +3,7 @@
 //
 // Normalization philosophy: two servers are wire-equivalent when a client
 // computes identical state from their frames. Frames are normalized down to
-// exactly what the client reads (PROTOCOL.md §3, with file:line citations),
+// exactly what the client reads (per the client source's Reactor.js et al.),
 // with volatile server-chosen values (ids, timestamps, isns, hashes,
 // trace ids) replaced by placeholders. Anything left must match byte-for-byte
 // unless an entry in allowed-divergences.json (with a client-code citation)

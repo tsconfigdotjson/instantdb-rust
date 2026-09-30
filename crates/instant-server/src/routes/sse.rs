@@ -1,5 +1,5 @@
 //! Server-sent-event transports over the reactive session machinery
-//! (docs/PROTOCOL.md §1.3, docs/ADMIN.md §4.13):
+//! (LEGACY reactive/session.clj, admin/routes.clj):
 //!
 //! - `/runtime/sse` — the client SDK's fallback transport. The stream opens
 //!   with an `sse-init` event; the client POSTs its messages back to the same

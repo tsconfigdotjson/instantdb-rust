@@ -83,7 +83,7 @@ const isJoinRows = (v) => Array.isArray(v) && v.every(T.arrayOf(isTriple));
 const isCursor = (v) =>
   v === null || (Array.isArray(v) && v.length === 4 && T.uuid(v[1]) && T.number(v[3]));
 
-// instaql-result node tree (PROTOCOL.md §5.1)
+// instaql-result node tree
 function assertResultNodes(result, label, { pageInfo = false, aggregate = false } = {}) {
   assert(Array.isArray(result) && result.length >= 1, `${label}: result is a node array`);
   for (const node of result) {
@@ -102,7 +102,7 @@ function assertResultNodes(result, label, { pageInfo = false, aggregate = false 
   }
 }
 
-// attr object (PROTOCOL.md §3.1.1)
+// attr object
 const ATTR_SPEC = {
   id: T.uuid,
   "value-type": T.oneOf("blob", "ref"),
