@@ -27,6 +27,11 @@ pub struct Config {
     /// (`INSTANT_REFRESH_CONCURRENCY`); bounded so one busy app can't drain
     /// the pool for everyone else.
     pub refresh_concurrency: usize,
+    /// Test-only jitter (`INSTANT_CHAOS_DELAY_MS`, default 0 = off): a random
+    /// pause of up to this many ms at points where a concurrent tx can
+    /// interleave with add-query or a refresh (AppState::chaos_pause), so the
+    /// race fuzz layer can hit windows that are otherwise microseconds wide.
+    pub chaos_delay_ms: u64,
     /// Outgoing messages a session may have queued before it is treated as a
     /// dead/slow consumer and disconnected (`INSTANT_MAX_QUEUED_MESSAGES`).
     pub max_queued_messages: usize,
@@ -112,6 +117,7 @@ impl Config {
             pg_pool_max: env_num("PG_POOL_MAX", 20u32).max(2),
             pg_pool_min: env_num("PG_POOL_MIN", 2u32),
             refresh_concurrency: env_num("INSTANT_REFRESH_CONCURRENCY", 8usize).max(1),
+            chaos_delay_ms: env_num("INSTANT_CHAOS_DELAY_MS", 0u64),
             max_queued_messages: env_num("INSTANT_MAX_QUEUED_MESSAGES", 10_000usize).max(100),
             indexing_batch_size: env_num("INSTANT_INDEXING_BATCH_SIZE", 1000usize).max(1),
             indexing_sweep_secs: env_num("INSTANT_INDEXING_SWEEP_SECS", 60u64).max(1),
@@ -427,6 +433,17 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// A random pause of up to `INSTANT_CHAOS_DELAY_MS` (no-op when 0):
+    /// test-only jitter at interleaving points (see Config::chaos_delay_ms).
+    pub async fn chaos_pause(&self) {
+        let max = self.cfg.chaos_delay_ms;
+        if max == 0 {
+            return;
+        }
+        let ms = rand::Rng::gen_range(&mut rand::thread_rng(), 0..=max);
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
+
     pub fn new(cfg: Config, pool: PgPool) -> Arc<Self> {
         Arc::new(AppState {
             cfg,

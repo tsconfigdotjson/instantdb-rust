@@ -2,6 +2,7 @@
   {
     "suite": "core",
     "test": "__tests__/src/infiniteQuery.e2e.test.ts > infinite scroll number line > adding negative numbers",
-    "reason": "Timing-flaky upstream test, not a parity difference: it polls 10s for the loaded window to grow to [-1, 0, 1, 2, 3] and intermittently stays at [-1, 0, 1, 2] on either server. PR #46's CI saw it fail on legacy alone (run 36626612399) and on rust alone (run 36628245410), passing on the other side both times."
+    "server": "legacy",
+    "reason": "Upstream legacy race, not a parity difference: legacy intermittently leaves the loaded window at [-1, 0, 1, 2] (seen alone in run 36626612399; legacy shares datalog results across sessions and a paginated page can miss an invalidation). Rust hit the same symptom (run 36628245410) through an add-query-ok/refresh-ok ordering race fixed in issue #51, so this entry only excuses legacy failing while rust passes."
   }
 ]

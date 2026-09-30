@@ -37,6 +37,8 @@ and `run-suite.sh` refuses any URL other than `http://localhost:<port>` /
 - `allowed.json` — empty by default. A failure shared with legacy is still a
   broken SDK path, so exemptions must be explicit:
   `{"suite": "core", "test": "<id exactly as compare.mjs prints it>", "reason": "..."}`.
+  Add `"server": "legacy"` to excuse only legacy failing while rust passes
+  (an upstream legacy race rust must not share); rust failing still fails.
 
 In CI each suite run is `continue-on-error` so all four runs happen; the
 comparator step decides, and the reports are uploaded as the

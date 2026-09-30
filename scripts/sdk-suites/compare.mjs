@@ -16,7 +16,9 @@
 //   - vitest exited non-zero with no failing test in its report (unhandled
 //     errors are not recorded in the JSON report),
 // unless the test is listed in the allowlist file as
-// {"suite": "...", "test": "<id as printed>", "reason": "..."}.
+// {"suite": "...", "test": "<id as printed>", "reason": "..."}. An entry with
+// "server": "legacy" (or "rust") only excuses that server failing while the
+// other passes — e.g. an upstream race in legacy that rust must not share.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -55,6 +57,9 @@ function loadAllowlist(file) {
       throw new Error(
         `${file}: every entry needs string "suite", "test" and a non-empty "reason": ${JSON.stringify(e)}`,
       );
+    }
+    if (e.server !== undefined && !SERVERS.includes(e.server)) {
+      throw new Error(`${file}: "server" must be one of ${SERVERS.join(', ')}: ${JSON.stringify(e)}`);
     }
   }
   return list;
@@ -184,7 +189,9 @@ function main() {
 
       let mark = '';
       if (kind) {
-        const allow = allowlist.find((e) => e.suite === suite && e.test === id);
+        const allow = allowlist.find((e) => e.suite === suite && e.test === id &&
+          (e.server === undefined ||
+            (isBad(o[e.server]) && SERVERS.every((s) => s === e.server || o[s] === 'passed'))));
         if (allow) {
           usedAllow.add(allow);
           mark = `allowed: ${allow.reason}`;

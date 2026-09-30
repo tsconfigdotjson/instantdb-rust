@@ -541,79 +541,53 @@ async fn handle_add_query(
         perms.origin.clone(),
         rules.as_ref().map(|r| value_hash(&r.code)).unwrap_or(0),
     );
-    // Compute, register, then re-read the watermark: a tx that committed
-    // after the query ran but was refreshed before the query was
-    // registered would otherwise never reach this subscription (ops of one
-    // session run concurrently, so a transact next to this add-query is the
-    // common case). A moved watermark recomputes; the invalidator's own
-    // hash check keeps a refresh it did send from repeating.
-    let mut attempts = 0;
-    let (ws_json, result_meta, processed_tx_id) = loop {
-        attempts += 1;
-        // Watermark first, so a cached result is never older than the tx id
-        // the client is told it reflects.
-        let processed_tx_id = service::max_tx_id(state, app_id).await?;
-        let attr_gen = service::attr_generation(state, app_id);
-        let cached = if cacheable {
-            state.query_cache.get(&cache_key).and_then(|e| {
-                (e.tx_id == processed_tx_id
-                    && e.attr_gen == attr_gen
-                    && e.created.elapsed() < QUERY_CACHE_TTL)
-                    .then(|| (e.ws_json.clone(), e.hash, e.topics.clone()))
-            })
-        } else {
-            None
-        };
-        let mut result_meta = Value::Null;
-        let (ws_json, hash, topics) = match cached {
-            Some(hit) => {
-                crate::metrics::METRICS.query_cache_hits_total.inc();
-                hit
-            }
-            None => {
-                crate::metrics::METRICS.query_cache_misses_total.inc();
-                let attrs = service::load_attrs(state, app_id).await?;
-                let outcome =
-                    service::run_query_full(state, app_id, &attrs, &perms, &q, rules.as_ref())
-                        .await?;
-                let (wire, meta, hash) =
-                    format_query_result(&outcome.result, &attrs, &q, tree, inference);
-                result_meta = meta;
-                let ws_json = Arc::new(
-                    RawValue::from_string(wire.to_string())
-                        .expect("serde_json output is valid JSON"),
-                );
-                let topics = Arc::new(outcome.topics);
-                if cacheable {
-                    state.query_cache.insert(
-                        cache_key.clone(),
-                        QueryCacheEntry {
-                            ws_json: ws_json.clone(),
-                            hash,
-                            topics: topics.clone(),
-                            tx_id: processed_tx_id,
-                            attr_gen,
-                            created: std::time::Instant::now(),
-                        },
-                    );
-                }
-                (ws_json, hash, topics)
-            }
-        };
-        {
-            let mut st = session.state.lock().await;
-            st.queries.insert(
-                key.clone(),
-                QueryEntry {
-                    q: q.clone(),
-                    result_hash: hash,
-                    topics: Some(topics),
-                    tree,
-                },
-            );
+    // Watermark first, so a result (cached or fresh) is never older than
+    // the tx id the client is told it reflects.
+    let processed_tx_id = service::max_tx_id(state, app_id).await?;
+    let processed_isn = service::current_isn(state).await;
+    let attr_gen = service::attr_generation(state, app_id);
+    let cached = if cacheable {
+        state.query_cache.get(&cache_key).and_then(|e| {
+            (e.tx_id == processed_tx_id
+                && e.attr_gen == attr_gen
+                && e.created.elapsed() < QUERY_CACHE_TTL)
+                .then(|| (e.ws_json.clone(), e.hash, e.topics.clone()))
+        })
+    } else {
+        None
+    };
+    let mut result_meta = Value::Null;
+    let (ws_json, hash, topics) = match cached {
+        Some(hit) => {
+            crate::metrics::METRICS.query_cache_hits_total.inc();
+            hit
         }
-        if attempts >= 3 || service::max_tx_id(state, app_id).await? == processed_tx_id {
-            break (ws_json, result_meta, processed_tx_id);
+        None => {
+            crate::metrics::METRICS.query_cache_misses_total.inc();
+            let attrs = service::load_attrs(state, app_id).await?;
+            let outcome =
+                service::run_query_full(state, app_id, &attrs, &perms, &q, rules.as_ref()).await?;
+            let (wire, meta, hash) =
+                format_query_result(&outcome.result, &attrs, &q, tree, inference);
+            result_meta = meta;
+            let ws_json = Arc::new(
+                RawValue::from_string(wire.to_string()).expect("serde_json output is valid JSON"),
+            );
+            let topics = Arc::new(outcome.topics);
+            if cacheable {
+                state.query_cache.insert(
+                    cache_key.clone(),
+                    QueryCacheEntry {
+                        ws_json: ws_json.clone(),
+                        hash,
+                        topics: topics.clone(),
+                        tx_id: processed_tx_id,
+                        attr_gen,
+                        created: std::time::Instant::now(),
+                    },
+                );
+            }
+            (ws_json, hash, topics)
         }
     };
     crate::metrics::METRICS
@@ -628,13 +602,45 @@ async fn handle_add_query(
         result: &ws_json,
         result_meta: &result_meta,
         processed_tx_id,
-        processed_isn: service::current_isn(state).await,
+        processed_isn,
         client_event_id: msg.get("client-event-id"),
         trace_id: crate::state::new_trace_id(),
     };
-    match serde_json::to_string(&reply) {
-        Ok(frame) => session.send_raw(frame),
-        Err(e) => tracing::error!("add-query-ok serialization failed: {e}"),
+    let frame = match serde_json::to_string(&reply) {
+        Ok(frame) => frame,
+        Err(e) => {
+            tracing::error!("add-query-ok serialization failed: {e}");
+            return Ok(());
+        }
+    };
+    state.chaos_pause().await;
+    // Register and reply in one critical section. The invalidator records
+    // and sends refresh-ok frames under this same lock, so the entry's
+    // hash always matches the last result the client received: a refresh
+    // can't slip out ahead of this reply and then be overwritten on the
+    // client by the older add-query-ok (issue #51).
+    {
+        let mut st = session.state.lock().await;
+        st.queries.insert(
+            key.clone(),
+            QueryEntry {
+                q: q.clone(),
+                result_hash: hash,
+                topics: Some(topics),
+                tree,
+            },
+        );
+        session.send_raw(frame);
+    }
+    // A tx that committed after the watermark read may have been matched
+    // against this session's queries before this one was registered (ops
+    // of one session run concurrently, so a transact next to this
+    // add-query is the common case). Recheck the query through the app's
+    // refresh worker, which sends refreshes in order.
+    state.chaos_pause().await;
+    let latest = service::max_tx_id(state, app_id).await?;
+    if latest > processed_tx_id {
+        crate::invalidator::enqueue_recheck(state, app_id, session.id, key, latest);
     }
     Ok(())
 }
