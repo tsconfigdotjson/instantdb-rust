@@ -269,11 +269,14 @@ jobs:
         run: |
           cargo build -p instant-server
           PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/rust-server.log 2>&1 &
+          # same database, random pauses where add-query and refreshes
+          # interleave: the subscription race fuzz (fuzz-race.mjs) runs here
+          INSTANT_CHAOS_DELAY_MS=30 PORT=8885 BASE_URL=http://localhost:8885 ./target/debug/instant-server > /tmp/rust-chaos-server.log 2>&1 &
           for i in $(seq 1 60); do
-            curl -sf http://localhost:8888/health >/dev/null && exit 0
+            curl -sf http://localhost:8888/health >/dev/null && curl -sf http://localhost:8885/health >/dev/null && exit 0
             sleep 1
           done
-          echo "rust server failed to boot"; cat /tmp/rust-server.log; exit 1
+          echo "rust server failed to boot"; cat /tmp/rust-server.log /tmp/rust-chaos-server.log; exit 1
       - name: Differential replay + fuzz vs legacy server
         env:
           # PRs and main run the nightly's original seeds at nightly depth
@@ -284,11 +287,14 @@ jobs:
           FUZZ_SEED_WINDOW: ${{ github.event_name == 'schedule' && '40' || '0' }}
           FUZZ_PERMS_SEEDS: ${{ github.event_name == 'schedule' && '7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22' || '7 8 9' }}
           FUZZ_PERMS_ROUNDS: ${{ github.event_name == 'schedule' && '300' || '120' }}
+          FUZZ_RACE_SEEDS: ${{ github.event_name == 'schedule' && '1 2 3 4 5 6 7 8 9 10' || '1 2 3' }}
+          RACE_URL: http://localhost:8885
         run: KEEP=1 ./scripts/differential/run.sh
       - name: Server logs
         if: failure()
         run: |
           echo "=== rust server ==="; cat /tmp/rust-server.log || true
+          echo "=== rust chaos server ==="; tail -200 /tmp/rust-chaos-server.log || true
           echo "=== legacy server ==="; docker compose -f scripts/differential/docker-compose.yml logs legacy-server | tail -100 || true
 
   # The official SDK runtime suites, unchanged, against BOTH the legacy server

@@ -122,6 +122,22 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `node fuzz-perms.mjs <app> <app> <token> [seed] [rounds]`; seeds 7-9 at 120
   rounds per PR (`FUZZ_PERMS_SEEDS` / `FUZZ_PERMS_ROUNDS`), 16 seeds at 300
   nightly.
+- `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):
+  seeded bursts of unawaited transacts and add-queries of order/limit pages
+  (a transact then a subscription to the page it changes, as an infinite
+  query does), on one session and across sessions. After every settled
+  burst: no `refresh-ok` for a query may arrive before its `add-query-ok`,
+  and each held subscription, folded in arrival order the way the client
+  folds it, must equal a fresh add-query of the same query. Legacy runs
+  add-query and refresh on separate group keys and shares paginated results
+  across sessions, so it fails these now and then; this layer is not
+  compared against it. It runs against a rust server booted with
+  `INSTANT_CHAOS_DELAY_MS=30` (`RACE_URL`, :8885 in CI), which pauses at
+  random where add-query and a refresh interleave, so windows that are
+  microseconds wide get hit every run. Transact failures (a tx racing a
+  delete of its entity) are printed as notes, not failures.
+  `node fuzz-race.mjs <app> <token> [seed] [rounds]`; seeds 1-3 at 30 rounds
+  per PR (`FUZZ_RACE_SEEDS` / `FUZZ_RACE_ROUNDS`), 10 nightly.
 - `errors.mjs` / `errors-allowed.json` — the error matrix: one probe per
   externally reachable legacy error type (`err:*` in surface.json) over HTTP
   and the ws session; the normalized envelope (status, type, message, hint)

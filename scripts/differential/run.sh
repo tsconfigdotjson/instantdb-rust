@@ -120,6 +120,17 @@ for SEED in ${FUZZ_PERMS_SEEDS:-7 8 9}; do
     FUZZ_FAILED="$FUZZ_FAILED perms:$SEED"
   fi
 done
+# subscription race fuzz (issue #51): rust-only invariants for queries
+# registered while transactions are in flight, against a rust server booted
+# with INSTANT_CHAOS_DELAY_MS (RACE_URL; defaults to RUST_URL)
+for SEED in ${FUZZ_RACE_SEEDS:-1 2 3}; do
+  RZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+  RZ_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+  ./provision.sh "$RZ_APP" "$RZ_TOKEN" > /dev/null
+  if ! RACE_URL="${RACE_URL:-$RUST_URL}" node fuzz-race.mjs "$RZ_APP" "$RZ_TOKEN" "$SEED" "${FUZZ_RACE_ROUNDS:-30}"; then
+    FUZZ_FAILED="$FUZZ_FAILED race:$SEED"
+  fi
+done
 if [ -n "$FUZZ_FAILED" ]; then
   echo "FUZZ FAILED for seeds:$FUZZ_FAILED (rerun one with: FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60} ./run.sh)"
   FAILED_LAYERS="$FAILED_LAYERS fuzz"

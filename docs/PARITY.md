@@ -241,6 +241,7 @@ counted apart.
 
 | Area | Coverage | Why |
 |---|---|---|
+| subscription races (`scripts/differential/fuzz-race.mjs`, 3 seeds per PR, 10 nightly) | this server only | Queries registered while transactions are in flight, against a server that pauses at random where add-query and a refresh interleave (`INSTANT_CHAOS_DELAY_MS`): no refresh-ok before a query's add-query-ok, and every settled subscription equals a fresh answer. Legacy runs add-query and refresh on separate group keys and shares paginated results across sessions, so it fails these now and then (issue #51). |
 | multi-node fan-out (`multinode-ws.mjs`, `multinode-storage-test.mjs`) | this server only | Legacy's multi-node path is Hazelcast + a shared WAL consumer, which has no self-hosted counterpart to diff against; the client-visible contract (a write on node A reaches a subscriber on node B, once, with a monotonic tx id) is asserted directly. |
 | OAuth code exchange success path (`oauth-test.mjs`) | this server only | Legacy resolves the provider's discovery document through its DNS-over-HTTPS SSRF guard, which can't reach a container-local mock provider; every error surface of the same routes is compared (replay step 34, dash step 42). |
 | behaviour under load, timing-dependent paths | two timeout probes, `stress.mjs`, fuzz-perms bursts | Load itself stays a benchmark (`crates/instant-loadtest`), not a parity check: the two servers' latencies are not a contract. Ordering-dependent outcomes are compared where the protocol fixes them (per-session op order, settled state). |

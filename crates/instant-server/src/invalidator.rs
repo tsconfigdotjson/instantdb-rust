@@ -735,6 +735,7 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
             }
         }
     }
+    state.chaos_pause().await;
     let processed_isn = service::current_isn(state).await;
     for ((plan, outcomes), failures) in plans.into_iter().zip(per_session).zip(failed) {
         if !failures.is_empty() {

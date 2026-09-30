@@ -613,6 +613,7 @@ async fn handle_add_query(
             return Ok(());
         }
     };
+    state.chaos_pause().await;
     // Register and reply in one critical section. The invalidator records
     // and sends refresh-ok frames under this same lock, so the entry's
     // hash always matches the last result the client received: a refresh
@@ -636,6 +637,7 @@ async fn handle_add_query(
     // of one session run concurrently, so a transact next to this
     // add-query is the common case). Recheck the query through the app's
     // refresh worker, which sends refreshes in order.
+    state.chaos_pause().await;
     let latest = service::max_tx_id(state, app_id).await?;
     if latest > processed_tx_id {
         crate::invalidator::enqueue_recheck(state, app_id, session.id, key, latest);
