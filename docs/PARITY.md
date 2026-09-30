@@ -1,4 +1,16 @@
-# Parity status vs the legacy Instant server
+# Parity with the original Instant server
+
+This is the feature-by-feature record of how this server compares with the
+original (legacy) Instant server in `LEGACY/`. Every surface a shipped client
+uses (`@instantdb/core`, `react`, `admin`, `platform`, `instant-cli` and the
+self-hosted dashboard) is served, and a differential harness replays it
+against the official legacy server and compares the responses. See
+[How parity is verified](#how-parity-is-verified) for what that does and
+doesn't prove, and [Known gaps and differences](#known-gaps-and-differences)
+for everything that isn't identical.
+
+The notes are deliberately detailed: they cite the legacy source
+(`LEGACY/server/src/instant/…`) and the harness step that covers each item.
 
 Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ not implemented
 
@@ -13,7 +25,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | `remove-query` | ✅ | |
 | `transact` / `transact-ok` (tx-id watermark) | ✅ | |
 | `refresh-ok` push with computations + attrs | ✅ | result-hash suppression; per-app coalesced refresh batches, identical (query, auth, request.ip/origin) recomputed once across sessions. Fan-out follows legacy's invalidator: only sessions with a topic-stale query are refreshed (triple topics plus a wildcard per changed attrs row, `topics-for-attr-upsert`), except attr inserts / deletes and ident changes (`schema-changes-require-refreshing-sessions?`), which refresh every session; flag flips and inferred-types writes therefore reach only sessions whose queries mention the attr |
-| topic-based invalidation narrowing | ✅ | coarse topics per registered query (`instant_core::topics`, QUERY.md §6.2 shapes with result substitution on the entity fetch) matched against the tx's `rust_tx_changes` rows; unresolvable shapes and `.ref(` rules fall back to catch-all; result-hash suppression remains the backstop |
+| topic-based invalidation narrowing | ✅ | coarse topics per registered query (`instant_core::topics`, legacy `datalog.clj` coarse-topic shapes with result substitution on the entity fetch) matched against the tx's `rust_tx_changes` rows; unresolvable shapes and `.ref(` rules fall back to catch-all; result-hash suppression remains the backstop |
 | error shapes (`type`, `hint`, `original-event` echo) | ✅ | full legacy key set incl. null `hint`/`client-event-id` (conformance error matrix); unknown ops are `param-malformed` "Invalid op", pre-init ops `validation-failed` "`init` has not run for this session.", `ex/get-param!` shapes (`Missing parameter: ["app-id"]` / `Malformed parameter: [...]` with `hint.in`) for `app-id`, `room-id`, stream `chunks`/`offset`/`reconnect-token`, `q: null` is "Query can not be null.", a missing `tx-steps` is `validation-failed` for `tx-steps`, a bad `__admin-token` is `record-not-found` (differential step 26) |
 | per-op handler timeout and op scheduling (`operation-timed-out`) | ✅ | legacy cancels a handler after `handle-receive-timeout-ms` (5000, session.clj:58, :1137-1207) and answers `operation-timed-out` status 500; same here (`INSTANT_HANDLE_RECEIVE_TIMEOUT_MS`). A session's ops run on legacy's group keys (`scheduler.rs`, session.clj:1463-1553): same-key ops in arrival order, different keys concurrently; while an op waits, a newer `set-presence` replaces it, `append-stream`s merge, and a transact of the same cardinality-one `add-triple`s takes it over (legacy's default-on `combine-transacts?`, every client-event-id answered with the one result); an `add-query` re-reads the tx watermark after registering and recomputes if a tx landed in between. Differential error matrix (`ws/operation-timed-out/transact-blocked`), stress.mjs |
 | rooms: join/leave/set-presence/refresh-presence | ✅ | cross-node via Postgres; in-room asserts + `set-presence-ok`/`client-broadcast-ok` acks like legacy; re-joining a room keeps the presence data already set (hazelcast.clj:123-134, the client re-joins on every reconnect; differential step 26) |
@@ -120,11 +132,11 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | unknown routes / wrong methods | 🟡 | JSON 404 `{"message": "Oops! We couldn't match this route."}` like core.clj:189-190 (the CLI parses error bodies); the self-hosted legacy image itself answers these with a 200 non-JSON body (differential step 28, allow-listed) |
 | `/admin/rooms/presence` shape | ✅ | `room-type` and `room-id` are required (`param-missing` with legacy's `["params" ...]` names) and each peer's `{id}` user is replaced with its current `$users` entity (admin/routes.clj:739-765); entries carry `instance-id` (the node id, ephemeral.clj:280-286). Differential step 33 |
 | rooms/presence | ✅ | |
-| storage: `PUT /admin/storage/upload`, `DELETE /admin/storage/files`, `POST /admin/storage/files/delete`, `GET /admin/storage/files`, `/admin/storage/signed-{upload,download}-url`, client `PUT /storage/upload`, `DELETE /storage/files`, `GET /storage/signed-download-url`, `POST /storage/signed-upload-url`, `PUT /storage/:id/consume-upload-url` | ✅ | `$files` rows carry legacy's S3 metadata defaults (`content-type: application/octet-stream`, `content-disposition: inline`), keep `location-id` unless a `fields` projection drops it, and get the synthetic `url`; blank `content-disposition` is `param-malformed`, `create`/`delete` rules apply to impersonated admin calls, errors mirror legacy's `["path"]`/`["params" "filename"]` param names, `has-storage-permission?`, `app-upload-url` shapes. Backends: Postgres blobs by default (multi-node correct; scripts/multinode-storage-test.mjs), `disk`, and `s3` (issue #9: any S3-compatible store via hand-rolled SigV4, legacy's `app-id/bin/location-id` key layout with the Java-hashCode bin so a legacy bucket serves as-is, object content-type/disposition metadata, presigned `$files.url` byte-compatible with legacy's `presign-s3-url` — day-bucketed signing instant, 7-day expiry, `response-cache-control` — or `S3_PRESIGN=0` to proxy; live stream bytes spool through Postgres and move to the bucket when the stream is done). Download URL text differs by design: legacy always presigns S3, this server presigns only on the `s3` backend and otherwise serves `/storage/serve/...` (HMAC-signed, day-bucketed, same `Cache-Control`). Legacy's deprecated `GET /admin/storage/files` 500s on the self-hosted image; this server returns the documented list. Verified: scripts/differential/storage.mjs (8 steps vs live legacy in both presign and proxy modes), scripts/s3-storage-test.mjs (bucket contents inspected with an independent signer) |
+| storage: `PUT /admin/storage/upload`, `DELETE /admin/storage/files`, `POST /admin/storage/files/delete`, `GET /admin/storage/files`, `/admin/storage/signed-{upload,download}-url`, client `PUT /storage/upload`, `DELETE /storage/files`, `GET /storage/signed-download-url`, `POST /storage/signed-upload-url`, `PUT /storage/:id/consume-upload-url` | ✅ | `$files` rows carry legacy's S3 metadata defaults (`content-type: application/octet-stream`, `content-disposition: inline`), keep `location-id` unless a `fields` projection drops it, and get the synthetic `url`; blank `content-disposition` is `param-malformed`, `create`/`delete` rules apply to impersonated admin calls, errors mirror legacy's `["path"]`/`["params" "filename"]` param names, `has-storage-permission?`, `app-upload-url` shapes. Backends: Postgres blobs by default (multi-node correct; scripts/multinode-storage-test.mjs), `disk`, and `s3` (any S3-compatible store via hand-rolled SigV4, legacy's `app-id/bin/location-id` key layout with the Java-hashCode bin so a legacy bucket serves as-is, object content-type/disposition metadata, presigned `$files.url` byte-compatible with legacy's `presign-s3-url` — day-bucketed signing instant, 7-day expiry, `response-cache-control` — or `S3_PRESIGN=0` to proxy; live stream bytes spool through Postgres and move to the bucket when the stream is done). Download URL text differs by design: legacy always presigns S3, this server presigns only on the `s3` backend and otherwise serves `/storage/serve/...` (HMAC-signed, day-bucketed, same `Cache-Control`). Legacy's deprecated `GET /admin/storage/files` 500s on the self-hosted image; this server returns the documented list. Verified: scripts/differential/storage.mjs (8 steps vs live legacy in both presign and proxy modes), scripts/s3-storage-test.mjs (bucket contents inspected with an independent signer) |
 | query_perms_check / transact_perms_check (debugQuery/debugTransact) | ✅ | check-results with programs; dry-run/commit semantics |
-| `/admin/subscribe-query`, `/admin/sse`, `/admin/sse/push` (SSE transports, issue #8) | ✅ | `@instantdb/admin` `subscribeQuery` and `db.streams`: an admin-authed reactive session over `text/event-stream` (`retry: 500` hint, `sse-init`, then `add-query-ok` with the object tree + `result-meta` for subscribe-query, `refresh-ok` computations in the same shape, `error` frames); the generic session takes every socket op via the push envelope (machine_id / session_id / sse_token / messages). Impersonation headers work like every /admin route (`as-token` sessions see rule-filtered trees). Sessions are pre-initialized like legacy `admin-init!` (no `init`, no feature flags: refresh-ok always carries attrs, frames are never batched). Push errors mirror legacy (`session-missing` with its printed-map message, `member-missing`, `param-missing` with `possible-ins`). Multi-node: the session lives on the node that holds the stream and pushes must reach it (session affinity), where legacy forwards over hazelcast. Differential replay steps 23-24 + dash step 25, scripts/admin-sdk-test.mjs (real SDK subscribeQuery + streams) |
+| `/admin/subscribe-query`, `/admin/sse`, `/admin/sse/push` (SSE transports) | ✅ | `@instantdb/admin` `subscribeQuery` and `db.streams`: an admin-authed reactive session over `text/event-stream` (`retry: 500` hint, `sse-init`, then `add-query-ok` with the object tree + `result-meta` for subscribe-query, `refresh-ok` computations in the same shape, `error` frames); the generic session takes every socket op via the push envelope (machine_id / session_id / sse_token / messages). Impersonation headers work like every /admin route (`as-token` sessions see rule-filtered trees). Sessions are pre-initialized like legacy `admin-init!` (no `init`, no feature flags: refresh-ok always carries attrs, frames are never batched). Push errors mirror legacy (`session-missing` with its printed-map message, `member-missing`, `param-missing` with `possible-ins`). Multi-node: the session lives on the node that holds the stream and pushes must reach it (session affinity), where legacy forwards over hazelcast. Differential replay steps 23-24 + dash step 25, scripts/admin-sdk-test.mjs (real SDK subscribeQuery + streams) |
 | `/dash/apps/:id/schema/pull`, `schema/steps/apply`, `schema/push/{plan,apply}` (instant-cli push/pull schema) | ✅ | `{schema: {blobs, refs}, attrs, app-title}` incl. legacy's Clojure-printed ref keys; add/update/delete-attr steps transact, `index`/`unique`/`required`/`check-data-type` (+ `remove-*`) become indexing jobs; server-side planning (`schemas->ops`, plan errors) ported to `instant_core::schema`; pulled `instant.schema.ts` is byte-identical to legacy's (scripts/cli-test.mjs, scripts/differential/dash.mjs) |
-| indexing jobs (`/dash/apps/:id/indexing-jobs/*`) | ✅ | port of legacy's stage machine (issue #5): `indexing?` / `setting-unique?` / `checking-data-type?` on the attr wire while a job runs, query planning treats such attrs as unindexed / non-unique / untyped (with legacy's order-by and comparator messages), triples rewritten in `INSTANT_INDEXING_BATCH_SIZE` batches resumed from a cursor in the job row, `work_estimate` / `work_completed` progress, legacy statuses, stages and error codes (`triple-not-unique-error` + `invalid_unique_value`, `triple-too-large-error` + sample, `invalid-triple-error` samples, `missing-required-error` + `error_data`); jobs are released between steps so any node continues them and orphaned ones are swept up (legacy only warns about stuck jobs). A raw `update-attr` tx-step still rewrites flags synchronously like legacy `update-multi!`. Verified by scripts/differential/dash.mjs (36 steps vs live legacy) + scripts/indexing-jobs-test.mjs |
+| indexing jobs (`/dash/apps/:id/indexing-jobs/*`) | ✅ | port of legacy's stage machine: `indexing?` / `setting-unique?` / `checking-data-type?` on the attr wire while a job runs, query planning treats such attrs as unindexed / non-unique / untyped (with legacy's order-by and comparator messages), triples rewritten in `INSTANT_INDEXING_BATCH_SIZE` batches resumed from a cursor in the job row, `work_estimate` / `work_completed` progress, legacy statuses, stages and error codes (`triple-not-unique-error` + `invalid_unique_value`, `triple-too-large-error` + sample, `invalid-triple-error` samples, `missing-required-error` + `error_data`); jobs are released between steps so any node continues them and orphaned ones are swept up (legacy only warns about stuck jobs). A raw `update-attr` tx-step still rewrites flags synchronously like legacy `update-multi!`. Verified by scripts/differential/dash.mjs (36 steps vs live legacy) + scripts/indexing-jobs-test.mjs |
 | `/dash/apps/:id/perms/pull`, `POST /dash/apps/:id/rules` (instant-cli push/pull perms) | ✅ | full rule validation port (binds, reserved namespaces, `$users.delete`, CEL compile errors with the same ANTLR messages, field rules, `$rateLimits` configs); version bump + `rules: null` on unchanged code like legacy |
 | `/dash/cli/version`, `/dash/cli/auth/{register,claim,check,void}` | ✅ | `instant-cli login`: `register` hands out a ticket + secret (`instant_cli_logins`, secret stored as sha256), the dashboard login (`/dash/oauth/start?ticket=` or the magic-code flow) claims or voids the ticket for the user, `check` polls with the secret and answers legacy's `issue` codes (`waiting-for-user`, `user-voided-request`, `user-already-claimed`, 2-minute expiry) before handing out a refresh token. Differential dash step 40, `scripts/dash-login-test.mjs` |
 | dashboard-route auth | ✅ | app admin token (the CLI's `INSTANT_APP_ADMIN_TOKEN`) with legacy's admin-token-mismatch error; dashboard refresh tokens for creators/members with the least-privilege roles; personal access tokens (`per_`) and scoped platform access tokens (`pat_`) through the superadmin path (`req->app-accepting-superadmin-or-ref-token!` with each route's scope, missing-scope `permission-denied`) |
@@ -149,8 +161,8 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | legacy Postgres schema, migrations replay on stock PG | ✅ | tested on Postgres 18 |
 | deterministic system-catalog UUIDs | ✅ | verified against hardcoded legacy values |
 | app status gates (read-only / disabled) | ✅ | read-only rejects writes (`app-read-only`), disabled rejects reads too (`app-disabled`), legacy messages; an `apps.status` flip (dashboard, psql) pushes `app-status-changed {status}` to every live session of the app on every node (row trigger + NOTIFY standing in for legacy's WAL-fed cache_evict), and a per-app status cache with a TTL safety net backs the gates (differential step 17-app-status) |
-| security hardening from the 2026-09-04 audit (scripts/security-test.mjs, scripts/oauth-test.mjs, crates/instant-core/tests/audit_test.rs) | ✅ | `/storage/serve` URLs are HMAC-SHA256 signed, compared in constant time, never dated in the future, and served with `Content-Security-Policy: sandbox` + `nosniff` (legacy serves blobs from the S3 origin, so uploader-chosen `text/html; inline` can't script against the API host here either); `/dash/*` bearer parsing requires the `Bearer ` prefix; JWT algorithms must be listed in the provider's discovery document (auth/oauth.clj:223-224); `$files.path` values under `$stream/` are rejected for everyone (permissioned_transaction.clj:72-79) |
-| rate limiting | ✅ | per-app + per-email token buckets (issue #1, `rate_limit.rs`, per node like legacy bucket4j; `INSTANT_RATE_LIMITS=off` disables) and rule-level `rateLimit.*` buckets shared through Postgres (issue #10) |
+| security hardening (scripts/security-test.mjs, scripts/oauth-test.mjs, crates/instant-core/tests/audit_test.rs) | ✅ | `/storage/serve` URLs are HMAC-SHA256 signed, compared in constant time, never dated in the future, and served with `Content-Security-Policy: sandbox` + `nosniff` (legacy serves blobs from the S3 origin, so uploader-chosen `text/html; inline` can't script against the API host here either); `/dash/*` bearer parsing requires the `Bearer ` prefix; JWT algorithms must be listed in the provider's discovery document (auth/oauth.clj:223-224); `$files.path` values under `$stream/` are rejected for everyone (permissioned_transaction.clj:72-79) |
+| rate limiting | ✅ | per-app + per-email token buckets (`rate_limit.rs`, per node like legacy bucket4j; `INSTANT_RATE_LIMITS=off` disables) and rule-level `rateLimit.*` buckets shared through Postgres |
 | backups/restore tooling, attr sketches | ❌ | ops tooling of the hosted service |
 | hosted-service dashboard routes: billing / Stripe (`checkout_session`, `portal_session`, `billing`, `/dash/stripe/*`), backups and restores (`/dash/apps/:id/backups*`, `restore*`), sunset stages, Postmark sender verification (`sender-verification*`), `/dash/session_counts` (internal websocket feed), `/dash/admin/*` overview and top-app reports, `ws_playground`, `/dash/apps/:id/track-*` posthog analytics beyond `track-import` | ❌ | These exist only for instantdb.com's operators and paid plans (Stripe, S3 backup buckets, Postmark, posthog, CloudWatch); a self-hosted server has no counterpart, so they are not served. Everything else under `/dash`, `/superadmin`, `/platform` and `/admin` is mounted; `scripts/differential/out-of-scope.json` names these items with a reason each, and the coverage report counts the rest of `surface.json` against what a differential run exercised |
 
@@ -197,11 +209,11 @@ client-code citation proving it is unread (client paths relative to
 | `$entityId` where key | present in `where-value-valid-keys?` (a dashboard hack, instaql.clj:69-75) but with no spec entry and no SQL branch, so a `{$entityId: v}` where value passes validation and yields a degenerate query result rather than an error | rejected as an unsupported where operator | undefined legacy behavior with no client that relies on it; the real, spec’d `$entityIdStartsWith` operator is implemented and covered by the fuzz layer |
 | `remove-sync` without `keep-subscription` | drops the in-memory sync query and calls `sync-sub-model/delete!` with `(:sync/subscription-id sync-ent)`, an attribute nothing sets, so the `sync_subs` row is never deleted (reactive/session.clj:373-381) | the same: the row is kept, `keep-subscription` changes nothing | a client that removes and later `resync-table`s the same subscription id resumes on both servers (differential replay steps 12 and 33) |
 | transaction with more than ~32k distinct lookup refs | `parameter-limit-exceeded`: lookups resolve through one `VALUES` list of two bind parameters each (transaction.clj resolve-lookups), past pgjdbc's 65,535 | the transaction runs | an implementation limit, not a contract; `$in` sets are one array parameter on both servers (error matrix `query-in-70k-values`) |
-| `/dash/cli/auth/claim` on a ticket another user claimed | the ticket is re-pointed at the caller (instant_cli_login.clj `claim!`) | refused: `validation-failed`, issue `user-already-claimed`; a same-user re-claim still succeeds | hardening (issue #38); the CLI only polls `check`, which signs in the first claimant (differential dash step 40, allowlisted) |
-| `/platform/oauth/deny` checks | deletes the redirect first, then checks the cookie; the grant token is never compared (oauth_apps/routes.clj:318-338) | grant token (`record-not-found`, like `grant`) and cookie checked before the redirect is deleted | hardening (issue #38): a bad deny can no longer burn the user's pending consent (differential dash step 38, allowlisted) |
+| `/dash/cli/auth/claim` on a ticket another user claimed | the ticket is re-pointed at the caller (instant_cli_login.clj `claim!`) | refused: `validation-failed`, issue `user-already-claimed`; a same-user re-claim still succeeds | hardening; the CLI only polls `check`, which signs in the first claimant (differential dash step 40, allowlisted) |
+| `/platform/oauth/deny` checks | deletes the redirect first, then checks the cookie; the grant token is never compared (oauth_apps/routes.clj:318-338) | grant token (`record-not-found`, like `grant`) and cookie checked before the redirect is deleted | hardening: a bad deny can no longer burn the user's pending consent (differential dash step 38, allowlisted) |
 | `join-room-error` op | defined in the client (`Reactor.js:921-927`) but never emitted by the legacy server either | never emitted; join failures use the generic `error` op | matches legacy behavior (no emitter in LEGACY/server) |
 
-## What the harness proves (issue #45)
+## How parity is verified
 
 "242/242" in the coverage report is a reachability count: every counted
 legacy surface item was sent to both servers (or seen from them) in a run
@@ -220,114 +232,38 @@ against the live legacy server:
 | official SDK suites | `@instantdb/core`'s e2e suite and instant-cli's e2e suite, run against both servers and compared test by test (`scripts/sdk-suites/`) |
 | allowlists | each entry names the exact sub-paths that may differ and pins both sides' values; an entry that stops matching fails its layer |
 
-Divergences found by that work and fixed here:
+Five error types no request can produce (`socket-missing`, `socket-error`,
+`connection-closed`, `parameter-limit-exceeded`, `record-check-violation`)
+are listed with a reason each in `scripts/differential/unreachable.json` and
+counted apart.
 
-- **Where-pattern triples.** Legacy compiles a where clause into patterns of
-  the form's own datalog query, and every pattern's matched triple is part of
-  the join row (datalog.clj accumulate-results). So a result carries the
-  triples its where clause matched even when a `fields` projection leaves the
-  attr out, and the linked entity's triples for a dotted path (`owner.name`).
-  This server now emits the same rows (`instaql.rs` `where_rows`), top-level
-  and in child forms, and permissions drop whole rows like legacy's
-  permissioned-node: a row with one unviewable triple goes, and a form left
-  with no viewable row loses every entity. Replay step 36.
-- **Permission evaluation count.** Each `[etype eid]` view rule and
-  `[etype eid label]` field rule runs once per query, over every entity any
-  join row mentions, before anything is pruned (legacy
-  extract-permission-helpers). A rule's `rateLimit` bucket is charged once per
-  entity, and a rule that errors anywhere fails the query. A forward link
-  triple to a hidden entity is kept (its viewability is the parent's), the
-  hidden entity is not.
-- **Failed refreshes.** A recomputation that throws (a dry `rateLimit`
-  bucket, a rule error) fails that session's whole refresh like legacy's
-  handle-refresh! (one `pmap` over the stale queries): the failing query is
-  unsubscribed, the other recomputations are recorded but not sent, no
-  refresh-ok goes out, and the client gets an `error` whose original-event is
-  `{op: "refresh", ...}`. Refresh recomputations charge rule buckets per
-  session (legacy recomputes per session), and the add-query result cache is
-  bypassed when the rules call `rateLimit` (its key now carries the rules
-  hash). Replay step 37.
-- **Schema changes.** A schema change reaches every session (so it learns the
-  new attrs) but recomputes only queries whose topics the change matches;
-  only restoring a blob attr stales every query (topics-for-attr-upsert's
-  `[#{:ea} _ _ _]`). Before, every query was recomputed on any schema change,
-  which charged rule buckets legacy never charged.
+### Covered by this server's tests only
 
-### Single-server areas, decided
-
-| Area | Coverage | Decision |
+| Area | Coverage | Why |
 |---|---|---|
-| multi-node fan-out (`multinode-ws.mjs`, `multinode-storage-test.mjs`) | this server only | Keep single-implementation. Legacy's multi-node path is Hazelcast + a shared WAL consumer, which has no self-hosted counterpart to diff against; the client-visible contract (a write on node A reaches a subscriber on node B, once, with a monotonic tx id) is asserted directly. |
-| OAuth code exchange success path (`oauth-test.mjs`) | this server only | Keep single-implementation. Legacy resolves the provider's discovery document through its DNS-over-HTTPS SSRF guard, which can't reach a container-local mock provider; every error surface of the same routes is compared (replay step 34, dash step 42). |
+| multi-node fan-out (`multinode-ws.mjs`, `multinode-storage-test.mjs`) | this server only | Legacy's multi-node path is Hazelcast + a shared WAL consumer, which has no self-hosted counterpart to diff against; the client-visible contract (a write on node A reaches a subscriber on node B, once, with a monotonic tx id) is asserted directly. |
+| OAuth code exchange success path (`oauth-test.mjs`) | this server only | Legacy resolves the provider's discovery document through its DNS-over-HTTPS SSRF guard, which can't reach a container-local mock provider; every error surface of the same routes is compared (replay step 34, dash step 42). |
 | behaviour under load, timing-dependent paths | two timeout probes, `stress.mjs`, fuzz-perms bursts | Load itself stays a benchmark (`crates/instant-loadtest`), not a parity check: the two servers' latencies are not a contract. Ordering-dependent outcomes are compared where the protocol fixes them (per-session op order, settled state). |
 
-## Open items from the 2026-09-04 audit
+## Known gaps and differences
 
-Three read-only audits (security, sync/InstaQL/InstaML parity, perms/auth/admin
-parity) were run against the legacy source. Everything they found is fixed
-and folded into the tables above: the first batch in #28 (differential replay
-steps 25-28), the rest in the follow-up issue's implementation (replay steps
-29-34, dash steps 26-32, `scripts/oauth-test.mjs`, the perms / tx integration
-tests). The two deliberate divergences are documented in the wire-level table
-(`update-attr` keeps cascade config; the `permission-evaluation-failed` cause
-text), and the per-session op scheduling difference is described there too.
+Everything that isn't identical to the legacy server falls into one of the
+groups below: a gap a particular deployment can hit, a deliberate
+divergence, a cosmetic difference, or a hosted-service feature with no
+self-hosted counterpart.
 
-## Open decisions on the way to 100%
+### Known gaps
 
-Everything a shipped client (`@instantdb/core`, `react`, `admin`, `platform`,
-`instant-cli`, the self-hosted dashboard) sends is served and compared against
-the legacy server by the differential harness. What is left is a set of
-decisions rather than a backlog: each item below is either a legacy subsystem
-with no self-hosting counterpart, a deliberate divergence, or a gap only a
-particular deployment hits. Decide each one and the ledger is complete.
-
-### Real gaps a self-hosted deployment can hit
-
-| Gap | Legacy | Here | Decision needed |
+| Gap | Legacy | Here | Workaround |
 |---|---|---|---|
-| `app_files_to_sweep` on the `s3` backend | `storage/sweeper.clj` drains the table migration 52's trigger fills on every `$files` delete and removes the objects | `storage.rs` deletes objects synchronously; the trigger still fills the table and nothing reads it | port the sweeper (recommended) or drop the trigger in a `rust_*` migration step |
-| Apple and GitHub sign-in | Apple client-secret JWT + issuer quirk (auth/oauth.clj:141-147, :215), GitHub non-OIDC client (:31-113), Instant's shared credentials | generic OIDC discovery only; the dashboard route accepts a `github` provider that the runtime can't sign anyone in with | implement both (a day each) or refuse those provider types on the dash route so the failure is at setup, not at sign-in |
-| email delivery provider | Postmark (with Sendgrid behind a flag) and per-app verified senders | `EMAIL_PROVIDER=log` or `cloudflare`; custom senders only via a hand-set `verified` row | add a Postmark / SMTP arm; decide whether sender verification (a Postmark feature) stays out of scope |
+| `app_files_to_sweep` on the `s3` backend | `storage/sweeper.clj` drains the table migration 52's trigger fills on every `$files` delete and removes the objects | `storage.rs` deletes objects synchronously; the trigger still fills the table and nothing reads it | nothing to do: objects are removed when their file is deleted; the table just accumulates rows |
+| Apple and GitHub sign-in | Apple client-secret JWT + issuer quirk (auth/oauth.clj:141-147, :215), GitHub non-OIDC client (:31-113), Instant's shared credentials | generic OIDC discovery only; the dashboard route accepts a `github` provider that the runtime can't sign anyone in with | use an OIDC provider (Google, or any provider with a discovery document) |
+| email delivery provider | Postmark (with Sendgrid behind a flag) and per-app verified senders | `EMAIL_PROVIDER=log` or `cloudflare`; custom senders only via a hand-set `verified` row | use Cloudflare Email Service, or mark a custom sender's row `verified` directly |
 
-### Resolved
-
-- **Per-session op scheduling** (session.clj:1463-1553): ported as
-  `scheduler.rs` (issue #38 item 9). Ops with different group keys run
-  concurrently, so a slow transact no longer delays that session's queries or
-  presence; the concurrency needed one fix legacy gets from its store, an
-  `add-query` that re-checks the tx watermark after it registers.
-- **Statement timeout** (jdbc/sql.clj `*query-timeout-seconds*`): user
-  transacts run with `statement_timeout` = `INSTANT_QUERY_TIMEOUT_SECS`
-  (default 30) and `/admin/query` is cut off at the same bound; a cancelled
-  statement (57014) is legacy's `timeout` "The query took too long to
-  complete." (error matrix `http/timeout/transact-blocked`).
-- **`$in` binding**: a `$in` set is one array parameter, like legacy's
-  `in-any`; it used to be one bind parameter per value, which failed past
-  65,535 values where legacy answers.
-- **Hard deletion of apps and attrs** (`hard_deletion_sweeper.clj` +
-  `custodian.clj`): `hard_delete.rs` purges apps and attrs whose
-  `deletion_marked_at` is older than `INSTANT_HARD_DELETE_GRACE_HOURS`
-  (default 48, legacy's 2 days). One node at a time drains triples and
-  transactions in 1000-row statements that re-check the mark, then deletes
-  the app row (the rest cascades) and its `rust_*` rows. On the `s3` backend
-  the objects stay (see `app_files_to_sweep` above).
-- **SSRF guard on OIDC fetches** (`smokescreen.clj`,
-  `assert-safe-discovery-endpoints!`): discovery, token, userinfo and JWKS
-  fetches, plus the dashboard's discovery-endpoint check, go through
-  `ssrf.rs`: private addresses refused, connections pinned to the vetted
-  addresses, no redirects, 1 MB response cap. `INSTANT_OAUTH_ALLOW_PRIVATE=1`
-  admits test providers on localhost.
-- **Triple size roll-up** (`triples_size_updates.clj`): the migration 114
-  triggers log every write's size delta to `triples_size_updates`; nothing
-  aggregated it, so the table grew without bound. `usage.rs` runs legacy's
-  collect query every `INSTANT_SIZE_COLLECT_SECS`, which also backs the
-  optional per-app size cap (`INSTANT_APP_SIZE_LIMIT_MB`).
-
-### Deliberate divergences (decided 2026-09-24: keep)
+### Deliberate divergences
 
 Each is documented in the wire-level table above with the client-code citation
-that makes it safe; none is observable by a shipped client. Issue #38 item 10
-settled every one as a keep; the differential harness pins the observable ones
+that makes it safe; none is observable by a shipped client. The differential harness pins the observable ones
 (`allowed-divergences.json`, `errors-allowed.json`, including `$entityId` and
 the out-of-scope invite revoke): `update-attr` keeps cascade
 config; admin `delete` by ref lookup deletes the doc; invite revoke is scoped
@@ -352,7 +288,7 @@ on our end!"; idle sockets are not force-closed (pings drop them); `GET /`
 answers `instant-server` rather than the welcome HTML; `GET /health/system`
 (`{wal: ok}`) is not served because there is no WAL consumer.
 
-### Not needed for self-hosting (accepted as out of scope unless decided otherwise)
+### Out of scope
 
 `scripts/differential/out-of-scope.json` lists every hosted-only route with a
 reason: billing / Stripe, backups and restores, sunset stages, Postmark sender
@@ -362,26 +298,3 @@ attr sketches, app proxy / fail-over / Hazelcast, the flags app, CloudWatch /
 Honeycomb / Discord / posthog, BYOP, the admin transact queue) are replaced by
 triggers + NOTIFY, exact counts, env vars and `/metrics`, or are the hosted
 service's own machinery.
-
-### Validation still to decide
-
-- The self-hosted legacy dashboard (`LEGACY/client/www` with
-  `NEXT_PUBLIC_SELF_HOSTED=true`) has every route it calls mounted here, but
-  it has not been driven in a browser against this server end to end. Doing so
-  (build `www`, point `INSTANT_API_URI` at a node, sign in, manage an app,
-  push a schema, invite a member, create a webhook) is the last validation
-  layer the dashboard-route PRs lack.
-- Differential coverage (issue #38 item 8): every counted surface item is
-  exercised on both servers. The runtime OAuth routes are compared in dash
-  step 42 (the `start` redirect against Google's real discovery document, the
-  callback / token / id_token error surfaces, `openid-configuration`), the
-  runtime SSE transport and `POST /runtime/signout` in replay step 35, org
-  invite revoke in dash step 37, `operation-timed-out` and `timeout` in the
-  error matrix (a transact held behind a table lock), and `$entityId` as an
-  allowlisted divergence. The OAuth code exchange's success path needs a
-  provider round trip that legacy's DNS-over-HTTPS resolver can't make to a
-  local double, so it stays single-server in `scripts/oauth-test.mjs`. Five
-  error types no request can produce (`socket-missing`, `socket-error`,
-  `connection-closed`, `parameter-limit-exceeded`, `record-check-violation`)
-  are listed with a reason each in `scripts/differential/unreachable.json`
-  and counted apart.

@@ -1,5 +1,5 @@
 //! CEL permission rules. Port of LEGACY model/rule.clj + db/cel.clj +
-//! db/permissioned_transaction.clj semantics (see docs/PERMS.md).
+//! db/permissioned_transaction.clj semantics.
 
 use std::collections::{HashMap, HashSet};
 
@@ -559,7 +559,7 @@ fn json_to_cel(v: &Value) -> cel::Value {
 /// `x['k']` and `'k' in x`).
 ///
 /// Legacy's CelMap answers null for any missing key and its `containsKey`
-/// always returns true (docs/PERMS.md §2), while the cel crate errors on
+/// always returns true, while the cel crate errors on
 /// missing keys. Pre-inserting the collected keys as null into the rule-scope
 /// maps (see [`null_safe_augment`]) reproduces the legacy semantics for every
 /// key a rule can reference. Keys computed at runtime (`x[someVar]`) can't be

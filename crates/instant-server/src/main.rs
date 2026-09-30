@@ -216,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
             post(routes::admin::admin_sign_in_guest),
         )
         .route("/admin/rooms/presence", get(routes::admin::presence))
-        // dashboard routes used by instant-cli (docs/ADMIN.md §6)
+        // dashboard routes used by instant-cli
         .route(
             "/dash/apps/{app_id}/schema/pull",
             get(routes::dash::schema_pull),

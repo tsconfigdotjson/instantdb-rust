@@ -1,5 +1,5 @@
 //! `/dash/*` routes used by `instant-cli` (schema pull/push, perms pull/push,
-//! indexing-job polling; docs/ADMIN.md §6). Port of the corresponding
+//! indexing-job polling). Port of the corresponding
 //! handlers in LEGACY dash/routes.clj + model/schema.clj.
 //!
 //! Auth: the CLI sends `Authorization: Bearer <token>`. Legacy accepts

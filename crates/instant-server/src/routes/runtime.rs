@@ -1,4 +1,4 @@
-//! /runtime/auth/* + /runtime/signout endpoints (see docs/AUTH.md).
+//! /runtime/auth/* + /runtime/signout endpoints.
 
 use std::sync::Arc;
 
@@ -17,7 +17,7 @@ use crate::service;
 use crate::state::AppState;
 
 /// Per-app limit shared by the /runtime/auth/* routes (legacy's
-/// with-rate-limiting wrapper, docs/AUTH.md §0).
+/// with-rate-limiting wrapper).
 fn check_auth_limit(state: &AppState, app_id: Uuid) -> Result<()> {
     state
         .limiters
@@ -101,7 +101,7 @@ fn coerce_email(raw: &str) -> Result<String> {
     Ok(email)
 }
 
-/// Full `user` JSON object per docs/AUTH.md §0.
+/// Full `user` JSON object, as legacy returns it.
 pub async fn user_json(
     state: &AppState,
     app_id: Uuid,

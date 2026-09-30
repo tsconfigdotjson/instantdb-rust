@@ -469,7 +469,7 @@ mod tests {
     #[test]
     fn encodes_known_uuids() {
         // Verified against migration 85's hardcoded $files.location-id id and
-        // DATAMODEL.md's table extracted from the legacy encoder.
+        // the ids the legacy encoder produces.
         assert_eq!(
             attr_id("$files", "location-id").to_string(),
             "96653230-13ff-ffff-2a34-b40fffffffff"

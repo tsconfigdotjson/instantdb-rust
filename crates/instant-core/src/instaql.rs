@@ -1,6 +1,6 @@
 //! InstaQL query engine over the triples schema.
 //! Port of LEGACY db/instaql.clj + db/datalog.clj observable behavior
-//! (see docs/QUERY.md). Produces per-entity node trees; the ws layer flattens
+//! Produces per-entity node trees; the ws layer flattens
 //! them to join-rows, the admin layer builds object trees.
 
 use std::collections::{BTreeMap, HashMap, HashSet};

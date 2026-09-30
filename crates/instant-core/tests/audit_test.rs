@@ -1,5 +1,4 @@
-// Coverage for the 2026-09-04 audit follow-ups (docs/PARITY.md "Open items"
-// section lists what is still deferred): lookup / attr / query validation,
+// Coverage for the security and parity audit follow-ups: lookup / attr / query validation,
 // system-entity guards, and rule-evaluation semantics. Each test names the
 // legacy source it mirrors.
 mod common;

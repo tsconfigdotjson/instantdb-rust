@@ -1,4 +1,4 @@
-//! /admin/* HTTP API (see docs/ADMIN.md), wire-compatible with @instantdb/admin.
+//! /admin/* HTTP API, wire-compatible with @instantdb/admin.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -201,8 +201,8 @@ async fn authed_with(
 ) -> Result<AdminCtx> {
     let app_id = app_id_param(headers, params)?;
 
-    // Per-app limit on all /admin/* routes (legacy with-rate-limiting,
-    // docs/ADMIN.md §2). Checked before token auth so a hammering client
+    // Per-app limit on all /admin/* routes (legacy with-rate-limiting).
+    // Checked before token auth so a hammering client
     // can't run a DB lookup per request.
     state
         .limiters

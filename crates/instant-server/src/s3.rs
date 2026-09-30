@@ -300,7 +300,7 @@ pub fn presign_get_url(
 /// Legacy `location-id->bin`: `(mod (Math/abs (.hashCode location-id)) 10)`
 /// with Java's 32-bit wrapping `String.hashCode` and Clojure's floor `mod`.
 /// Keeping this exact means a bucket written by the legacy server is served
-/// as-is (docs/MIGRATION.md §5).
+/// as-is.
 pub fn java_hash_bin(s: &str) -> u32 {
     let mut h: i32 = 0;
     for unit in s.encode_utf16() {
