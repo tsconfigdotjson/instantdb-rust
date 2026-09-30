@@ -1,0 +1,183 @@
+/* The site's fonts, palette tokens and Tailwind (which the mounted
+   components use), then the card's own layout. */
+@import "../src/index.css";
+
+html,
+body {
+  margin: 0;
+  width: 1200px;
+  height: 630px;
+  overflow: hidden;
+  background: var(--color-plum-900);
+}
+
+.card {
+  position: relative;
+  isolation: isolate;
+  width: 1200px;
+  height: 630px;
+  overflow: hidden;
+  background: linear-gradient(180deg, #12051f 0%, #1c0932 24%, #34145c 50%, #5a1d6e 72%, #7a2a68 90%);
+}
+
+/* Static paper grain: the site's .grain, without the jitter. */
+.card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  opacity: 0.09;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 1 0 0 0 0 .85 0 0 0 0 .7 0 0 0 .9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.sky,
+.horizon {
+  position: absolute;
+  inset-inline: 0;
+  z-index: -1;
+}
+.sky {
+  top: 0;
+  height: 440px;
+}
+.sky > svg {
+  width: 100%;
+  height: 100%;
+}
+.horizon {
+  /* Sunk below the frame so the sun clears the copy and the lake shows. */
+  bottom: -90px;
+  height: 330px;
+}
+.horizon > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* Freeze everything the site animates on a loop. */
+.card * {
+  animation: none !important;
+}
+
+.brand {
+  position: absolute;
+  top: 34px;
+  left: 44px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.brand-mark > svg {
+  display: block;
+  width: 50px;
+  height: 36px;
+}
+.brand-name {
+  font-size: 27px;
+  font-weight: 600;
+  color: var(--color-ember-400);
+}
+.brand-rust {
+  display: inline-block;
+  margin-left: 2px;
+  transform: rotate(-6deg);
+  font-family: var(--font-hand);
+  font-size: 33px;
+  font-weight: 700;
+  color: var(--color-ember-300);
+}
+
+.domain {
+  position: absolute;
+  top: 40px;
+  right: 44px;
+  padding: 6px 14px;
+  border: 1.5px solid rgb(255 183 127 / 0.35);
+  border-radius: 999px;
+  background: rgb(18 5 31 / 0.45);
+  font-family: var(--font-mono);
+  font-size: 18px;
+  color: var(--color-peach-200);
+}
+
+.copy {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 88px;
+  text-align: center;
+}
+
+.psst {
+  margin: 0 0 6px;
+  transform: rotate(-3deg);
+  font-family: var(--font-hand);
+  font-size: 34px;
+  font-weight: 500;
+  color: var(--color-ember-300);
+}
+
+.headline {
+  margin: 0;
+  font-size: 116px;
+  line-height: 0.86;
+  font-weight: 500;
+  color: var(--color-ember-400);
+}
+.sunset {
+  color: var(--color-ember-500);
+}
+
+/* "rewritten in Rust!" pencilled in beside the first line, crab and all. */
+.note {
+  position: absolute;
+  top: 150px;
+  left: 836px;
+  transform: rotate(5deg);
+  text-align: left;
+}
+.note p {
+  margin: 0;
+  font-family: var(--font-hand);
+  font-size: 44px;
+  font-weight: 500;
+  line-height: 0.95;
+  color: var(--color-ember-300);
+}
+.note-crab {
+  position: absolute;
+  bottom: 0;
+  left: 100%;
+  margin-left: -10px;
+  width: 78px;
+}
+.note-crab > svg {
+  display: block;
+  width: 100%;
+}
+
+.sub {
+  margin: 26px 0 0;
+  font-size: 27px;
+  white-space: nowrap;
+  line-height: 1.4;
+  color: rgb(255 214 176 / 0.92);
+  text-shadow: 0 2px 18px rgb(18 5 31 / 0.6);
+}
+.sub strong {
+  font-weight: 600;
+  color: var(--color-cream-100);
+}
+.sub code {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgb(45 17 80 / 0.8);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: var(--color-ember-300);
+}

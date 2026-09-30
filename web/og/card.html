@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>InstantDB Rust: Open Graph card</title>
+    <!--
+      The 1200x630 social card. Text and layout are plain HTML and CSS; the
+      hand-drawn pieces (stars, sun, crab, underline) mount into the
+      [data-slot] elements from the site's own components, so the card keeps
+      in step with the page. `npm run og` screenshots it to public/og.jpg.
+    -->
+    <link rel="stylesheet" href="./card.css" />
+    <script type="module" src="./card.tsx"></script>
+  </head>
+  <body>
+    <main class="card">
+      <div class="sky" data-slot="stars"></div>
+      <div class="horizon" data-slot="horizon"></div>
+
+      <header class="brand">
+        <span class="brand-mark" data-slot="logo"></span>
+        <span class="brand-name display">instantdb <span class="brand-rust">rust</span></span>
+      </header>
+      <span class="domain">instantdbrust.com</span>
+
+      <div class="copy">
+        <p class="psst">psst: Instant Cloud shuts down Aug&nbsp;31,&nbsp;2027</p>
+        <h1 class="headline display">
+          Instant,<br />
+          after the <span class="sunset display-italic" data-slot="underline">sunset.</span>
+        </h1>
+        <div class="note">
+          <p>rewritten<br />in <span data-slot="underline-small">Rust!</span></p>
+          <span class="note-crab" data-slot="crab"></span>
+        </div>
+        <p class="sub">
+          Your <code>@instantdb</code> apps, unmodified, on <strong>your own Postgres.</strong>
+        </p>
+      </div>
+    </main>
+  </body>
+</html>
