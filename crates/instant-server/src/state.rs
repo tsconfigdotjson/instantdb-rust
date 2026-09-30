@@ -169,7 +169,7 @@ impl Config {
     }
 }
 
-fn env_nonblank(name: &str) -> Option<String> {
+pub(crate) fn env_nonblank(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|s| s.trim().to_string())

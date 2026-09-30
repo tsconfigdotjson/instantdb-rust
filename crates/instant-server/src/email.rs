@@ -36,8 +36,8 @@ pub struct EmailConfig {
 
 impl EmailConfig {
     pub fn from_env() -> Self {
-        let default_sender_email = std::env::var("INSTANT_APP_EMAIL_SENDER_EMAIL")
-            .unwrap_or_else(|_| "verify@auth-pm.instantdb.com".into());
+        let default_sender_email = crate::state::env_nonblank("INSTANT_APP_EMAIL_SENDER_EMAIL")
+            .unwrap_or_else(|| "verify@auth-pm.instantdb.com".into());
         let provider = match std::env::var("EMAIL_PROVIDER").as_deref() {
             Ok("cloudflare") => {
                 let account_id = std::env::var("CLOUDFLARE_ACCOUNT_ID").unwrap_or_default();

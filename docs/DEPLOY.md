@@ -122,10 +122,15 @@ Caddy issues certificates from its internal CA for `*.localhost`.
    Fill in the domains, `ACME_EMAIL`, `INSTANT_SUPERUSER_EMAIL` and
    `INSTANT_DASHBOARD_ALLOWED_EMAILS`.
 4. **Email.** Magic codes are printed to the server log until you configure
-   an email provider (`EMAIL_PROVIDER=cloudflare`) or dashboard Google login
+   an email provider or dashboard Google login
    (`INSTANT_DASHBOARD_GOOGLE_OAUTH_*`, redirect URI
    `https://$API_DOMAIN/dash/oauth/callback`). The log is fine while signup
-   is `restricted` to you; set one up before opening signups.
+   is `restricted` to you; set one up before opening signups. For Cloudflare:
+   onboard the sender's domain under Email Service → Email Sending, create an
+   account API token with *Email Sending: Edit*, then set
+   `EMAIL_PROVIDER=cloudflare`, `CLOUDFLARE_ACCOUNT_ID`,
+   `CLOUDFLARE_API_TOKEN` and `INSTANT_APP_EMAIL_SENDER_EMAIL` (an address on
+   that domain; the default, `verify@auth-pm.instantdb.com`, won't send).
 
 ### Deploying from GitHub Actions
 
