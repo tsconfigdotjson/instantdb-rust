@@ -208,7 +208,10 @@ function buildScript() {
     else if (q < 0.6) opts.where = { owner: { $isNull: pick([true, false]) } };
     if (chance(0.3)) opts.fields = pick([["p1"], ["tnum", "tstr"], ["p3", "owner"], ["p2"]]);
     if (chance(0.25)) {
-      opts.order = { [pick(["tnum", "tstr", "serverCreatedAt"])]: pick(["asc", "desc"]) };
+      // no serverCreatedAt: a burst creates entities in concurrent
+      // transacts, whose creation order is arbitrary on either server
+      // (fuzz.mjs covers serverCreatedAt pages, one session at a time)
+      opts.order = { [pick(["tnum", "tstr"])]: pick(["asc", "desc"]) };
       opts.limit = 1 + Math.floor(rand() * 4);
     }
     const form = Object.keys(opts).length ? { $: opts } : {};
@@ -402,6 +405,22 @@ async function runOn(serverName, plan) {
     return out;
   };
 
+  // queries each session holds as far as the script knows; legacy's refresh
+  // can re-register a query removed while it recomputes it (query.clj
+  // instaql-query-reactive! -> bump-instaql-version!), and a later
+  // add-query of it then answers add-query-exists. That is a legacy race,
+  // not an outcome: remove the stray query and ask again.
+  const held = Object.fromEntries(SESSIONS.map((s) => [s, new Set()]));
+  let reregistered = 0;
+  const addQuery = async (s, q) => {
+    let r = await queryReply(s, send(s, { op: "add-query", q }), q);
+    if (r.op === "add-query-exists" && serverName === "legacy" && !held[s].has(canon(normalize(q)))) {
+      reregistered++;
+      await removeQuery(s, q);
+      r = await queryReply(s, send(s, { op: "add-query", q }), q);
+    }
+    return r;
+  };
   const outcomes = [];
   for (const [i, op] of plan.script.entries()) {
     // debugging: stop after op STOP_AT, leaving the data as it was then
@@ -410,8 +429,7 @@ async function runOn(serverName, plan) {
       const r = await txReply(op.session, send(op.session, { op: "transact", "tx-steps": op.steps }));
       outcomes.push({ i, kind: op.kind, session: op.session, ...txOutcome(r) });
     } else if (op.kind === "query") {
-      const ceid = send(op.session, { op: "add-query", q: op.q });
-      const r = await queryReply(op.session, ceid, op.q);
+      const r = await addQuery(op.session, op.q);
       if (r.op === "add-query-ok") {
         await removeQuery(op.session, op.q);
       }
@@ -421,13 +439,14 @@ async function runOn(serverName, plan) {
       fold();
       subs[op.session].set(canon(normalize(op.q)), null);
       subQ[op.session].set(canon(normalize(op.q)), op.q);
-      const ceid = send(op.session, { op: "add-query", q: op.q });
-      const r = await queryReply(op.session, ceid, op.q);
+      const r = await addQuery(op.session, op.q);
       if (r.op !== "add-query-ok") subs[op.session].delete(canon(normalize(op.q)));
+      else held[op.session].add(canon(normalize(op.q)));
       outcomes.push({ i, kind: op.kind, session: op.session, ...(r.op === "error" ? errView(r) : { ok: r.op }) });
     } else if (op.kind === "unsubscribe") {
       fold();
       subs[op.session].delete(canon(normalize(op.q)));
+      held[op.session].delete(canon(normalize(op.q)));
       await removeQuery(op.session, op.q);
       outcomes.push({ i, kind: op.kind, session: op.session });
     } else if (op.kind === "burst") {
@@ -444,7 +463,12 @@ async function runOn(serverName, plan) {
       const c1 = send(s, { op: "transact", "tx-steps": op.first });
       const cq = send(s, { op: "add-query", q: op.q });
       const c2 = send(s, { op: "transact", "tx-steps": op.second });
-      const [r1, rq, r2] = await Promise.all([txReply(s, c1), queryReply(s, cq, op.q), txReply(s, c2)]);
+      let [r1, rq, r2] = await Promise.all([txReply(s, c1), queryReply(s, cq, op.q), txReply(s, c2)]);
+      if (rq.op === "add-query-exists" && serverName === "legacy" && !held[s].has(canon(normalize(op.q)))) {
+        reregistered++;
+        await removeQuery(s, op.q);
+        rq = await addQuery(s, op.q);
+      }
       if (!op.subscribe && rq.op === "add-query-ok") {
         // let the second transact's refresh land first: legacy's refresh
         // re-registers a query removed while it recomputes it
@@ -455,6 +479,7 @@ async function runOn(serverName, plan) {
         await removeQuery(s, op.q);
       }
       if (op.subscribe && rq.op !== "add-query-ok") subs[s].delete(canon(normalize(op.q)));
+      if (op.subscribe && rq.op === "add-query-ok") held[s].add(canon(normalize(op.q)));
       // the query's own result depends on where it lands between the two
       // transacts; only its success is compared (the subscription state is
       // compared once settled)
@@ -474,6 +499,7 @@ async function runOn(serverName, plan) {
     }
   }
   for (const c of all) c.close();
+  if (reregistered) console.log(`[${serverName}] re-registered a removed query ${reregistered} times (asked again)`);
   return { outcomes, fresh };
 }
 
