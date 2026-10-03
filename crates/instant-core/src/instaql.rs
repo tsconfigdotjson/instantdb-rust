@@ -1924,8 +1924,21 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
     let where_rows = match &form.opts.where_conds {
         Some(w) if !eids.is_empty() => {
             let mut by_eid = where_rows(conn, &sql_ctx, &form.etype, w, &eids).await?;
+            // a paginated form keeps one where row per entity: legacy's page
+            // cte is a SELECT DISTINCT ON (order-val, order-eid) over the
+            // where ctes (datalog.clj add-page-info), and a top-level `or`
+            // gathers its branches as disjoint rows (or-gather-cte's
+            // FULL JOIN ON 0 = 1), so only the first matching branch's
+            // triples come back
+            let per_entity = if paginated { 1 } else { usize::MAX };
             eids.iter()
-                .flat_map(|e| by_eid.remove(e).unwrap_or_default())
+                .flat_map(|e| {
+                    by_eid
+                        .remove(e)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .take(per_entity)
+                })
                 .collect()
         }
         _ => vec![],

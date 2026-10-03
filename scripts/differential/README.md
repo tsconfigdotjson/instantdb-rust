@@ -106,9 +106,10 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   equality of every query result and error type.
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
   runs twelve seeds at 250 rounds (42, 99 and the nightly's original 1-10);
-  the nightly (`schedule` in ci.yml) runs them at 400 rounds plus a window of
-  40 fresh seeds that moves every day (`FUZZ_SEED_WINDOW`). `run.sh` runs
-  every seed and lists the failing ones at the end.
+  the nightly (`schedule` in ci.yml, or a manual run with the `nightly`
+  input) runs them at 400 rounds plus a window of 40 fresh seeds that moves
+  every day (`FUZZ_SEED_WINDOW`). `run.sh` runs every seed and lists the
+  failing ones at the end.
 - `fuzz-perms.mjs` — the same grammar under **generated permission rules**
   (view / create / update / delete per namespace, a bind, field rules,
   `ruleParams`) driven by four concurrent sessions: a guest, two signed-in
@@ -117,11 +118,16 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   subscription state (what the client computes from its `add-query-ok` /
   `refresh-ok` frames) and the refresh errors it received; bursts of
   transacts from several sessions at once (disjoint entities, so the outcome
-  can't depend on their order) and transact / add-query / transact on one
-  session sent without waiting (the per-session scheduler).
+  can't depend on their order; queries don't order by `serverCreatedAt`,
+  whose order across concurrent transacts is arbitrary) and transact /
+  add-query / transact on one session sent without waiting (the per-session
+  scheduler). Legacy's known slips are told apart from mismatches: a stale
+  result that a fresh legacy session corrects, and `add-query-exists` for a
+  query the session removed (legacy's refresh re-registers it), which is
+  removed and asked again.
   `node fuzz-perms.mjs <app> <app> <token> [seed] [rounds]`; seeds 7-9 at 120
   rounds per PR (`FUZZ_PERMS_SEEDS` / `FUZZ_PERMS_ROUNDS`), 16 seeds at 300
-  nightly.
+  nightly, `FUZZ_PERMS_JOBS` (4 nightly) at a time.
 - `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):
   seeded bursts of unawaited transacts and add-queries of order/limit pages
   (a transact then a subscription to the page it changes, as an infinite

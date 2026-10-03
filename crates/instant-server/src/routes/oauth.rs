@@ -700,7 +700,7 @@ async fn callback_inner(
         .unwrap_or_else(|| default_callback_url(state));
     let user_info = exchange_code(state, &client, code, &redirect_to)
         .await
-        .map_err(&fail)?;
+        .map_err(fail)?;
     if user_info.get("sub").and_then(|v| v.as_str()).is_none() {
         return Err(fail(oauth_err("Missing sub.")));
     }
