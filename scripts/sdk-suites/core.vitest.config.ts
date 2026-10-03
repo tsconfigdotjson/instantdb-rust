@@ -19,13 +19,30 @@ if (!raw || !Number.isInteger(port) || port <= 0 || port > 65535) {
   );
 }
 
+// infiniteQuery.e2e.test.ts races the server on both servers alike: a test
+// transacts again ~35 ms after the first transact, on the strength of the
+// optimistic result, and passes only if the first transact's refresh arrives
+// in between. When that refresh already includes the second write, the
+// infinite query bootstraps at the new first item and the last item lands on
+// a page the test never loads (`[-1, 0, 1, 2]` for `[-1, 0, 1, 2, 3]`). In a
+// local replica it failed 26/260 against this server and 11/100 against
+// legacy, with the same frames. That file alone gets retries; every other
+// file still fails on its first failure.
+const RACY = ['**/infiniteQuery.e2e.test.ts'];
+
 export default defineConfig({
   define: {
     __DEV_LOCAL_PORT__: port,
   },
   test: {
-    name: 'e2e',
-    include: ['**/**.e2e.test.ts'],
+    // `include` stays out of the root: projects that extend it merge arrays
+    projects: [
+      {
+        extends: true,
+        test: { name: 'e2e', include: ['**/**.e2e.test.ts'], exclude: [...RACY, '**/node_modules/**'] },
+      },
+      { extends: true, test: { name: 'e2e-retried', include: RACY, retry: 2 } },
+    ],
     expect: {
       poll: {
         timeout: 10_000,

@@ -3,6 +3,6 @@
     "suite": "core",
     "test": "__tests__/src/infiniteQuery.e2e.test.ts > infinite scroll number line > adding negative numbers",
     "server": "legacy",
-    "reason": "Upstream legacy race, not a parity difference: legacy intermittently leaves the loaded window at [-1, 0, 1, 2] (seen alone in run 36626612399; legacy shares datalog results across sessions and a paginated page can miss an invalidation). Rust hit the same symptom (run 36628245410) through an add-query-ok/refresh-ok ordering race fixed in issue #51, so this entry only excuses legacy failing while rust passes."
+    "reason": "Upstream test race on both servers, not a parity difference: the test transacts -1 about 35 ms after inserting 0..3, on the optimistic result. When the first insert's refresh already includes -1, the infinite query bootstraps at -1 and 3 lands on a page the test never loads ([-1, 0, 1, 2]). A local replica failed 26/260 against rust and 11/100 against legacy with the same frames. core.vitest.config.ts retries this file on both servers; this entry also excuses legacy failing all attempts while rust passes."
   }
 ]
