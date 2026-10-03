@@ -27,6 +27,10 @@ and `run-suite.sh` refuses any URL other than `http://localhost:<port>` /
   vitest's exit status beside it (`.exit`). For `core` it copies
   `core.vitest.config.ts` into the core package for the run (vitest resolves
   the config's imports from its own directory) and removes it afterwards.
+  That config retries `infiniteQuery.e2e.test.ts` up to twice. The file
+  races either server: it transacts again ~35 ms after the first transact,
+  and passes only if the first refresh arrives in between. A local replica
+  failed ~10% of runs on both servers. No other file is retried.
 - `compare.mjs [--dir DIR] [--suites core,cli] [--allowed FILE]` — lists
   every test with its outcome on each server and fails when a report is
   missing or empty, a test's outcome differs between legacy and rust
@@ -34,7 +38,7 @@ and `run-suite.sh` refuses any URL other than `http://localhost:<port>` /
   vitest exited non-zero without a failing test in its report (unhandled
   errors). Module-level errors appear as a `<file> > (file)` row. Writes a
   Markdown table to `$GITHUB_STEP_SUMMARY` when set.
-- `allowed.json` — empty by default. A failure shared with legacy is still a
+- `allowed.json` — explicit exemptions. A failure shared with legacy is still a
   broken SDK path, so exemptions must be explicit:
   `{"suite": "core", "test": "<id exactly as compare.mjs prints it>", "reason": "..."}`.
   Add `"server": "legacy"` to excuse only legacy failing while rust passes

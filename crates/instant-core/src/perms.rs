@@ -1847,6 +1847,9 @@ impl<'a> PermsFilter<'a> {
             for row in &form.where_rows {
                 todo.note(attrs, row);
             }
+            if let Some(pi) = &form.page_info {
+                todo.note(attrs, &pi.rows);
+            }
             for node in &form.entities {
                 note_node(attrs, node, parsed, &mut todo, &mut memo);
             }
@@ -1864,10 +1867,40 @@ impl<'a> PermsFilter<'a> {
                 pi.start_cursor = viewable.first().map(|t| t.to_json());
                 pi.end_cursor = viewable.last().map(|t| t.to_json());
             }
+            // a paginated form's join rows also carry the entity's order
+            // triple (datalog.clj add-page-info joins the page pattern onto
+            // the where ctes), so a field rule on the order attr drops the
+            // row; without a where clause the page rows are the join rows
+            let page_ok: HashMap<Uuid, bool> = form
+                .page_info
+                .iter()
+                .flat_map(|pi| &pi.rows)
+                .map(|t| (t.e, memo.triple_ok(attrs, t)))
+                .collect();
+            let root_ok = |row: &Vec<crate::instaql::TripleOut>| {
+                if page_ok.is_empty() {
+                    return true;
+                }
+                row.iter()
+                    .find_map(|t| {
+                        page_ok.get(&t.e).or_else(|| {
+                            t.v.as_str()
+                                .and_then(|s| Uuid::parse_str(s).ok())
+                                .and_then(|v| page_ok.get(&v))
+                        })
+                    })
+                    .copied()
+                    .unwrap_or(true)
+            };
             let had_where = !form.where_rows.is_empty();
             form.where_rows
-                .retain(|row| row.iter().all(|t| memo.triple_ok(attrs, t)));
-            if had_where && form.where_rows.is_empty() {
+                .retain(|row| row.iter().all(|t| memo.triple_ok(attrs, t)) && root_ok(row));
+            let dropped_all = if had_where {
+                form.where_rows.is_empty()
+            } else {
+                !page_ok.is_empty() && !page_ok.values().any(|ok| *ok)
+            };
+            if dropped_all {
                 // no viewable top-level row: legacy drops the form's child
                 // nodes, i.e. every entity (instaql.clj permissioned-node)
                 form.entities.clear();
@@ -2209,6 +2242,18 @@ pub async fn permissioned_transact_checked(
     global_rule_params: &Value,
     fail_fast: bool,
 ) -> Result<(TxReport, Vec<Value>)> {
+    // legacy coerce-value-uuids runs over every step before any pre-check
+    // (permissioned_transaction.clj:684-687): a bad link value is a
+    // validation-failed even when an attr-scope check would deny the tx
+    for step in &steps {
+        if let TxStep::AddTriple { attr_id, value, .. }
+        | TxStep::DeepMergeTriple { attr_id, value, .. }
+        | TxStep::RetractTriple { attr_id, value, .. } = step
+        {
+            crate::tx::check_ref_value(attrs, attr_id, value)?;
+        }
+    }
+
     // ---- pre-pass: snapshot old entity data + note link targets ----
     let mut old_maps: HashMap<(Uuid, String), Option<Map<String, Value>>> = HashMap::new();
     // the triple steps per (eid, etype), for legacy's approximated
@@ -2537,7 +2582,9 @@ pub async fn permissioned_transact_checked(
         let mut out = vec![];
         let mut seen = HashSet::new();
         for (key, step) in &local_steps {
-            if matches!(step, LocalStep::Dissoc(_))
+            // a ref retract without an unlink rule falls back to an update
+            // check too (pre-checks, the unlink fallback)
+            if (matches!(step, LocalStep::Dissoc(_)) && !ref_retracted.contains(key))
                 || (explicit_ref_touch.contains(key) && !other_touch.contains(key))
                 || !seen.insert(key.clone())
             {
@@ -2562,6 +2609,18 @@ pub async fn permissioned_transact_checked(
                 .flatten()
                 .unwrap_or_else(|| base_entity_map(attrs, &key.1, key.0));
             out.push(("delete", key.clone(), old, None));
+        }
+        // the link / unlink fallback views a target that exists before the
+        // tx as a pre-check; a target the tx brings into being is a post
+        // check (post-create-checks)
+        let mut view_seen = HashSet::new();
+        for key in &link_targets {
+            if !view_seen.insert(key.clone()) || rules.program(&key.1, "view").is_true() {
+                continue;
+            }
+            if let Some(old) = fetch_entity_map(conn, app_id, attrs, &key.1, key.0).await? {
+                out.push(("view", key.clone(), old, None));
+            }
         }
         out
     } else {
@@ -2649,13 +2708,21 @@ pub async fn permissioned_transact_checked(
     // (post-create-checks `create?`, pre-checks `when entity`): an entity
     // the tx deletes and then writes again is updated, not created
     let existed = |key: &(Uuid, String)| matches!(old_maps.get(key), Some(Some(_)));
-    let created: HashSet<(Uuid, String)> = report
-        .created
+    // an add / merge step on an entity without pre-tx data is a create even
+    // when it writes no id triple, e.g. a link step alone
+    // (post-create-checks `create?` is `(nil? entity)`)
+    let mut created_order: Vec<(Uuid, String)> = report.created.clone();
+    for (key, s) in &local_steps {
+        if !matches!(s, LocalStep::Dissoc(_)) && !created_order.contains(key) {
+            created_order.push(key.clone());
+        }
+    }
+    let created: HashSet<(Uuid, String)> = created_order
         .iter()
         .filter(|k| !existed(k))
         .cloned()
         .collect();
-    for (e, et) in &report.created {
+    for (e, et) in &created_order {
         let key = (*e, et.clone());
         if !created.contains(&key) {
             continue;
@@ -2764,9 +2831,18 @@ pub async fn permissioned_transact_checked(
     for check in checks {
         let (action, etype, eid, data, new_data) = match &check {
             Check::Create { etype, eid } => {
-                let new = fetch_entity_map(conn, app_id, attrs, etype, *eid)
-                    .await?
-                    .unwrap_or_else(|| base_entity_map(attrs, etype, *eid));
+                // legacy binds its approximated post-tx entity, the steps
+                // applied locally (update-entities-map), so a create the tx
+                // then deletes still sees what it wrote; an entity created
+                // through a lookup has no local steps and is read back
+                let key = (*eid, etype.clone());
+                let new = if local_steps.iter().any(|(k, _)| *k == key) {
+                    apply_local_steps(&base_entity_map(attrs, etype, *eid), &local_steps, &key)
+                } else {
+                    fetch_entity_map(conn, app_id, attrs, etype, *eid)
+                        .await?
+                        .unwrap_or_else(|| base_entity_map(attrs, etype, *eid))
+                };
                 ("create", etype.clone(), *eid, Value::Object(new), None)
             }
             Check::Update { etype, eid, old } => {

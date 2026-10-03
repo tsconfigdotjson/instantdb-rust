@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      nightly:
+        description: "Run the differential job at nightly depth"
+        type: boolean
+        default: false
   # nightly: the differential fuzz layer with more seeds and longer scripts
   schedule:
     - cron: "17 3 * * *"
@@ -237,7 +242,10 @@ jobs:
   differential:
     name: differential vs legacy server
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # nightly depth (inputs.nightly runs it on demand): 16 perms seeds of
+    # ~2.7 min each, 4 at a time, plus the 40-seed fuzz window; run one
+    # after another they took about 65 minutes, past the old 45-minute cap
+    timeout-minutes: ${{ (github.event_name == 'schedule' || inputs.nightly) && 120 || 45 }}
     services:
       postgres:
         image: postgres:17
@@ -283,11 +291,12 @@ jobs:
           # (a 250-round seed takes ~10s); the nightly adds a fresh window
           # of 40 seeds every day (FUZZ_SEED_WINDOW, see run.sh), deeper.
           FUZZ_SEEDS: "42 99 1 2 3 4 5 6 7 8 9 10"
-          FUZZ_ROUNDS: ${{ github.event_name == 'schedule' && '400' || '250' }}
-          FUZZ_SEED_WINDOW: ${{ github.event_name == 'schedule' && '40' || '0' }}
-          FUZZ_PERMS_SEEDS: ${{ github.event_name == 'schedule' && '7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22' || '7 8 9' }}
-          FUZZ_PERMS_ROUNDS: ${{ github.event_name == 'schedule' && '300' || '120' }}
-          FUZZ_RACE_SEEDS: ${{ github.event_name == 'schedule' && '1 2 3 4 5 6 7 8 9 10' || '1 2 3' }}
+          FUZZ_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '400' || '250' }}
+          FUZZ_SEED_WINDOW: ${{ (github.event_name == 'schedule' || inputs.nightly) && '40' || '0' }}
+          FUZZ_PERMS_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22' || '7 8 9' }}
+          FUZZ_PERMS_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '300' || '120' }}
+          FUZZ_PERMS_JOBS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '4' || '1' }}
+          FUZZ_RACE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '1 2 3 4 5 6 7 8 9 10' || '1 2 3' }}
           RACE_URL: http://localhost:8885
         run: KEEP=1 ./scripts/differential/run.sh
       - name: Server logs
@@ -346,10 +355,13 @@ jobs:
           cache-dependency-path: LEGACY/client/pnpm-lock.yaml
       - name: Apply migrations
         run: ./scripts/apply-migrations.sh
+      # release, like production: the SDK tests race the server's refresh
+      # latency (infiniteQuery.e2e, see core.vitest.config.ts), and a debug
+      # build's ~30 ms refreshes lost that race ~7x as often locally
       - name: Boot rust server
         run: |
-          cargo build -p instant-server
-          PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/rust-server.log 2>&1 &
+          cargo build --release -p instant-server
+          PORT=8888 BASE_URL=http://localhost:8888 ./target/release/instant-server > /tmp/rust-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://localhost:8888/health >/dev/null && exit 0
             sleep 1

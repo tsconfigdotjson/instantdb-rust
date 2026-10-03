@@ -111,15 +111,34 @@ for SEED in $SEEDS; do
   fi
 done
 # permissions + concurrency fuzz: generated rules, four concurrent sessions,
-# subscriptions compared at settled checkpoints (fuzz-perms.mjs)
-for SEED in ${FUZZ_PERMS_SEEDS:-7 8 9}; do
-  PZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
-  PZ_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
-  ./provision.sh "$PZ_APP" "$PZ_TOKEN" > /dev/null
-  if ! node fuzz-perms.mjs "$PZ_APP" "$PZ_APP" "$PZ_TOKEN" "$SEED" "${FUZZ_PERMS_ROUNDS:-120}"; then
+# subscriptions compared at settled checkpoints (fuzz-perms.mjs). A seed is
+# mostly waiting for streams to go quiet, and each runs on its own apps, so
+# FUZZ_PERMS_JOBS seeds run at once; their logs print in seed order.
+PERMS_SEEDS="${FUZZ_PERMS_SEEDS:-7 8 9}"
+PERMS_LOGS=$(mktemp -d)
+perms_seed() {
+  local seed="$1" app token
+  app=$(python3 -c "import uuid; print(uuid.uuid4())")
+  token=$(python3 -c "import uuid; print(uuid.uuid4())")
+  if ./provision.sh "$app" "$token" > /dev/null &&
+    node fuzz-perms.mjs "$app" "$app" "$token" "$seed" "${FUZZ_PERMS_ROUNDS:-120}"; then
+    echo 0 > "$PERMS_LOGS/$seed.rc"
+  else
+    echo 1 > "$PERMS_LOGS/$seed.rc"
+  fi
+}
+for SEED in $PERMS_SEEDS; do
+  perms_seed "$SEED" > "$PERMS_LOGS/$SEED.log" 2>&1 &
+  while [ "$(jobs -rp | wc -l)" -ge "${FUZZ_PERMS_JOBS:-1}" ]; do wait -n || true; done
+done
+wait
+for SEED in $PERMS_SEEDS; do
+  cat "$PERMS_LOGS/$SEED.log"
+  if [ "$(cat "$PERMS_LOGS/$SEED.rc" 2>/dev/null)" != "0" ]; then
     FUZZ_FAILED="$FUZZ_FAILED perms:$SEED"
   fi
 done
+rm -rf "$PERMS_LOGS"
 # subscription race fuzz (issue #51): rust-only invariants for queries
 # registered while transactions are in flight, against a rust server booted
 # with INSTANT_CHAOS_DELAY_MS (RACE_URL; defaults to RUST_URL)
