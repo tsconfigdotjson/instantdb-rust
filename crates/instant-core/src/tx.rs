@@ -185,7 +185,7 @@ fn parse_attr_uuid(v: Option<&Value>) -> Result<Uuid> {
 /// Legacy coerce-value-uuids (permissioned_transaction.clj:111-122): the
 /// value of a ref attr must be a lookup ref or a uuid; anything else fails
 /// with a `Validation failed for eid` error before any deeper processing.
-fn check_ref_value(attrs: &AttrMap, attr_id: &Uuid, value: &Value) -> Result<()> {
+pub(crate) fn check_ref_value(attrs: &AttrMap, attr_id: &Uuid, value: &Value) -> Result<()> {
     let Some(attr) = attrs.get(attr_id) else {
         return Ok(());
     };

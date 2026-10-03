@@ -1140,3 +1140,312 @@ async fn permissions_drop_whole_join_rows() {
     let t1_node = res.forms[0].entities.iter().find(|n| n.eid == t1).unwrap();
     assert_eq!(t1_node.children[0].entities.len(), 1);
 }
+
+/// A paginated form's join rows carry the entity's order triple (datalog.clj
+/// add-page-info), so a field rule on the order attr that fails drops the
+/// row; when no row is left the page is empty, with null cursors and the
+/// unfiltered has-next-page (instaql.clj permissioned-node).
+#[tokio::test]
+async fn field_rule_on_the_order_attr_drops_the_page_row() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let rank = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([["add-attr", {"id": rank, "forward-identity": [Uuid::new_v4(), "todos", "rank"],
+          "value-type": "blob", "cardinality": "one", "unique?": false, "index?": true,
+          "checked-data-type": "number"}]]),
+    )
+    .await
+    .unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"fields": {"rank": "data.title == 'mine'"}}}),
+    )
+    .await;
+    let (a, b, c, d) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", d, ids.todos_id, d],
+            ["add-triple", d, ids.todos_title, "theirs"],
+            ["add-triple", d, rank, 0],
+            ["add-triple", a, ids.todos_id, a],
+            ["add-triple", a, ids.todos_title, "theirs"],
+            ["add-triple", a, rank, 1],
+            ["add-triple", b, ids.todos_id, b],
+            ["add-triple", b, ids.todos_title, "theirs"],
+            ["add-triple", b, rank, 2],
+            ["add-triple", c, ids.todos_id, c],
+            ["add-triple", c, ids.todos_title, "mine"],
+            ["add-triple", c, rank, 3]
+        ]),
+    )
+    .await
+    .unwrap();
+    let auth = AuthCtx::default();
+
+    // the first page holds only entities whose rank is hidden
+    for q in [
+        json!({"todos": {"$": {"order": {"rank": "asc"}, "limit": 2}}}),
+        json!({"todos": {"$": {"where": {"title": "theirs"}, "order": {"rank": "asc"}, "limit": 2}}}),
+    ] {
+        let res = run_filtered(&pool, app, &auth, q.clone()).await;
+        let form = &res.forms[0];
+        assert!(form.entities.is_empty(), "{q}");
+        assert!(form.where_rows.is_empty(), "{q}");
+        let pi = form.page_info.as_ref().unwrap();
+        assert!(pi.start_cursor.is_none() && pi.end_cursor.is_none(), "{q}");
+        assert!(pi.has_next_page, "{q}");
+    }
+
+    // a page with one viewable order triple keeps every entity
+    let res = run_filtered(
+        &pool,
+        app,
+        &auth,
+        json!({"todos": {"$": {"order": {"rank": "desc"}, "limit": 2}}}),
+    )
+    .await;
+    let eids: Vec<Uuid> = res.forms[0].entities.iter().map(|n| n.eid).collect();
+    assert_eq!(eids.len(), 2);
+    assert!(eids.contains(&c) && eids.contains(&b));
+}
+
+/// Legacy coerce-value-uuids runs over every step before the pre-checks
+/// (permissioned_transaction.clj:684-687): a link to a non-uuid is a
+/// validation error even in a tx whose attr steps would be denied.
+#[tokio::test]
+async fn bad_link_value_fails_before_attr_scope_checks() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let t = Uuid::new_v4();
+    for steps in [
+        json!([["update-attr", {"id": Uuid::new_v4(), "index?": true}],
+               ["add-triple", t, ids.todos_owner, "not-a-uuid"]]),
+        json!([
+            ["add-triple", t, ids.todos_owner, "not-a-uuid"],
+            ["delete-attr", Uuid::new_v4()]
+        ]),
+    ] {
+        let err = transact_with_perms(&pool, app, &AuthCtx::default(), steps)
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_type, "validation-failed");
+    }
+    // the attr step alone is still denied
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["delete-attr", Uuid::new_v4()]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+}
+
+/// A paginated top-level `or` keeps one where row per entity, the first
+/// matching branch's (datalog.clj or-gather-cte + add-page-info's
+/// DISTINCT ON); an unpaginated one keeps every branch's rows.
+#[tokio::test]
+async fn paginated_or_keeps_the_first_matching_branch() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let (both, second) = (Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", both, ids.todos_id, both],
+            ["add-triple", both, ids.todos_title, "x"],
+            ["add-triple", both, ids.todos_done, true],
+            ["add-triple", second, ids.todos_id, second],
+            ["add-triple", second, ids.todos_title, "y"],
+            ["add-triple", second, ids.todos_done, true]
+        ]),
+    )
+    .await
+    .unwrap();
+    let auth = AuthCtx::default();
+    let where_ = json!({"or": [{"title": "x"}, {"done": true}]});
+    let rows_of = |res: &instant_core::instaql::QueryResult, e: Uuid| -> Vec<Uuid> {
+        res.forms[0]
+            .where_rows
+            .iter()
+            .flatten()
+            .filter(|t| t.e == e)
+            .map(|t| t.a)
+            .collect()
+    };
+
+    let res = run_filtered(
+        &pool,
+        app,
+        &auth,
+        json!({"todos": {"$": {"where": where_.clone(), "limit": 5}}}),
+    )
+    .await;
+    assert_eq!(rows_of(&res, both), vec![ids.todos_title]);
+    assert_eq!(rows_of(&res, second), vec![ids.todos_done]);
+
+    let res = run_filtered(
+        &pool,
+        app,
+        &auth,
+        json!({"todos": {"$": {"where": where_}}}),
+    )
+    .await;
+    let mut both_rows = rows_of(&res, both);
+    both_rows.sort();
+    let mut want = vec![ids.todos_title, ids.todos_done];
+    want.sort();
+    assert_eq!(both_rows, want);
+}
+
+/// An add step on an entity with no pre-tx data runs the create rule even
+/// when it writes no id triple, e.g. a link step alone
+/// (permissioned_transaction.clj post-create-checks `create?`).
+#[tokio::test]
+async fn a_link_alone_creates_its_entity() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(&pool, app, json!({"todos": {"allow": {"create": "false"}}})).await;
+    let (o, existing, missing) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", o, ids.owners_id, o],
+            ["add-triple", existing, ids.todos_id, existing]
+        ]),
+    )
+    .await
+    .unwrap();
+    let auth = AuthCtx::default();
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &auth,
+        json!([["add-triple", missing, ids.todos_owner, o]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &auth,
+        json!([["add-triple", missing, ids.todos_title, "t"]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+    transact_with_perms(
+        &pool,
+        app,
+        &auth,
+        json!([["add-triple", existing, ids.todos_owner, o]]),
+    )
+    .await
+    .unwrap();
+}
+
+/// The link / unlink fallback's `view` check on a target that exists before
+/// the tx is a pre-check (permissioned_transaction.clj pre-checks): it
+/// fails the tx with permission-denied even when a step would error.
+#[tokio::test]
+async fn unlink_fallback_views_the_target_before_the_steps_run() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(&pool, app, json!({"owners": {"allow": {"view": "false"}}})).await;
+    let (o, t) = (Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", o, ids.owners_id, o],
+            ["add-triple", t, ids.todos_id, t],
+            ["add-triple", t, ids.todos_owner, o]
+        ]),
+    )
+    .await
+    .unwrap();
+    // `mode: create` on an existing entity fails while the steps run
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([
+            ["retract-triple", t, ids.todos_owner, o],
+            ["add-triple", t, ids.todos_id, t, {"mode": "create"}]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+}
+
+/// Create checks bind legacy's locally approximated post-tx entity
+/// (update-entities-map applies the add / merge / retract steps and ignores
+/// delete-entity), so an entity the tx writes and then deletes still shows
+/// the written fields to its create rule.
+#[tokio::test]
+async fn create_check_sees_the_written_fields_of_a_deleted_entity() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"create": "newData.title == 'ok'"}}}),
+    )
+    .await;
+    let auth = AuthCtx::default();
+    let t = Uuid::new_v4();
+    transact_with_perms(
+        &pool,
+        app,
+        &auth,
+        json!([
+            ["add-triple", t, ids.todos_id, t],
+            ["add-triple", t, ids.todos_title, "ok"],
+            ["delete-entity", t, "todos"]
+        ]),
+    )
+    .await
+    .unwrap();
+    let t2 = Uuid::new_v4();
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &auth,
+        json!([
+            ["add-triple", t2, ids.todos_id, t2],
+            ["add-triple", t2, ids.todos_title, "no"],
+            ["delete-entity", t2, "todos"]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "permission-denied");
+}
