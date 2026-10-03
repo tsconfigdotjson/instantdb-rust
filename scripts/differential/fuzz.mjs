@@ -228,6 +228,15 @@ function buildScript() {
   // final full queries on every namespace, both directions of the link
   script.push({ kind: "query", q: { [NS]: { owner: {} } } });
   script.push({ kind: "query", q: { [OWNER]: { items: {} } } });
+  // the attrs a where path reads, by path (pagedOrWhereOnly)
+  script.pathAttrs = {
+    ...Object.fromEntries(Object.entries(attrs.labels).map(([l, id]) => [l, [id]])),
+    tnum: [attrs.typedNum],
+    tstr: [attrs.typedStr],
+    owner: [attrs.owner],
+    "owner.name": [attrs.owner, attrs.ownerName],
+    "owner.id": [attrs.owner, attrs.ownerId],
+  };
   return script;
 }
 
@@ -353,11 +362,41 @@ const legacy = await runOn("legacy", script);
 console.log("running against rust…");
 const rust = await runOn("rust", script);
 
+// A paginated form keeps one where row per entity (legacy's page cte is a
+// DISTINCT ON over its where ctes), and a top-level `or` gathers its
+// branches as disjoint rows. For an entity matching several branches, which
+// branch's row survives is up to legacy's query plan; rust keeps the first.
+// So for those queries the triples only a where row carries (a branch attr
+// the `fields` leave out, a link path's link and target triples) are
+// compared on neither side.
+function pagedOrWhereOnly(q) {
+  const form = q?.fuzz;
+  const $ = form?.$;
+  if (!$?.where?.or || !($.limit || $.first || $.last)) return null;
+  const drop = new Set();
+  for (const branch of $.where.or) {
+    for (const path of Object.keys(branch)) {
+      const ids = script.pathAttrs[path] ?? [];
+      const [head] = path.split(".");
+      ids.forEach((id, k) => {
+        const kept = k === 0 ? !$.fields || $.fields.includes(head) : !!form.owner;
+        if (!kept) drop.add(id);
+      });
+    }
+  }
+  return drop.size ? drop : null;
+}
+const comparable = (entry) => {
+  const drop = entry?.result && pagedOrWhereOnly(entry.q);
+  if (!drop) return entry;
+  return { ...entry, result: { ...entry.result, triples: entry.result.triples.filter(([, a]) => !drop.has(a)) } };
+};
+
 let mismatches = 0;
 const n = Math.max(legacy.queryResults.length, rust.queryResults.length);
 for (let i = 0; i < n; i++) {
   const l = legacy.queryResults[i], r = rust.queryResults[i];
-  if (canon(l) !== canon(r)) {
+  if (canon(comparable(l)) !== canon(comparable(r))) {
     console.error(`query mismatch at slot ${i}:\n  legacy: ${JSON.stringify(l)}\n  rust:   ${JSON.stringify(r)}`);
     mismatches++;
   }

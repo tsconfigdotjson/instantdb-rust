@@ -55,6 +55,8 @@ const SERVERS = {
 const RULES_SETTLE_MS = 1500;
 // a checkpoint waits for the frame stream to go quiet this long
 const CHECKPOINT_QUIET_MS = 900;
+// how long a legacy probe that disagreed with everything waits to ask again
+const LEGACY_RESETTLE_MS = 2000;
 const SESSIONS = ["G", "U1", "U2", "ADM"];
 const EMAILS = { U1: "u1@fuzz.example", U2: "u2@fuzz.example" };
 
@@ -270,7 +272,12 @@ function buildScript() {
   }
   script.push({ kind: "checkpoint" });
   for (const s of SESSIONS) script.push({ kind: "query", session: s, q: { [NS]: { owner: {} } } });
-  return { rules, schema, seedData, script };
+  // the attrs a where path reads, by path (see project below)
+  const pathAttrs = {
+    p1: [attrs.p1], p2: [attrs.p2], p3: [attrs.p3], tnum: [attrs.tnum], tstr: [attrs.tstr],
+    owner: [attrs.owner], "owner.name": [attrs.owner, attrs.ownerName],
+  };
+  return { rules, schema, seedData, script, pathAttrs };
 }
 
 async function mintRefreshToken(url, appId, email) {
@@ -283,6 +290,30 @@ async function mintRefreshToken(url, appId, email) {
   const token = body?.user?.refresh_token;
   if (!token) throw new Error(`no refresh token for ${email}: ${JSON.stringify(body).slice(0, 300)}`);
   return token;
+}
+
+// A paginated form keeps one where row per entity (legacy's page cte is a
+// DISTINCT ON over its where ctes), and a top-level `or` gathers its
+// branches as disjoint rows. For an entity matching several branches, which
+// branch's row survives is up to legacy's query plan; rust keeps the first.
+// So for those queries the triples only a where row carries (a branch attr
+// the `fields` leave out, a link path's link and target triples) are left
+// out of what is compared, on both servers.
+function project(plan, q, result) {
+  const projected = projectAnyResult(result);
+  const form = q?.pz;
+  const $ = form?.$;
+  if (!$?.where?.or || !$.limit || !Array.isArray(projected?.triples)) return projected;
+  const drop = new Set();
+  for (const branch of $.where.or) {
+    for (const path of Object.keys(branch)) {
+      (plan.pathAttrs[path] ?? []).forEach((id, k) => {
+        const kept = k === 0 ? !$.fields || $.fields.includes(path.split(".")[0]) : !!form.owner;
+        if (!kept) drop.add(id);
+      });
+    }
+  }
+  return drop.size ? { ...projected, triples: projected.triples.filter((t) => !drop.has(t[1])) } : projected;
 }
 
 const errView = (m) => ({ type: m.type, status: m.status });
@@ -318,13 +349,16 @@ async function runOn(serverName, plan) {
   // still be handed a cached result; the probe asks an equivalent one that
   // compiles to a different datalog query: every top-level form also
   // requires `id` to be present, which every entity with an id triple
-  // satisfies (the forms without a where scan the id attr anyway)
+  // satisfies (the forms without a where scan the id attr anyway). The id
+  // must also differ from a fresh random uuid: a variant asked at an earlier
+  // checkpoint is itself in legacy's shared cache, and a stale entry there
+  // would be served to the probe too.
   const variant = (q) =>
     Object.fromEntries(
       Object.entries(q).map(([k, form]) => {
         if (k.startsWith("$$")) return [k, form];
         const opts = { ...(form.$ ?? {}) };
-        const idCond = { id: { $isNull: false } };
+        const idCond = { and: [{ id: { $isNull: false } }, { id: { $ne: uuid() } }] };
         opts.where = opts.where ? { and: [opts.where, idCond] } : idCond;
         return [k, { ...form, $: opts }];
       }),
@@ -335,7 +369,7 @@ async function runOn(serverName, plan) {
     try {
       const ceid = c.send({ "client-event-id": uuid(), op: "add-query", q });
       const r = await c.waitFor((m) => ["add-query-ok", "error"].includes(m.op) && m["client-event-id"] === ceid, 20000);
-      return r.op === "add-query-ok" ? projectAnyResult(r.result) : errView(r);
+      return r.op === "add-query-ok" ? project(plan, q0, r.result) : errView(r);
     } finally {
       c.close();
     }
@@ -381,11 +415,11 @@ async function runOn(serverName, plan) {
       for (const m of frames) {
         if (m.op === "add-query-ok") {
           const k = canon(normalize(m.q));
-          if (subs[s].has(k)) subs[s].set(k, projectAnyResult(m.result));
+          if (subs[s].has(k)) subs[s].set(k, project(plan, m.q, m.result));
         } else if (m.op === "refresh-ok") {
           for (const c of m.computations ?? []) {
             const k = canon(normalize(c["instaql-query"]));
-            if (subs[s].has(k)) subs[s].set(k, projectAnyResult(c["instaql-result"]));
+            if (subs[s].has(k)) subs[s].set(k, project(plan, c["instaql-query"], c["instaql-result"]));
           }
         } else if (m.op === "error" && m["original-event"]?.op === "refresh") {
           refreshErrors[s].push(errView(m));
@@ -433,7 +467,7 @@ async function runOn(serverName, plan) {
       if (r.op === "add-query-ok") {
         await removeQuery(op.session, op.q);
       }
-      outcomes.push({ i, kind: op.kind, session: op.session, q: op.q, ...(r.op === "add-query-ok" ? { result: projectAnyResult(r.result) } : r.op === "error" ? errView(r) : { op: r.op }) });
+      outcomes.push({ i, kind: op.kind, session: op.session, q: op.q, ...(r.op === "add-query-ok" ? { result: project(plan, op.q, r.result) } : r.op === "error" ? errView(r) : { op: r.op }) });
       if (r.op === "add-query-ok") fresh[i] = await probe(op.session, op.q);
     } else if (op.kind === "subscribe") {
       fold();
@@ -493,7 +527,18 @@ async function runOn(serverName, plan) {
         fresh[i][s] = {};
         for (const key of Object.keys(state[s].subs)) {
           const q = subQ[s].get(key);
-          if (q) fresh[i][s][key] = await probe(s, q);
+          if (!q) continue;
+          let answer = await probe(s, q);
+          // legacy runs view rules on entity maps from its shared datalog
+          // cache, so right after a write even a new connection can be
+          // answered from stale data. When the probe disagrees with the
+          // session too, legacy is mid-invalidation: ask again once it
+          // settles.
+          if (serverName === "legacy" && canon(answer) !== canon(state[s].subs[key])) {
+            await new Promise((r) => setTimeout(r, LEGACY_RESETTLE_MS));
+            answer = await probe(s, q);
+          }
+          fresh[i][s][key] = answer;
         }
       }
     }

@@ -121,10 +121,18 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   can't depend on their order; queries don't order by `serverCreatedAt`,
   whose order across concurrent transacts is arbitrary) and transact /
   add-query / transact on one session sent without waiting (the per-session
-  scheduler). Legacy's known slips are told apart from mismatches: a stale
-  result that a fresh legacy session corrects, and `add-query-exists` for a
-  query the session removed (legacy's refresh re-registers it), which is
-  removed and asked again.
+  scheduler). Legacy's known slips are told apart from mismatches:
+  - a stale result that a fresh legacy session corrects. Each probe query is
+    unique (an `id $ne <random uuid>` clause), so legacy's shared datalog
+    cache can't answer it. When the probe still disagrees with the session,
+    legacy is asked again 2 s later, because its view rules read cached
+    entity maps right after a write.
+  - `add-query-exists` for a query the session removed (legacy's refresh
+    re-registers it): the query is removed and asked again.
+  For a paginated top-level `or`, the triples only a where row carries are
+  left out of the comparison in both fuzz layers. Legacy keeps one where row
+  per entity (DISTINCT ON), and which branch survives for an entity matching
+  several branches depends on its query plan.
   `node fuzz-perms.mjs <app> <app> <token> [seed] [rounds]`; seeds 7-9 at 120
   rounds per PR (`FUZZ_PERMS_SEEDS` / `FUZZ_PERMS_ROUNDS`), 16 seeds at 300
   nightly, `FUZZ_PERMS_JOBS` (4 nightly) at a time.
