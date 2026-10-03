@@ -355,10 +355,13 @@ jobs:
           cache-dependency-path: LEGACY/client/pnpm-lock.yaml
       - name: Apply migrations
         run: ./scripts/apply-migrations.sh
+      # release, like production: the SDK tests race the server's refresh
+      # latency (infiniteQuery.e2e, see core.vitest.config.ts), and a debug
+      # build's ~30 ms refreshes lost that race ~7x as often locally
       - name: Boot rust server
         run: |
-          cargo build -p instant-server
-          PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/rust-server.log 2>&1 &
+          cargo build --release -p instant-server
+          PORT=8888 BASE_URL=http://localhost:8888 ./target/release/instant-server > /tmp/rust-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://localhost:8888/health >/dev/null && exit 0
             sleep 1

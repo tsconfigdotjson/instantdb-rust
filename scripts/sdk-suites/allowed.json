@@ -3,6 +3,6 @@
     "suite": "core",
     "test": "__tests__/src/infiniteQuery.e2e.test.ts > infinite scroll number line > adding negative numbers",
     "server": "legacy",
-    "reason": "Upstream test race on both servers, not a parity difference: the test transacts -1 about 35 ms after inserting 0..3, on the optimistic result. When the first insert's refresh already includes -1, the infinite query bootstraps at -1 and 3 lands on a page the test never loads ([-1, 0, 1, 2]). A local replica failed 26/260 against rust and 11/100 against legacy with the same frames. core.vitest.config.ts retries this file on both servers; this entry also excuses legacy failing all attempts while rust passes."
+    "reason": "Upstream test race on both servers, not a parity difference: the test transacts -1 about 35 ms after inserting 0..3, on the optimistic result. When the first insert's refresh already includes -1, the infinite query bootstraps at -1 and 3 lands on a page the test never loads ([-1, 0, 1, 2]). A local replica failed 26/260 against rust (debug), 4/200 (release) and 11/100 against legacy, with the same frames. core.vitest.config.ts retries this file on both servers; this entry also excuses legacy failing all attempts while rust passes."
   }
 ]

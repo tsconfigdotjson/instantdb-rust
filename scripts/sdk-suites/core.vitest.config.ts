@@ -25,9 +25,10 @@ if (!raw || !Number.isInteger(port) || port <= 0 || port > 65535) {
 // in between. When that refresh already includes the second write, the
 // infinite query bootstraps at the new first item and the last item lands on
 // a page the test never loads (`[-1, 0, 1, 2]` for `[-1, 0, 1, 2, 3]`). In a
-// local replica it failed 26/260 against this server and 11/100 against
-// legacy, with the same frames. That file alone gets retries; every other
-// file still fails on its first failure.
+// local replica it failed 26/260 against this server's debug build, 4/200
+// against its release build (what CI runs here) and 11/100 against legacy,
+// with the same frames. That file alone gets retries; every other file still
+// fails on its first failure.
 const RACY = ['**/infiniteQuery.e2e.test.ts'];
 
 export default defineConfig({
