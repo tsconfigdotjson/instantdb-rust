@@ -226,8 +226,8 @@ mod tests {
             "198.20.0.0",
             "192.0.1.0",
             "191.255.255.255",
-            // just below 240/4
-            "239.255.255.255",
+            // just below multicast 224/4 (and so below reserved 240/4)
+            "223.255.255.255",
             "::ffff:8.8.8.8",
             // Teredo is 2001:0::/32 only
             "2001:1::1",
