@@ -325,6 +325,10 @@ pub async fn assert_valid_url(url: &str) -> Result<ValidatedUrl> {
         std::env::var("INSTANT_WEBHOOK_ALLOW_INSECURE").as_deref(),
         Ok("1") | Ok("true")
     );
+    validate_url(url, insecure_ok).await
+}
+
+async fn validate_url(url: &str, insecure_ok: bool) -> Result<ValidatedUrl> {
     let parsed = url::Url::parse(url).ok();
     let scheme = parsed.as_ref().map(|u| u.scheme()).unwrap_or("");
     let host = parsed
@@ -1756,5 +1760,124 @@ pub async fn run(state: Arc<AppState>) {
     loop {
         state.webhook_notify.notified().await;
         work(&state).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every URL here is either refused before resolution or is a literal IP,
+    // so none of these tests touch DNS or the network.
+
+    async fn refused(url: &str, insecure_ok: bool) -> String {
+        match validate_url(url, insecure_ok).await {
+            Ok(v) => panic!("{url} was accepted with addrs {:?}", v.addrs),
+            Err(e) => {
+                assert_eq!(e.error_type, "validation-failed", "{url}");
+                assert_eq!(e.status, 400, "{url}");
+                let hint = e.hint.as_ref().expect("hint");
+                assert_eq!(hint["data-type"], "webhook", "{url}");
+                assert_eq!(hint["input"], json!({"url": url}), "{url}");
+                let msg = hint["errors"][0]["message"].as_str().unwrap().to_string();
+                assert_eq!(e.message, format!("Validation failed for webhook: {msg}"));
+                msg
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn requires_https() {
+        for url in [
+            "http://example.com/hook",
+            "http://8.8.8.8/hook",
+            "ftp://8.8.8.8/hook",
+            "file:///etc/passwd",
+            "ws://8.8.8.8/",
+            // unparseable URLs hit the scheme check first, as in legacy
+            "not a url",
+            "",
+            "https://",
+        ] {
+            assert_eq!(
+                refused(url, false).await,
+                "The Webhook url must be https",
+                "{url}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_localhost_by_name() {
+        for url in [
+            "https://localhost/hook",
+            "https://LOCALHOST:8443/hook",
+            "https://127.0.0.1/hook",
+            "https://127.0.0.1:3000/",
+        ] {
+            assert_eq!(
+                refused(url, false).await,
+                "The Webhook url must be a public url, localhost is not allowed.",
+                "{url}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_private_literal_ips() {
+        for url in [
+            "https://127.0.0.2/",
+            "https://10.0.0.1/hook",
+            "https://172.16.0.1/",
+            "https://192.168.1.1:8443/x",
+            "https://169.254.169.254/latest/meta-data",
+            "https://0.0.0.0/",
+            "https://100.64.0.1/",
+            "https://224.0.0.1/",
+            "https://255.255.255.255/",
+            // ranges bad_ip used to let through
+            "https://192.0.0.192/",
+            "https://198.18.0.1/",
+            "https://240.0.0.1/",
+        ] {
+            assert_eq!(refused(url, false).await, "Could not resolve URL.", "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn pins_public_literal_ips() {
+        for (url, host, addr) in [
+            ("https://8.8.8.8/hook", "8.8.8.8", "8.8.8.8:443"),
+            ("https://1.1.1.1:8443/hook", "1.1.1.1", "1.1.1.1:8443"),
+            ("https://172.32.0.1/", "172.32.0.1", "172.32.0.1:443"),
+        ] {
+            let v = validate_url(url, false).await.unwrap();
+            assert_eq!(v.host, host, "{url}");
+            assert_eq!(
+                v.addrs,
+                vec![addr.parse::<std::net::SocketAddr>().unwrap()],
+                "{url}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn insecure_mode_allows_local_receivers_unpinned() {
+        for (url, host) in [
+            ("http://localhost:3000/hook", "localhost"),
+            ("http://127.0.0.1:9999/", "127.0.0.1"),
+            ("https://10.0.0.1/hook", "10.0.0.1"),
+        ] {
+            let v = validate_url(url, true).await.unwrap();
+            assert_eq!(v.host, host, "{url}");
+            assert!(v.addrs.is_empty(), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn insecure_mode_still_rejects_invalid_urls() {
+        for url in ["not a url", "", "ftp://8.8.8.8/", "file:///etc/passwd"] {
+            assert_eq!(refused(url, true).await, "Invalid URL.", "{url}");
+        }
     }
 }
