@@ -132,31 +132,25 @@ Caddy issues certificates from its internal CA for `*.localhost`.
    `CLOUDFLARE_API_TOKEN` and `INSTANT_APP_EMAIL_SENDER_EMAIL` (an address on
    that domain; the default, `verify@auth-pm.instantdb.com`, won't send).
 
-### Deploying from GitHub Actions
+### Building images in GitHub Actions
 
 `.github/workflows/deploy.yml` runs after CI passes on `main`, or by hand
 from the Actions tab. It builds the server and dashboard images for
-`linux/amd64`, pushes them to GHCR as `:<sha>` and `:latest`, builds the site,
-copies `deploy/` and the site to the host, and runs `deploy.sh` with that
-sha. The dashboard is never built on the host, since a Next.js build needs
-more memory than a small box can spare.
+`linux/amd64`, pushes them to GHCR as `:<sha>` and `:latest`, and builds the
+site as a workflow artifact. It no longer rolls a host: copy `deploy/` (and
+the site, if you serve it from Caddy) to the box yourself and run
+`deploy.sh` with the sha you want. The dashboard is never built on the host,
+since a Next.js build needs more memory than a small box can spare.
 
-To use it from a fork, create a `production` environment under
-Settings → Environments with:
-
-- variables `VPS_HOST` (IP or hostname) and `API_DOMAIN`
-- secrets `VPS_SSH_KEY` (the contents of `instant-deploy`) and
-  `VPS_KNOWN_HOSTS` (`ssh-keyscan <host>` output)
-
-To roll back, re-run the workflow on an older commit, or on the box run
-`IMAGE_TAG=<old sha> /opt/instant/deploy.sh`. That rolls the images; the site
-only changes on a workflow run. If your GHCR packages are private, the host
-needs a token with `read:packages` to pull by hand:
+If your GHCR packages are private, the host needs a token with
+`read:packages` to pull:
 
 ```sh
 echo <token> | docker login ghcr.io -u <github user> --password-stdin
 IMAGE_TAG=<sha> /opt/instant/deploy.sh
 ```
+
+To roll back, run the same with an older sha.
 
 ### Operating
 
