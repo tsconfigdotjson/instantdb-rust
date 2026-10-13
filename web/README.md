@@ -11,8 +11,9 @@ npm run dev        # http://localhost:5173
 npm run build      # static site in dist/
 ```
 
-`VITE_DASH_URL` overrides where "Try the demo" points (defaults to the public
-demo dashboard). Append `?still` to any URL to render every animation at its end
+The hosted demo is retired: "Try the demo" and the other dashboard links go to
+`/dashboard/`, a second static page (`dashboard/index.html`, copy and the
+self-hosting prompt in `src/sunset.ts`). Append `?still` to any URL to render every animation at its end
 state, for screenshots.
 
 The parity number is not typed in by hand: `src/sections/Parity.tsx` imports

@@ -55,7 +55,11 @@ export function Footer() {
             <ul className="mt-4 space-y-3">
               {c.links.map((l) => (
                 <li key={l.label}>
-                  <a href={l.href} target="_blank" rel="noopener" className="text-peach-200/75 transition-colors hover:text-ember-300">
+                  <a
+                    href={l.href}
+                    {...(l.href.startsWith("http") ? { target: "_blank", rel: "noopener" } : {})}
+                    className="text-peach-200/75 transition-colors hover:text-ember-300"
+                  >
                     {l.label}
                   </a>
                 </li>
