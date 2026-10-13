@@ -52,11 +52,9 @@ export function Nav() {
           </a>
           <a
             href={DASH_URL}
-            target="_blank"
-            rel="noopener"
             className="rounded-[12px_9px_13px_8px] bg-ember-500 px-4 py-2 text-[15px] font-semibold text-plum-950 transition-all hover:-translate-y-0.5 hover:bg-ember-400"
           >
-            Try the demo
+            Self-host
           </a>
         </div>
       </nav>

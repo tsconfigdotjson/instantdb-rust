@@ -1,7 +1,6 @@
-// Links the site points at. The demo dashboard's origin can be overridden at
-// build time (VITE_DASH_URL), e.g. for a staging stack.
-export const DASH_URL: string =
-  import.meta.env.VITE_DASH_URL ?? "https://dash.instantdbrust.com/dash";
+// Links the site points at. The hosted demo dashboard is retired; its links
+// land on a static page in this site (dashboard/index.html) instead.
+export const DASH_URL = "/dashboard/";
 
 export const GITHUB_URL = "https://github.com/tsconfigdotjson/instantdb-rust";
 

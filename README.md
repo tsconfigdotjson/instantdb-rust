@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://instantdbrust.com"><b>Website</b></a> ·
-  <a href="https://dash.instantdbrust.com/dash">Demo dashboard</a> ·
+  <a href="#quick-start">Self-host</a> ·
   <a href="docs/PARITY.md">Parity</a> ·
   <a href="docs/PERF.md">Performance</a>
 </p>

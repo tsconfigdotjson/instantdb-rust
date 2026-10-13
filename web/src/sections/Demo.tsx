@@ -7,12 +7,12 @@ import { HandButton } from "../components/doodles";
 import { DASH_URL } from "../config";
 
 const notes = [
-  { big: "3", small: "apps per account", rotate: -4, tape: 8 },
-  { big: "10 MB", small: "per app", rotate: 3, tape: -6 },
-  { big: "$0", small: "every paid feature switched on", rotate: -2, tape: 4 },
+  { big: "1", small: "stateless binary", rotate: -4, tape: 8 },
+  { big: "16–18", small: "any stock Postgres", rotate: 3, tape: -6 },
+  { big: "MIT", small: "every feature, no account", rotate: -2, tape: 4 },
 ];
 
-/** The closing act: the sun comes back up over the demo server. */
+/** The closing act: the sun comes back up, over a server you run yourself. */
 export function Demo() {
   const ref = useRef<HTMLElement>(null);
   const { scrollYProgress } = useScroll({ target: ref, offset: ["start end", "end end"] });
@@ -32,10 +32,14 @@ export function Demo() {
       <Stars opacity={stars} seed={21} count={24} className="absolute inset-x-0 top-0 -z-10 h-[60%] w-full" />
 
       <div className="mx-auto w-full max-w-5xl px-4 pt-28 pb-16 text-center sm:px-8 sm:pt-36 sm:pb-20">
-        <Heading kicker="good morning" title="Kick the tires on the" accent="demo server." center />
+        <Heading kicker="good morning" title="Run it on your" accent="own machine." center />
         <p className="mx-auto mt-8 max-w-2xl text-lg leading-relaxed text-peach-200/90 sm:text-xl">
-          We run a public InstantDB Rust server so you can try it before moving anything real. Sign in to the
-          dashboard, create an app, and point a client at it.
+          Clone the repo, run{" "}
+          <code className="rounded bg-plum-800/70 px-1.5 py-0.5 font-mono text-[0.85em] text-ember-300">
+            docker compose up
+          </code>
+          , and point a client at it. That's the whole setup, and there's a ready-made prompt if you'd rather your
+          coding agent did it.
         </p>
 
         <div className="mt-14 flex flex-wrap items-start justify-center gap-x-4 gap-y-6 sm:gap-10">
@@ -61,10 +65,10 @@ export function Demo() {
 
         <div className="mt-14 flex flex-col items-center gap-5">
           <HandButton href={DASH_URL} delay={0.6}>
-            Open the demo dashboard
+            Get the self-hosting prompt
           </HandButton>
           <p className="max-w-md text-sm text-peach-200/65">
-            It's a sandbox: no SLA, and data can be wiped. Self-host anything you care about.
+            We used to run a hosted demo here. It's shut down, but the server is the same one you can run.
           </p>
         </div>
       </div>
