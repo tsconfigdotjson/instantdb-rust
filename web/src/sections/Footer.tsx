@@ -10,7 +10,7 @@ const columns = [
       { label: "Source on GitHub", href: GITHUB_URL },
       { label: "Parity status", href: doc("docs/PARITY.md") },
       { label: "Performance notes", href: doc("docs/PERF.md") },
-      { label: "Demo dashboard", href: DASH_URL },
+      { label: "Self-hosting prompt", href: DASH_URL },
     ],
   },
   {

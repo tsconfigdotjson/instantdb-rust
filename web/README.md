@@ -11,7 +11,7 @@ npm run dev        # http://localhost:5173
 npm run build      # static site in dist/
 ```
 
-The hosted demo is retired: "Try the demo" and the other dashboard links go to
+The hosted demo is retired: the "Self-host" buttons and the other old demo links go to
 `/dashboard/`, a second static page (`dashboard/index.html`, copy and the
 self-hosting prompt in `src/sunset.ts`). Append `?still` to any URL to render every animation at its end
 state, for screenshots.

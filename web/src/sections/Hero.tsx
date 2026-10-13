@@ -108,7 +108,7 @@ export function Hero() {
           className="mt-10 flex flex-col items-center gap-5 sm:flex-row sm:gap-7"
         >
           <HandButton href={DASH_URL} delay={1.5}>
-            Try the demo server
+            Self-host it
           </HandButton>
           <HandButton href={GITHUB_URL} variant="ghost" delay={1.7}>
             Read the source
