@@ -15,6 +15,22 @@ import { noteHttp, noteCel, noteWsFrame, noteWsMessage } from "./coverage-hook.m
 
 export const uuid = () => crypto.randomUUID();
 
+// Named harness exception for the rust-only contention checks (tx-conflicts,
+// fuzz-race), which otherwise fail on any 5xx transact reply. A transact that
+// waits on row locks past the 5s handle-receive timeout gets a 500
+// operation-timed-out from both servers: legacy session.clj:58
+// handle-receive-timeout-ms and :1160-1178 (it cancels the in-progress
+// statements and answers with the 500), rust ws.rs handle_receive_timeout_ms.
+// That is legacy behavior, not a bug, so these checks count and report it
+// but don't fail on it. Only that exact reply matches: a deadlock /
+// sql-exception, an internal-error or any other 5xx still fails.
+export const HANDLER_TIMEOUT_EXCEPTION = "handler-timeout";
+export const isHandlerTimeout = (reply) =>
+  reply?.op === "error" &&
+  reply.status === 500 &&
+  reply.type === "operation-timed-out" &&
+  reply.message === "Operation timed out: handle-receive";
+
 // Deterministic uuids so both servers receive byte-identical client input.
 // Derived from the app id (attr ids are globally unique in the legacy schema,
 // so ids must be fresh per provisioned app) — but identical between the two

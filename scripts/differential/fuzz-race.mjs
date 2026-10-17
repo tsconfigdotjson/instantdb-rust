@@ -21,7 +21,7 @@
 // Usage: node fuzz-race.mjs <app-id> <admin-token> [seed] [rounds]
 // Env: RACE_URL (default RUST_URL, then http://localhost:8888)
 
-import { canon, connect, makeIdFactory, projectResult, settle, uuid } from "./lib.mjs";
+import { canon, connect, HANDLER_TIMEOUT_EXCEPTION, isHandlerTimeout, makeIdFactory, projectResult, settle, uuid } from "./lib.mjs";
 
 const appId = process.argv[2];
 const adminToken = process.argv[3];
@@ -146,6 +146,7 @@ let checks = 0;
 // "status type: message" -> count, printed at the end
 const txErrors = new Map();
 let serverTxErrors = 0;
+let handlerTimeouts = 0;
 
 for (let round = 0; round < rounds; round++) {
   const pending = [];
@@ -190,10 +191,13 @@ for (let round = 0; round < rounds; round++) {
   for (const r of replies) {
     // this layer checks subscriptions, not transacts: a failed tx (one that
     // raced a delete of its entity, say) only changes less data. A 5xx (a
-    // deadlock between two txs, issue #53) is a server bug all the same.
+    // deadlock between two txs, issue #53) is a server bug all the same,
+    // except the named handler-timeout exception (lib.mjs), which is
+    // counted and reported.
     if (r.op === "error" && r["original-event"]?.op === "transact") {
       txErrors.set(`${r.status} ${r.type}: ${r.message}`, (txErrors.get(`${r.status} ${r.type}: ${r.message}`) ?? 0) + 1);
-      if (!(r.status < 500)) serverTxErrors++;
+      if (isHandlerTimeout(r)) handlerTimeouts++;
+      else if (!(r.status < 500)) serverTxErrors++;
     } else if (r.op === "error") {
       throw new Error(`round ${round}: unexpected error ${JSON.stringify(r).slice(0, 400)}`);
     }
@@ -255,6 +259,9 @@ for (const f of failures) {
       console.error(`  page-info held ${JSON.stringify(f.got["page-info"])} fresh ${JSON.stringify(f.want["page-info"])}`);
     }
   }
+}
+if (handlerTimeouts) {
+  console.log(`exception ${HANDLER_TIMEOUT_EXCEPTION}: ${handlerTimeouts} transact(s) got 500 operation-timed-out (legacy's 5s handle-receive timeout; reported, not failed)`);
 }
 if (serverTxErrors) console.error(`${serverTxErrors} transact(s) got a 5xx`);
 if (failures.length || serverTxErrors) {
