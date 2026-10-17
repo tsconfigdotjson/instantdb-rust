@@ -1,9 +1,9 @@
 # Official SDK suites vs legacy + rust
 
-The `sdk-suites` CI job runs the vendored Instant SDKs' own
+The `sdk-suites` CI jobs run the vendored Instant SDKs' own
 runtime test suites, unchanged, against **both** the legacy server (the
 official self-hosting images from `scripts/differential/docker-compose.yml`,
-host :8891) and this repo's rust server (:8888), then compares the outcomes
+host :8891) and this repo's rust server (:8888), then compare the outcomes
 test by test.
 
 | suite | tests | pointed at a server via |
@@ -44,9 +44,12 @@ and `run-suite.sh` refuses any URL other than `http://localhost:<port>` /
   Add `"server": "legacy"` to excuse only legacy failing while rust passes
   (an upstream legacy race rust must not share); rust failing still fails.
 
-In CI each suite run is `continue-on-error` so all four runs happen; the
-comparator step decides, and the reports are uploaded as the
-`sdk-suite-reports` artifact.
+In CI the `sdk-suites` matrix runs one leg per server side by side (the
+legacy leg skips the rust build, the rust leg the legacy stack). Each suite
+run is `continue-on-error` so both runs happen, and each leg uploads its
+reports as `sdk-suite-reports-<server>`. `sdk-suites-compare` downloads them,
+runs `compare.mjs`, and uploads the merged set as `sdk-suite-reports`; it runs
+even when a leg failed, so a leg that wrote no reports fails the comparison.
 
 ## Running locally
 
