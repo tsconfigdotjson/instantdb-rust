@@ -265,13 +265,13 @@ jobs:
             layers: dash storage errors
             shard: 1/1
           - leg: seeds-1
-            layers: fuzz perms race
+            layers: fuzz perms race conflicts
             shard: 1/3
           - leg: seeds-2
-            layers: fuzz perms race
+            layers: fuzz perms race conflicts
             shard: 2/3
           - leg: seeds-3
-            layers: fuzz perms race
+            layers: fuzz perms race conflicts
             shard: 3/3
     services:
       postgres:

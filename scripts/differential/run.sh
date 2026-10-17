@@ -128,10 +128,14 @@ layer stress node stress.mjs "$STRESS_APP" "$STRESS_APP" "$STRESS_TOKEN" "${STRE
 echo "== concurrent transact conflicts =="
 # rust-only (issue #53): overlapping concurrent transacts never get a 5xx
 for SEED in ${TX_CONFLICT_SEEDS:-1 2 3}; do
+  want "conflicts:$SEED" || continue
   TC_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
   TC_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
   ./provision.sh "$TC_APP" "$TC_TOKEN" > /dev/null
-  layer "conflicts:$SEED" node tx-conflicts.mjs "$TC_APP" "$TC_TOKEN" "$SEED" "${TX_CONFLICT_TXS:-60}"
+  if ! node tx-conflicts.mjs "$TC_APP" "$TC_TOKEN" "$SEED" "${TX_CONFLICT_TXS:-60}"; then
+    FAILED_LAYERS="$FAILED_LAYERS conflicts:$SEED"
+    echo "LAYER FAILED: conflicts:$SEED"
+  fi
 done
 
 echo "== fuzz layer =="
