@@ -13,6 +13,27 @@ KEEP=1 ./run.sh   # keep the legacy stack running afterwards
 Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
 `RUST_URL` (default `http://localhost:8888`) against `RUST_DATABASE_URL`.
 
+### Parallel legs in CI
+
+CI's `differential` job runs `run.sh` as a five-leg matrix. Each leg boots its
+own legacy stack and rust servers and runs part of the harness:
+
+```
+LAYERS="schema replay stress" ./run.sh   # only these layers
+LAYERS="fuzz perms race" SHARD=2/3 ./run.sh   # every 3rd seed of each, from the 2nd
+```
+
+A seeded layer makes one run per seed (`fuzz:42`, `perms:7`, `race:1`, …) and
+an unseeded layer makes one run, which lands in shard 1. With `RUNS_DIR` set,
+a leg lists every run of the full harness in `$RUNS_DIR/planned` and the runs
+it made in `$RUNS_DIR/ran`. A partial run (`LAYERS` or `SHARD` set) skips the
+coverage check. `differential-merge` (check name `differential vs legacy
+server`) then runs `legs.sh inventory`, which fails unless every planned run
+was made by exactly one leg. That catches a new layer that no leg lists. When
+every leg passed, `legs.sh coverage` runs `coverage.mjs --check` on the union
+of the legs' coverage records. Without `LAYERS` and `SHARD`, `run.sh` runs
+everything and checks coverage itself, as before.
+
 ## Pieces
 
 - `docker-compose.yml` — legacy postgres (host :8890), minio (host :9000,
