@@ -405,25 +405,37 @@ jobs:
           docker compose -f scripts/differential/docker-compose.yml logs legacy-server | tail -200
           exit 1
 
-      # Each run writes $SDK_REPORT_DIR/<suite>-<server>.json; a failing run
-      # must not stop the others — compare.mjs decides (and fails on a
-      # missing report).
-      - name: "core e2e vs legacy"
+      # All four runs at once (the job's cost is the release build above, so
+      # a matrix would only repeat it). Each run writes
+      # $SDK_REPORT_DIR/<suite>-<server>.json and its log beside it; a failing
+      # run must not stop the others — compare.mjs decides (and fails on a
+      # missing report). run-suite.sh isolates concurrent runs; core's two runs
+      # get separate browser server ports.
+      - name: "core + instant-cli e2e vs legacy + rust (concurrent)"
         continue-on-error: true
-        timeout-minutes: 10
-        run: ./scripts/sdk-suites/run-suite.sh core legacy "$LEGACY_URL"
-      - name: "core e2e vs rust"
-        continue-on-error: true
-        timeout-minutes: 10
-        run: ./scripts/sdk-suites/run-suite.sh core rust "$RUST_URL"
-      - name: "instant-cli e2e vs legacy"
-        continue-on-error: true
-        timeout-minutes: 10
-        run: ./scripts/sdk-suites/run-suite.sh cli legacy "$LEGACY_URL"
-      - name: "instant-cli e2e vs rust"
-        continue-on-error: true
-        timeout-minutes: 10
-        run: ./scripts/sdk-suites/run-suite.sh cli rust "$RUST_URL"
+        timeout-minutes: 12
+        run: |
+          mkdir -p "$SDK_REPORT_DIR"
+          declare -A pids
+          start() { # <suite> <server> <url> [browser port]
+            # timeout signals the run's whole process group, like a step timeout
+            SDK_BROWSER_PORT="${4:-}" timeout --kill-after=15 600 \
+              ./scripts/sdk-suites/run-suite.sh "$1" "$2" "$3" > "$SDK_REPORT_DIR/$1-$2.log" 2>&1 &
+            pids["$1-$2"]=$!
+          }
+          start core legacy "$LEGACY_URL" 63315
+          start core rust "$RUST_URL" 63325
+          start cli legacy "$LEGACY_URL"
+          start cli rust "$RUST_URL"
+          failed=0
+          for run in core-legacy core-rust cli-legacy cli-rust; do
+            status=0; wait "${pids[$run]}" || status=$?
+            echo "::group::$run (exit $status)"
+            cat "$SDK_REPORT_DIR/$run.log"
+            echo "::endgroup::"
+            [ "$status" -eq 0 ] || { echo "::warning::$run exited $status"; failed=1; }
+          done
+          exit "$failed"
       - name: Compare outcomes (legacy vs rust)
         run: node scripts/sdk-suites/compare.mjs --dir "$SDK_REPORT_DIR"
       - name: Upload suite reports

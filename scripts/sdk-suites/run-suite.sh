@@ -11,8 +11,12 @@
 #   cli  — LEGACY/client/packages/cli/__tests__/e2e (instant-cli's e2e project)
 #
 # Exits with vitest's status; CI runs this with continue-on-error and lets
-# compare.mjs decide. Assumes the SDK workspace is installed and built
-# (pnpm install/build under LEGACY/client) and, for core, playwright chromium.
+# compare.mjs decide. Runs may go concurrently (CI runs all four at once):
+# each gets its own TMPDIR (instant-cli's e2e sandboxes HOME at a fixed path
+# under os.tmpdir()) and, for core, its own config copy; core's browser server
+# ports come from SDK_BROWSER_PORT (core.vitest.config.ts). Assumes the SDK
+# workspace is installed and built (pnpm install/build under LEGACY/client)
+# and, for core, playwright chromium.
 set -uo pipefail
 
 SUITE="${1:?usage: run-suite.sh <core|cli> <server-label> <base-url>}"
@@ -37,18 +41,23 @@ if ! [[ "$URL" =~ ^http://(localhost|127\.0\.0\.1):([0-9]+)$ ]]; then
 fi
 PORT="${BASH_REMATCH[2]}"
 
+RUN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/sdk-suite-$SUITE-$SERVER.XXXXXX")"
+trap 'rm -rf "$RUN_TMP"' EXIT
+export TMPDIR="$RUN_TMP"
+
 echo "== $SUITE suite vs $SERVER ($URL) -> $REPORT =="
 case "$SUITE" in
   core)
     PKG="$ROOT/LEGACY/client/packages/core"
     # vitest resolves the config's imports from the config's own directory
-    cp "$HERE/core.vitest.config.ts" "$PKG/vitest.sdk-suites.config.ts"
+    CONFIG="vitest.sdk-suites-$SERVER.config.ts"
+    cp "$HERE/core.vitest.config.ts" "$PKG/$CONFIG"
     cd "$PKG"
     SDK_SERVER_PORT="$PORT" pnpm exec vitest run \
-      --config vitest.sdk-suites.config.ts \
+      --config "$CONFIG" \
       --reporter=default --reporter=json --outputFile.json="$REPORT"
     status=$?
-    rm -f "$PKG/vitest.sdk-suites.config.ts"
+    rm -f "$PKG/$CONFIG"
     ;;
   cli)
     cd "$ROOT/LEGACY/client/packages/cli"

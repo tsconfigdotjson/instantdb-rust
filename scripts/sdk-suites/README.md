@@ -44,9 +44,14 @@ and `run-suite.sh` refuses any URL other than `http://localhost:<port>` /
   Add `"server": "legacy"` to excuse only legacy failing while rust passes
   (an upstream legacy race rust must not share); rust failing still fails.
 
-In CI each suite run is `continue-on-error` so all four runs happen; the
-comparator step decides, and the reports are uploaded as the
-`sdk-suite-reports` artifact.
+In CI the four runs go concurrently in one `continue-on-error` step, each
+writing its log to `$SDK_REPORT_DIR/<suite>-<server>.log` (printed in a group
+once it finishes); the comparator step decides, and the reports and logs are
+uploaded as the `sdk-suite-reports` artifact. Concurrent runs are isolated:
+each gets its own `TMPDIR` (instant-cli's e2e sandboxes `HOME` at a fixed path
+under `os.tmpdir()`), core's runs get their own config copy and vite cache,
+and CI pins each core run's browser servers with `SDK_BROWSER_PORT` (that port
+and the next, `strictPort`).
 
 ## Running locally
 
