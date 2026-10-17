@@ -7,11 +7,6 @@
 // The upstream config sets __DEV_LOCAL_PORT__ to 0 whenever CI is set, and
 // __tests__/src/utils/e2e.ts then falls back to https://api.instantdb.com.
 // This config never does that: a missing or invalid port is a hard error.
-//
-// CI runs this suite against both servers at once, from the same package
-// directory: each run gets its own vite cache (keyed by the server port), and
-// SDK_BROWSER_PORT, when set, pins the two projects' browser servers to it and
-// the port after it (strictPort, so a collision fails instead of drifting).
 import { playwright } from '@vitest/browser-playwright';
 import { defineConfig } from 'vitest/config';
 
@@ -36,16 +31,7 @@ if (!raw || !Number.isInteger(port) || port <= 0 || port > 65535) {
 // fails on its first failure.
 const RACY = ['**/infiniteQuery.e2e.test.ts'];
 
-const rawBrowserPort = process.env.SDK_BROWSER_PORT;
-const browserPort = Number(rawBrowserPort);
-if (rawBrowserPort && (!Number.isInteger(browserPort) || browserPort <= 0 || browserPort > 65534)) {
-  throw new Error(`SDK_BROWSER_PORT must be a port number (got ${JSON.stringify(rawBrowserPort)})`);
-}
-const browserApi = (offset: number) =>
-  rawBrowserPort ? { browser: { api: { port: browserPort + offset, strictPort: true } } } : {};
-
 export default defineConfig({
-  cacheDir: `node_modules/.vite/sdk-suites-${port}`,
   define: {
     __DEV_LOCAL_PORT__: port,
   },
@@ -54,14 +40,9 @@ export default defineConfig({
     projects: [
       {
         extends: true,
-        test: {
-          name: 'e2e',
-          include: ['**/**.e2e.test.ts'],
-          exclude: [...RACY, '**/node_modules/**'],
-          ...browserApi(0),
-        },
+        test: { name: 'e2e', include: ['**/**.e2e.test.ts'], exclude: [...RACY, '**/node_modules/**'] },
       },
-      { extends: true, test: { name: 'e2e-retried', include: RACY, retry: 2, ...browserApi(1) } },
+      { extends: true, test: { name: 'e2e-retried', include: RACY, retry: 2 } },
     ],
     expect: {
       poll: {

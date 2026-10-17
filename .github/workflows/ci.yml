@@ -313,13 +313,23 @@ jobs:
   # both servers and no test to fail on both (scripts/sdk-suites/README.md).
   # @instantdb/react and @instantdb/admin ship no runtime suites; platform's
   # and mcp's e2e tests are hardwired to production and are not run.
+  #
+  # One leg per server, side by side: the legacy leg needs no rust build and
+  # the rust leg no legacy stack, and the suites are CPU-bound, so running them
+  # concurrently on one runner only slows each down. sdk-suites-compare joins
+  # the legs' reports.
   sdk-suites:
-    name: official SDK suites vs legacy + rust
+    name: SDK suites vs ${{ matrix.server }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        server: [legacy, rust]
     services:
       postgres:
-        image: postgres:17
+        # the rust server's database; the legacy stack brings its own
+        image: ${{ matrix.server == 'rust' && 'postgres:17' || '' }}
         env:
           POSTGRES_USER: instant
           POSTGRES_PASSWORD: instant
@@ -333,16 +343,18 @@ jobs:
           --health-retries 20
     env:
       DATABASE_URL: postgres://instant:instant@localhost:5432/instant
-      LEGACY_URL: http://localhost:8891
-      RUST_URL: http://localhost:8888
+      SERVER_URL: ${{ matrix.server == 'legacy' && 'http://localhost:8891' || 'http://localhost:8888' }}
       SDK_REPORT_DIR: ${{ github.workspace }}/sdk-suite-reports
     steps:
       - uses: actions/checkout@v4
-      # boots while the rust server and the SDKs build; waited on below
+      # boots while the SDKs install; waited on below
       - name: Start legacy server stack
+        if: matrix.server == 'legacy'
         run: docker compose -f scripts/differential/docker-compose.yml up -d --quiet-pull
       - uses: dtolnay/rust-toolchain@stable
+        if: matrix.server == 'rust'
       - uses: Swatinem/rust-cache@v2
+        if: matrix.server == 'rust'
         with:
           cache-on-failure: true
       - uses: pnpm/action-setup@v4
@@ -354,11 +366,13 @@ jobs:
           cache: pnpm
           cache-dependency-path: LEGACY/client/pnpm-lock.yaml
       - name: Apply migrations
+        if: matrix.server == 'rust'
         run: ./scripts/apply-migrations.sh
       # release, like production: the SDK tests race the server's refresh
       # latency (infiniteQuery.e2e, see core.vitest.config.ts), and a debug
       # build's ~30 ms refreshes lost that race ~7x as often locally
       - name: Boot rust server
+        if: matrix.server == 'rust'
         run: |
           cargo build --release -p instant-server
           PORT=8888 BASE_URL=http://localhost:8888 ./target/release/instant-server > /tmp/rust-server.log 2>&1 &
@@ -394,9 +408,10 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: Wait for legacy server
+        if: matrix.server == 'legacy'
         run: |
           for i in $(seq 1 180); do
-            if curl -sf "$LEGACY_URL/" > /dev/null 2>&1; then
+            if curl -sf "$SERVER_URL/" > /dev/null 2>&1; then
               echo "legacy server is up"; exit 0
             fi
             sleep 2
@@ -405,39 +420,56 @@ jobs:
           docker compose -f scripts/differential/docker-compose.yml logs legacy-server | tail -200
           exit 1
 
-      # All four runs at once (the job's cost is the release build above, so
-      # a matrix would only repeat it). Each run writes
-      # $SDK_REPORT_DIR/<suite>-<server>.json and its log beside it; a failing
-      # run must not stop the others — compare.mjs decides (and fails on a
-      # missing report). run-suite.sh isolates concurrent runs; core's two runs
-      # get separate browser server ports.
-      - name: "core + instant-cli e2e vs legacy + rust (concurrent)"
+      # Each run writes $SDK_REPORT_DIR/<suite>-<server>.json; a failing run
+      # must not stop the other — sdk-suites-compare decides (and fails on a
+      # missing report).
+      - name: "core e2e vs ${{ matrix.server }}"
         continue-on-error: true
-        timeout-minutes: 12
+        timeout-minutes: 10
+        run: ./scripts/sdk-suites/run-suite.sh core "${{ matrix.server }}" "$SERVER_URL"
+      - name: "instant-cli e2e vs ${{ matrix.server }}"
+        continue-on-error: true
+        timeout-minutes: 10
+        run: ./scripts/sdk-suites/run-suite.sh cli "${{ matrix.server }}" "$SERVER_URL"
+      - name: Upload suite reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-suite-reports-${{ matrix.server }}
+          path: sdk-suite-reports/
+          if-no-files-found: ignore
+      - name: Server logs
+        if: failure()
         run: |
-          mkdir -p "$SDK_REPORT_DIR"
-          declare -A pids
-          start() { # <suite> <server> <url> [browser port]
-            # timeout signals the run's whole process group, like a step timeout
-            SDK_BROWSER_PORT="${4:-}" timeout --kill-after=15 600 \
-              ./scripts/sdk-suites/run-suite.sh "$1" "$2" "$3" > "$SDK_REPORT_DIR/$1-$2.log" 2>&1 &
-            pids["$1-$2"]=$!
-          }
-          start core legacy "$LEGACY_URL" 63315
-          start core rust "$RUST_URL" 63325
-          start cli legacy "$LEGACY_URL"
-          start cli rust "$RUST_URL"
-          failed=0
-          for run in core-legacy core-rust cli-legacy cli-rust; do
-            status=0; wait "${pids[$run]}" || status=$?
-            echo "::group::$run (exit $status)"
-            cat "$SDK_REPORT_DIR/$run.log"
-            echo "::endgroup::"
-            [ "$status" -eq 0 ] || { echo "::warning::$run exited $status"; failed=1; }
-          done
-          exit "$failed"
+          if [ "${{ matrix.server }}" = rust ]; then
+            echo "=== rust server ==="; cat /tmp/rust-server.log || true
+          else
+            echo "=== legacy server ==="; docker compose -f scripts/differential/docker-compose.yml logs legacy-server | tail -200 || true
+          fi
+
+  # runs even when a leg failed: a leg that wrote no reports fails the
+  # comparison (missing report) instead of skipping it
+  sdk-suites-compare:
+    name: official SDK suites vs legacy + rust
+    needs: sdk-suites
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/sdk-suites
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download suite reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sdk-suite-reports-*
+          merge-multiple: true
+          path: sdk-suite-reports
       - name: Compare outcomes (legacy vs rust)
-        run: node scripts/sdk-suites/compare.mjs --dir "$SDK_REPORT_DIR"
+        run: node scripts/sdk-suites/compare.mjs --dir sdk-suite-reports
       - name: Upload suite reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -445,11 +477,6 @@ jobs:
           name: sdk-suite-reports
           path: sdk-suite-reports/
           if-no-files-found: ignore
-      - name: Server logs
-        if: failure()
-        run: |
-          echo "=== rust server ==="; cat /tmp/rust-server.log || true
-          echo "=== legacy server ==="; docker compose -f scripts/differential/docker-compose.yml logs legacy-server | tail -200 || true
 
   docker:
     name: docker build
