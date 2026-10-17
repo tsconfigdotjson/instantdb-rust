@@ -178,7 +178,13 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   (`send_magic_code` hands the code back, `verify_magic_code` signs in);
   step 42 the runtime OAuth routes (the `start` redirect through Google's
   real discovery document, the callback / token / id_token error surfaces,
-  `openid-configuration`).
+  `openid-configuration`); step 43 the same routes for a `github` provider's
+  client (GitHub's authorize redirect and scope, the callback's error
+  surfaces including a live code exchange github.com rejects, so both
+  servers redirect back with `Error exchanging code for token.`, and the
+  id_token refusal). `scripts/github-oauth-test.mjs` runs the GitHub success
+  paths (`$users` creation, email / avatar updates, link moves, guest
+  upgrades, every exchange error) against a mock GitHub.
   `scripts/dash-login-test.mjs` (the `cargo test + e2e` job) runs the full
   Google round trip against a mock token endpoint.
 - `lib.mjs` — capture clients, normalization, folding.

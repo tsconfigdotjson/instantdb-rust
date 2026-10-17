@@ -1635,6 +1635,72 @@ async function runAgainst(name) {
       r42.openidConfigurationBadApp = errView(await call(base, "GET", "/runtime/nope/.well-known/openid-configuration", { token: null }));
       raw("42-runtime-oauth", r42);
       record("42-runtime-oauth", r42);
+
+      // 43 runtime OAuth with a GitHub client (auth/oauth.clj:31-113): a
+      // `github` provider's client needs no discovery endpoint, start sends
+      // the browser to GitHub's fixed authorize URL with GitHub's scope, the
+      // callback's error surfaces match step 42's, and the id_token route
+      // refuses (GitHub isn't OIDC). The callback with a code and a live
+      // redirect makes both servers ask github.com for real: GitHub answers
+      // an unknown client_id with a 404, so both redirect back to the app
+      // with legacy's default exchange error. The success path needs GitHub
+      // to accept a code and lives in scripts/github-oauth-test.mjs.
+      const r43 = {};
+      const authCfg = await call(base, "GET", `/dash/apps/${appId}/auth`);
+      let ghProviderId = (authCfg.body?.oauth_service_providers ?? []).find((p) => p.provider_name === "github")?.id;
+      if (!ghProviderId) {
+        const p = await call(base, "POST", `/dash/apps/${appId}/oauth_service_providers`, { body: { provider_name: "github" } });
+        ghProviderId = p.body?.provider?.id;
+      }
+      const ghClient = await call(base, "POST", `/dash/apps/${appId}/oauth_clients`, {
+        body: { provider_id: ghProviderId, client_name: "github-web", client_id: "diff-gh-client", client_secret: "diff-gh-secret", meta: { providerName: "github" } },
+      });
+      r43.clientCreate = ghClient.status === 200 ? { status: 200, discovery_endpoint: ghClient.body.client?.discovery_endpoint ?? null } : errView(ghClient);
+      const ghStart = `/runtime/oauth/start?app_id=${appId}&client_name=github-web&redirect_uri=${redirectUri}`;
+      r43.start = await startView(`${ghStart}&state=client-state&code_challenge=abc&code_challenge_method=S256`);
+      // `hd` is a Google extra param; the GitHub client drops it
+      r43.startDropsHd = await startView(`${ghStart}&hd=example.com`);
+      r43.startClientIdAlias = await startView(`/runtime/oauth/start?app_id=${appId}&client_id=github-web&redirect_uri=${redirectUri}`);
+      r43.startAppInPath = await startView(`/runtime/${appId}/oauth/start?client_name=github-web&redirect_uri=${redirectUri}`);
+      r43.startMissingRedirect = await startView(`/runtime/oauth/start?app_id=${appId}&client_name=github-web`);
+      r43.startUnauthorizedRedirect = await startView(`/runtime/oauth/start?app_id=${appId}&client_name=github-web&redirect_uri=${encodeURIComponent("https://evil.example.net/cb")}`);
+      // a live start: its state and cookie drive the callback
+      const ghBegin = async () => {
+        const res = await fetch(base + `${ghStart}&state=client-state`, { redirect: "manual" });
+        const loc = res.headers.get("location");
+        return { state: loc ? new URL(loc).searchParams.get("state") : null, cookie: /__session=[^;]+/.exec(res.headers.get("set-cookie") ?? "")?.[0] ?? null };
+      };
+      const ghCallback = async (qs, cookie) => {
+        const res = await fetch(base + "/runtime/oauth/callback" + qs, { redirect: "manual", headers: cookie ? { cookie } : {} });
+        const text = await res.text();
+        let json = null;
+        try { json = JSON.parse(text); } catch {}
+        const loc = res.headers.get("location") ? new URL(res.headers.get("location")) : null;
+        return {
+          status: res.status,
+          redirected: loc != null,
+          to: loc ? loc.origin + loc.pathname : null,
+          params: loc ? Object.fromEntries(loc.searchParams.entries()) : null,
+          type: json?.type ?? null,
+          // legacy renders oauth-error bodies as {type, message}; the text is what a developer reads
+          message: json?.message ?? json?.error ?? null,
+        };
+      };
+      // GitHub's "user denied" redirect: the provider error comes first
+      const g1 = await ghBegin();
+      r43.callbackDenied = await ghCallback(`?error=access_denied&error_description=${encodeURIComponent("The user has denied your application access.")}&state=${g1.state}`, g1.cookie);
+      // a valid state + cookie consumes the request before the code check
+      r43.callbackMissingCode = await ghCallback(`?state=${g1.state}`, g1.cookie);
+      r43.callbackConsumed = await ghCallback(`?state=${g1.state}&code=abc`, g1.cookie);
+      const g2 = await ghBegin();
+      r43.callbackCookieMismatch = await ghCallback(`?state=${g2.state}&code=abc`, `__session=instantdb_${mk()}`);
+      const g3 = await ghBegin();
+      r43.callbackLiveExchange = await ghCallback(`?state=${g3.state}&code=diff-code`, g3.cookie);
+      r43.idToken = errView(await tokenPost("/runtime/oauth/id_token", { app_id: appId, client_name: "github-web", id_token: "x.y.z" }));
+      r43.idTokenUnauthorizedOrigin = errView(await call(base, "POST", "/runtime/oauth/id_token", { token: null, headers: { origin: "https://evil.example.net" }, body: { app_id: appId, client_name: "github-web", id_token: "x.y.z" } }));
+      r43.idTokenAuthorizedOrigin = errView(await call(base, "POST", "/runtime/oauth/id_token", { token: null, headers: { origin: "https://app.example.com" }, body: { app_id: appId, client_name: "github-web", id_token: "x.y.z" } }));
+      raw("43-runtime-oauth-github", r43);
+      record("43-runtime-oauth-github", r43);
     }
   }
 

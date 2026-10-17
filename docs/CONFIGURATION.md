@@ -83,3 +83,4 @@ Never set these in production.
 |---|---|---|
 | `INSTANT_WEBHOOK_ALLOW_INSECURE` | `false` | lets webhooks target `http://` and private hosts |
 | `INSTANT_OAUTH_ALLOW_PRIVATE` | `false` | lets OIDC discovery / token / userinfo / JWKS fetches reach private addresses (mock providers on localhost) |
+| `INSTANT_GITHUB_OAUTH_AUTH_URL` / `_TOKEN_URL`, `INSTANT_GITHUB_API_URL` | GitHub's | point GitHub sign-in at a mock GitHub (`https://github.com/login/oauth/authorize`, `.../access_token`, `https://api.github.com`) |
