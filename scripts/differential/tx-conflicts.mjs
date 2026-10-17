@@ -20,8 +20,11 @@ if (!appId || !adminToken) throw new Error("usage: node tx-conflicts.mjs <app-id
 const url = process.env.RUST_URL || "http://localhost:8888";
 
 const SESSIONS = 8;
-// few entities, so concurrent txs overlap on almost every write
-const POOL = 6;
+// a small pool, so concurrent txs overlap on most writes. Each tx touches 2-4
+// entities: when every tx locked most of the pool, txs queued behind each
+// other's locks (and Postgres' 1s deadlock_timeout for cycles across
+// statements, which the server retries) past the 5s handler timeout.
+const POOL = 12;
 
 function prng(a) {
   return () => {
@@ -76,7 +79,7 @@ const create = (e) => [
 
 const txFor = () => {
   const k = rand();
-  const some = shuffle(pool).slice(0, 2 + Math.floor(rand() * (POOL - 1)));
+  const some = shuffle(pool).slice(0, 2 + Math.floor(rand() * 3));
   // shuffled multi-entity updates: two of these lock the same rows in
   // opposite orders unless the server orders them
   if (k < 0.35) return some.map((e) => ["add-triple", e, attrs.v, Math.floor(rand() * 100)]);

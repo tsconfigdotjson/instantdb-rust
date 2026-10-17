@@ -153,9 +153,9 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   `node fuzz-race.mjs <app> <token> [seed] [rounds]`; seeds 1-3 at 30 rounds
   per PR (`FUZZ_RACE_SEEDS` / `FUZZ_RACE_ROUNDS`), 10 nightly.
 - `tx-conflicts.mjs` — **rust-only** concurrent transact conflicts (issue
-  #53): 8 sessions transact at once on a pool of 6 entities (multi-entity
-  updates in shuffled order, creates, links, delete-entity). Every transact
-  must get `transact-ok` or a 4xx. Postgres deadlocks between txs surface
+  #53): 8 sessions transact at once on a pool of 12 entities, 2-4 per tx
+  (multi-entity updates in shuffled order, creates, links, delete-entity).
+  Every transact must get `transact-ok` or a 4xx. Postgres deadlocks between txs surface
   as a 500 `sql-exception` in legacy; rust orders its row locks like legacy
   and retries a deadlocked or unserializable tx (`service::run_transact`).
   `node tx-conflicts.mjs <app> <token> [seed] [txs-per-session]`; seeds 1-3
