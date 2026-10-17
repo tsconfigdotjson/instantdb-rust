@@ -125,6 +125,19 @@ STRESS_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$STRESS_APP" "$STRESS_TOKEN"
 layer stress node stress.mjs "$STRESS_APP" "$STRESS_APP" "$STRESS_TOKEN" "${STRESS_TRIPLES:-400}"
 
+echo "== concurrent transact conflicts =="
+# rust-only (issue #53): overlapping concurrent transacts never get a 5xx
+for SEED in ${TX_CONFLICT_SEEDS:-1 2 3}; do
+  want "conflicts:$SEED" || continue
+  TC_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+  TC_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+  ./provision.sh "$TC_APP" "$TC_TOKEN" > /dev/null
+  if ! node tx-conflicts.mjs "$TC_APP" "$TC_TOKEN" "$SEED" "${TX_CONFLICT_TXS:-60}"; then
+    FAILED_LAYERS="$FAILED_LAYERS conflicts:$SEED"
+    echo "LAYER FAILED: conflicts:$SEED"
+  fi
+done
+
 echo "== fuzz layer =="
 # FUZZ_SEEDS: fixed seeds (every run); FUZZ_SEED_WINDOW=N adds N more seeds
 # from a window that moves every day (seeds 1000 + day*N ...), so the

@@ -326,6 +326,9 @@ pub async fn insert_triples(
     // One multi-row statement per group (UNNEST over parallel arrays): a
     // 300-triple seed is two round trips instead of 300, and the
     // change-capture trigger fires once per statement instead of per row.
+    // Rows go in (entity, attr, value-md5) order, like legacy's insert-multi!
+    // (triple.clj :order-by), so concurrent txs lock overlapping rows in the
+    // same order instead of deadlocking (issue #53).
     if !ea_order.is_empty() {
         let mut cols = InsertCols::with_capacity(ea_order.len());
         for key in &ea_order {
@@ -340,6 +343,7 @@ pub async fn insert_triples(
             FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::bool[], $6::bool[],
                         $7::bool[], $8::bool[], $9::bool[], $10::text[])
                  AS t(e, a, v, ea, eav, av, ave, vae, cdt)
+            ORDER BY e, a
             ON CONFLICT (app_id, entity_id, attr_id) WHERE ea
             DO UPDATE SET value = excluded.value, value_md5 = excluded.value_md5,
                           checked_data_type = excluded.checked_data_type
@@ -389,6 +393,7 @@ pub async fn insert_triples(
             FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::bool[], $6::bool[],
                         $7::bool[], $8::bool[], $9::bool[], $10::text[])
                  AS t(e, a, v, ea, eav, av, ave, vae, cdt)
+            ORDER BY e, a, md5((v::jsonb)::text)
             ON CONFLICT (app_id, entity_id, attr_id, value_md5) DO NOTHING
             "#,
         )
@@ -448,6 +453,7 @@ pub async fn backfill_indexed_nulls(
         FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::bool[], $6::bool[],
                     $7::bool[], $8::bool[], $9::bool[], $10::text[])
              AS t(e, a, v, ea, eav, av, ave, vae, cdt)
+        ORDER BY e, a
         ON CONFLICT (app_id, entity_id, attr_id) WHERE ea DO NOTHING
         "#,
     )
@@ -587,6 +593,31 @@ pub async fn delete_triples(
     app_id: Uuid,
     triples: &[(Uuid, Uuid, Value)],
 ) -> Result<()> {
+    if triples.is_empty() {
+        return Ok(());
+    }
+    // legacy delete-multi! (triple.clj) locks the rows in (entity, attr,
+    // value-md5) order before deleting them, so concurrent txs can't lock
+    // them in opposite orders (issue #53)
+    sqlx::query(
+        r#"
+        WITH input AS (
+          SELECT e, a, md5((v::jsonb)::text) AS md5
+          FROM UNNEST($2::uuid[], $3::uuid[], $4::text[]) AS i(e, a, v)
+        )
+        SELECT 1 FROM triples t
+        JOIN input i ON t.entity_id = i.e AND t.attr_id = i.a AND t.value_md5 = i.md5
+        WHERE t.app_id = $1
+        ORDER BY t.entity_id, t.attr_id, t.value_md5
+        FOR UPDATE OF t
+        "#,
+    )
+    .bind(app_id)
+    .bind(triples.iter().map(|t| t.0).collect::<Vec<_>>())
+    .bind(triples.iter().map(|t| t.1).collect::<Vec<_>>())
+    .bind(triples.iter().map(|t| t.2.to_string()).collect::<Vec<_>>())
+    .execute(&mut *conn)
+    .await?;
     for (eid, attr_id, value) in triples {
         sqlx::query(
             "DELETE FROM triples
@@ -676,6 +707,7 @@ pub async fn delete_entities(
     attrs: &AttrMap,
     entities: &[(Uuid, String)],
 ) -> Result<()> {
+    lock_entities_for_delete(conn, app_id, attrs, entities).await?;
     for (eid, etype) in entities {
         let etype_attr_ids: Vec<Uuid> = attrs.attrs_of_etype(etype).map(|a| a.id).collect();
         sqlx::query(
@@ -712,6 +744,66 @@ pub async fn delete_entities(
         // to another etype are covered when that etype is in `entities`;
         // refs where this entity is the value are the rev_attr case above.
     }
+    Ok(())
+}
+
+/// Lock every row [`delete_entities`] removes, in (entity, attr, value-md5)
+/// order, like legacy delete-entity-multi! (triple.clj ordered_rows), so
+/// concurrent txs can't lock them in opposite orders (issue #53). The
+/// deletes themselves stay separate statements: a DELETE by ctid would miss
+/// a row another tx updated (and committed) after this statement's snapshot.
+async fn lock_entities_for_delete(
+    conn: &mut PgConnection,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    entities: &[(Uuid, String)],
+) -> Result<()> {
+    let (mut fwd_e, mut fwd_a) = (vec![], vec![]);
+    let (mut rev_e, mut rev_a) = (vec![], vec![]);
+    for (eid, etype) in entities {
+        for a in attrs.attrs_of_etype(etype) {
+            fwd_e.push(*eid);
+            fwd_a.push(a.id);
+        }
+        for a in attrs.iter().filter(|a| {
+            a.value_type == ValueType::Ref && a.reverse_etype.as_deref() == Some(etype.as_str())
+        }) {
+            rev_e.push(*eid);
+            rev_a.push(a.id);
+        }
+    }
+    if fwd_e.is_empty() && rev_e.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        WITH fwd AS (
+          SELECT t.ctid
+          FROM triples t
+          JOIN UNNEST($2::uuid[], $3::uuid[]) AS f(e, a)
+            ON t.entity_id = f.e AND t.attr_id = f.a
+          WHERE t.app_id = $1
+        ),
+        rev AS (
+          SELECT t.ctid
+          FROM triples t
+          JOIN UNNEST($4::uuid[], $5::uuid[]) AS r(e, a)
+            ON t.attr_id = r.a AND json_uuid_to_uuid(t.value) = r.e
+          WHERE t.app_id = $1 AND t.vae
+        )
+        SELECT 1 FROM triples t
+        JOIN (SELECT ctid FROM fwd UNION SELECT ctid FROM rev) c ON t.ctid = c.ctid
+        ORDER BY t.entity_id, t.attr_id, t.value_md5
+        FOR UPDATE OF t
+        "#,
+    )
+    .bind(app_id)
+    .bind(&fwd_e)
+    .bind(&fwd_a)
+    .bind(&rev_e)
+    .bind(&rev_a)
+    .execute(&mut *conn)
+    .await?;
     Ok(())
 }
 

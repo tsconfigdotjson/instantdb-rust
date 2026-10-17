@@ -340,48 +340,22 @@ pub async fn run_transact(
     let started = std::time::Instant::now();
     let steps = tx::parse_tx_steps(tx_steps)?;
     crate::usage::check_transact(state, app_id, &steps)?;
-    let mut attrs = (*load_attrs(state, app_id).await?).clone();
-    let mut dbtx = state.pool.begin().await.map_err(InstantError::from)?;
-    // legacy runs every statement under a 30s query timeout (jdbc/sql.clj
-    // *query-timeout-seconds*); a cancelled one is `timeout` (57014)
-    sqlx::query(&format!(
-        "SET LOCAL statement_timeout = {}",
-        query_timeout().as_millis()
-    ))
-    .execute(&mut *dbtx)
-    .await
-    .map_err(InstantError::from)?;
-    tx::assert_write_allowed(&mut dbtx, app_id).await?;
-
-    let report = if perms.admin {
-        tx::transact(
-            &mut dbtx,
-            app_id,
-            &mut attrs,
-            steps,
-            &TxOptions {
-                admin: true,
-                ..TxOptions::default()
-            },
-        )
-        .await?
-    } else {
-        let rules = instant_core::perms::Rules::load(&mut dbtx, app_id).await?;
-        let auth = perms.auth_ctx(state);
-        instant_core::perms::permissioned_transact(
-            &mut dbtx,
-            app_id,
-            &mut attrs,
-            steps,
-            &rules,
-            &auth,
-            perms.rule_params.as_ref().unwrap_or(&json!({})),
-        )
-        .await?
+    // Two txs locking overlapping rows can still deadlock (or, at a stricter
+    // isolation level, fail to serialize) despite the ordered writes; legacy
+    // surfaces that as a 500 sql-exception (issue #53). Nothing was
+    // committed, so run the whole DB transaction again a few times first.
+    let mut attempt = 1;
+    let (report, queued) = loop {
+        match transact_once(state, app_id, perms, steps.clone()).await {
+            Err(e) if e.is_tx_conflict() && attempt < TX_CONFLICT_ATTEMPTS => {
+                tracing::warn!(%app_id, attempt, "transact hit {}, retrying", e.message);
+                let jitter = rand::Rng::gen_range(&mut rand::thread_rng(), 0..10 * attempt);
+                tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
+                attempt += 1;
+            }
+            res => break res?,
+        }
     };
-
-    let queued = crate::webhooks::queue_events(state, &mut dbtx, app_id, &attrs, &report).await?;
-    dbtx.commit().await.map_err(InstantError::from)?;
     notify_tx(state, app_id, &TxNotice::from(&report)).await;
     if queued {
         state.webhook_notify.notify_one();
@@ -390,6 +364,109 @@ pub async fn run_transact(
         .transact_seconds
         .observe_since(started);
     Ok(report)
+}
+
+/// Tries per transact before a deadlock / serialization failure reaches the
+/// client.
+const TX_CONFLICT_ATTEMPTS: u64 = 5;
+
+/// One attempt of [`run_transact`]: the DB transaction through commit.
+/// Returns whether webhook events were queued.
+async fn transact_once(
+    state: &Arc<AppState>,
+    app_id: Uuid,
+    perms: &PermsCtx,
+    steps: Vec<tx::TxStep>,
+) -> Result<(TxReport, bool)> {
+    let mut attrs = (*load_attrs(state, app_id).await?).clone();
+    let mut dbtx = state.pool.begin().await.map_err(InstantError::from)?;
+    // legacy runs every statement under a 30s query timeout (jdbc/sql.clj
+    // *query-timeout-seconds*); a cancelled one is `timeout` (57014)
+    let row = sqlx::query(
+        "SELECT pg_backend_pid() AS pid, txid_current() AS xid,
+                set_config('statement_timeout', $1, true)",
+    )
+    .bind(query_timeout().as_millis().to_string())
+    .fetch_one(&mut *dbtx)
+    .await
+    .map_err(InstantError::from)?;
+    let mut cancel = CancelOnDrop {
+        pool: state.pool.clone(),
+        backend: Some((row.get("pid"), row.get("xid"))),
+    };
+    // an attempt that returns (Ok or Err) has nothing in flight; only a drop
+    // mid-await leaves a statement running
+    let res = async {
+        tx::assert_write_allowed(&mut dbtx, app_id).await?;
+
+        let report = if perms.admin {
+            tx::transact(
+                &mut dbtx,
+                app_id,
+                &mut attrs,
+                steps,
+                &TxOptions {
+                    admin: true,
+                    ..TxOptions::default()
+                },
+            )
+            .await?
+        } else {
+            let rules = instant_core::perms::Rules::load(&mut dbtx, app_id).await?;
+            let auth = perms.auth_ctx(state);
+            instant_core::perms::permissioned_transact(
+                &mut dbtx,
+                app_id,
+                &mut attrs,
+                steps,
+                &rules,
+                &auth,
+                perms.rule_params.as_ref().unwrap_or(&json!({})),
+            )
+            .await?
+        };
+
+        let queued =
+            crate::webhooks::queue_events(state, &mut dbtx, app_id, &attrs, &report).await?;
+        dbtx.commit().await.map_err(InstantError::from)?;
+        Ok((report, queued))
+    }
+    .await;
+    cancel.backend = None;
+    res
+}
+
+/// Cancels the statement a transact attempt is still running when the
+/// attempt is dropped unfinished (the ws handle-receive timeout drops the
+/// handler). Otherwise the backend keeps waiting on row locks while holding
+/// the tx's own, up to the 30s statement timeout, and every tx queued behind
+/// them times out too. Legacy cancels in-progress statements on that timeout
+/// (session.clj:1171 `sql/cancel-in-progress`). Matching the xid as well as
+/// the pid means a pooled connection that has moved on to another tx is
+/// never cancelled.
+struct CancelOnDrop {
+    pool: sqlx::PgPool,
+    /// (backend pid, txid_current()) while the tx is open
+    backend: Option<(i32, i64)>,
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        let Some((pid, xid)) = self.backend.take() else {
+            return;
+        };
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            let _ = sqlx::query(
+                "SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+                 WHERE pid = $1 AND backend_xid::text::bigint = $2 % 4294967296",
+            )
+            .bind(pid)
+            .bind(xid)
+            .execute(&pool)
+            .await;
+        });
+    }
 }
 
 /// Legacy's per-statement query timeout (`INSTANT_QUERY_TIMEOUT_SECS`,
