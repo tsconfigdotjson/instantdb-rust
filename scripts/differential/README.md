@@ -148,10 +148,18 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
   compared against it. It runs against a rust server booted with
   `INSTANT_CHAOS_DELAY_MS=30` (`RACE_URL`, :8885 in CI), which pauses at
   random where add-query and a refresh interleave, so windows that are
-  microseconds wide get hit every run. Transact failures (a tx racing a
-  delete of its entity) are printed as notes, not failures.
+  microseconds wide get hit every run. 4xx transact failures (a tx racing a
+  delete of its entity) are printed as notes, not failures; a 5xx fails it.
   `node fuzz-race.mjs <app> <token> [seed] [rounds]`; seeds 1-3 at 30 rounds
   per PR (`FUZZ_RACE_SEEDS` / `FUZZ_RACE_ROUNDS`), 10 nightly.
+- `tx-conflicts.mjs` — **rust-only** concurrent transact conflicts (issue
+  #53): 8 sessions transact at once on a pool of 6 entities (multi-entity
+  updates in shuffled order, creates, links, delete-entity). Every transact
+  must get `transact-ok` or a 4xx. Postgres deadlocks between txs surface
+  as a 500 `sql-exception` in legacy; rust orders its row locks like legacy
+  and retries a deadlocked or unserializable tx (`service::run_transact`).
+  `node tx-conflicts.mjs <app> <token> [seed] [txs-per-session]`; seeds 1-3
+  at 60 per session (`TX_CONFLICT_SEEDS` / `TX_CONFLICT_TXS`).
 - `errors.mjs` / `errors-allowed.json` — the error matrix: one probe per
   externally reachable legacy error type (`err:*` in surface.json) over HTTP
   and the ws session; the normalized envelope (status, type, message, hint)

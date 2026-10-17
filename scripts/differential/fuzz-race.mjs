@@ -143,8 +143,9 @@ const held = Object.fromEntries(Object.keys(SESSIONS).map((s) => [s, new Map()])
 const failures = [];
 let ops = 0;
 let checks = 0;
-// "type: message" -> count, printed at the end
+// "status type: message" -> count, printed at the end
 const txErrors = new Map();
+let serverTxErrors = 0;
 
 for (let round = 0; round < rounds; round++) {
   const pending = [];
@@ -188,9 +189,11 @@ for (let round = 0; round < rounds; round++) {
   const replies = await Promise.all(pending);
   for (const r of replies) {
     // this layer checks subscriptions, not transacts: a failed tx (one that
-    // raced a delete of its entity, say) only changes less data
+    // raced a delete of its entity, say) only changes less data. A 5xx (a
+    // deadlock between two txs, issue #53) is a server bug all the same.
     if (r.op === "error" && r["original-event"]?.op === "transact") {
-      txErrors.set(`${r.type}: ${r.message}`, (txErrors.get(`${r.type}: ${r.message}`) ?? 0) + 1);
+      txErrors.set(`${r.status} ${r.type}: ${r.message}`, (txErrors.get(`${r.status} ${r.type}: ${r.message}`) ?? 0) + 1);
+      if (!(r.status < 500)) serverTxErrors++;
     } else if (r.op === "error") {
       throw new Error(`round ${round}: unexpected error ${JSON.stringify(r).slice(0, 400)}`);
     }
@@ -253,8 +256,9 @@ for (const f of failures) {
     }
   }
 }
-if (failures.length) {
-  console.error(`FUZZ-RACE FAILED: ${seen.size} problem(s) (seed ${seed}, ${url})`);
+if (serverTxErrors) console.error(`${serverTxErrors} transact(s) got a 5xx`);
+if (failures.length || serverTxErrors) {
+  console.error(`FUZZ-RACE FAILED: ${seen.size + (serverTxErrors ? 1 : 0)} problem(s) (seed ${seed}, ${url})`);
   process.exit(1);
 }
 console.log(`FUZZ-RACE PASSED: ${rounds} rounds, ${ops} ops, ${checks} settled subscriptions matched a fresh answer (seed ${seed}, ${url})`);
