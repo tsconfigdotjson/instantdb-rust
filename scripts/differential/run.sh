@@ -10,6 +10,37 @@ RUST_URL="${RUST_URL:-http://localhost:8888}"
 LEGACY_URL="${LEGACY_URL:-http://localhost:8891}"
 KEEP="${KEEP:-0}"
 
+# CI spreads the layers over parallel legs (the `differential` matrix in
+# ci.yml). LAYERS="replay dash ..." runs only the named layers (default: all);
+# SHARD=k/n runs only every n-th run of each layer, starting at the k-th (a
+# seeded layer runs once per seed, an unseeded one once, so in shard 1). With
+# RUNS_DIR set, every run the full script would make is appended to
+# $RUNS_DIR/planned and every run this invocation makes to $RUNS_DIR/ran;
+# legs.sh checks that the legs together made each planned run exactly once.
+LAYERS="${LAYERS:-}"
+SHARD="${SHARD:-1/1}"
+SHARD_K="${SHARD%/*}"
+SHARD_N="${SHARD#*/}"
+if ! [[ "$SHARD" =~ ^[0-9]+/[0-9]+$ ]] || [ "$SHARD_K" -lt 1 ] || [ "$SHARD_K" -gt "$SHARD_N" ]; then
+  echo "SHARD must be k/n with 1 <= k <= n, got: $SHARD"; exit 1
+fi
+RUNS_DIR="${RUNS_DIR:-}"
+if [ -n "$RUNS_DIR" ]; then
+  mkdir -p "$RUNS_DIR"
+  rm -f "$RUNS_DIR/planned" "$RUNS_DIR/ran"
+fi
+declare -A RUN_COUNT=()
+# want <layer>[:<seed>]: whether this invocation makes that run
+want() {
+  local base="${1%%:*}" i
+  i="${RUN_COUNT[$base]:-0}"
+  RUN_COUNT[$base]=$((i + 1))
+  if [ -n "$RUNS_DIR" ]; then echo "$1" >> "$RUNS_DIR/planned"; fi
+  if [ -n "$LAYERS" ] && [[ " $LAYERS " != *" $base "* ]]; then return 1; fi
+  if [ $((i % SHARD_N)) -ne $((SHARD_K - 1)) ]; then return 1; fi
+  if [ -n "$RUNS_DIR" ]; then echo "$1" >> "$RUNS_DIR/ran"; fi
+}
+
 echo "== legacy surface manifest =="
 node surface.mjs --check
 export COVERAGE_FILE="${COVERAGE_FILE:-$(pwd)/.coverage.jsonl}"
@@ -47,6 +78,10 @@ TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 FAILED_LAYERS=""
 layer() {
   local name="$1"; shift
+  if ! want "$name"; then
+    echo "(not in this leg: $name)"
+    return 0
+  fi
   if ! "$@"; then
     FAILED_LAYERS="$FAILED_LAYERS $name"
     echo "LAYER FAILED: $name"
@@ -104,14 +139,17 @@ echo "== fuzz layer =="
 # from a window that moves every day (seeds 1000 + day*N ...), so the
 # nightly keeps exploring new scripts while any failure stays reproducible
 # from the seed it prints. Every seed runs; failures are listed at the end.
+# FUZZ_SEED_DAY pins the day (CI legs use the workflow run's creation day, so
+# legs that straddle midnight still split one window).
 SEEDS="${FUZZ_SEEDS:-42 99}"
 if [ "${FUZZ_SEED_WINDOW:-0}" -gt 0 ]; then
-  DAY=$(( $(date -u +%s) / 86400 ))
+  DAY="${FUZZ_SEED_DAY:-$(( $(date -u +%s) / 86400 ))}"
   BASE=$(( 1000 + (DAY % 1000) * FUZZ_SEED_WINDOW ))
   SEEDS="$SEEDS $(seq -s ' ' "$BASE" $(( BASE + FUZZ_SEED_WINDOW - 1 )))"
 fi
 FUZZ_FAILED=""
 for SEED in $SEEDS; do
+  want "fuzz:$SEED" || continue
   FUZZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
   FUZZ_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
   ./provision.sh "$FUZZ_APP" "$FUZZ_TOKEN" > /dev/null
@@ -124,6 +162,7 @@ done
 # mostly waiting for streams to go quiet, and each runs on its own apps, so
 # FUZZ_PERMS_JOBS seeds run at once; their logs print in seed order.
 PERMS_SEEDS="${FUZZ_PERMS_SEEDS:-7 8 9}"
+PERMS_RUN=""
 PERMS_LOGS=$(mktemp -d)
 perms_seed() {
   local seed="$1" app token
@@ -137,11 +176,13 @@ perms_seed() {
   fi
 }
 for SEED in $PERMS_SEEDS; do
+  want "perms:$SEED" || continue
+  PERMS_RUN="$PERMS_RUN $SEED"
   perms_seed "$SEED" > "$PERMS_LOGS/$SEED.log" 2>&1 &
   while [ "$(jobs -rp | wc -l)" -ge "${FUZZ_PERMS_JOBS:-1}" ]; do wait -n || true; done
 done
 wait
-for SEED in $PERMS_SEEDS; do
+for SEED in $PERMS_RUN; do
   cat "$PERMS_LOGS/$SEED.log"
   if [ "$(cat "$PERMS_LOGS/$SEED.rc" 2>/dev/null)" != "0" ]; then
     FUZZ_FAILED="$FUZZ_FAILED perms:$SEED"
@@ -152,6 +193,7 @@ rm -rf "$PERMS_LOGS"
 # registered while transactions are in flight, against a rust server booted
 # with INSTANT_CHAOS_DELAY_MS (RACE_URL; defaults to RUST_URL)
 for SEED in ${FUZZ_RACE_SEEDS:-1 2 3}; do
+  want "race:$SEED" || continue
   RZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
   RZ_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
   ./provision.sh "$RZ_APP" "$RZ_TOKEN" > /dev/null
@@ -167,6 +209,13 @@ fi
 if [ -n "$FAILED_LAYERS" ]; then
   echo "DIFFERENTIAL HARNESS FAILED:$FAILED_LAYERS"
   exit 1
+fi
+
+if [ -n "$LAYERS" ] || [ "$SHARD" != "1/1" ]; then
+  # a part of the harness covers part of the surface: CI checks the baseline
+  # against the union of every leg's records (legs.sh)
+  echo "DIFFERENTIAL HARNESS PASSED (LAYERS=${LAYERS:-all} SHARD=$SHARD; coverage is checked across legs)"
+  exit 0
 fi
 
 echo "== legacy surface coverage =="
