@@ -158,6 +158,19 @@ impl InstantError {
         )
     }
 
+    /// A Postgres deadlock (40P01) or serialization failure (40001): the
+    /// whole DB transaction can be retried from the start.
+    pub fn is_tx_conflict(&self) -> bool {
+        self.error_type == "sql-exception"
+            && matches!(
+                self.hint
+                    .as_ref()
+                    .and_then(|h| h.get("condition"))
+                    .and_then(|c| c.as_str()),
+                Some("deadlock-detected" | "serialization-failure")
+            )
+    }
+
     /// JSON body for HTTP error responses / fields for ws `error` op.
     /// Legacy `instant-ex->bad-request` (util/http.clj:148-158) always
     /// emits the `hint` key, null when the exception carried none.
@@ -197,8 +210,33 @@ impl From<sqlx::Error> for InstantError {
                 }
                 _ => {}
             }
+            // legacy default-psql-throw! (util/exception.clj:616-621): a
+            // lock conflict is a 500 `sql-exception` named for its condition.
+            // Transact retries these (service::run_transact), so a client
+            // only sees one once the retries run out.
+            if let Some(condition) = tx_conflict_condition(db.code().as_deref()) {
+                return InstantError::new(
+                    "sql-exception",
+                    500,
+                    format!("SQL Exception: {condition}"),
+                    Some(json!({
+                        "table": db.table(),
+                        "condition": condition,
+                        "constraint": db.constraint(),
+                    })),
+                );
+            }
         }
         InstantError::internal(format!("database error: {e}"))
+    }
+}
+
+/// legacy pgerrors.clj class 40 condition names for the retryable states
+fn tx_conflict_condition(code: Option<&str>) -> Option<&'static str> {
+    match code {
+        Some("40P01") => Some("deadlock-detected"),
+        Some("40001") => Some("serialization-failure"),
+        _ => None,
     }
 }
 

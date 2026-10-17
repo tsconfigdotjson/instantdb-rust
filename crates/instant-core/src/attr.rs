@@ -527,6 +527,15 @@ pub async fn record_inferred_types(
         return Ok(vec![]);
     }
     let (ids, bits): (Vec<Uuid>, Vec<i32>) = pending.iter().map(|(id, b)| (*id, *b as i32)).unzip();
+    // Concurrent first writes to the same attrs would otherwise lock their
+    // rows in hash order and can deadlock (issue #53; legacy's
+    // insert-attr-inferred-types-cte has the same race), so lock them in id
+    // order first.
+    sqlx::query("SELECT 1 FROM attrs WHERE app_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE")
+        .bind(app_id)
+        .bind(&ids)
+        .execute(&mut *conn)
+        .await?;
     let rows = sqlx::query(
         r#"
         UPDATE attrs

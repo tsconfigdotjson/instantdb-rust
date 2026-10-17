@@ -340,6 +340,44 @@ pub async fn run_transact(
     let started = std::time::Instant::now();
     let steps = tx::parse_tx_steps(tx_steps)?;
     crate::usage::check_transact(state, app_id, &steps)?;
+    // Two txs locking overlapping rows can still deadlock (or, at a stricter
+    // isolation level, fail to serialize) despite the ordered writes; legacy
+    // surfaces that as a 500 sql-exception (issue #53). Nothing was
+    // committed, so run the whole DB transaction again a few times first.
+    let mut attempt = 1;
+    let (report, queued) = loop {
+        match transact_once(state, app_id, perms, steps.clone()).await {
+            Err(e) if e.is_tx_conflict() && attempt < TX_CONFLICT_ATTEMPTS => {
+                tracing::warn!(%app_id, attempt, "transact hit {}, retrying", e.message);
+                let jitter = rand::Rng::gen_range(&mut rand::thread_rng(), 0..10 * attempt);
+                tokio::time::sleep(std::time::Duration::from_millis(jitter)).await;
+                attempt += 1;
+            }
+            res => break res?,
+        }
+    };
+    notify_tx(state, app_id, &TxNotice::from(&report)).await;
+    if queued {
+        state.webhook_notify.notify_one();
+    }
+    crate::metrics::METRICS
+        .transact_seconds
+        .observe_since(started);
+    Ok(report)
+}
+
+/// Tries per transact before a deadlock / serialization failure reaches the
+/// client.
+const TX_CONFLICT_ATTEMPTS: u64 = 5;
+
+/// One attempt of [`run_transact`]: the DB transaction through commit.
+/// Returns whether webhook events were queued.
+async fn transact_once(
+    state: &Arc<AppState>,
+    app_id: Uuid,
+    perms: &PermsCtx,
+    steps: Vec<tx::TxStep>,
+) -> Result<(TxReport, bool)> {
     let mut attrs = (*load_attrs(state, app_id).await?).clone();
     let mut dbtx = state.pool.begin().await.map_err(InstantError::from)?;
     // legacy runs every statement under a 30s query timeout (jdbc/sql.clj
@@ -382,14 +420,7 @@ pub async fn run_transact(
 
     let queued = crate::webhooks::queue_events(state, &mut dbtx, app_id, &attrs, &report).await?;
     dbtx.commit().await.map_err(InstantError::from)?;
-    notify_tx(state, app_id, &TxNotice::from(&report)).await;
-    if queued {
-        state.webhook_notify.notify_one();
-    }
-    crate::metrics::METRICS
-        .transact_seconds
-        .observe_since(started);
-    Ok(report)
+    Ok((report, queued))
 }
 
 /// Legacy's per-statement query timeout (`INSTANT_QUERY_TIMEOUT_SECS`,
