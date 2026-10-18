@@ -112,6 +112,13 @@ STORAGE_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$STORAGE_APP" "$STORAGE_TOKEN"
 layer storage node storage.mjs "$STORAGE_APP" "$STORAGE_TOKEN"
 
+echo "== rule-where rewriter =="
+# legacy's rule-wheres flag on for this app only (rule-wheres.mjs)
+RW_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+RW_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+./provision.sh "$RW_APP" "$RW_TOKEN"
+layer rulewheres node rule-wheres.mjs "$RW_APP" "$RW_TOKEN"
+
 echo "== error matrix =="
 ERR_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
 ERR_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")

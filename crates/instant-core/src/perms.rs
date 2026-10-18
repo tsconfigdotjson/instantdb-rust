@@ -848,7 +848,9 @@ pub fn rate_limit_names(expr: &cel::IdedExpr) -> Vec<String> {
 /// view / delete see the base set, create / update add `newData`, `link`
 /// adds `newData` / `linkedData` / `actions`, `unlink` `newData` /
 /// `linkedData`). `math` is the math extension's namespace (cel-java
-/// 0.11's strings extension has no namespaced function).
+/// 0.11's strings extension has no namespaced function). The type
+/// identifiers (`string`, `list`, ...) are declared for every action
+/// ([`crate::cel_ext::TYPE_IDENTS`]).
 fn declared_vars(action: Option<&str>) -> &'static [&'static str] {
     const BASE: [&str; 6] = ["data", "auth", "ruleParams", "request", "rateLimit", "math"];
     const VIEW: &[&str] = &BASE;
@@ -1079,7 +1081,11 @@ pub fn undeclared_reference(program: &Program) -> Option<InstantError> {
     // throw-validation-err! joins their messages
     let messages: Vec<String> = idents
         .into_iter()
-        .filter(|i| !declared.contains(&i.as_str()) && !bind_names.contains(i.as_str()))
+        .filter(|i| {
+            !declared.contains(&i.as_str())
+                && !bind_names.contains(i.as_str())
+                && !crate::cel_ext::TYPE_IDENTS.contains(&i.as_str())
+        })
         .map(|bad| format!("undeclared reference to '{bad}' (in container '')"))
         .collect();
     if messages.is_empty() {
