@@ -69,34 +69,62 @@ const RULES_SETTLE_MS = 1200;
 // per-entity check and debugQuery lists no rule-where for it. `covers` are
 // the surface ids the probe exercises once its witness holds.
 
+// Rules that would read a missing field (`null.startsWith(...)`) are guarded
+// with `data.x != null && ...`: a rule erroring on any entity fails the whole
+// query on rust and on legacy with the flag off (permission-evaluation-
+// failed), so without the guard there would be no result sets to compare.
+// `endswith` is left unguarded on purpose: with the flag on, legacy's where
+// clause filters the erroring row out before any rule runs.
 const PROBES = [
   { name: "eq", rule: "data.title == 'alpha'", where: { title: "alpha" }, covers: ["_eq_dynamic"] },
   { name: "eqnull", rule: "data.tag == null", where: { tag: { $isNull: true } }, covers: ["_eq_dynamic"] },
   { name: "neq", rule: "data.tag != 'x'", where: { tag: { $not: "x" } }, covers: ["_neq_dynamic"] },
   { name: "neqnull", rule: "data.tag != null", where: { tag: { $isNull: false } }, covers: ["_neq_dynamic"] },
-  { name: "inlist", rule: "data.tag in ['x', 'z']", where: { tag: { $in: ["x", "z"] } }, covers: ["_in_dynamic"] },
+  // a list literal is a java List, neither an ArrayList nor `sequential?`,
+  // so `_in_dynamic` throws "invalid inputs for in" (cel.clj:1229-1233)
+  { name: "inlist", rule: "data.tag in ['x', 'z']", throws: true, covers: ["_in_dynamic"] },
   { name: "inref", rule: "'ann' in data.ref('owner.name')", where: { "owner.name": "ann" }, covers: ["_in_dynamic", "_checked_data_ref"] },
-  { name: "notkey", rule: "!data.flag", where: { flag: false }, covers: ["_not_datakey"] },
+  { name: "notkey", rule: "data.flag != null && !data.flag", where: { and: [{ flag: { $isNull: false } }, { flag: false }] }, covers: ["_not_datakey"] },
   {
     name: "notwhere",
     rule: "!(data.title == 'alpha' || data.tag == 'x')",
     where: { and: [{ title: { $not: "alpha" } }, { tag: { $not: "x" } }] },
     covers: ["_not_whereclause"],
   },
-  { name: "startswith", rule: "data.title.startsWith('al')", where: { title: { $like: "al%" } }, covers: ["_datakey_starts_with"] },
+  {
+    name: "startswith",
+    rule: "data.title != null && data.title.startsWith('al')",
+    where: { and: [{ title: { $isNull: false } }, { title: { $like: "al%" } }] },
+    covers: ["_datakey_starts_with"],
+  },
   { name: "endswith", rule: "data.title.endsWith('a')", where: { title: { $like: "%a" } }, covers: ["_datakey_ends_with"] },
   // cel.clj:1356 builds the pattern as (str "%" y "%s"): a stray `s`
-  { name: "contains", rule: "data.title.contains('lph')", where: { title: { $like: "%lph%s" } }, covers: ["_datakey_contains"] },
+  {
+    name: "contains",
+    rule: "data.title != null && data.title.contains('lph')",
+    where: { and: [{ title: { $isNull: false } }, { title: { $like: "%lph%s" } }] },
+    covers: ["_datakey_contains"],
+  },
   // the prefix goes into the LIKE pattern unescaped: `_` matches any character
-  { name: "likewild", rule: "data.title.startsWith('a_')", where: { title: { $like: "a_%" } }, covers: ["_datakey_starts_with"] },
+  {
+    name: "likewild",
+    rule: "data.title != null && data.title.startsWith('a_')",
+    where: { and: [{ title: { $isNull: false } }, { title: { $like: "a_%" } }] },
+    covers: ["_datakey_starts_with"],
+  },
   { name: "sizeempty", rule: "size(data.ref('owner.id')) == 0", where: { owner: { $isNull: true } }, covers: ["_size_refpath_size", "_checked_data_ref"] },
   { name: "sizenonempty", rule: "size(data.ref('owner.id')) != 0", where: { owner: { $isNull: false } }, covers: ["_size_refpath_size"] },
-  { name: "timestamp", rule: "timestamp(data.due) > request.time", where: { due: { $gt: { $type: "string" } } }, covers: ["_timestamp_from_datakey"] },
+  {
+    name: "timestamp",
+    rule: "data.due != null && timestamp(data.due) > request.time",
+    where: { and: [{ due: { $isNull: false } }, { due: { $gt: { $type: "string" } } }] },
+    covers: ["_timestamp_from_datakey"],
+  },
   { name: "typekey", rule: "type(data.tag) == string", throws: true, covers: ["_type_datakey_override"] },
   { name: "typeref", rule: "type(data.ref('owner.name')) == list", throws: true, covers: ["_type_refpath_override"] },
-  { name: "typewhere", rule: "type(data.title.startsWith('al')) == bool", throws: true, covers: ["_type_whereclause_override"] },
+  { name: "typewhere", rule: "data.title != null && type(data.title.startsWith('al')) == bool", throws: true, covers: ["_type_whereclause_override"] },
   // a like clause can't be negated (negate-where-clauses throws)
-  { name: "notlike", rule: "!data.title.startsWith('al')", throws: true, covers: ["_not_whereclause"] },
+  { name: "notlike", rule: "data.title != null && !data.title.startsWith('al')", throws: true, covers: ["_not_whereclause"] },
 ];
 // the probe whose rule-where proves the flag is on next to a `throws` probe
 const CONTROL = "eq";
@@ -110,6 +138,7 @@ const ids = {
   oName: mk(),
   o1: mk(),
   o2: mk(),
+  o3: mk(),
   probes: Object.fromEntries(
     PROBES.map((p) => [
       p.name,
@@ -165,19 +194,23 @@ function rowSteps(p, e, row) {
 // The queries a guest runs per probe, and the attrs each reads (the client
 // computes its result from the triples of those attrs: the forms' etypes and
 // the attrs on a where path; any other join-row triple is compared apart).
+// `admin` queries also go through the admin SDK as guest. The nested ones
+// don't: legacy's permission filter drops a nested link form left without
+// viewable rows (instaql.clj:1945-1954), so an impersonated admin query has
+// no key where rust answers `[]`; the `emptyLink` query below pins that once.
 function queriesFor(p) {
   const a = ids.probes[p.name];
   const probeAttrs = [a.id, a.title, a.tag, a.flag, a.due, a.owner];
   const ownerAttrs = [ids.oId, ids.oName];
   return [
     // the probe's rule-where becomes the form's where
-    { key: "top", q: { [ns(p)]: {} }, reads: probeAttrs },
+    { key: "top", q: { [ns(p)]: {} }, reads: probeAttrs, admin: true },
     { key: "withOwner", q: { [ns(p)]: { owner: {} } }, reads: [...probeAttrs, ...ownerAttrs] },
     // ... the nested form's where (add-rule-wheres-to-query)
     { key: "nested", q: { rwowner: { [itemsLabel(p)]: {} } }, reads: [...ownerAttrs, ...probeAttrs] },
     // ... and is added to a where path that reaches the probe's etype
     // (extend-where-with-rule-refs)
-    { key: "wherePath", q: { rwowner: { $: { where: { [`${itemsLabel(p)}.tag`]: "x" } } } }, reads: [...ownerAttrs, a.owner, a.tag] },
+    { key: "wherePath", q: { rwowner: { $: { where: { [`${itemsLabel(p)}.tag`]: "x" } } } }, reads: [...ownerAttrs, a.owner, a.tag], admin: true },
   ];
 }
 
@@ -203,6 +236,7 @@ async function call(base, method, p, { headers = {}, json } = {}) {
   return { status: res.status, body };
 }
 const asGuest = { "app-id": appId, authorization: `Bearer ${adminToken}`, "as-guest": "true" };
+const adminOnly = { "app-id": appId, authorization: `Bearer ${adminToken}` };
 const errView = (status, b) => normalize({ status, type: b?.type ?? null, message: b?.message ?? null });
 
 // the object tree, entities in a stable order (rows seeded in one tx share
@@ -316,7 +350,7 @@ async function setUp(name, out) {
   };
   // schema and rows: small transacts, one per namespace
   await adminTx(
-    [attrStep(ids.oId, "rwowner", "id"), attrStep(ids.oName, "rwowner", "name"), ["add-triple", ids.o1, ids.oId, ids.o1], ["add-triple", ids.o1, ids.oName, "ann"], ["add-triple", ids.o2, ids.oId, ids.o2], ["add-triple", ids.o2, ids.oName, "bob"]],
+    [attrStep(ids.oId, "rwowner", "id"), attrStep(ids.oName, "rwowner", "name"), ["add-triple", ids.o1, ids.oId, ids.o1], ["add-triple", ids.o1, ids.oName, "ann"], ["add-triple", ids.o2, ids.oId, ids.o2], ["add-triple", ids.o2, ids.oName, "bob"], ["add-triple", ids.o3, ids.oId, ids.o3], ["add-triple", ids.o3, ids.oName, "cy"]],
     "owner seed",
   );
   for (const p of PROBES) {
@@ -349,7 +383,7 @@ async function setUp(name, out) {
   return {
     async queries(prefix = "") {
       for (const p of PROBES) {
-        for (const { key, q, reads } of queriesFor(p)) {
+        for (const { key, q, reads, admin } of queriesFor(p)) {
           const k = `${prefix}${p.name}/${key}`;
           const ceid = msg(guest, { op: "add-query", q });
           const r = await guest.waitFor((m) => (m.op === "add-query-ok" && canon(m.q) === canon(q)) || (m.op === "error" && m["client-event-id"] === ceid));
@@ -358,14 +392,17 @@ async function setUp(name, out) {
           } else {
             const readSet = new Set(reads);
             const triples = triplesOf(r.result);
-            record(`${k}/visible`, triples.filter((t) => readSet.has(t[1])));
-            record(`${k}/extra`, triples.filter((t) => !readSet.has(t[1])));
+            record(k, { visible: triples.filter((t) => readSet.has(t[1])), extra: triples.filter((t) => !readSet.has(t[1])) });
             msg(guest, { op: "remove-query", q });
             await guest.waitFor((m) => m.op === "remove-query-ok" && canon(m.q) === canon(q));
           }
-          record(`${k}.admin`, treeView(await call(url, "POST", "/admin/query", { headers: asGuest, json: { query: q } })));
+          if (admin) record(`${k}.admin`, treeView(await call(url, "POST", "/admin/query", { headers: asGuest, json: { query: q } })));
         }
       }
+      // an owner with no items: nested as guest and as admin
+      const emptyLink = { rwowner: { $: { where: { id: ids.o3 } }, [itemsLabel(PROBES[0])]: {} } };
+      record(`${prefix}emptyLink.admin`, treeView(await call(url, "POST", "/admin/query", { headers: asGuest, json: { query: emptyLink } })));
+      record(`${prefix}emptyLink.asAdmin`, treeView(await call(url, "POST", "/admin/query", { headers: adminOnly, json: { query: emptyLink } })));
     },
     close: () => guest.close(),
   };
@@ -375,7 +412,7 @@ async function setUp(name, out) {
 // run, witness, diff
 //
 // Compared paths: `rulewheres:<probe>/create<n>` (the guest's creates),
-// `rulewheres:<probe>/<query>/{visible,extra}` (socket add-query) and
+// `rulewheres:<probe>/<query>` (socket add-query: {visible, extra}) and
 // `rulewheres:<probe>/<query>.admin` (admin SDK as guest) with legacy's flag
 // on, and the same queries under `rulewheres:flag-off/` with it off.
 
@@ -423,6 +460,7 @@ for (const d of diffs) {
   console.log("  legacy:", JSON.stringify(d.legacy)?.slice(0, 2000));
   console.log("  rust:  ", JSON.stringify(d.rust)?.slice(0, 2000));
   for (const line of describeAllowVerdict(d.verdict)) console.log(line);
+  if (!d.allowed) console.log(`  UNALLOWED ${JSON.stringify({ path: d.path, legacy: d.legacy, rust: d.rust })}`);
 }
 for (const w of witnessFailures) console.log(`\n[WITNESS FAILED] ${w}`);
 const staleAllows = allowlist.reportStale();
