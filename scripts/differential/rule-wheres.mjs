@@ -32,6 +32,7 @@
 //      and the config app's admin token via psql), DUMP=1 prints each
 //      server's results
 
+import { execSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { note } from "./coverage-hook.mjs";
@@ -234,8 +235,9 @@ function triplesOf(result) {
 
 async function enableRuleWheres() {
   const { url, db } = SERVERS.legacy;
-  const token = uuid();
-  psql(db, `INSERT INTO app_admin_tokens (app_id, token) SELECT id, '${token}' FROM apps WHERE id = '${CONFIG_APP_ID}'`);
+  // the bootstrap gave the config app its (one) admin token
+  const token = execSync(`psql "${db}" -tA -v ON_ERROR_STOP=1 -c "SELECT token FROM app_admin_tokens WHERE app_id = '${CONFIG_APP_ID}'"`).toString().trim();
+  if (!token) throw new Error(`legacy has no admin token for its config app ${CONFIG_APP_ID} (does the image bootstrap it?)`);
   const res = await call(url, "POST", "/admin/transact", {
     headers: { "app-id": CONFIG_APP_ID, authorization: `Bearer ${token}` },
     json: { steps: [["update", "rule-wheres", uuid(), { "app-ids": [appId] }]] },
