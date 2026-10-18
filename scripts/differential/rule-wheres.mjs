@@ -114,12 +114,11 @@ const PROBES = [
   },
   { name: "sizeempty", rule: "size(data.ref('owner.id')) == 0", where: { owner: { $isNull: true } }, covers: ["_size_refpath_size", "_checked_data_ref"] },
   { name: "sizenonempty", rule: "size(data.ref('owner.id')) != 0", where: { owner: { $isNull: false } }, covers: ["_size_refpath_size"] },
-  {
-    name: "timestamp",
-    rule: "data.due != null && timestamp(data.due) > request.time",
-    where: { and: [{ due: { $isNull: false } }, { due: { $gt: { $type: "string" } } }] },
-    covers: ["_timestamp_from_datakey"],
-  },
+  // `_timestamp_from_datakey` hands the DataKey to `_>_datakey_timestamp`,
+  // whose clause carries a java.time.Instant (cel.clj:1076-1083) that the
+  // query validation rejects for a date attr (instaql.clj get-rule-wheres
+  // rule-wheres->where-conds), so legacy drops the rule-where like a throw
+  { name: "timestamp", rule: "data.due != null && timestamp(data.due) > request.time", throws: true, covers: ["_timestamp_from_datakey"] },
   { name: "typekey", rule: "type(data.tag) == string", throws: true, covers: ["_type_datakey_override"] },
   { name: "typeref", rule: "type(data.ref('owner.name')) == list", throws: true, covers: ["_type_refpath_override"] },
   { name: "typewhere", rule: "data.title != null && type(data.title.startsWith('al')) == bool", throws: true, covers: ["_type_whereclause_override"] },
@@ -139,6 +138,8 @@ const ids = {
   o1: mk(),
   o2: mk(),
   o3: mk(),
+  passOff: mk(),
+  passOn: mk(),
   probes: Object.fromEntries(
     PROBES.map((p) => [
       p.name,
@@ -164,6 +165,31 @@ const ROWS = [
 ];
 // what the guest creates per probe: like r1 and like r5
 const CREATES = [ROWS[0], ROWS[4]];
+
+// fixed ids carry the app id's prefix; recorded values name them instead
+// (`contains.r1`, `attr:rw_contains.title`, `o1`), so allowlist pins hold
+// from run to run
+const ID_NAMES = new Map([
+  [ids.oId, "attr:rwowner.id"],
+  [ids.oName, "attr:rwowner.name"],
+  [ids.o1, "o1"],
+  [ids.o2, "o2"],
+  [ids.o3, "o3"],
+  ...PROBES.flatMap((p) => {
+    const a = ids.probes[p.name];
+    return [
+      ...["id", "title", "tag", "flag", "due", "owner"].map((l) => [a[l], `attr:${ns(p)}.${l}`]),
+      ...a.rows.map((e, i) => [e, `${p.name}.r${i + 1}`]),
+      ...a.creates.map((e, i) => [e, `${p.name}.c${i + 1}`]),
+    ];
+  }),
+]);
+function relabel(v) {
+  if (typeof v === "string") return ID_NAMES.get(v) ?? v;
+  if (Array.isArray(v)) return v.map(relabel);
+  if (v !== null && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, relabel(x)]));
+  return v;
+}
 
 const ceids = (() => {
   let i = 0;
@@ -198,19 +224,23 @@ function rowSteps(p, e, row) {
 // don't: legacy's permission filter drops a nested link form left without
 // viewable rows (instaql.clj:1945-1954), so an impersonated admin query has
 // no key where rust answers `[]`; the `emptyLink` query below pins that once.
-function queriesFor(p) {
+function queriesFor(p, pass) {
   const a = ids.probes[p.name];
+  // legacy answers a socket add-query it has answered before from its
+  // query cache, keyed by the query as sent (before the rule-wheres
+  // rewrite): every pass's queries are made unique
+  const unique = { id: { $ne: pass } };
   const probeAttrs = [a.id, a.title, a.tag, a.flag, a.due, a.owner];
   const ownerAttrs = [ids.oId, ids.oName];
   return [
     // the probe's rule-where becomes the form's where
-    { key: "top", q: { [ns(p)]: {} }, reads: probeAttrs, admin: true },
-    { key: "withOwner", q: { [ns(p)]: { owner: {} } }, reads: [...probeAttrs, ...ownerAttrs] },
+    { key: "top", q: { [ns(p)]: { $: { where: unique } } }, reads: probeAttrs, admin: true },
+    { key: "withOwner", q: { [ns(p)]: { $: { where: unique }, owner: {} } }, reads: [...probeAttrs, ...ownerAttrs] },
     // ... the nested form's where (add-rule-wheres-to-query)
-    { key: "nested", q: { rwowner: { [itemsLabel(p)]: {} } }, reads: [...ownerAttrs, ...probeAttrs] },
+    { key: "nested", q: { rwowner: { $: { where: unique }, [itemsLabel(p)]: {} } }, reads: [...ownerAttrs, ...probeAttrs] },
     // ... and is added to a where path that reaches the probe's etype
     // (extend-where-with-rule-refs)
-    { key: "wherePath", q: { rwowner: { $: { where: { [`${itemsLabel(p)}.tag`]: "x" } } } }, reads: [...ownerAttrs, a.owner, a.tag], admin: true },
+    { key: "wherePath", q: { rwowner: { $: { where: { ...unique, [`${itemsLabel(p)}.tag`]: "x" } } } }, reads: [...ownerAttrs, a.owner, a.tag], admin: true },
   ];
 }
 
@@ -333,6 +363,7 @@ async function setUp(name, out) {
   const msg = (conn, m) => conn.send({ "client-event-id": ceids(), ...m });
   const reply = (conn, ceid) => conn.waitFor((m) => (m.op === "transact-ok" || m.op === "error") && m["client-event-id"] === ceid);
   const record = (k, v) => {
+    v = relabel(v);
     out[k] = v;
     if (process.env.DUMP) console.log(`[${name}] ${k}`, JSON.stringify(v));
   };
@@ -381,9 +412,9 @@ async function setUp(name, out) {
   }
 
   return {
-    async queries(prefix = "") {
+    async queries(prefix, pass) {
       for (const p of PROBES) {
-        for (const { key, q, reads, admin } of queriesFor(p)) {
+        for (const { key, q, reads, admin } of queriesFor(p, pass)) {
           const k = `${prefix}${p.name}/${key}`;
           const ceid = msg(guest, { op: "add-query", q });
           const r = await guest.waitFor((m) => (m.op === "add-query-ok" && canon(m.q) === canon(q)) || (m.op === "error" && m["client-event-id"] === ceid));
@@ -400,7 +431,7 @@ async function setUp(name, out) {
         }
       }
       // an owner with no items: nested as guest and as admin
-      const emptyLink = { rwowner: { $: { where: { id: ids.o3 } }, [itemsLabel(PROBES[0])]: {} } };
+      const emptyLink = { rwowner: { $: { where: { and: [{ id: ids.o3 }, { id: { $ne: pass } }] } }, [itemsLabel(PROBES[0])]: {} } };
       record(`${prefix}emptyLink.admin`, treeView(await call(url, "POST", "/admin/query", { headers: asGuest, json: { query: emptyLink } })));
       record(`${prefix}emptyLink.asAdmin`, treeView(await call(url, "POST", "/admin/query", { headers: adminOnly, json: { query: emptyLink } })));
     },
@@ -421,10 +452,10 @@ const witnessFailures = [];
 {
   const legacy = await setUp("legacy", results.legacy);
   console.log("legacy: rule-where probes with the flag off…");
-  await legacy.queries("flag-off/");
+  await legacy.queries("flag-off/", ids.passOff);
   await enableRuleWheres();
   console.log("legacy: rule-wheres is on for the app; the probes again…");
-  await legacy.queries();
+  await legacy.queries("", ids.passOn);
   legacy.close();
   for (const p of PROBES) {
     const why = await witness(p);
@@ -435,8 +466,8 @@ const witnessFailures = [];
 {
   console.log("rust: rule-where probes…");
   const rust = await setUp("rust", results.rust);
-  await rust.queries("flag-off/");
-  await rust.queries();
+  await rust.queries("flag-off/", ids.passOff);
+  await rust.queries("", ids.passOn);
   rust.close();
 }
 
