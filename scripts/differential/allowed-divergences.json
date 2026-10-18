@@ -354,5 +354,714 @@
     },
     "reason": "Decided divergence: legacy's reject-by-id-and-foreign-key formats the id-only query (reject-by-id-qs) against the route's invite table, so an org admin revoking through their own org's path revokes a pending invite of any other org by id (probed with an invite of a second org, revoked through the team org's path; an app invite revoked through an org path stays pending on both servers because the org table has no such id). This server scopes the revoke to the org in the path, so the other org's invite stays pending. docs/PARITY.md (wire-level divergences: invite revoke scope).",
     "citation": "LEGACY/server/src/instant/model/member_invites.clj:166-172"
+  },
+  {
+    "path": "^rulewheres:(flag-off/)?emptyLink\\.admin$",
+    "differs": [
+      "^\\.result\\.rwowner\\.0\\.items_eq$"
+    ],
+    "legacy": {
+      "status": 200,
+      "result": {
+        "rwowner": [
+          {
+            "id": "o3",
+            "name": "cy",
+            "items_eq": {
+              "$absent": true
+            }
+          }
+        ]
+      }
+    },
+    "rust": {
+      "status": 200,
+      "result": {
+        "rwowner": [
+          {
+            "id": "o3",
+            "name": "cy",
+            "items_eq": []
+          }
+        ]
+      }
+    },
+    "reason": "An impersonated admin query (`db.asUser(...).query`) of an entity whose nested link has no viewable rows: legacy's permission filter drops the nested form node (permissioned-node keeps child nodes with join rows only), so the key is missing from the object tree; the same query as admin answers `items_eq: []` on legacy too (rulewheres:emptyLink.asAdmin matches). This server answers `[]` either way, which is the shape the admin SDK's result types promise. Legacy bug, not reproduced.",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:1945-1954 (permissioned-node), LEGACY/server/src/instant/util/instaql.clj:86-97 (instaql-ref-nodes->object-tree)"
+  },
+  {
+    "path": "^rulewheres:endswith/wherePath$",
+    "differs": [
+      "^\\.extra$"
+    ],
+    "legacy": {
+      "extra": [
+        ["endswith.r1", "attr:rw_endswith.title", "alpha", "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.title", "alpha", "<ts>"]
+      ]
+    },
+    "rust": {
+      "extra": []
+    },
+    "reason": "Legacy's rewriter adds the probe's view rule to the query as a where clause, and a where clause's matched triples ship in the join rows (attrs the query's forms don't read: `id` / `title` of the linked items on a where path, the owner's `name` for `data.ref('owner.name')`). The visible triples, i.e. what the client's query result is computed from, match; the client stores the extra triples but no query of this shape reads them, and they belong to entities the same rule lets the session see. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag); LEGACY/client/packages/core/src/model/instaqlResult.js:1-25"
+  },
+  {
+    "path": "^rulewheres:eq/wherePath$",
+    "differs": [
+      "^\\.extra$"
+    ],
+    "legacy": {
+      "extra": [
+        ["eq.r1", "attr:rw_eq.title", "alpha", "<ts>"],
+        ["eq.c1", "attr:rw_eq.title", "alpha", "<ts>"]
+      ]
+    },
+    "rust": {
+      "extra": []
+    },
+    "reason": "Legacy's rewriter adds the probe's view rule to the query as a where clause, and a where clause's matched triples ship in the join rows (attrs the query's forms don't read: `id` / `title` of the linked items on a where path, the owner's `name` for `data.ref('owner.name')`). The visible triples, i.e. what the client's query result is computed from, match; the client stores the extra triples but no query of this shape reads them, and they belong to entities the same rule lets the session see. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag); LEGACY/client/packages/core/src/model/instaqlResult.js:1-25"
+  },
+  {
+    "path": "^rulewheres:inref/top$",
+    "differs": [
+      "^\\.extra$"
+    ],
+    "legacy": {
+      "extra": [
+        ["o1", "attr:rwowner.name", "ann", "<ts>"]
+      ]
+    },
+    "rust": {
+      "extra": []
+    },
+    "reason": "Legacy's rewriter adds the probe's view rule to the query as a where clause, and a where clause's matched triples ship in the join rows (attrs the query's forms don't read: `id` / `title` of the linked items on a where path, the owner's `name` for `data.ref('owner.name')`). The visible triples, i.e. what the client's query result is computed from, match; the client stores the extra triples but no query of this shape reads them, and they belong to entities the same rule lets the session see. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag); LEGACY/client/packages/core/src/model/instaqlResult.js:1-25"
+  },
+  {
+    "path": "^rulewheres:likewild/wherePath$",
+    "differs": [
+      "^\\.extra$"
+    ],
+    "legacy": {
+      "extra": [
+        ["likewild.r4", "attr:rw_likewild.id", "likewild.r4", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.title", "a_c", "<ts>"]
+      ]
+    },
+    "rust": {
+      "extra": []
+    },
+    "reason": "Legacy's rewriter adds the probe's view rule to the query as a where clause, and a where clause's matched triples ship in the join rows (attrs the query's forms don't read: `id` / `title` of the linked items on a where path, the owner's `name` for `data.ref('owner.name')`). The visible triples, i.e. what the client's query result is computed from, match; the client stores the extra triples but no query of this shape reads them, and they belong to entities the same rule lets the session see. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag); LEGACY/client/packages/core/src/model/instaqlResult.js:1-25"
+  },
+  {
+    "path": "^rulewheres:neqnull/wherePath$",
+    "differs": [
+      "^\\.extra$"
+    ],
+    "legacy": {
+      "extra": [
+        ["neqnull.r1", "attr:rw_neqnull.id", "neqnull.r1", "<ts>"],
+        ["neqnull.r4", "attr:rw_neqnull.id", "neqnull.r4", "<ts>"],
+        ["neqnull.c1", "attr:rw_neqnull.id", "neqnull.c1", "<ts>"]
+      ]
+    },
+    "rust": {
+      "extra": []
+    },
+    "reason": "Legacy's rewriter adds the probe's view rule to the query as a where clause, and a where clause's matched triples ship in the join rows (attrs the query's forms don't read: `id` / `title` of the linked items on a where path, the owner's `name` for `data.ref('owner.name')`). The visible triples, i.e. what the client's query result is computed from, match; the client stores the extra triples but no query of this shape reads them, and they belong to entities the same rule lets the session see. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag); LEGACY/client/packages/core/src/model/instaqlResult.js:1-25"
+  },
+  {
+    "path": "^rulewheres:sizenonempty/wherePath$",
+    "differs": [
+      "^\\.extra$"
+    ],
+    "legacy": {
+      "extra": [
+        ["sizenonempty.r1", "attr:rw_sizenonempty.id", "sizenonempty.r1", "<ts>"],
+        ["sizenonempty.r4", "attr:rw_sizenonempty.id", "sizenonempty.r4", "<ts>"],
+        ["sizenonempty.c1", "attr:rw_sizenonempty.id", "sizenonempty.c1", "<ts>"]
+      ]
+    },
+    "rust": {
+      "extra": []
+    },
+    "reason": "Legacy's rewriter adds the probe's view rule to the query as a where clause, and a where clause's matched triples ship in the join rows (attrs the query's forms don't read: `id` / `title` of the linked items on a where path, the owner's `name` for `data.ref('owner.name')`). The visible triples, i.e. what the client's query result is computed from, match; the client stores the extra triples but no query of this shape reads them, and they belong to entities the same rule lets the session see. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag); LEGACY/client/packages/core/src/model/instaqlResult.js:1-25"
+  },
+  {
+    "path": "^rulewheres:startswith/wherePath$",
+    "differs": [
+      "^\\.extra$"
+    ],
+    "legacy": {
+      "extra": [
+        ["startswith.r1", "attr:rw_startswith.id", "startswith.r1", "<ts>"],
+        ["startswith.r1", "attr:rw_startswith.title", "alpha", "<ts>"],
+        ["startswith.c1", "attr:rw_startswith.id", "startswith.c1", "<ts>"],
+        ["startswith.c1", "attr:rw_startswith.title", "alpha", "<ts>"]
+      ]
+    },
+    "rust": {
+      "extra": []
+    },
+    "reason": "Legacy's rewriter adds the probe's view rule to the query as a where clause, and a where clause's matched triples ship in the join rows (attrs the query's forms don't read: `id` / `title` of the linked items on a where path, the owner's `name` for `data.ref('owner.name')`). The visible triples, i.e. what the client's query result is computed from, match; the client stores the extra triples but no query of this shape reads them, and they belong to entities the same rule lets the session see. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag); LEGACY/client/packages/core/src/model/instaqlResult.js:1-25"
+  },
+  {
+    "path": "^rulewheres:contains/nested$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "visible": [
+        ["o1", "attr:rwowner.id", "o1", "<ts>"],
+        ["o1", "attr:rwowner.name", "ann", "<ts>"],
+        ["o2", "attr:rwowner.id", "o2", "<ts>"],
+        ["o2", "attr:rwowner.name", "bob", "<ts>"],
+        ["o3", "attr:rwowner.id", "o3", "<ts>"],
+        ["o3", "attr:rwowner.name", "cy", "<ts>"],
+        ["contains.r2", "attr:rw_contains.id", "contains.r2", "<ts>"],
+        ["contains.r2", "attr:rw_contains.title", "alphas", "<ts>"],
+        ["contains.r2", "attr:rw_contains.tag", "y", "<ts>"],
+        ["contains.r2", "attr:rw_contains.flag", false, "<ts>"],
+        ["contains.r2", "attr:rw_contains.due", "2099-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.r2", "attr:rw_contains.owner", "o2", "<ts>"]
+      ],
+      "extra": []
+    },
+    "rust": {
+      "visible": [
+        ["o1", "attr:rwowner.id", "o1", "<ts>"],
+        ["o1", "attr:rwowner.name", "ann", "<ts>"],
+        ["o2", "attr:rwowner.id", "o2", "<ts>"],
+        ["o2", "attr:rwowner.name", "bob", "<ts>"],
+        ["o3", "attr:rwowner.id", "o3", "<ts>"],
+        ["o3", "attr:rwowner.name", "cy", "<ts>"],
+        ["contains.r1", "attr:rw_contains.id", "contains.r1", "<ts>"],
+        ["contains.r1", "attr:rw_contains.title", "alpha", "<ts>"],
+        ["contains.r1", "attr:rw_contains.tag", "x", "<ts>"],
+        ["contains.r1", "attr:rw_contains.flag", true, "<ts>"],
+        ["contains.r1", "attr:rw_contains.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.r1", "attr:rw_contains.owner", "o1", "<ts>"],
+        ["contains.r2", "attr:rw_contains.id", "contains.r2", "<ts>"],
+        ["contains.r2", "attr:rw_contains.title", "alphas", "<ts>"],
+        ["contains.r2", "attr:rw_contains.tag", "y", "<ts>"],
+        ["contains.r2", "attr:rw_contains.flag", false, "<ts>"],
+        ["contains.r2", "attr:rw_contains.due", "2099-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.r2", "attr:rw_contains.owner", "o2", "<ts>"],
+        ["contains.c1", "attr:rw_contains.id", "contains.c1", "<ts>"],
+        ["contains.c1", "attr:rw_contains.title", "alpha", "<ts>"],
+        ["contains.c1", "attr:rw_contains.tag", "x", "<ts>"],
+        ["contains.c1", "attr:rw_contains.flag", true, "<ts>"],
+        ["contains.c1", "attr:rw_contains.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.c1", "attr:rw_contains.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "reason": "Legacy bug: `_datakey_contains` builds the LIKE pattern as (str \"%\" y \"%s\") (cel.clj:1356), so `data.title.contains('lph')` becomes `$like '%lph%s'` and only titles that also end in `s` match. The rows the rule allows (`alpha`) are hidden from the guest, and so are owners found through a where path. This server evaluates `contains` per entity and returns every row the rule allows. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1345-1357; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:contains/top$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "visible": [
+        ["contains.r2", "attr:rw_contains.id", "contains.r2", "<ts>"],
+        ["contains.r2", "attr:rw_contains.title", "alphas", "<ts>"],
+        ["contains.r2", "attr:rw_contains.tag", "y", "<ts>"],
+        ["contains.r2", "attr:rw_contains.flag", false, "<ts>"],
+        ["contains.r2", "attr:rw_contains.due", "2099-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.r2", "attr:rw_contains.owner", "o2", "<ts>"]
+      ],
+      "extra": []
+    },
+    "rust": {
+      "visible": [
+        ["contains.r1", "attr:rw_contains.id", "contains.r1", "<ts>"],
+        ["contains.r1", "attr:rw_contains.title", "alpha", "<ts>"],
+        ["contains.r1", "attr:rw_contains.tag", "x", "<ts>"],
+        ["contains.r1", "attr:rw_contains.flag", true, "<ts>"],
+        ["contains.r1", "attr:rw_contains.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.r1", "attr:rw_contains.owner", "o1", "<ts>"],
+        ["contains.r2", "attr:rw_contains.id", "contains.r2", "<ts>"],
+        ["contains.r2", "attr:rw_contains.title", "alphas", "<ts>"],
+        ["contains.r2", "attr:rw_contains.tag", "y", "<ts>"],
+        ["contains.r2", "attr:rw_contains.flag", false, "<ts>"],
+        ["contains.r2", "attr:rw_contains.due", "2099-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.r2", "attr:rw_contains.owner", "o2", "<ts>"],
+        ["contains.c1", "attr:rw_contains.id", "contains.c1", "<ts>"],
+        ["contains.c1", "attr:rw_contains.title", "alpha", "<ts>"],
+        ["contains.c1", "attr:rw_contains.tag", "x", "<ts>"],
+        ["contains.c1", "attr:rw_contains.flag", true, "<ts>"],
+        ["contains.c1", "attr:rw_contains.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.c1", "attr:rw_contains.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "reason": "Legacy bug: `_datakey_contains` builds the LIKE pattern as (str \"%\" y \"%s\") (cel.clj:1356), so `data.title.contains('lph')` becomes `$like '%lph%s'` and only titles that also end in `s` match. The rows the rule allows (`alpha`) are hidden from the guest, and so are owners found through a where path. This server evaluates `contains` per entity and returns every row the rule allows. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1345-1357; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:contains/top\\.admin$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "status": 200,
+      "result": {
+        "rw_contains": [
+          {
+            "title": "alphas",
+            "due": "2099-01-01T00:00:00.000Z",
+            "tag": "y",
+            "id": "contains.r2",
+            "flag": false,
+            "owner": "o2"
+          }
+        ]
+      }
+    },
+    "rust": {
+      "status": 200,
+      "result": {
+        "rw_contains": [
+          {
+            "id": "contains.r1",
+            "title": "alpha",
+            "tag": "x",
+            "flag": true,
+            "due": "2020-01-01T00:00:00.000Z",
+            "owner": "o1"
+          },
+          {
+            "id": "contains.c1",
+            "title": "alpha",
+            "tag": "x",
+            "flag": true,
+            "due": "2020-01-01T00:00:00.000Z",
+            "owner": "o1"
+          },
+          {
+            "id": "contains.r2",
+            "title": "alphas",
+            "tag": "y",
+            "flag": false,
+            "due": "2099-01-01T00:00:00.000Z",
+            "owner": "o2"
+          }
+        ]
+      }
+    },
+    "reason": "Legacy bug: `_datakey_contains` builds the LIKE pattern as (str \"%\" y \"%s\") (cel.clj:1356), so `data.title.contains('lph')` becomes `$like '%lph%s'` and only titles that also end in `s` match. The rows the rule allows (`alpha`) are hidden from the guest, and so are owners found through a where path. This server evaluates `contains` per entity and returns every row the rule allows. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1345-1357; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:contains/wherePath$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "visible": [],
+      "extra": []
+    },
+    "rust": {
+      "visible": [
+        ["o1", "attr:rwowner.id", "o1", "<ts>"],
+        ["o1", "attr:rwowner.name", "ann", "<ts>"],
+        ["contains.r1", "attr:rw_contains.tag", "x", "<ts>"],
+        ["contains.r1", "attr:rw_contains.owner", "o1", "<ts>"],
+        ["contains.c1", "attr:rw_contains.tag", "x", "<ts>"],
+        ["contains.c1", "attr:rw_contains.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "reason": "Legacy bug: `_datakey_contains` builds the LIKE pattern as (str \"%\" y \"%s\") (cel.clj:1356), so `data.title.contains('lph')` becomes `$like '%lph%s'` and only titles that also end in `s` match. The rows the rule allows (`alpha`) are hidden from the guest, and so are owners found through a where path. This server evaluates `contains` per entity and returns every row the rule allows. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1345-1357; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:contains/wherePath\\.admin$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "status": 200,
+      "result": {
+        "rwowner": []
+      }
+    },
+    "rust": {
+      "status": 200,
+      "result": {
+        "rwowner": [
+          {
+            "id": "o1",
+            "name": "ann"
+          }
+        ]
+      }
+    },
+    "reason": "Legacy bug: `_datakey_contains` builds the LIKE pattern as (str \"%\" y \"%s\") (cel.clj:1356), so `data.title.contains('lph')` becomes `$like '%lph%s'` and only titles that also end in `s` match. The rows the rule allows (`alpha`) are hidden from the guest, and so are owners found through a where path. This server evaluates `contains` per entity and returns every row the rule allows. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1345-1357; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:contains/withOwner$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "visible": [
+        ["o2", "attr:rwowner.id", "o2", "<ts>"],
+        ["o2", "attr:rwowner.name", "bob", "<ts>"],
+        ["contains.r2", "attr:rw_contains.id", "contains.r2", "<ts>"],
+        ["contains.r2", "attr:rw_contains.title", "alphas", "<ts>"],
+        ["contains.r2", "attr:rw_contains.tag", "y", "<ts>"],
+        ["contains.r2", "attr:rw_contains.flag", false, "<ts>"],
+        ["contains.r2", "attr:rw_contains.due", "2099-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.r2", "attr:rw_contains.owner", "o2", "<ts>"]
+      ],
+      "extra": []
+    },
+    "rust": {
+      "visible": [
+        ["o1", "attr:rwowner.id", "o1", "<ts>"],
+        ["o1", "attr:rwowner.name", "ann", "<ts>"],
+        ["o2", "attr:rwowner.id", "o2", "<ts>"],
+        ["o2", "attr:rwowner.name", "bob", "<ts>"],
+        ["contains.r1", "attr:rw_contains.id", "contains.r1", "<ts>"],
+        ["contains.r1", "attr:rw_contains.title", "alpha", "<ts>"],
+        ["contains.r1", "attr:rw_contains.tag", "x", "<ts>"],
+        ["contains.r1", "attr:rw_contains.flag", true, "<ts>"],
+        ["contains.r1", "attr:rw_contains.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.r1", "attr:rw_contains.owner", "o1", "<ts>"],
+        ["contains.r2", "attr:rw_contains.id", "contains.r2", "<ts>"],
+        ["contains.r2", "attr:rw_contains.title", "alphas", "<ts>"],
+        ["contains.r2", "attr:rw_contains.tag", "y", "<ts>"],
+        ["contains.r2", "attr:rw_contains.flag", false, "<ts>"],
+        ["contains.r2", "attr:rw_contains.due", "2099-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.r2", "attr:rw_contains.owner", "o2", "<ts>"],
+        ["contains.c1", "attr:rw_contains.id", "contains.c1", "<ts>"],
+        ["contains.c1", "attr:rw_contains.title", "alpha", "<ts>"],
+        ["contains.c1", "attr:rw_contains.tag", "x", "<ts>"],
+        ["contains.c1", "attr:rw_contains.flag", true, "<ts>"],
+        ["contains.c1", "attr:rw_contains.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["contains.c1", "attr:rw_contains.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "reason": "Legacy bug: `_datakey_contains` builds the LIKE pattern as (str \"%\" y \"%s\") (cel.clj:1356), so `data.title.contains('lph')` becomes `$like '%lph%s'` and only titles that also end in `s` match. The rows the rule allows (`alpha`) are hidden from the guest, and so are owners found through a where path. This server evaluates `contains` per entity and returns every row the rule allows. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1345-1357; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:endswith/top$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "visible": [
+        ["endswith.r1", "attr:rw_endswith.id", "endswith.r1", "<ts>"],
+        ["endswith.r1", "attr:rw_endswith.title", "alpha", "<ts>"],
+        ["endswith.r1", "attr:rw_endswith.tag", "x", "<ts>"],
+        ["endswith.r1", "attr:rw_endswith.flag", true, "<ts>"],
+        ["endswith.r1", "attr:rw_endswith.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["endswith.r1", "attr:rw_endswith.owner", "o1", "<ts>"],
+        ["endswith.r3", "attr:rw_endswith.id", "endswith.r3", "<ts>"],
+        ["endswith.r3", "attr:rw_endswith.title", "beta", "<ts>"],
+        ["endswith.r3", "attr:rw_endswith.due", null, "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.id", "endswith.c1", "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.title", "alpha", "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.tag", "x", "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.flag", true, "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "rust": {
+      "status": 400,
+      "type": "permission-evaluation-failed",
+      "message": "Could not evaluate permission rule for `rw_endswith.view`. You may have a typo. Debug this in the sandbox and then update your permission rules."
+    },
+    "reason": "`data.title.endsWith('a')` errors on a row without a title. This server, like legacy with the flag off, fails the whole query with `permission-evaluation-failed` (one erroring view rule fails the query). With the flag on, legacy's rewriter turns the rule into `{title: {$like: '%a'}}`, the title-less row never matches, and the matched rows skip the per-entity check, so legacy answers. Rule evaluation stays per entity here, so a rule that errors on some row keeps failing the query, as on a default legacy server. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1331-1343; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:endswith/top\\.admin$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "status": 200,
+      "result": {
+        "rw_endswith": [
+          {
+            "id": "endswith.r1",
+            "flag": true,
+            "owner": "o1",
+            "due": "2020-01-01T00:00:00.000Z",
+            "title": "alpha",
+            "tag": "x"
+          },
+          {
+            "title": "alpha",
+            "owner": "o1",
+            "tag": "x",
+            "due": "2020-01-01T00:00:00.000Z",
+            "flag": true,
+            "id": "endswith.c1"
+          },
+          {
+            "id": "endswith.r3",
+            "title": "beta",
+            "due": null
+          }
+        ]
+      }
+    },
+    "rust": {
+      "status": 400,
+      "type": "permission-evaluation-failed",
+      "message": "Could not evaluate permission rule for `rw_endswith.view`. You may have a typo. Debug this in the sandbox and then update your permission rules."
+    },
+    "reason": "`data.title.endsWith('a')` errors on a row without a title. This server, like legacy with the flag off, fails the whole query with `permission-evaluation-failed` (one erroring view rule fails the query). With the flag on, legacy's rewriter turns the rule into `{title: {$like: '%a'}}`, the title-less row never matches, and the matched rows skip the per-entity check, so legacy answers. Rule evaluation stays per entity here, so a rule that errors on some row keeps failing the query, as on a default legacy server. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1331-1343; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:endswith/withOwner$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "visible": [
+        ["o1", "attr:rwowner.id", "o1", "<ts>"],
+        ["o1", "attr:rwowner.name", "ann", "<ts>"],
+        ["endswith.r1", "attr:rw_endswith.id", "endswith.r1", "<ts>"],
+        ["endswith.r1", "attr:rw_endswith.title", "alpha", "<ts>"],
+        ["endswith.r1", "attr:rw_endswith.tag", "x", "<ts>"],
+        ["endswith.r1", "attr:rw_endswith.flag", true, "<ts>"],
+        ["endswith.r1", "attr:rw_endswith.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["endswith.r1", "attr:rw_endswith.owner", "o1", "<ts>"],
+        ["endswith.r3", "attr:rw_endswith.id", "endswith.r3", "<ts>"],
+        ["endswith.r3", "attr:rw_endswith.title", "beta", "<ts>"],
+        ["endswith.r3", "attr:rw_endswith.due", null, "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.id", "endswith.c1", "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.title", "alpha", "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.tag", "x", "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.flag", true, "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["endswith.c1", "attr:rw_endswith.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "rust": {
+      "status": 400,
+      "type": "permission-evaluation-failed",
+      "message": "Could not evaluate permission rule for `rw_endswith.view`. You may have a typo. Debug this in the sandbox and then update your permission rules."
+    },
+    "reason": "`data.title.endsWith('a')` errors on a row without a title. This server, like legacy with the flag off, fails the whole query with `permission-evaluation-failed` (one erroring view rule fails the query). With the flag on, legacy's rewriter turns the rule into `{title: {$like: '%a'}}`, the title-less row never matches, and the matched rows skip the per-entity check, so legacy answers. Rule evaluation stays per entity here, so a rule that errors on some row keeps failing the query, as on a default legacy server. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1331-1343; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:likewild/nested$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "visible": [
+        ["o1", "attr:rwowner.id", "o1", "<ts>"],
+        ["o1", "attr:rwowner.name", "ann", "<ts>"],
+        ["o2", "attr:rwowner.id", "o2", "<ts>"],
+        ["o2", "attr:rwowner.name", "bob", "<ts>"],
+        ["o3", "attr:rwowner.id", "o3", "<ts>"],
+        ["o3", "attr:rwowner.name", "cy", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.id", "likewild.r1", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.title", "alpha", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.tag", "x", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.flag", true, "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.owner", "o1", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.id", "likewild.r2", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.title", "alphas", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.tag", "y", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.flag", false, "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.due", "2099-01-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.owner", "o2", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.id", "likewild.r4", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.title", "a_c", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.tag", "x", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.flag", true, "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.due", "2020-06-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "rust": {
+      "visible": [
+        ["o1", "attr:rwowner.id", "o1", "<ts>"],
+        ["o1", "attr:rwowner.name", "ann", "<ts>"],
+        ["o2", "attr:rwowner.id", "o2", "<ts>"],
+        ["o2", "attr:rwowner.name", "bob", "<ts>"],
+        ["o3", "attr:rwowner.id", "o3", "<ts>"],
+        ["o3", "attr:rwowner.name", "cy", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.id", "likewild.r4", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.title", "a_c", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.tag", "x", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.flag", true, "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.due", "2020-06-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "reason": "Legacy bug, and it over-shares: `_datakey_starts_with` puts the CEL prefix into the LIKE pattern unescaped (cel.clj:1328), so `data.title.startsWith('a_')` becomes `$like 'a_%'` and `_` matches any character. Rows the rule denies (`alpha`, `alphas`) are shown to the guest, and the matched rows skip the per-entity check that would have denied them. This server evaluates `startsWith` per entity and shows only `a_c`. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1317-1329; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:likewild/top$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "visible": [
+        ["likewild.r1", "attr:rw_likewild.id", "likewild.r1", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.title", "alpha", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.tag", "x", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.flag", true, "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.owner", "o1", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.id", "likewild.r2", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.title", "alphas", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.tag", "y", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.flag", false, "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.due", "2099-01-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.owner", "o2", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.id", "likewild.r4", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.title", "a_c", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.tag", "x", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.flag", true, "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.due", "2020-06-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "rust": {
+      "visible": [
+        ["likewild.r4", "attr:rw_likewild.id", "likewild.r4", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.title", "a_c", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.tag", "x", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.flag", true, "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.due", "2020-06-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "reason": "Legacy bug, and it over-shares: `_datakey_starts_with` puts the CEL prefix into the LIKE pattern unescaped (cel.clj:1328), so `data.title.startsWith('a_')` becomes `$like 'a_%'` and `_` matches any character. Rows the rule denies (`alpha`, `alphas`) are shown to the guest, and the matched rows skip the per-entity check that would have denied them. This server evaluates `startsWith` per entity and shows only `a_c`. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1317-1329; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:likewild/top\\.admin$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "status": 200,
+      "result": {
+        "rw_likewild": [
+          {
+            "id": "likewild.r1",
+            "owner": "o1",
+            "due": "2020-01-01T00:00:00.000Z",
+            "title": "alpha",
+            "tag": "x",
+            "flag": true
+          },
+          {
+            "due": "2020-06-01T00:00:00.000Z",
+            "tag": "x",
+            "owner": "o1",
+            "id": "likewild.r4",
+            "flag": true,
+            "title": "a_c"
+          },
+          {
+            "id": "likewild.r2",
+            "due": "2099-01-01T00:00:00.000Z",
+            "title": "alphas",
+            "owner": "o2",
+            "flag": false,
+            "tag": "y"
+          }
+        ]
+      }
+    },
+    "rust": {
+      "status": 200,
+      "result": {
+        "rw_likewild": [
+          {
+            "id": "likewild.r4",
+            "title": "a_c",
+            "tag": "x",
+            "flag": true,
+            "due": "2020-06-01T00:00:00.000Z",
+            "owner": "o1"
+          }
+        ]
+      }
+    },
+    "reason": "Legacy bug, and it over-shares: `_datakey_starts_with` puts the CEL prefix into the LIKE pattern unescaped (cel.clj:1328), so `data.title.startsWith('a_')` becomes `$like 'a_%'` and `_` matches any character. Rows the rule denies (`alpha`, `alphas`) are shown to the guest, and the matched rows skip the per-entity check that would have denied them. This server evaluates `startsWith` per entity and shows only `a_c`. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1317-1329; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^rulewheres:likewild/withOwner$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "visible": [
+        ["o1", "attr:rwowner.id", "o1", "<ts>"],
+        ["o1", "attr:rwowner.name", "ann", "<ts>"],
+        ["o2", "attr:rwowner.id", "o2", "<ts>"],
+        ["o2", "attr:rwowner.name", "bob", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.id", "likewild.r1", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.title", "alpha", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.tag", "x", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.flag", true, "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.due", "2020-01-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r1", "attr:rw_likewild.owner", "o1", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.id", "likewild.r2", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.title", "alphas", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.tag", "y", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.flag", false, "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.due", "2099-01-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r2", "attr:rw_likewild.owner", "o2", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.id", "likewild.r4", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.title", "a_c", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.tag", "x", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.flag", true, "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.due", "2020-06-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "rust": {
+      "visible": [
+        ["o1", "attr:rwowner.id", "o1", "<ts>"],
+        ["o1", "attr:rwowner.name", "ann", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.id", "likewild.r4", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.title", "a_c", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.tag", "x", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.flag", true, "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.due", "2020-06-01T00:00:00.000Z", "<ts>"],
+        ["likewild.r4", "attr:rw_likewild.owner", "o1", "<ts>"]
+      ],
+      "extra": []
+    },
+    "reason": "Legacy bug, and it over-shares: `_datakey_starts_with` puts the CEL prefix into the LIKE pattern unescaped (cel.clj:1328), so `data.title.startsWith('a_')` becomes `$like 'a_%'` and `_` matches any character. Rows the rule denies (`alpha`, `alphas`) are shown to the guest, and the matched rows skip the per-entity check that would have denied them. This server evaluates `startsWith` per entity and shows only `a_c`. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
+    "citation": "LEGACY/server/src/instant/db/cel.clj:1317-1329; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
   }
 ]

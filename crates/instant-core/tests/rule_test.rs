@@ -160,6 +160,45 @@ async fn view_rule_filters_entities() {
 }
 
 #[tokio::test]
+async fn type_function_in_rules() {
+    // cel-java declares the type identifiers in every rule environment, so
+    // `type(x) == string` is a valid rule on the legacy server, not an
+    // undeclared reference
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"view": "type(data.done) == bool && type(data.title) != int"}}}),
+    )
+    .await;
+
+    let (e1, e2, e3) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", e1, ids.todos_id, e1],
+            ["add-triple", e1, ids.todos_done, true],
+            ["add-triple", e1, ids.todos_title, "a"],
+            ["add-triple", e2, ids.todos_id, e2],
+            ["add-triple", e2, ids.todos_done, "yes"],
+            ["add-triple", e3, ids.todos_id, e3],
+            ["add-triple", e3, ids.todos_done, false],
+            ["add-triple", e3, ids.todos_title, 7]
+        ]),
+    )
+    .await
+    .unwrap();
+
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"todos": {}})).await;
+    assert_eq!(res.forms[0].entities.len(), 1);
+    assert_eq!(res.forms[0].entities[0].eid, e1);
+}
+
+#[tokio::test]
 async fn auth_binding_and_owner_rule() {
     let pool = pool().await;
     let app = mk_app(&pool).await;

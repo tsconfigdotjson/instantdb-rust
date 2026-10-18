@@ -308,7 +308,12 @@ fn node_to_object(
         let Some(attr) = attrs.get(&t.a) else {
             continue;
         };
-        if attr.value_type != ValueType::Blob {
+        // legacy triples->map labels every triple of the entity, its forward
+        // links included: a link the query doesn't nest shows up as the
+        // linked id (`owner: "<uuid>"`, the last triple for a many link); a
+        // nested form of the same label replaces it below (obj-node merges
+        // the ref entries over the blob entries)
+        if attr.value_type != ValueType::Blob && attr.etype != node.etype {
             continue;
         }
         if attr.label == "id" {

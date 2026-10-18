@@ -4,27 +4,27 @@
  "items": [
   {
    "id": "cel:_checked_data_ref",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
    "id": "cel:_datakey_contains",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
    "id": "cel:_datakey_ends_with",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
    "id": "cel:_datakey_starts_with",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
    "id": "cel:_eq_dynamic",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
@@ -34,22 +34,22 @@
   },
   {
    "id": "cel:_in_dynamic",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
    "id": "cel:_neq_dynamic",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
    "id": "cel:_not_datakey",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
    "id": "cel:_not_whereclause",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
@@ -69,12 +69,12 @@
   },
   {
    "id": "cel:_size_refpath_size",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
    "id": "cel:_timestamp_from_datakey",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
@@ -89,17 +89,17 @@
   },
   {
    "id": "cel:_type_datakey_override",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
    "id": "cel:_type_refpath_override",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {
    "id": "cel:_type_whereclause_override",
-   "group": "cel-internal",
+   "group": "cel-where",
    "source": "db/cel.clj"
   },
   {

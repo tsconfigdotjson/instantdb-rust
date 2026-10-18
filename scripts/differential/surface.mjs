@@ -83,9 +83,11 @@ export function legacySurface() {
   }
   // CEL: custom overload ids. The user-facing ones are `ref`, `getTime`, the
   // `timestamp` widenings and `rateLimit.limit`; the rest are the rule-where
-  // rewriter's internal overloads (cel.clj:1400+), listed but not counted.
-  // The standard library and cel-java's strings / math extensions are
-  // covered by the differential's per-clause probes (replay step 29).
+  // rewriter's overloads (cel.clj:729-1617), which turn view rules into
+  // where clauses when the operator's `rule-wheres` flag lists the app
+  // (exercised by rule-wheres.mjs). The standard library and cel-java's
+  // strings / math extensions are covered by the differential's per-clause
+  // probes (replay step 29).
   const USER_FACING_CEL = new Set([
     "_ref",
     "_getTime",
@@ -96,7 +98,7 @@ export function legacySurface() {
   ]);
   const cel = read("db/cel.clj");
   for (const m of new Set([...cel.matchAll(/:overload-id "([^"]+)"/g)].map((x) => x[1]))) {
-    items.push({ id: `cel:${m}`, group: USER_FACING_CEL.has(m) ? "cel" : "cel-internal", source: "db/cel.clj" });
+    items.push({ id: `cel:${m}`, group: USER_FACING_CEL.has(m) ? "cel" : "cel-where", source: "db/cel.clj" });
   }
   // error types: every `::type ::x` thrown by util/exception.clj
   const ex = read("util/exception.clj");

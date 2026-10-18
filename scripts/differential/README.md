@@ -190,6 +190,28 @@ everything and checks coverage itself, as before.
   `sql-exception` or an `internal-error`, still fails.
   `node tx-conflicts.mjs <app> <token> [seed] [txs-per-session]`; seeds 1-3
   at 60 per session (`TX_CONFLICT_SEEDS` / `TX_CONFLICT_TXS`).
+- `rule-wheres.mjs` — legacy's rule-where rewriter (cel.clj:729-1617, the
+  `cel-where` group of surface.json). With the operator's `rule-wheres` flag
+  listing an app (set in the Instant Config app the self-hosted bootstrap
+  creates), legacy compiles view rules a second time with a where-clause
+  compiler whose overloads (`==` / `!=` / `in` on `data.*`, `!`,
+  `startsWith` / `endsWith` / `contains`, `size(data.ref(...))`,
+  `timestamp(data.x)`, `data.ref`, and `type()` overrides that throw) turn
+  the rule into InstaQL where clauses, adds them to the query and skips the
+  per-entity check for the entities they match. A rule that doesn't
+  convert falls back to the per-entity check. The layer seeds one namespace
+  per probe rule (as its view and create rule), runs the guest's creates and
+  four queries per probe (top level, with a nested link, as a nested form,
+  through a where path) over the socket and `/admin/query` as guest: on
+  legacy with the flag off, then on (it sets the flag through the config
+  app's admin API and waits for legacy to pick it up), and on rust, which
+  always checks per entity. Both legacy passes are compared with rust
+  (`rulewheres:flag-off/...` and `rulewheres:...`). Socket results are split
+  into the triples of the attrs the query reads (`visible`) and the other
+  join-row triples (`extra`). On legacy, debugQuery's `rule-wheres` must show
+  each probe's overload ran (its pinned where clause, or none for a probe
+  whose overload throws next to one that converted) before the probe's
+  `cel:*` ids are recorded as covered. `node rule-wheres.mjs <app> <token>`.
 - `errors.mjs` / `errors-allowed.json` — the error matrix: one probe per
   externally reachable legacy error type (`err:*` in surface.json) over HTTP
   and the ws session; the normalized envelope (status, type, message, hint)
@@ -239,12 +261,12 @@ everything and checks coverage itself, as before.
   operators' reports) and `unreachable.json` the error types no request can
   produce, with a reason each; they leave the counted total and are
   reported on their own line, so the percentage measures what a
-  self-hosted server can serve. Groups `demo`, `health`, `ws-internal`, `cel-internal` are
-  listed but not counted.
+  self-hosted server can serve. Groups `demo`, `health`, `core` and
+  `ws-internal` are listed but not counted.
 
 ## Allowlists
 
-`allowed-divergences.json` (replay, dash and storage layers, keyed by
+`allowed-divergences.json` (replay, dash, storage and rule-wheres layers, keyed by
 `path`) and `errors-allowed.json` (error matrix, keyed by `probe`) share one
 strict entry format, checked by `loadAllowlist` / `allowDivergence` in
 `lib.mjs`. An entry allows one documented difference, not whatever else later

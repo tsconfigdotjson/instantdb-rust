@@ -18,6 +18,12 @@
 //!   `timestamp(string)` through the same lenient date parser the `date`
 //!   checked type uses (`triple-model/parse-date-value`).
 //!
+//! - the standard library's `type(x)` and the type identifiers cel-java
+//!   declares in every environment (`bool`, `bytes`, `double`, `int`,
+//!   `list`, `map`, `null_type`, `string`, `type`, `uint`), so
+//!   `type(data.tag) == string` is a rule like on the legacy server (the
+//!   `cel` crate has neither); see [`CelType`].
+//!
 //! - cel-java `CelExtensions/bindings` (cel.clj:489-491): the
 //!   `cel.bind(var, init, body)` macro, expanded like cel-java into a
 //!   comprehension over an empty list whose accumulator is `var`
@@ -35,6 +41,59 @@ use cel::{ExecutionError, Value};
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 type R = std::result::Result<Value, ExecutionError>;
+
+/// A CEL type value: what `type(x)` returns and what a type identifier
+/// names. Two compare equal when they name the same type; a type never
+/// equals a value of another kind (`type('a') == 'string'` is false, like
+/// cel-java's heterogeneous equality).
+#[derive(Debug, PartialEq, Eq)]
+pub struct CelType(String);
+
+impl cel::objects::Opaque for CelType {
+    fn runtime_type_name(&self) -> &str {
+        "type"
+    }
+}
+
+/// The type identifiers every legacy rule environment declares (cel-java's
+/// standard declarations); they resolve to [`CelType`] values.
+pub const TYPE_IDENTS: [&str; 10] = [
+    "bool",
+    "bytes",
+    "double",
+    "int",
+    "list",
+    "map",
+    "null_type",
+    "string",
+    "type",
+    "uint",
+];
+
+fn type_value(name: &str) -> Value {
+    Value::Opaque(Arc::new(CelType(name.to_string())))
+}
+
+/// `type(x)`, with cel-java's names (timestamps and durations are their
+/// protobuf well-known types).
+fn type_of(v: &Value) -> Value {
+    type_value(match v {
+        Value::List(_) => "list",
+        Value::Map(_) => "map",
+        Value::Function(..) => "function",
+        Value::Int(_) => "int",
+        Value::UInt(_) => "uint",
+        Value::Float(_) => "double",
+        Value::String(_) => "string",
+        Value::Bytes(_) => "bytes",
+        Value::Bool(_) => "bool",
+        Value::Duration(_) => "google.protobuf.Duration",
+        Value::Timestamp(_) => "google.protobuf.Timestamp",
+        Value::Opaque(o) if o.runtime_type_name() == "type" => "type",
+        Value::Opaque(o) => o.runtime_type_name(),
+        Value::Null => "null_type",
+    })
+}
 
 /// Name the AST rewrite gives `timestamp(...)` calls so the standard
 /// `timestamp(string)` overload (strict RFC 3339) no longer shadows the
@@ -432,6 +491,17 @@ pub fn rewrite_timestamp_calls(expr: &mut cel::IdedExpr) {
 
 /// Register every extension function on a context.
 pub fn register(ctx: &mut cel::Context) {
+    // ---- type ------------------------------------------------------------
+    ctx.add_function("type", |Arguments(args): Arguments| -> R {
+        match args.as_slice() {
+            [v] => Ok(type_of(v)),
+            _ => Err(no_overload("type")),
+        }
+    });
+    for name in TYPE_IDENTS {
+        ctx.add_variable_from_value(name, type_value(name));
+    }
+
     // ---- strings ---------------------------------------------------------
     ctx.add_function(
         "charAt",
@@ -887,6 +957,27 @@ mod tests {
             eval("[1, 2, 3].all(i, cel.bind(d, i * 2, d > i))"),
             Value::Bool(true)
         );
+    }
+
+    #[test]
+    fn type_function() {
+        assert_eq!(eval("type(1) == int"), Value::Bool(true));
+        assert_eq!(eval("type('a') == string"), Value::Bool(true));
+        assert_eq!(
+            eval("type(1.5) == double && type(true) == bool && type(null) == null_type"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval("type([1]) == list && type({'a': 1}) == map"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval("type(string) == type && type(type(1)) == type"),
+            Value::Bool(true)
+        );
+        assert_eq!(eval("type('a') == int"), Value::Bool(false));
+        assert_eq!(eval("type('a') == 'string'"), Value::Bool(false));
+        assert_eq!(eval("type(timestamp(0)) == int"), Value::Bool(false));
     }
 
     #[test]
