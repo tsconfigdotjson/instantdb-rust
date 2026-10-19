@@ -260,8 +260,8 @@ async fn lookup_refs_upsert_and_resolve() {
     .unwrap();
     let triples = entity_triples(&pool, app, bob).await;
     assert!(triples.contains(&("owners.name".to_string(), json!("bobby"))));
-    // renaming at creation to a value another entity holds is the unique
-    // violation, which legacy's INSERT hits first
+    // the same holds when another entity has the new value, and writing the
+    // lookup's own value is a no-op
     let err = transact_json(
         &pool,
         app,
@@ -274,7 +274,19 @@ async fn lookup_refs_upsert_and_resolve() {
     )
     .await
     .unwrap_err();
-    assert_eq!(err.error_type, "record-not-unique");
+    assert_eq!(err.error_type, "validation-failed");
+    transact_json(
+        &pool,
+        app,
+        json!([[
+            "add-triple",
+            [ids.owners_name, "zoe"],
+            ids.owners_name,
+            "zoe"
+        ]]),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
