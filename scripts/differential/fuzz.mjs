@@ -324,7 +324,19 @@ function buildScript() {
           else steps.push(["add-triple", p, attrs.profileId, p], ["add-triple", p, attrs.profileHandle, pick(handles)]);
         }
       }
-      script.push({ kind: "tx", steps, features: [...features] });
+      // Not generated: a link whose value lookup names the entity an eid
+      // lookup of the same tx creates. Legacy's post-create checks give the
+      // link's view check the lookup as its eid (permissioned_transaction.clj
+      // :500-503 runs create-lookups-map on the entity's "id", not on the
+      // lookup), and run-checks! (:619-621) then refuses the tx with "Could
+      // not find the entity for this lookup" though the entity exists. This
+      // server links it; the legacy bug is listed in docs/PARITY.md.
+      const created = new Set(
+        steps.filter(([o, e]) => (o === "add-triple" || o === "deep-merge-triple") && Array.isArray(e)).map(([, e]) => JSON.stringify(e)),
+      );
+      const linksCreated = ([o, , a, v]) =>
+        o === "add-triple" && (a === attrs.tags || a === attrs.profile) && Array.isArray(v) && created.has(JSON.stringify(v));
+      script.push({ kind: "tx", steps: steps.filter((st) => !linksCreated(st)), features: [...features] });
     } else if (r < 0.64) {
       // schema churn: delete-attr then restore-attr (p2), or an update-attr
       if (chance(0.5)) {

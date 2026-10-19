@@ -164,6 +164,11 @@ everything and checks coverage itself, as before.
   `lookup` refusal; this server always refuses the rename first, and its
   message is pinned. Error messages ride along non-enumerable: mismatch
   reports print them, comparisons ignore them.
+  Not generated: a link whose value lookup names the entity an eid lookup of
+  the same tx creates. Legacy refuses it ("Could not find the entity for
+  this lookup", a post-create check bug listed in docs/PARITY.md) and this
+  server links it, after which the two states would differ for the rest of
+  the seed.
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
   runs twelve seeds at 250 rounds (42, 99 and the nightly's original 1-10);
   the nightly (`schedule` in ci.yml, or a manual run with the `nightly`

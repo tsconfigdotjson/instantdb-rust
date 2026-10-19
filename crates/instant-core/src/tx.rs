@@ -788,7 +788,7 @@ pub async fn transact(
                     check_ref_value(attrs, &attr_id, &value)?;
                     items.push((eid, attr_id, value, mode));
                 }
-                let resolved = resolve_add_batch(
+                let (resolved, id_lookup_refusal) = resolve_add_batch(
                     &mut *conn,
                     app_id,
                     attrs,
@@ -804,6 +804,9 @@ pub async fn transact(
                     }
                 }
                 let newly = insert_triples(&mut *conn, app_id, attrs, &resolved).await?;
+                if let Some(e) = id_lookup_refusal {
+                    return Err(e);
+                }
                 for eid in newly {
                     if let Some(t) = resolved.iter().find(|t| t.entity_id == eid) {
                         created_etypes.insert(eid, t.attr.etype.clone());
@@ -1287,7 +1290,7 @@ async fn resolve_add_batch(
     resolver: &mut LookupResolver,
     created_etypes: &mut HashMap<Uuid, String>,
     items: Vec<(EidRef, Uuid, Value, WriteMode)>,
-) -> Result<Vec<ResolvedTriple>> {
+) -> Result<(Vec<ResolvedTriple>, Option<InstantError>)> {
     let mut out = vec![];
     // legacy writes a batch's eid-lookup creations and its triples in one
     // INSERT ... ON CONFLICT DO UPDATE (triple.clj insert-multi!): any
@@ -1391,17 +1394,29 @@ async fn resolve_add_batch(
     if let Some(e) = unknown_attr {
         return Err(e);
     }
-    if out.iter().any(|t| {
-        t.attr.cardinality == crate::attr::Cardinality::One
-            && created_by_lookup.contains(&(t.entity_id, t.attr.id))
-    }) {
-        return Err(InstantError::validation_failed_input(
+    let hits = |id_attr: bool| {
+        out.iter().any(|t| {
+            t.attr.cardinality == crate::attr::Cardinality::One
+                && (t.attr.label == "id") == id_attr
+                && created_by_lookup.contains(&(t.entity_id, t.attr.id))
+        })
+    };
+    let refusal = || {
+        InstantError::validation_failed_input(
             "lookup",
             json!(lookup_refs),
             json!([{"message": "Updates with lookups can only update the lookup attribute if an entity with the unique attribute value already exists."}]),
-        ));
+        )
+    };
+    if hits(false) {
+        return Err(refusal());
     }
-    Ok(out)
+    // legacy inserts id triples last (insert-multi!'s `ea-id-inserts`
+    // follows the other inserts), so a unique violation elsewhere in the
+    // batch wins over an id-lookup refusal: the caller raises it once the
+    // insert went through
+    let deferred = hits(true).then(refusal);
+    Ok((out, deferred))
 }
 
 /// Check the app allows writes (status gate).
