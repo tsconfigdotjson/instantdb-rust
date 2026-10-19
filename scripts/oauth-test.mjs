@@ -186,9 +186,12 @@ const idTokenCall = (body, headers = {}) =>
     headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify({ app_id: appId, client_name: "mock", ...body }),
   }).then(async (r) => ({ status: r.status, body: await r.json() }));
+// the signature is checked first (legacy verify-jwt): an ES256 header naming
+// an RSA key finds no key to verify with (the discovery-list check that runs
+// after a valid signature is in apple-oauth-test.mjs)
 const es = await idTokenCall({ id_token: signJwt(claimsFor("mock-sub-42", "oauth-user@example.com"), "ES256") });
-assert(es.status === 400 && es.body.type === "oauth-error", "an algorithm the discovery document doesn't list is refused");
-assert(es.body.error === "The id_token used an unsupported algorithm.", "unsupported-alg message");
+assert(es.status === 400 && es.body.type === "oauth-error", "an ES256 header over an RSA key is refused");
+assert(es.body.error === "Error validating JWT. Could not find signing key.", "no signing key for it");
 const forged = signJwt(claimsFor("mock-sub-42", "oauth-user@example.com")).replace(/\.[^.]+$/, ".AAAA");
 const bad = await idTokenCall({ id_token: forged });
 assert(bad.status === 400 && bad.body.type === "oauth-error", "a bad signature is refused");

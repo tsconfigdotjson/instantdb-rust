@@ -14,7 +14,7 @@
 
 import fs from "node:fs";
 import { execSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canon, connectSse, DIVERGENCE_PREFIXES, describeAllowVerdict, firstDifference, loadAllowlist, makeIdFactory } from "./lib.mjs";
@@ -45,6 +45,20 @@ function readDashCode(name, email) {
 
 // ---------------------------------------------------------------------------
 // http helpers (exactly the headers the CLI sends: lib/http.ts)
+
+// Apple sign-in probes (step 44): a Sign in with Apple key (.p8 = PKCS#8
+// PEM, P-256), an RSA key Apple's client secret can't be built from, and
+// id_tokens signed by a key Apple never issued
+const APPLE_P8 = generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey.export({ format: "pem", type: "pkcs8" });
+const diffRsa = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const APPLE_RSA_PKCS8 = diffRsa.privateKey.export({ format: "pem", type: "pkcs8" });
+// one timestamp for both servers' runs, so the tokens are byte-identical
+const APPLE_IAT = Math.floor(Date.now() / 1000);
+const b64url = (o) => Buffer.from(JSON.stringify(o)).toString("base64url");
+function rs256(header, claims) {
+  const input = `${b64url(header)}.${b64url(claims)}`;
+  return `${input}.${sign("sha256", Buffer.from(input), diffRsa.privateKey).toString("base64url")}`;
+}
 
 async function call(base, method, p, { token = adminToken, body, headers = {} } = {}) {
   const h = {
@@ -1635,6 +1649,101 @@ async function runAgainst(name) {
       r42.openidConfigurationBadApp = errView(await call(base, "GET", "/runtime/nope/.well-known/openid-configuration", { token: null }));
       raw("42-runtime-oauth", r42);
       record("42-runtime-oauth", r42);
+    }
+
+    // 44 Apple sign-in (issue #38 item 5): an `apple` provider's clients on
+    // Apple's real discovery documents (appleid.apple.com, and
+    // account.apple.com, which legacy fetches with a browser User-Agent).
+    // Without Apple credentials the reachable surfaces are the start redirect,
+    // the callback's live exchange (both servers build the client-secret JWT
+    // and POST it to Apple, which refuses the made-up code), a client secret
+    // the JWT can't be built from, and the id_token refusals that precede a
+    // valid Apple signature. The issuer quirk and the hashed nonce need a
+    // token Apple signed: scripts/apple-oauth-test.mjs (mock Apple).
+    {
+      const r44 = {};
+      const aprov = await call(base, "POST", `/dash/apps/${appId}/oauth_service_providers`, { body: { provider_name: "apple" } });
+      const appleClient = (name, extra) =>
+        call(base, "POST", `/dash/apps/${appId}/oauth_clients`, {
+          body: { provider_id: aprov.body?.provider?.id, client_name: name, client_id: "com.example.diff", discovery_endpoint: "https://appleid.apple.com/.well-known/openid-configuration", meta: { providerName: "apple", teamId: "DIFFTEAM01", keyId: "DIFFKEY001" }, ...extra },
+        });
+      const created = {
+        web: await appleClient("apple-web", { client_secret: APPLE_P8 }),
+        account: await appleClient("apple-account", { client_secret: APPLE_P8, discovery_endpoint: "https://account.apple.com/.well-known/openid-configuration" }),
+        noIds: await appleClient("apple-noids", { client_secret: APPLE_P8, meta: { providerName: "apple" } }),
+        noKey: await appleClient("apple-nokey", {}),
+        badKey: await appleClient("apple-badkey", { client_secret: "not a pem" }),
+        rsaKey: await appleClient("apple-rsakey", { client_secret: APPLE_RSA_PKCS8 }),
+      };
+      r44.clientCreate = Object.fromEntries(Object.entries(created).map(([k, c]) => [k, c.status === 200 ? { status: 200, discovery_endpoint: c.body.client?.discovery_endpoint ?? null, meta: c.body.client?.meta ?? null } : errView(c)]));
+      const startRaw = (client) => fetch(`${base}/runtime/oauth/start?app_id=${appId}&client_name=${client}&redirect_uri=${encodeURIComponent("https://app.example.com/after")}&state=apple-state`, { redirect: "manual" });
+      const startView = async (client) => {
+        const res = await startRaw(client);
+        const loc = res.headers.get("location");
+        if (!loc) return errView({ status: res.status, body: await res.json().catch(() => null) });
+        const u = new URL(loc);
+        const params = Object.fromEntries([...u.searchParams.entries()].map(([k, v]) => {
+          if (k === "redirect_uri") return [k, new URL(v).pathname];
+          if (k === "state") return [k, v.startsWith(appId) ? "<app-id><uuid>" : v];
+          return [k, v];
+        }));
+        return { status: res.status, to: u.origin + u.pathname, params };
+      };
+      r44.start = await startView("apple-web");
+      r44.startAccount = await startView("apple-account");
+      // Apple form-posts the callback; the code is made up, so the live
+      // exchange ends in Apple's refusal
+      const callbackView = async (client, code) => {
+        const s = await startRaw(client);
+        const st = s.headers.get("location") ? new URL(s.headers.get("location")).searchParams.get("state") : null;
+        const cookie = (s.headers.get("set-cookie") ?? "").split(";")[0];
+        const res = await fetch(`${base}/runtime/oauth/callback`, {
+          method: "POST",
+          redirect: "manual",
+          headers: { "content-type": "application/x-www-form-urlencoded", cookie },
+          body: new URLSearchParams({ state: st ?? "", code }),
+        });
+        const loc = res.headers.get("location");
+        if (!loc) {
+          const text = await res.text();
+          let b;
+          try { b = JSON.parse(text); } catch { b = { "<non-json>": text.slice(0, 80) }; }
+          return { status: res.status, type: b.type ?? null, message: b.message ?? b.error ?? null };
+        }
+        const u = new URL(loc);
+        return { status: res.status, to: u.origin + u.pathname, error: u.searchParams.get("error"), state: u.searchParams.get("state"), marker: u.searchParams.get("_instant_oauth_redirect"), code: u.searchParams.has("code") };
+      };
+      r44.callbackLiveExchange = await callbackView("apple-web", "diff-made-up-code");
+      r44.callbackLiveExchangeAccount = await callbackView("apple-account", "diff-made-up-code");
+      r44.callbackLiveExchangeNoIds = await callbackView("apple-noids", "diff-made-up-code");
+      r44.callbackProviderError = await (async () => {
+        const res = await fetch(`${base}/runtime/oauth/callback`, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ error: "user_cancelled_authorize", state: `${appId}${mk()}` }) });
+        const b = await res.json().catch(() => ({}));
+        return { status: res.status, type: b.type ?? null, message: b.error ?? b.message ?? null };
+      })();
+      // no client secret / not PEM / not an EC key: allow-listed (legacy 500s)
+      r44.callbackNoKey = await callbackView("apple-nokey", "diff-made-up-code");
+      r44.callbackBadKey = await callbackView("apple-badkey", "diff-made-up-code");
+      r44.callbackRsaKey = await callbackView("apple-rsakey", "diff-made-up-code");
+      // id_token: every refusal before Apple's signature verifies
+      const idTokenView = async (client, idToken, extra = {}) => {
+        const res = await call(base, "POST", "/runtime/oauth/id_token", { token: null, body: { app_id: appId, client_name: client, id_token: idToken, ...extra } });
+        const b = res.body ?? {};
+        return norm({ status: res.status, type: b.type ?? null, message: b.message ?? b.error ?? null, hint: b.hint ?? null, keys: Object.keys(b).sort() });
+      };
+      const appleKid = await fetch("https://appleid.apple.com/auth/keys").then((r) => r.json()).then((j) => j.keys?.[0]?.kid ?? null).catch(() => null);
+      const claims = { iss: "https://appleid.apple.com", aud: "com.example.diff", sub: "diff-apple-sub", email: "diff@privaterelay.appleid.com", email_verified: "true", nonce: "n", iat: APPLE_IAT, exp: APPLE_IAT + 3600 };
+      r44.idTokenMalformed = await idTokenView("apple-web", "x.y.z");
+      r44.idTokenTwoSegments = await idTokenView("apple-web", `${b64url({ alg: "RS256" })}.${b64url(claims)}`);
+      r44.idTokenHs256 = await idTokenView("apple-web", `${b64url({ alg: "HS256", typ: "JWT" })}.${b64url(claims)}.sig`);
+      r44.idTokenAlgNone = await idTokenView("apple-web", `${b64url({ alg: "none", typ: "JWT" })}.${b64url(claims)}.`);
+      r44.idTokenUnknownKid = await idTokenView("apple-web", rs256({ alg: "RS256", typ: "JWT", kid: "diff-unknown-kid" }, claims));
+      r44.idTokenNoKid = await idTokenView("apple-web", rs256({ alg: "RS256", typ: "JWT" }, claims));
+      r44.idTokenBadSignature = await idTokenView("apple-web", rs256({ alg: "RS256", typ: "JWT", kid: appleKid }, claims), { nonce: "n" });
+      r44.idTokenBadSignatureAccount = await idTokenView("apple-account", rs256({ alg: "RS256", typ: "JWT", kid: appleKid }, { ...claims, iss: "https://account.apple.com" }), { nonce: "n" });
+      r44.idTokenNoSecretClient = await idTokenView("apple-nokey", rs256({ alg: "RS256", typ: "JWT", kid: appleKid }, claims));
+      raw("44-runtime-oauth-apple", r44);
+      record("44-runtime-oauth-apple", r44);
     }
   }
 

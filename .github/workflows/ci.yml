@@ -156,6 +156,12 @@ jobs:
         run: node scripts/streams-test.mjs "$APP_ID"
       - name: "e2e: oauth (mock OIDC)"
         run: node scripts/oauth-test.mjs "$APP_ID" "$ADMIN_TOKEN"
+      - name: "e2e: Apple sign-in (mock Apple)"
+        run: |
+          ./scripts/create-app.sh "apple oauth app" | tee /tmp/apple-app.txt
+          node scripts/apple-oauth-test.mjs \
+            "$(grep '^app_id=' /tmp/apple-app.txt | cut -d= -f2)" \
+            "$(grep '^admin_token=' /tmp/apple-app.txt | cut -d= -f2)"
       - name: "e2e: security"
         run: TIMEOUT_NODE_URL=http://localhost:8887 node scripts/security-test.mjs "$APP_ID" "$ADMIN_TOKEN"
       - name: "e2e: admin SDK"

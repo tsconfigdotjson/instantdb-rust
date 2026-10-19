@@ -114,30 +114,70 @@ async fn read_json(url: &str, mut resp: reqwest::Response) -> Result<Value, Stri
     serde_json::from_slice(&buf).map_err(|e| format!("Invalid JSON from {url}: {e}"))
 }
 
+/// Legacy `fetch-discovery`'s User-Agent (auth/oauth.clj:298-302):
+/// account.apple.com serves its discovery document to browsers.
+const DISCOVERY_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
+
+async fn send_get(
+    url: &str,
+    bearer: Option<&str>,
+    user_agent: Option<&str>,
+    allow_private: bool,
+) -> Result<reqwest::Response, String> {
+    let v = vet(url, allow_private).await?;
+    let mut req = client(&v)?.get(url);
+    if let Some(token) = bearer {
+        req = req.bearer_auth(token);
+    }
+    if let Some(ua) = user_agent {
+        req = req.header(reqwest::header::USER_AGENT, ua);
+    }
+    req.send()
+        .await
+        .map_err(|e| format!("Failed to fetch {url}: {e}"))
+}
+
 /// Guarded GET of a JSON document, optionally with a bearer token.
 pub async fn get_json(
     url: &str,
     bearer: Option<&str>,
     allow_private: bool,
 ) -> Result<Value, String> {
-    let v = vet(url, allow_private).await?;
-    let mut req = client(&v)?.get(url);
-    if let Some(token) = bearer {
-        req = req.bearer_auth(token);
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
+    let resp = send_get(url, bearer, None, allow_private).await?;
     read_json(url, resp).await
 }
 
-/// Guarded form POST returning JSON (OAuth token exchange).
-pub async fn post_form_json(
+/// Guarded GET of an OIDC discovery document, with legacy's browser
+/// User-Agent.
+pub async fn get_discovery_json(url: &str, allow_private: bool) -> Result<Value, String> {
+    let resp = send_get(url, None, Some(DISCOVERY_USER_AGENT), allow_private).await?;
+    read_json(url, resp).await
+}
+
+/// Legacy `safe-get` / `safe-post-form`'s `{:success? :body}`: whether the
+/// status was a 2xx, and the body when it is JSON.
+async fn status_and_json(url: &str, resp: reqwest::Response) -> (bool, Option<Value>) {
+    let ok = resp.status().is_success();
+    (ok, read_json(url, resp).await.ok())
+}
+
+/// Guarded GET with a bearer token (OIDC userinfo). `Err` is a refused host
+/// or a network failure (legacy throws there).
+pub async fn get_bearer(
+    url: &str,
+    bearer: &str,
+    allow_private: bool,
+) -> Result<(bool, Option<Value>), String> {
+    let resp = send_get(url, Some(bearer), None, allow_private).await?;
+    Ok(status_and_json(url, resp).await)
+}
+
+/// Guarded form POST (OAuth token exchange); `Err` as for `get_bearer`.
+pub async fn post_form(
     url: &str,
     form: &[(&str, &str)],
     allow_private: bool,
-) -> Result<Value, String> {
+) -> Result<(bool, Option<Value>), String> {
     let v = vet(url, allow_private).await?;
     let resp = client(&v)?
         .post(url)
@@ -145,5 +185,5 @@ pub async fn post_form_json(
         .send()
         .await
         .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
-    read_json(url, resp).await
+    Ok(status_and_json(url, resp).await)
 }

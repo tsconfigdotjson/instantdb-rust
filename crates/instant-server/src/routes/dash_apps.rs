@@ -1374,7 +1374,7 @@ async fn validate_discovery_endpoint(state: &AppState, endpoint: &str) -> Result
             })),
         )
     };
-    let doc = crate::ssrf::get_json(endpoint, None, state.cfg.oauth_allow_private)
+    let doc = crate::ssrf::get_discovery_json(endpoint, state.cfg.oauth_allow_private)
         .await
         .map_err(|_| fail())?;
     if doc.get("issuer").and_then(|v| v.as_str()).is_none() {
