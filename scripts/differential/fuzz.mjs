@@ -505,7 +505,7 @@ async function runOn(serverName, script) {
       await conn.waitFor((m) => m.op === "remove-query-ok" && canon(m.q) === canon(q));
       return { result: projectTriples(reply.result), raw: reply.result };
     }
-    if (reply.op === "error") return { error: { type: reply.type, status: reply.status } };
+    if (reply.op === "error") return { error: errorOf(reply) };
     return { error: { type: "unexpected", op: reply.op } };
   };
 
@@ -532,7 +532,7 @@ async function runOn(serverName, script) {
         // comparison
         queryResults.push({ i, tx: "ok" });
       } else {
-        queryResults.push({ i, error: { type: reply.type, status: reply.status } });
+        queryResults.push({ i, error: errorOf(reply) });
       }
     } else if (op.kind === "query") {
       const r = await query(op.q);
@@ -581,6 +581,15 @@ async function runOn(serverName, script) {
   await settle([conn], 500);
   conn.close();
   return { queryResults, violations, txOk, txOkBy };
+}
+
+// An error compares by type and status. Its message rides along
+// non-enumerable, so canon() leaves it out; mismatch reports print it and
+// EXCEPTIONS may pin it.
+function errorOf(reply) {
+  const error = { type: reply.type, status: reply.status };
+  Object.defineProperty(error, "message", { value: reply.message, enumerable: false });
+  return error;
 }
 
 // The client flattens a result's join-rows into a set of [e a v] triples
@@ -696,13 +705,37 @@ const EXCEPTIONS = [
     legacy: { type: null, status: 500 },
     rust: { type: "validation-failed", status: 400 },
   },
+  {
+    // A lookup that matches nothing and a write of its own attr on the
+    // entity it creates (a rename at creation) in a tx that also writes a
+    // value another row of the same INSERT holds. Legacy runs the batch as
+    // one INSERT ... ON CONFLICT (triple.clj insert-multi!): the rename hits
+    // the row the lookup just inserted ("cannot affect row a second time",
+    // reported as `lookup` validation-failed, triple.clj:1128-1139) and the
+    // duplicate is a unique violation (record-not-unique), and the created
+    // entity's random id decides which row Postgres reaches first. Rust
+    // refuses the rename before it inserts anything, so it always answers
+    // the former; the message is pinned.
+    name: "lookup-rename-or-unique-violation",
+    matches: (op) =>
+      op?.kind === "tx" &&
+      op.steps.some(([o, e, a]) => o === "add-triple" && Array.isArray(e) && e[0] === a),
+    legacy: { type: "record-not-unique", status: 400 },
+    rust: { type: "validation-failed", status: 400 },
+    rustMessage:
+      "Validation failed for lookup: Updates with lookups can only update the lookup attribute if an entity with the unique attribute value already exists.",
+  },
 ];
 const exceptionHits = {};
 const allowedByException = (l, r) => {
   const op = script[l?.i];
   if (l?.i !== r?.i || canon(l?.q) !== canon(r?.q)) return null;
   const ex = EXCEPTIONS.find(
-    (x) => x.matches(op) && canon(l.error) === canon(x.legacy) && canon(r.error) === canon(x.rust),
+    (x) =>
+      x.matches(op) &&
+      canon(l.error) === canon(x.legacy) &&
+      canon(r.error) === canon(x.rust) &&
+      (x.rustMessage === undefined || r.error.message === x.rustMessage),
   );
   if (ex) exceptionHits[ex.name] = (exceptionHits[ex.name] ?? 0) + 1;
   return ex;
@@ -713,7 +746,8 @@ const n = Math.max(legacy.queryResults.length, rust.queryResults.length);
 for (let i = 0; i < n; i++) {
   const l = legacy.queryResults[i], r = rust.queryResults[i];
   if (canon(comparable(l)) !== canon(comparable(r)) && !allowedByException(l, r)) {
-    console.error(`query mismatch at slot ${i}:\n  legacy: ${JSON.stringify(l)}\n  rust:   ${JSON.stringify(r)}`);
+    const msgs = l?.error || r?.error ? `\n  messages: legacy ${JSON.stringify(l?.error?.message)} / rust ${JSON.stringify(r?.error?.message)}` : "";
+    console.error(`query mismatch at slot ${i}:\n  legacy: ${JSON.stringify(l)}\n  rust:   ${JSON.stringify(r)}${msgs}`);
     mismatches++;
   }
 }

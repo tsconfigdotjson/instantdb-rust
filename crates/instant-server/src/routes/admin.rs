@@ -1386,9 +1386,10 @@ pub(crate) async fn store_file(
     let path_attr = sc::attr_id("$files", "path");
     let old_location = file_location_by_path(state, app_id, path).await;
     let lookup = json!([path_attr, path]);
+    // legacy app-file/create! (app_file.clj:13-35): the lookup writes `path`;
+    // writing it again through the lookup would be refused for a new file
     let steps = vec![
         json!(["add-triple", lookup, sc::attr_id("$files", "id"), lookup]),
-        json!(["add-triple", lookup, sc::attr_id("$files", "path"), path]),
         json!(["add-triple", lookup, sc::attr_id("$files", "size"), size]),
         json!([
             "add-triple",

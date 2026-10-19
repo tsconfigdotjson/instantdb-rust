@@ -1290,28 +1290,32 @@ async fn resolve_add_batch(
 ) -> Result<Vec<ResolvedTriple>> {
     let mut out = vec![];
     // legacy writes a batch's eid-lookup creations and its triples in one
-    // INSERT ... ON CONFLICT DO UPDATE (triple.clj insert-multi!): a triple
-    // of the lookup attr on an entity that lookup creates hits the row the
-    // lookup just inserted, which Postgres refuses ("cannot affect row a
-    // second time") and legacy reports as a `lookup` validation error
-    // (triple.clj:1128-1139) when the value differs from the lookup's,
-    // whether or not another entity holds it. Every eid lookup of the batch
-    // is its `input`.
+    // INSERT ... ON CONFLICT DO UPDATE (triple.clj insert-multi!): any
+    // triple of the batch on the lookup attr of an entity a lookup creates
+    // (through the lookup or the entity's id) hits the row the lookup just
+    // inserted, which Postgres refuses ("cannot affect row a second time")
+    // and legacy reports as a `lookup` validation error
+    // (triple.clj:1128-1139), whatever the value. Every eid lookup of the
+    // batch is its `input`.
     let created_before = resolver.created.clone();
     let mut lookup_refs: Vec<Value> = vec![];
-    let mut writes_created_lookup_attr = false;
+    // (entity, lookup attr) of the entities this batch's lookups create
+    let mut created_by_lookup: HashSet<(Uuid, Uuid)> = HashSet::new();
+    // an unknown attr is a raise in that same INSERT, which a missing link
+    // value lookup (resolved in its input rows) beats
+    let mut unknown_attr: Option<InstantError> = None;
     for (eid, attr_id, value, mode) in items {
-        let attr = attrs
-            .get(&attr_id)
-            .cloned()
-            .ok_or_else(|| unknown_attr_raise(attr_id))?;
+        let Some(attr) = attrs.get(&attr_id).cloned() else {
+            unknown_attr.get_or_insert_with(|| unknown_attr_raise(attr_id));
+            continue;
+        };
         let lookup = match &eid {
             EidRef::Lookup(la, lv) => {
                 let r = json!([la, lv.value()]);
                 if !lookup_refs.contains(&r) {
                     lookup_refs.push(r);
                 }
-                Some((*la, lv.clone()))
+                Some(*la)
             }
             EidRef::Id(_) => None,
         };
@@ -1373,16 +1377,10 @@ async fn resolve_add_batch(
         } else {
             value
         };
-        // the same value is a no-op on that row (the storage upload writes
-        // `path` through its own `path` lookup)
-        if lookup
-            .as_ref()
-            .is_some_and(|(la, lv)| *la == attr.id && *lv != CanonicalValue::of(&value))
-            && attr.cardinality == crate::attr::Cardinality::One
-            && resolver.created.contains(&eid)
-            && !created_before.contains(&eid)
-        {
-            writes_created_lookup_attr = true;
+        if let Some(la) = lookup {
+            if resolver.created.contains(&eid) && !created_before.contains(&eid) {
+                created_by_lookup.insert((eid, la));
+            }
         }
         out.push(ResolvedTriple {
             entity_id: eid,
@@ -1390,7 +1388,13 @@ async fn resolve_add_batch(
             value,
         });
     }
-    if writes_created_lookup_attr {
+    if let Some(e) = unknown_attr {
+        return Err(e);
+    }
+    if out.iter().any(|t| {
+        t.attr.cardinality == crate::attr::Cardinality::One
+            && created_by_lookup.contains(&(t.entity_id, t.attr.id))
+    }) {
         return Err(InstantError::validation_failed_input(
             "lookup",
             json!(lookup_refs),

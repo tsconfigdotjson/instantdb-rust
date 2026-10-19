@@ -260,8 +260,8 @@ async fn lookup_refs_upsert_and_resolve() {
     .unwrap();
     let triples = entity_triples(&pool, app, bob).await;
     assert!(triples.contains(&("owners.name".to_string(), json!("bobby"))));
-    // the same holds when another entity has the new value, and writing the
-    // lookup's own value is a no-op
+    // the same holds when another entity has the new value, and for the
+    // lookup's own value
     let err = transact_json(
         &pool,
         app,
@@ -275,7 +275,7 @@ async fn lookup_refs_upsert_and_resolve() {
     .await
     .unwrap_err();
     assert_eq!(err.error_type, "validation-failed");
-    transact_json(
+    let err = transact_json(
         &pool,
         app,
         json!([[
@@ -286,7 +286,49 @@ async fn lookup_refs_upsert_and_resolve() {
         ]]),
     )
     .await
-    .unwrap();
+    .unwrap_err();
+    assert_eq!(err.error_type, "validation-failed");
+    // an `id` lookup creates the entity under its own id: writing that id
+    // triple again in the batch is the same row
+    let fresh = Uuid::new_v4();
+    let err = transact_json(
+        &pool,
+        app,
+        json!([
+            [
+                "add-triple",
+                [ids.owners_id, fresh],
+                ids.owners_name,
+                "fresh"
+            ],
+            ["add-triple", fresh, ids.owners_id, fresh]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "validation-failed");
+    // a missing link-value lookup outranks an unknown attr in the batch
+    let todo = Uuid::new_v4();
+    let err = transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", todo, Uuid::new_v4(), 1],
+            [
+                "add-triple",
+                todo,
+                ids.todos_owner,
+                [ids.owners_name, "nobody"]
+            ]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "validation-failed");
+    assert_eq!(
+        err.message,
+        "Validation failed for lookup: The entity for the lookup does not exist."
+    );
 }
 
 #[tokio::test]

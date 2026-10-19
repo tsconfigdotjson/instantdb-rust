@@ -157,7 +157,13 @@ everything and checks coverage itself, as before.
   <name>: N`. `date-comparison-with-boolean`: a boolean bound on a `date`
   attr (`{tdate: {$gt: true}}`) crashes legacy's coercion `case`
   (attr_pat.clj:308-317) into a typeless 500, and this server answers 400
-  `validation-failed`.
+  `validation-failed`. `lookup-rename-or-unique-violation`: a tx that both
+  renames an entity its lookup creates and writes a value another row of
+  the same INSERT holds fails on legacy with whichever row Postgres reaches
+  first (the created entity's id is random), `record-not-unique` or the
+  `lookup` refusal; this server always refuses the rename first, and its
+  message is pinned. Error messages ride along non-enumerable: mismatch
+  reports print them, comparisons ignore them.
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
   runs twelve seeds at 250 rounds (42, 99 and the nightly's original 1-10);
   the nightly (`schedule` in ci.yml, or a manual run with the `nightly`
