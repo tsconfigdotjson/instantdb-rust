@@ -228,11 +228,6 @@ pub async fn run_query_full(
                 &loaded
             }
         };
-        if rules_reference_other_entities(rules) {
-            // data.ref / auth.ref walk links the topic derivation doesn't
-            // see; fall back to refreshing on every tx for this query.
-            topics = QueryTopics::catch_all();
-        }
         let auth = perms.auth_ctx(state);
         let filter = instant_core::perms::PermsFilter {
             rules,
@@ -242,27 +237,29 @@ pub async fn run_query_full(
                 .unwrap_or(json!({})),
         };
         // view / field rules see the whole entity even under a `fields`
-        // projection (instaql.clj:1956-2007), so the parsed forms ride along
+        // projection (instaql.clj:1956-2007), so the parsed forms ride along.
+        // The checks' lookups (entity maps, data.ref / auth.ref hops) add
+        // their topics: legacy records them through the reactive
+        // datalog-query-fn (cel.clj prefetch-data-refs, reactive/query.clj
+        // datalog-query-reactive!), so a write to a ref target refreshes
+        // the query and a write elsewhere doesn't (issue #59).
+        let mut lookups = instant_core::topics::LookupTopics::default();
         filter
-            .filter_with_forms(
+            .filter_with_forms_tracked(
                 &mut conn,
                 app_id,
                 attrs,
                 &mut result,
                 parsed_forms.as_deref().unwrap_or(&[]),
+                Some(&mut lookups),
             )
             .await?;
+        topics.merge_lookups(lookups);
     }
     drop(conn);
     inject_file_urls(state, app_id, attrs, q, &mut result);
     crate::metrics::METRICS.query_seconds.observe_since(started);
     Ok(QueryOutcome { result, topics })
-}
-
-/// True when any rule expression uses `.ref(`, i.e. permission results
-/// depend on linked entities beyond the queried ones.
-fn rules_reference_other_entities(rules: &Rules) -> bool {
-    !rules.code.is_null() && rules.code.to_string().contains(".ref(")
 }
 
 /// $files entities get a synthetic `url` triple (legacy

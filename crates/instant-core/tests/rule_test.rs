@@ -1488,3 +1488,248 @@ async fn create_check_sees_the_written_fields_of_a_deleted_entity() {
     .unwrap_err();
     assert_eq!(err.error_type, "permission-denied");
 }
+
+/// Runs a query through the permission filter and returns its invalidation
+/// topics the way the server derives them (service::run_query_full): the
+/// query's own topics plus the lookups its permission checks ran.
+async fn filtered_topics(
+    pool: &PgPool,
+    app: Uuid,
+    auth: &AuthCtx,
+    q: Value,
+) -> (
+    instant_core::instaql::QueryResult,
+    instant_core::topics::QueryTopics,
+) {
+    let attrs = attrs_of(pool, app).await;
+    let ctx = QueryCtx {
+        app_id: app,
+        attrs: &attrs,
+        admin: true,
+    };
+    let mut conn = pool.acquire().await.unwrap();
+    let mut result = query(&mut conn, &ctx, &q).await.unwrap();
+    let forms = instant_core::instaql::parse_query(&q).unwrap();
+    let mut topics = instant_core::topics::query_topics(&attrs, &forms, &result);
+    let rules = Rules::load(&mut conn, app).await.unwrap();
+    let filter = PermsFilter {
+        rules: &rules,
+        auth,
+        rule_params: json!({}),
+    };
+    let mut lookups = instant_core::topics::LookupTopics::default();
+    filter
+        .filter_with_forms_tracked(
+            &mut conn,
+            app,
+            &attrs,
+            &mut result,
+            &forms,
+            Some(&mut lookups),
+        )
+        .await
+        .unwrap();
+    topics.merge_lookups(lookups);
+    (result, topics)
+}
+
+/// The topics a tx would log for these changed triples (rust_tx_changes).
+fn tx_of(changes: &[(Uuid, Uuid, Value)]) -> instant_core::topics::TxTopics {
+    instant_core::topics::TxTopics::from_changes(changes.iter().map(|(e, a, v)| {
+        instant_core::topics::TxChange {
+            e: *e,
+            a: *a,
+            v: v.clone(),
+        }
+    }))
+}
+
+/// Issue #59: a query whose view rule reads `data.ref` / `auth.ref` is
+/// invalidated by writes to what its hops read, and not by writes anywhere
+/// else (it used to be catch-all for the whole app).
+#[tokio::test]
+async fn ref_rule_topics_narrow_to_ref_targets() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let (teams_id, teams_name, owner_team) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (notes_id, notes_body) = (Uuid::new_v4(), Uuid::new_v4());
+    let (members_id, member_user) = (Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-attr", {"id": teams_id, "forward-identity": [Uuid::new_v4(), "teams", "id"],
+              "value-type": "blob", "cardinality": "one", "unique?": true, "index?": false}],
+            ["add-attr", {"id": teams_name, "forward-identity": [Uuid::new_v4(), "teams", "name"],
+              "value-type": "blob", "cardinality": "one", "unique?": false, "index?": false}],
+            ["add-attr", {"id": owner_team, "forward-identity": [Uuid::new_v4(), "owners", "team"],
+              "reverse-identity": [Uuid::new_v4(), "teams", "owners"],
+              "value-type": "ref", "cardinality": "one", "unique?": false, "index?": false}],
+            ["add-attr", {"id": notes_id, "forward-identity": [Uuid::new_v4(), "notes", "id"],
+              "value-type": "blob", "cardinality": "one", "unique?": true, "index?": false}],
+            ["add-attr", {"id": notes_body, "forward-identity": [Uuid::new_v4(), "notes", "body"],
+              "value-type": "blob", "cardinality": "one", "unique?": false, "index?": false}],
+            ["add-attr", {"id": members_id, "forward-identity": [Uuid::new_v4(), "members", "id"],
+              "value-type": "blob", "cardinality": "one", "unique?": true, "index?": false}],
+            ["add-attr", {"id": member_user, "forward-identity": [Uuid::new_v4(), "members", "user"],
+              "reverse-identity": [Uuid::new_v4(), "$users", "members"],
+              "value-type": "ref", "cardinality": "one", "unique?": false, "index?": false}],
+            ["add-attr", {"id": Uuid::new_v4(), "forward-identity": [Uuid::new_v4(), "members", "team"],
+              "reverse-identity": [Uuid::new_v4(), "teams", "members"],
+              "value-type": "ref", "cardinality": "one", "unique?": false, "index?": false}]
+        ]),
+    )
+    .await
+    .unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({
+            // one hop, two hops
+            "todos": {"allow": {"view": "'alice' in data.ref('owner.name') || 'red' in data.ref('owner.team.name')"}},
+            // a reverse hop to a terminal id
+            "owners": {"allow": {"view": "size(data.ref('todos.id')) > 0"}},
+            // auth.ref through a reverse link from $users
+            "notes": {"allow": {"view": "'red' in auth.ref('$user.members.team.name')"}}
+        }),
+    )
+    .await;
+    let (owner_a, owner_b, owner_c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (t1, t2, red, blue) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    let note = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", owner_a, ids.owners_id, owner_a],
+            ["add-triple", owner_a, ids.owners_name, "alice"],
+            ["add-triple", owner_b, ids.owners_id, owner_b],
+            ["add-triple", owner_b, ids.owners_name, "bob"],
+            ["add-triple", owner_b, owner_team, blue],
+            ["add-triple", owner_c, ids.owners_id, owner_c],
+            ["add-triple", owner_c, ids.owners_name, "carl"],
+            ["add-triple", red, teams_id, red],
+            ["add-triple", red, teams_name, "red"],
+            ["add-triple", blue, teams_id, blue],
+            ["add-triple", blue, teams_name, "blue"],
+            ["add-triple", t1, ids.todos_id, t1],
+            ["add-triple", t1, ids.todos_owner, owner_a],
+            ["add-triple", t2, ids.todos_id, t2],
+            ["add-triple", t2, ids.todos_owner, owner_b],
+            ["add-triple", note, notes_id, note],
+            ["add-triple", note, notes_body, "hi"]
+        ]),
+    )
+    .await
+    .unwrap();
+    let anon = AuthCtx::default();
+
+    // todos: t1 visible through owner.name, t2 hidden (bob, team blue)
+    let (res, qt) = filtered_topics(&pool, app, &anon, json!({"todos": {}})).await;
+    assert_eq!(res.forms[0].entities.len(), 1);
+    assert!(
+        !qt.catch_all,
+        "ref rules no longer make the query catch-all"
+    );
+    // unrelated namespace: no refresh
+    assert!(!tx_of(&[(Uuid::new_v4(), notes_body, json!("x"))]).matches(&qt));
+    assert!(!tx_of(&[(note, notes_body, json!("x"))]).matches(&qt));
+    // an owner no result todo links to: no refresh
+    assert!(!tx_of(&[(owner_c, ids.owners_name, json!("alice"))]).matches(&qt));
+    // a team no owner of a result todo is on: no refresh
+    assert!(!tx_of(&[(red, teams_name, json!("blue"))]).matches(&qt));
+    // hop 1 target renamed (t2's owner becomes alice): refresh
+    assert!(tx_of(&[(owner_b, ids.owners_name, json!("alice"))]).matches(&qt));
+    // hop 2 link moved (bob joins red) and hop 2 target renamed: refresh
+    assert!(tx_of(&[(owner_b, owner_team, json!(red.to_string()))]).matches(&qt));
+    assert!(tx_of(&[(blue, teams_name, json!("red"))]).matches(&qt));
+    // the queried entity relinked: refresh
+    assert!(tx_of(&[(t2, ids.todos_owner, json!(owner_c.to_string()))]).matches(&qt));
+
+    // owners: reverse hop todos.owner -> owner; owner_c has no todo
+    let (res, qt) = filtered_topics(&pool, app, &anon, json!({"owners": {}})).await;
+    assert_eq!(res.forms[0].entities.len(), 2);
+    assert!(!qt.catch_all);
+    let t3 = Uuid::new_v4();
+    // a todo linked to owner_c: owner_c becomes visible
+    assert!(tx_of(&[(t3, ids.todos_owner, json!(owner_c.to_string()))]).matches(&qt));
+    // a todo linked to an owner outside the result: no refresh
+    assert!(!tx_of(&[(t3, ids.todos_owner, json!(Uuid::new_v4().to_string()))]).matches(&qt));
+    // t1's id triple (the terminal `id` read): refresh
+    assert!(tx_of(&[(t1, ids.todos_id, json!(t1.to_string()))]).matches(&qt));
+    assert!(!tx_of(&[(note, notes_body, json!("x"))]).matches(&qt));
+
+    // notes: auth.ref('$user.members.team.name') for a signed-in user
+    let uid = mk_user(&pool, app, "u@example.com").await;
+    let auth = AuthCtx {
+        user_id: Some(uid),
+        ..AuthCtx::default()
+    };
+    let (res, qt) = filtered_topics(&pool, app, &auth, json!({"notes": {}})).await;
+    assert_eq!(res.forms[0].entities.len(), 0);
+    assert!(!qt.catch_all);
+    let attrs = attrs_of(&pool, app).await;
+    let member_team = attrs.by_fwd_name("members", "team").unwrap().id;
+    let m1 = Uuid::new_v4();
+    // a membership for this user: refresh (reverse hop $users <- members.user)
+    assert!(tx_of(&[(m1, member_user, json!(uid.to_string()))]).matches(&qt));
+    // a membership for someone else: no refresh
+    assert!(!tx_of(&[(m1, member_user, json!(Uuid::new_v4().to_string()))]).matches(&qt));
+    // an unrelated membership's team: no refresh (the user has no members yet)
+    assert!(!tx_of(&[(m1, member_team, json!(red.to_string()))]).matches(&qt));
+    assert!(!tx_of(&[(t1, ids.todos_owner, json!(owner_b.to_string()))]).matches(&qt));
+}
+
+/// Field rules prefetch `data.ref` like view rules: legacy's
+/// eval-programs! resolves the refs of every program it runs
+/// (cel.clj:679-727), field programs included.
+#[tokio::test]
+async fn data_ref_in_field_rule() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"fields": {"title": "'alice' in data.ref('owner.name')"}}}),
+    )
+    .await;
+    let (owner_a, owner_b) = (Uuid::new_v4(), Uuid::new_v4());
+    let (t1, t2) = (Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", owner_a, ids.owners_id, owner_a],
+            ["add-triple", owner_a, ids.owners_name, "alice"],
+            ["add-triple", owner_b, ids.owners_id, owner_b],
+            ["add-triple", owner_b, ids.owners_name, "bob"],
+            ["add-triple", t1, ids.todos_id, t1],
+            ["add-triple", t1, ids.todos_title, "one"],
+            ["add-triple", t1, ids.todos_owner, owner_a],
+            ["add-triple", t2, ids.todos_id, t2],
+            ["add-triple", t2, ids.todos_title, "two"],
+            ["add-triple", t2, ids.todos_owner, owner_b]
+        ]),
+    )
+    .await
+    .unwrap();
+    let (res, qt) = filtered_topics(&pool, app, &AuthCtx::default(), json!({"todos": {}})).await;
+    let titled: Vec<Uuid> = res.forms[0]
+        .entities
+        .iter()
+        .filter(|n| n.triples.iter().any(|t| t.a == ids.todos_title))
+        .map(|n| n.eid)
+        .collect();
+    assert_eq!(titled, vec![t1]);
+    // the field rule's hop is tracked too
+    assert!(tx_of(&[(owner_b, ids.owners_name, json!("alice"))]).matches(&qt));
+}

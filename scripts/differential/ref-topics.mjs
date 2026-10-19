@@ -67,8 +67,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // rules written straight to Postgres: legacy evicts its rule cache off the
 // WAL feed, so give it a beat before the next op
 const RULES_SETTLE_MS = 1500;
-// a phase is over once every session has been frame-silent this long
-const PHASE_QUIET_MS = 1200;
+// after a phase's barrier, how long the sessions must stay frame-silent
+const PHASE_QUIET_MS = 500;
+// how long a session may take to see a barrier
+const BARRIER_TIMEOUT_MS = 30000;
 
 // ---------------------------------------------------------------------------
 // schema, rows, rules
@@ -81,6 +83,7 @@ const ids = {
   taskId: mk(), taskTitle: mk(), taskDoc: mk(), taskDocRev: mk(),
   boardId: mk(), boardName: mk(),
   noiseId: mk(), noiseVal: mk(),
+  syncId: mk(), syncVal: mk(), sync: mk(),
   acme: mk(), beta: mk(), gamma: mk(), delta: mk(),
   m1: mk(), m2: mk(), m3: mk(), m4: mk(),
   d1: mk(), d2: mk(), d3: mk(), d4: mk(), d5: mk(),
@@ -116,6 +119,7 @@ const schemaSteps = () => [
   linkStep(ids.taskDoc, "rtTasks", "doc", ids.taskDocRev, "rtDocs", "tasks"),
   attrStep(ids.boardId, "rtBoards", "id"), attrStep(ids.boardName, "rtBoards", "name"),
   attrStep(ids.noiseId, "rtNoise", "id"), attrStep(ids.noiseVal, "rtNoise", "val"),
+  attrStep(ids.syncId, "rtSync", "id"), attrStep(ids.syncVal, "rtSync", "val"),
 ];
 // acme: d1, d2 (U1 is a member); beta: d3 (no members); gamma: d4 (no
 // members); tasks k1 on d1, k2 on d3
@@ -126,6 +130,7 @@ const seedSteps = (users) => [
   ...task(ids.k1, "k1", ids.d1), ...task(ids.k2, "k2", ids.d3),
   ...ent(ids.b1, ids.boardId, [[ids.boardName, "b1"]]), ...ent(ids.b2, ids.boardId, [[ids.boardName, "b2"]]),
   ...ent(ids.n1, ids.noiseId, [[ids.noiseVal, 1]]),
+  ...ent(ids.sync, ids.syncId, [[ids.syncVal, "sync-0"]]),
 ];
 
 const rules = {
@@ -141,6 +146,7 @@ const rules = {
   // auth.ref through the reverse link from $users
   rtBoards: { allow: { view: "'acme' in auth.ref('$user.rtMembers.org.name')" } },
   rtNoise: { allow: { view: "true" } },
+  rtSync: { allow: { view: "true" } },
 };
 
 // the subscriptions, per session
@@ -158,6 +164,14 @@ const SESSIONS = {
   G: ["docs", "tasks", "orgsDocs"],
 };
 const queryName = new Map(Object.entries(QUERIES).map(([k, q]) => [canon(normalize(q)), k]));
+// Phase barrier: every session also holds this subscription, and after a
+// phase's tx the admin bumps the one rtSync row. A session has seen the
+// phase's refreshes once the bump reaches it (both servers refresh a
+// session's txs in order), however long the recomputations took; a fixed
+// quiet window is not enough for the debug build under load. Its
+// computations are left out of what is compared.
+const SYNC_Q = { rtSync: {} };
+const SYNC_KEY = canon(normalize(SYNC_Q));
 
 // One admin tx per phase. `rust` pins what the rust server's refresh
 // counters must show for it: "none" recomputed, or "some".
@@ -231,6 +245,7 @@ function phaseView(conn, from) {
   for (const f of conn.frames.slice(from)) {
     if (f.op === "refresh-ok") {
       for (const c of f.computations ?? []) {
+        if (canon(normalize(c["instaql-query"])) === SYNC_KEY) continue;
         const k = queryName.get(canon(normalize(c["instaql-query"]))) ?? canon(normalize(c["instaql-query"]));
         refreshed[k] = projectAnyResult(c["instaql-result"]);
       }
@@ -288,25 +303,49 @@ async function run(name, out, pinFailures) {
       subscriptions++;
     }
     record(`00-subscribed/${s}`, initial);
+    msg(conns[s], { op: "add-query", q: SYNC_Q });
+    await conns[s].waitFor((m) => m.op === "add-query-ok" && canon(m.q) === canon(SYNC_Q));
+    subscriptions++;
   }
   const sessionConns = Object.values(conns);
-  await settle(sessionConns, PHASE_QUIET_MS);
+  let syncN = 0;
+  const barrier = async (what) => {
+    syncN++;
+    const marker = `"sync-${syncN}"`;
+    await adminTx([["add-triple", ids.sync, ids.syncVal, `sync-${syncN}`]], `${what} barrier`);
+    await Promise.all(
+      Object.entries(conns).map(([s, c]) =>
+        c
+          .waitFor(
+            (m) => m.op === "refresh-ok" && (m.computations ?? []).some((x) => canon(normalize(x["instaql-query"])) === SYNC_KEY && JSON.stringify(x["instaql-result"]).includes(marker)),
+            BARRIER_TIMEOUT_MS,
+          )
+          .catch(() => {
+            throw new Error(`${name}: session ${s} never saw the ${what} barrier`);
+          }),
+      ),
+    );
+    await settle(sessionConns, PHASE_QUIET_MS);
+  };
+  await barrier("subscribe");
 
   for (const phase of PHASES) {
     const marks = Object.fromEntries(Object.entries(conns).map(([s, c]) => [s, c.frames.length]));
     const before = name === "rust" && phase.rust ? await rustCounters() : null;
     await adminTx(phase.steps(users), phase.name);
+    let after = null;
     if (before) {
-      // the tx's refresh batch has run once its duration is observed
-      for (let i = 0; i < 200; i++) {
-        if ((await rustCounters()).batches > before.batches) break;
+      // the tx's refresh batch has run once its duration is observed; read
+      // the counters before the barrier's own batch
+      for (let i = 0; i < 400; i++) {
+        after = await rustCounters();
+        if (after.batches > before.batches) break;
         await sleep(50);
       }
     }
-    await settle(sessionConns, PHASE_QUIET_MS);
+    await barrier(phase.name);
     for (const [s, c] of Object.entries(conns)) record(`${phase.name}/${s}`, phaseView(c, marks[s]));
     if (before) {
-      const after = await rustCounters();
       const computed = after.computed - before.computed;
       const skipped = after.skipped - before.skipped;
       const line = `rust ${phase.name}: ${computed} recomputed, ${skipped} skipped by topics (${subscriptions} subscriptions)`;
