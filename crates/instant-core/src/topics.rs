@@ -74,6 +74,58 @@ impl QueryTopics {
             v,
         });
     }
+
+    /// Adds the topics of the lookups a permission check ran.
+    pub fn merge_lookups(&mut self, lookups: LookupTopics) {
+        if lookups.catch_all {
+            self.catch_all = true;
+        }
+        for (a, es) in lookups.by_e {
+            self.push(Part::Set(es), [a], Part::Any);
+        }
+        for (a, vs) in lookups.by_v {
+            self.push(Part::Any, [a], Part::Set(vs));
+        }
+    }
+}
+
+/// Topics of the lookups a query's permission checks ran: `data.ref` /
+/// `auth.ref` hops and the entity maps rules read. Legacy runs both through
+/// the reactive `datalog-query-fn` (cel.clj prefetch-data-refs, instaql.clj
+/// preload-entity-maps -> query.clj datalog-query-reactive!), which records
+/// each lookup's topics against the subscription. Collected per attr, so a
+/// check repeated for every result entity adds one topic per attr, not one
+/// per entity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LookupTopics {
+    /// `[#{e..} #{a} _]`: triples of attr `a` on these entities
+    by_e: HashMap<Uuid, HashSet<Uuid>>,
+    /// `[_ #{a} #{v..}]`: triples of attr `a` pointing at these values
+    /// ([`value_key`]s; reverse link hops)
+    by_v: HashMap<Uuid, HashSet<String>>,
+    /// a lookup the derivation can't describe (an attr or etype it couldn't
+    /// resolve): refresh on every tx
+    pub catch_all: bool,
+}
+
+impl LookupTopics {
+    /// A lookup of attr `a` on entities `es`.
+    pub fn entities(&mut self, a: Uuid, es: impl IntoIterator<Item = Uuid>) {
+        self.by_e.entry(a).or_default().extend(es);
+    }
+
+    /// A lookup of attr `a` triples whose value is one of `ids` (a reverse
+    /// link hop: link triples are stored (child, link, parent-id)).
+    pub fn values(&mut self, a: Uuid, ids: impl IntoIterator<Item = Uuid>) {
+        self.by_v.entry(a).or_default().extend(
+            ids.into_iter()
+                .map(|u| value_key(&Value::String(u.to_string()))),
+        );
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.catch_all && self.by_e.is_empty() && self.by_v.is_empty()
+    }
 }
 
 /// One changed triple from a transaction.
@@ -576,6 +628,40 @@ mod tests {
         let forms = parse_query(&json!({"todos": {"ghost": {}}})).unwrap();
         let qt = query_topics(&fx.attrs, &forms, &result(vec![("todos", vec![])]));
         assert!(qt.catch_all);
+    }
+
+    #[test]
+    fn lookup_topics_merge_per_attr() {
+        let fx = fixture();
+        let (t1, u1, u2) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let forms = parse_query(&json!({"todos": {}})).unwrap();
+        let mut qt = query_topics(
+            &fx.attrs,
+            &forms,
+            &result(vec![("todos", vec![node(t1, "todos")])]),
+        );
+        let before = qt.topics.len();
+        let mut lookups = LookupTopics::default();
+        // data.ref('owner.name') for two entities: forward hop, then the
+        // terminal attr on the owners found
+        lookups.entities(fx.users_name, [u1]);
+        lookups.entities(fx.users_name, [u2]);
+        // a reverse hop to u1
+        lookups.values(fx.todos_owner, [u1]);
+        assert!(!lookups.is_empty());
+        qt.merge_lookups(lookups);
+        assert_eq!(qt.topics.len(), before + 2, "one topic per attr and shape");
+        assert!(!qt.catch_all);
+        assert!(tx(&[(u2, fx.users_name, json!("x"))]).matches(&qt));
+        assert!(!tx(&[(Uuid::new_v4(), fx.users_name, json!("x"))]).matches(&qt));
+        assert!(tx(&[(Uuid::new_v4(), fx.todos_owner, json!(u1.to_string()))]).matches(&qt));
+        assert!(!tx(&[(Uuid::new_v4(), fx.todos_owner, json!(u2.to_string()))]).matches(&qt));
+        // an unresolvable lookup degrades the query to catch-all
+        qt.merge_lookups(LookupTopics {
+            catch_all: true,
+            ..LookupTopics::default()
+        });
+        assert!(tx(&[]).matches(&qt));
     }
 
     #[test]

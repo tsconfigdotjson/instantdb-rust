@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::attr::{AttrMap, Cardinality, ValueType};
 use crate::error::{InstantError, Result};
 use crate::instaql::QueryResult;
+use crate::topics::LookupTopics;
 use crate::triple::EidRef;
 use crate::tx::{self, TxOptions, TxReport, TxStep};
 
@@ -391,7 +392,11 @@ fn extract_ref_paths(sources: &[&str], receiver: &str) -> Vec<String> {
 }
 
 /// Resolve a data.ref path from an entity: walk link segments, collect the
-/// terminal attr's values as a list.
+/// terminal attr's values as a list. With `topics`, each lookup's topic is
+/// recorded there, substituted with the ids the previous hop found (legacy
+/// refines a ref query's topics with its symbol values the same way,
+/// datalog.clj named-pattern->topics): a write that could change what any
+/// hop reads matches one of them.
 async fn resolve_ref_path(
     conn: &mut PgConnection,
     app_id: Uuid,
@@ -399,6 +404,7 @@ async fn resolve_ref_path(
     etype: &str,
     eid: Uuid,
     path: &str,
+    mut topics: Option<&mut LookupTopics>,
 ) -> Result<Value> {
     let segs: Vec<&str> = path.split('.').collect();
     // legacy build-query (cel.clj:88-117) anchors the walk on the root
@@ -411,12 +417,19 @@ async fn resolve_ref_path(
         attrs: &AttrMap,
         etype: &str,
         ids: &[Uuid],
+        topics: Option<&mut LookupTopics>,
     ) -> Result<Vec<Uuid>> {
         let Some(id_attr) = attrs.id_attr_of(etype) else {
+            if let Some(t) = topics {
+                t.catch_all = true;
+            }
             return Ok(vec![]);
         };
         if ids.is_empty() {
             return Ok(vec![]);
+        }
+        if let Some(t) = topics {
+            t.entities(id_attr.id, ids.iter().copied());
         }
         let rows = sqlx::query(
             "SELECT entity_id FROM triples
@@ -430,20 +443,32 @@ async fn resolve_ref_path(
         let found: HashSet<Uuid> = rows.iter().map(|r| r.get::<Uuid, _>("entity_id")).collect();
         Ok(ids.iter().copied().filter(|i| found.contains(i)).collect())
     }
-    let mut current: Vec<Uuid> = with_id_triple(conn, app_id, attrs, etype, &[eid]).await?;
+    let mut current: Vec<Uuid> =
+        with_id_triple(conn, app_id, attrs, etype, &[eid], topics.as_deref_mut()).await?;
     let mut current_etype = etype.to_string();
     for (i, seg) in segs.iter().enumerate() {
         let is_last = i == segs.len() - 1;
         if is_last {
             // terminal: blob attr (or id) -> collect values
             if *seg == "id" {
-                let ids = with_id_triple(conn, app_id, attrs, &current_etype, &current).await?;
+                let ids = with_id_triple(
+                    conn,
+                    app_id,
+                    attrs,
+                    &current_etype,
+                    &current,
+                    topics.as_deref_mut(),
+                )
+                .await?;
                 return Ok(json!(ids.iter().map(|u| u.to_string()).collect::<Vec<_>>()));
             }
             if let Some(attr) = attrs.by_fwd_name(&current_etype, seg) {
                 if attr.value_type == ValueType::Blob {
                     if current.is_empty() {
                         return Ok(json!([]));
+                    }
+                    if let Some(t) = topics.as_deref_mut() {
+                        t.entities(attr.id, current.iter().copied());
                     }
                     let rows = sqlx::query(
                         "SELECT value FROM triples
@@ -468,6 +493,9 @@ async fn resolve_ref_path(
                 if current.is_empty() {
                     (vec![], a.reverse_etype.clone().unwrap_or_default())
                 } else {
+                    if let Some(t) = topics.as_deref_mut() {
+                        t.entities(a.id, current.iter().copied());
+                    }
                     let rows = sqlx::query(
                         "SELECT json_uuid_to_uuid(value) AS t FROM triples
                          WHERE app_id = $1 AND attr_id = $2 AND entity_id = ANY($3) AND eav",
@@ -490,6 +518,9 @@ async fn resolve_ref_path(
                     if current.is_empty() {
                         (vec![], a.etype.clone())
                     } else {
+                        if let Some(t) = topics.as_deref_mut() {
+                            t.values(a.id, current.iter().copied());
+                        }
                         let rows = sqlx::query(
                             "SELECT entity_id FROM triples
                              WHERE app_id = $1 AND attr_id = $2 AND vae
@@ -506,7 +537,14 @@ async fn resolve_ref_path(
                         )
                     }
                 }
-                None => return Ok(json!([])),
+                None => {
+                    // an attr this walk can't resolve: a later attr change
+                    // could make it resolvable, which no lookup topic covers
+                    if let Some(t) = topics.as_deref_mut() {
+                        t.catch_all = true;
+                    }
+                    return Ok(json!([]));
+                }
             },
         };
         if is_last {
@@ -1734,7 +1772,19 @@ pub async fn fetch_entity_map(
     Ok(Some(m))
 }
 
-/// Attach prefetched _refs for the given paths.
+/// The topic of an entity-map read ([`fetch_entity_map`] / a result node's
+/// triples): every attr of the etype on that entity. Legacy preloads the
+/// maps its rules read with `[[:ea eid (ea-ids-for-etype etype)]]` through
+/// the reactive datalog-query-fn (instaql.clj:1966-2008).
+fn note_entity_map(topics: &mut LookupTopics, attrs: &AttrMap, etype: &str, eid: Uuid) {
+    for a in attrs.attrs_of_etype(etype) {
+        topics.entities(a.id, [eid]);
+    }
+}
+
+/// Attach prefetched _refs for the given paths (recording their lookups'
+/// topics in `topics`, when given).
+#[allow(clippy::too_many_arguments)]
 async fn attach_refs(
     conn: &mut PgConnection,
     app_id: Uuid,
@@ -1743,6 +1793,7 @@ async fn attach_refs(
     eid: Uuid,
     paths: &[String],
     map: &mut Map<String, Value>,
+    mut topics: Option<&mut LookupTopics>,
 ) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
@@ -1757,7 +1808,7 @@ async fn attach_refs(
         if refs.contains_key(p) {
             continue;
         }
-        let v = resolve_ref_path(conn, app_id, attrs, etype, eid, p).await?;
+        let v = resolve_ref_path(conn, app_id, attrs, etype, eid, p, topics.as_deref_mut()).await?;
         refs.insert(p.clone(), v);
     }
     map.insert("_refs".to_string(), Value::Object(refs));
@@ -1775,15 +1826,33 @@ pub async fn build_auth_value(
     auth: &AuthCtx,
     programs: &[&Program],
 ) -> Result<Value> {
+    build_auth_value_tracked(conn, app_id, attrs, auth, programs, None).await
+}
+
+/// [`build_auth_value`], recording the topics of the `$users` lookups it
+/// runs (the entity map when the session has none, and `auth.ref` paths).
+pub async fn build_auth_value_tracked(
+    conn: &mut PgConnection,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    auth: &AuthCtx,
+    programs: &[&Program],
+    mut topics: Option<&mut LookupTopics>,
+) -> Result<Value> {
     let Some(uid) = auth.user_id else {
         return Ok(Value::Null);
     };
     let mut m = match &auth.user_map {
         Some(Value::Object(m)) => m.clone(),
-        _ => match fetch_entity_map(conn, app_id, attrs, "$users", uid).await? {
-            Some(m) => m,
-            None => base_entity_map(attrs, "$users", uid),
-        },
+        _ => {
+            if let Some(t) = topics.as_deref_mut() {
+                note_entity_map(t, attrs, "$users", uid);
+            }
+            match fetch_entity_map(conn, app_id, attrs, "$users", uid).await? {
+                Some(m) => m,
+                None => base_entity_map(attrs, "$users", uid),
+            }
+        }
     };
     let sources: Vec<&str> = programs.iter().flat_map(|p| p.all_sources()).collect();
     let paths = extract_ref_paths(&sources, "auth");
@@ -1794,7 +1863,16 @@ pub async fn build_auth_value(
     if !stripped.is_empty() {
         let mut refs = Map::new();
         for (orig, path) in paths.iter().zip(stripped.iter()) {
-            let v = resolve_ref_path(conn, app_id, attrs, "$users", uid, path).await?;
+            let v = resolve_ref_path(
+                conn,
+                app_id,
+                attrs,
+                "$users",
+                uid,
+                path,
+                topics.as_deref_mut(),
+            )
+            .await?;
             refs.insert(orig.clone(), v);
         }
         m.insert("_refs".to_string(), Value::Object(refs));
@@ -1846,6 +1924,24 @@ impl<'a> PermsFilter<'a> {
         result: &mut QueryResult,
         forms: &[crate::instaql::Form],
     ) -> Result<()> {
+        self.filter_with_forms_tracked(conn, app_id, attrs, result, forms, None)
+            .await
+    }
+
+    /// [`PermsFilter::filter_with_forms`], recording in `topics` the topics
+    /// of every lookup the checks ran (the entity maps rules read and their
+    /// `data.ref` / `auth.ref` hops), so a subscription can be invalidated
+    /// by writes to what its permission results depend on, like legacy's
+    /// reactive datalog-query-fn (reactive/query.clj:35-50).
+    pub async fn filter_with_forms_tracked(
+        &self,
+        conn: &mut PgConnection,
+        app_id: Uuid,
+        attrs: &AttrMap,
+        result: &mut QueryResult,
+        forms: &[crate::instaql::Form],
+        topics: Option<&mut LookupTopics>,
+    ) -> Result<()> {
         let mut memo = CheckMemo::default();
         let mut todo = CheckTodo::default();
         for form in &result.forms {
@@ -1860,7 +1956,8 @@ impl<'a> PermsFilter<'a> {
                 note_node(attrs, node, parsed, &mut todo, &mut memo);
             }
         }
-        self.evaluate(conn, app_id, attrs, &todo, &mut memo).await?;
+        self.evaluate(conn, app_id, attrs, &todo, &mut memo, topics)
+            .await?;
         for form in &mut result.forms {
             // the cursors come from the first and last rows whose cursor
             // triple is viewable; has-next / has-previous stay as computed
@@ -1925,6 +2022,7 @@ impl<'a> PermsFilter<'a> {
         attrs: &AttrMap,
         todo: &CheckTodo,
         memo: &mut CheckMemo,
+        mut topics: Option<&mut LookupTopics>,
     ) -> Result<()> {
         for (etype, eid) in &todo.views {
             let key = (etype.clone(), *eid);
@@ -1936,11 +2034,31 @@ impl<'a> PermsFilter<'a> {
                 true
             } else {
                 let mut data = memo.data(conn, app_id, attrs, etype, *eid).await?;
+                if let Some(t) = topics.as_deref_mut() {
+                    note_entity_map(t, attrs, etype, *eid);
+                }
                 let sources: Vec<&str> = program.all_sources();
                 let data_paths = extract_ref_paths(&sources, "data");
-                attach_refs(conn, app_id, attrs, etype, *eid, &data_paths, &mut data).await?;
-                let auth_val =
-                    build_auth_value(conn, app_id, attrs, self.auth, &[&program]).await?;
+                attach_refs(
+                    conn,
+                    app_id,
+                    attrs,
+                    etype,
+                    *eid,
+                    &data_paths,
+                    &mut data,
+                    topics.as_deref_mut(),
+                )
+                .await?;
+                let auth_val = build_auth_value_tracked(
+                    conn,
+                    app_id,
+                    attrs,
+                    self.auth,
+                    &[&program],
+                    topics.as_deref_mut(),
+                )
+                .await?;
                 let env = EvalEnv::new(app_id, self.rules, &self.auth.request);
                 eval_program(
                     &program,
@@ -1962,8 +2080,34 @@ impl<'a> PermsFilter<'a> {
             let Some(program) = self.rules.field_program(etype, label) else {
                 continue;
             };
-            let data = memo.data(conn, app_id, attrs, etype, *eid).await?;
-            let auth_val = build_auth_value(conn, app_id, attrs, self.auth, &[&program]).await?;
+            let mut data = memo.data(conn, app_id, attrs, etype, *eid).await?;
+            if let Some(t) = topics.as_deref_mut() {
+                note_entity_map(t, attrs, etype, *eid);
+            }
+            // field programs go through the same eval-programs! as view
+            // programs, which prefetches every `data.ref` they read
+            // (cel.clj:679-727)
+            let data_paths = extract_ref_paths(&program.all_sources(), "data");
+            attach_refs(
+                conn,
+                app_id,
+                attrs,
+                etype,
+                *eid,
+                &data_paths,
+                &mut data,
+                topics.as_deref_mut(),
+            )
+            .await?;
+            let auth_val = build_auth_value_tracked(
+                conn,
+                app_id,
+                attrs,
+                self.auth,
+                &[&program],
+                topics.as_deref_mut(),
+            )
+            .await?;
             let env = EvalEnv::new(app_id, self.rules, &self.auth.request);
             let ok = eval_program(
                 &program,
@@ -2490,7 +2634,7 @@ pub async fn permissioned_transact_checked(
         }
         for (key, paths) in wanted {
             if let Some(Some(map)) = old_maps.get_mut(&key) {
-                attach_refs(conn, app_id, attrs, &key.1, key.0, &paths, map).await?;
+                attach_refs(conn, app_id, attrs, &key.1, key.0, &paths, map, None).await?;
             }
         }
     }
@@ -2901,7 +3045,17 @@ pub async fn permissioned_transact_checked(
                     Some(o) => o.clone(),
                     None => new.clone(),
                 };
-                attach_refs(conn, app_id, attrs, etype, *eid, &data_paths, &mut data).await?;
+                attach_refs(
+                    conn,
+                    app_id,
+                    attrs,
+                    etype,
+                    *eid,
+                    &data_paths,
+                    &mut data,
+                    None,
+                )
+                .await?;
                 let mut linked = match linked_old {
                     Some(l) => l.clone(),
                     None => fetch_entity_map(conn, app_id, attrs, linked_etype, *linked_eid)
@@ -2916,6 +3070,7 @@ pub async fn permissioned_transact_checked(
                     *linked_eid,
                     &linked_paths,
                     &mut linked,
+                    None,
                 )
                 .await?;
                 let actions = (*action == "link").then(|| {
@@ -3035,7 +3190,7 @@ pub async fn permissioned_transact_checked(
         if let Value::Object(ref mut m) = data {
             let sources = program.all_sources();
             let paths = extract_ref_paths(&sources, "data");
-            attach_refs(conn, app_id, attrs, &etype, eid, &paths, m).await?;
+            attach_refs(conn, app_id, attrs, &etype, eid, &paths, m, None).await?;
         }
         let auth_val = match (&pre_auth, action) {
             (Some(v), "update" | "delete") => v.clone(),

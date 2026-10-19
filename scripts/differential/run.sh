@@ -94,6 +94,14 @@ layer schema node schema.mjs
 echo "== differential replay =="
 layer replay node replay.mjs "$APP_ID" "$APP_ID" "$TOKEN"
 
+echo "== ref-rule invalidation =="
+# subscriptions under data.ref / auth.ref rules, refreshed by ref-target
+# writes only (issue #59)
+RT_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+RT_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+./provision.sh "$RT_APP" "$RT_TOKEN"
+layer reftopics node ref-topics.mjs "$RT_APP" "$RT_TOKEN"
+
 echo "== dashboard/CLI routes =="
 DASH_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
 DASH_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")

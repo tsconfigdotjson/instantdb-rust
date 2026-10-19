@@ -259,7 +259,7 @@ jobs:
       matrix:
         include:
           - leg: replay
-            layers: schema replay stress
+            layers: schema replay reftopics stress
             shard: 1/1
           - leg: dash
             layers: dash storage rulewheres errors

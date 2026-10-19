@@ -212,6 +212,36 @@ everything and checks coverage itself, as before.
   each probe's overload ran (its pinned where clause, or none for a probe
   whose overload throws next to one that converted) before the probe's
   `cel:*` ids are recorded as covered. `node rule-wheres.mjs <app> <token>`.
+- `ref-topics.mjs` — reactive invalidation under `data.ref` / `auth.ref`
+  rules (issue #59). Legacy prefetches a rule's refs through the reactive
+  datalog-query-fn (cel.clj prefetch-data-refs → reactive/query.clj
+  datalog-query-reactive!), which records each lookup's topics against the
+  subscription; rust records the same lookups' topics
+  (`perms::resolve_ref_path`). Three sessions (two signed-in users and a
+  guest) subscribe to queries whose view rules use `data.ref` through one
+  hop, two hops and a reverse link, a field rule with `data.ref`, and
+  `auth.ref` through a reverse link from `$users`, with nested link forms and
+  a where path reaching the same rules. One admin tx per phase then changes
+  the ref targets (memberships added / removed / moved, including into an
+  org whose docs had no member chain, an org renamed and back), unrelated
+  data (another namespace, an org no doc is in), and the queried entities.
+  A phase ends at a barrier: every session also subscribes to one `rtSync`
+  row, which the admin bumps after the phase's tx, and the phase is over
+  once each session has received the bump (both servers refresh a session's
+  txs in order), so a slow recomputation can't spill into the next phase.
+  Compared per phase and session (`reftopics:<phase>/<session>`): the
+  queries whose result a `refresh-ok` computation changed, with the new
+  result (`refreshed`), the queries that got a computation equal to what the
+  client already held (`unchanged`), and refresh errors; then each session's folded subscription
+  state (`reftopics:final/<session>`). Rust only: the `/metrics` refresh
+  counters (`instant_refresh_queries_computed_total` / `_skipped_total`)
+  must show the unrelated-namespace write (and the write to a member of an
+  org without docs) recomputing none of the subscriptions, every one
+  skipped by topics, and the first ref-target write recomputing some.
+  One allowlist entry: legacy sends `unchanged` computations when only data
+  the view rules hide changed (its result hash covers the unpermissioned
+  datalog result), which the client applies as a no-op.
+  `node ref-topics.mjs <app> <token>`.
 - `errors.mjs` / `errors-allowed.json` — the error matrix: one probe per
   externally reachable legacy error type (`err:*` in surface.json) over HTTP
   and the ws session; the normalized envelope (status, type, message, hint)
@@ -266,8 +296,8 @@ everything and checks coverage itself, as before.
 
 ## Allowlists
 
-`allowed-divergences.json` (replay, dash, storage and rule-wheres layers, keyed by
-`path`) and `errors-allowed.json` (error matrix, keyed by `probe`) share one
+`allowed-divergences.json` (replay, dash, storage, rule-wheres and ref-topics
+layers, keyed by `path`) and `errors-allowed.json` (error matrix, keyed by `probe`) share one
 strict entry format, checked by `loadAllowlist` / `allowDivergence` in
 `lib.mjs`. An entry allows one documented difference, not whatever else later
 shows up at the same path:
@@ -286,7 +316,8 @@ shows up at the same path:
 - `path` / `probe`: an anchored (`^...$`) regex over the compared path.
   Replay paths are `step:<step>/<conn>`, `final/<conn>/<section>` and
   `keyset/<op>/<key>`; dash paths `dash:<step>/<key>`; storage paths
-  `storage:<step>/<key>`; errors-allowed.json uses probe names.
+  `storage:<step>/<key>`; ref-topics paths `reftopics:<phase>/<session>`;
+  errors-allowed.json uses probe names.
 - `differs` (required): anchored regexes over sub-paths of the compared value.
   Object keys and array indexes join with dots, as in the log's "first
   differing sub-path": `.status`, `.hint.debug-uri`, `.0.status`; `^$` is
@@ -302,7 +333,8 @@ shows up at the same path:
   "array" | "object"}` and `{"$absent": true}`. If either server changes
   behavior, the entry stops applying and the difference fails.
 - Each layer loads only the entries whose path prefix it owns (replay:
-  `step:` / `final/` / `keyset/`; dash: `dash:`; storage: `storage:`). An
+  `step:` / `final/` / `keyset/`; dash: `dash:`; storage: `storage:`;
+  rule-wheres: `rulewheres:`; ref-topics: `reftopics:`). An
   entry no layer owns is a load error, and so is a malformed entry or an
   unknown field. If an owned entry allowed nothing in a run, the layer fails
   (`[STALE ALLOWLIST]`). The exception is `"flaky": true` with a

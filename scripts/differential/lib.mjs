@@ -640,6 +640,7 @@ export const DIVERGENCE_PREFIXES = {
   dash: ["dash:"],
   storage: ["storage:"],
   rulewheres: ["rulewheres:"],
+  reftopics: ["reftopics:"],
 };
 
 function anchoredRegex(src, what) {
