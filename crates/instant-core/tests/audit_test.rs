@@ -780,6 +780,30 @@ async fn query_value_validation_matches_legacy() {
         "Validation failed for query: The $like value for `things.name` must be a string, but the query got the value `5` of type `number`."
     );
 
+    // date values go through legacy's parser, not Postgres': a string with
+    // digits that neither parses is a 400 (Postgres' datetime overflow used
+    // to escape as a 500), and a format only legacy reads still matches
+    for bad in ["2024-13-45", "2024-6-5x", ""] {
+        assert_eq!(
+            msg(json!({"things": {"$": {"where": {"when": {"$lt": bad}}}}})).await,
+            format!("Validation failed for query: The data type of `things.when` is `date`, but the query got value `{}` of type `string`.", json!(bad))
+        );
+    }
+    for (v, n) in [
+        ("1/2/2024, 1:00:00 AM", 1),
+        ("2024-01-01 00:00:00", 0),
+        ("2024-01-01T01:00:00+01:00", 0),
+        ("\"2024-01-01T00:00:00.001Z\"", 1),
+    ] {
+        let res = q(
+            &pool,
+            app,
+            json!({"things": {"$": {"where": {"when": {"$lt": v}}}}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(eids(&res).len(), n, "{v}");
+    }
     // comparison parses relative keywords (every row is in 2024)
     let res = q(
         &pool,

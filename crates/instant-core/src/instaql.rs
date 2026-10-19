@@ -696,12 +696,14 @@ fn coerce_typed(attr: &Attr, t: CheckedDataType, v: &Value, op: &str) -> Result<
                 // equality refuses the relative keywords legacy can parse but
                 // the client can't agree on (attr_pat.clj:286-293); comparison
                 // parses them (verified live: `{$gt: "now"}` is a valid
-                // query). Anything the parser rejects is a 400 either way.
-                let keyword = matches!(s.trim(), "now" | "today" | "tomorrow" | "yesterday");
-                if s.trim().is_empty()
-                    || (keyword && matches!(op, "$eq" | "$not"))
-                    || (!keyword && !looks_like_date(s))
-                {
+                // query). Anything `parse-date-value` rejects is a 400 either
+                // way, also strings Postgres would have read (`2024-13-45`
+                // is a datetime overflow there, a 500).
+                let keyword = matches!(s.as_str(), "now" | "today" | "tomorrow" | "yesterday");
+                if keyword && matches!(op, "$eq" | "$not") {
+                    return Err(bad_date());
+                }
+                if !keyword && date_sql_text(s).is_none() {
                     return Err(bad_date());
                 }
                 Ok(v.clone())
@@ -711,16 +713,25 @@ fn coerce_typed(attr: &Attr, t: CheckedDataType, v: &Value, op: &str) -> Result<
     }
 }
 
-/// Cheap pre-check standing in for legacy `parse-date-value`
-/// (triple.clj:1630-1640), which accepts a wide family of formats (ISO,
-/// RFC 2822, `M/D/YYYY`, `Date.toString()`, quoted JSON strings, ...).
-/// Postgres does the real parse; this only keeps digit-less garbage like
-/// `not-a-date` from reaching it as a 500. Postgres' own special strings
-/// (`epoch`, `infinity`, `allballs`) stay accepted.
-fn looks_like_date(s: &str) -> bool {
-    let s = s.trim().trim_matches('"');
-    s.chars().any(|c| c.is_ascii_digit())
-        || matches!(s, "epoch" | "infinity" | "-infinity" | "allballs")
+/// Legacy `parse-date-value` (triple.clj:1630-1642) for a where / cursor
+/// value of a `date` attr: the string as the instant legacy binds, in a form
+/// Postgres reads back exactly (RFC 3339, UTC), so the instant doesn't
+/// depend on Postgres' own, different date grammar or the session time
+/// zone. Its special strings (`special-str->instant`) stay Postgres' own,
+/// which reads them alike (`now` is the statement's clock instead of the
+/// JVM's). `None` when legacy can't parse the string.
+fn date_sql_text(s: &str) -> Option<String> {
+    if let Some(t) = crate::cel_ext::parse_date_string(s) {
+        return Some(
+            t.with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+        );
+    }
+    matches!(
+        s,
+        "epoch" | "infinity" | "-infinity" | "now" | "today" | "tomorrow" | "yesterday"
+    )
+    .then(|| s.to_string())
 }
 
 /// Push SQL for a date/number/boolean/string extract-value expression of `v`.
@@ -742,8 +753,9 @@ fn push_typed_value(qb: &mut QueryBuilder<Postgres>, t: CheckedDataType, v: &Val
                 qb.push(" / 1000.0)");
             }
             _ => {
+                let s = v.as_str().unwrap_or("");
                 qb.push("(");
-                qb.push_bind(v.as_str().unwrap_or("").to_string());
+                qb.push_bind(date_sql_text(s).unwrap_or_else(|| s.to_string()));
                 qb.push(")::timestamptz");
             }
         },
@@ -794,7 +806,10 @@ fn push_typed_any(
             let texts: Vec<String> = vals
                 .iter()
                 .filter(|v| !v.is_number())
-                .map(|v| v.as_str().unwrap_or("").to_string())
+                .map(|v| {
+                    let s = v.as_str().unwrap_or("");
+                    date_sql_text(s).unwrap_or_else(|| s.to_string())
+                })
                 .collect();
             let has_millis = !millis.is_empty();
             qb.push("(");

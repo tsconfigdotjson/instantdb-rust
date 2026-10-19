@@ -120,11 +120,37 @@ everything and checks coverage itself, as before.
   `/storage/serve` and only the fetched content is compared.
   `node storage.mjs <app> <token>`.
 - `fuzz.mjs` — seeded random tx-steps + queries over the whole client
-  grammar (every tx-step op incl. `mode`, links, schema churn, malformed
-  steps; every where operator, dotted link paths, first/last/after/before
-  cursor walks, fields, nested links, `$$ruleParams`) replayed on both
-  servers; asserts per-server invariants (monotonic tx-ids) and cross-server
-  equality of every query result and error type.
+  grammar replayed on both servers; asserts per-server invariants
+  (monotonic tx-ids) and cross-server equality of every query result and
+  error type. The grammar:
+  - tx-steps: every op incl. `mode`, schema churn and malformed steps;
+    lookup refs (`[attr-id, value]` on a unique attr) as a step's entity
+    (add / deep-merge / retract / delete, a rename through the lookup, on
+    the `id` attr and on others, matching an entity or not) and as a
+    link's value (one that matches nothing fails the tx);
+  - typed, indexed attrs of every checked data type: `number`, `string`,
+    `date` (epoch ms, ISO-8601 with `Z`, an offset, no zone, a space for the
+    `T`, date-only, `Date.toUTCString()`) and `boolean`, plus checked-type
+    violations of each;
+  - links of cardinality one (`fuzz.owner`), many (`fuzz.tags`) and
+    one-to-one (`fuzz.profile`, a unique ref), linked and unlinked by id or
+    lookup, their targets deleted and recreated, queried nested in both
+    directions and from every namespace;
+  - every where operator (on dates: comparisons with the same input shapes
+    plus `Date.toLocaleString()`, `now` and strings neither server parses;
+    equality, `$in` (with `null`), `$ne` / `$not`, `$isNull`; on booleans the
+    same plus refused strings and `$like`), dotted link paths of one to
+    three hops through every link kind, `or` / `and`;
+  - first / last / after / before cursor walks (also by date, boolean and a
+    unique label, with the inclusive flags), limit / offset / order, fields,
+    nested links, `$$ruleParams`.
+  An entity a lookup creates on a non-`id` attr gets an id each server picks
+  (`<uuid>` in the comparison), so those creations only happen in the
+  `tag` / `profile` namespaces, which are never paged by creation time.
+  Besides most transacts committing and the final read holding data, the
+  success floor asks each new grammar feature (date, bool, tags, profile,
+  lookup, hops) used often enough for at least one committed transact and
+  one query answered with data (`grammar floor:` in the log).
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
   runs twelve seeds at 250 rounds (42, 99 and the nightly's original 1-10);
   the nightly (`schedule` in ci.yml, or a manual run with the `nightly`
