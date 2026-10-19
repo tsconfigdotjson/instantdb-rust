@@ -151,6 +151,12 @@ everything and checks coverage itself, as before.
   success floor asks each new grammar feature (date, bool, tags, profile,
   lookup, hops) used often enough for at least one committed transact and
   one query answered with data (`grammar floor:` in the log).
+  **Named exceptions** (`EXCEPTIONS` in fuzz.mjs) each match one op shape
+  and pin both servers' replies whole; hits are logged as `exception
+  <name>: N`. `date-comparison-with-boolean`: a boolean bound on a `date`
+  attr (`{tdate: {$gt: true}}`) crashes legacy's coercion `case`
+  (attr_pat.clj:308-317) into a typeless 500, and this server answers 400
+  `validation-failed`.
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
   runs twelve seeds at 250 rounds (42, 99 and the nightly's original 1-10);
   the nightly (`schedule` in ci.yml, or a manual run with the `nightly`

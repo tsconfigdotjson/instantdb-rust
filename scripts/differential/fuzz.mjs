@@ -631,11 +631,55 @@ const comparable = (entry) => {
   return { ...entry, result: { ...entry.result, triples: entry.result.triples.filter(([, a]) => !drop.has(a)) } };
 };
 
+// Named exceptions: a documented legacy defect this server doesn't copy.
+// Each matches one script op shape and pins both servers' replies whole, so
+// anything else that differs, or either side changing, still fails. Hits
+// are counted and reported.
+const whereEntries = (v, out = []) => {
+  if (Array.isArray(v)) v.forEach((x) => whereEntries(x, out));
+  else if (v && typeof v === "object") {
+    for (const [k, x] of Object.entries(v)) {
+      out.push([k, x]);
+      whereEntries(x, out);
+    }
+  }
+  return out;
+};
+const EXCEPTIONS = [
+  {
+    // attr_pat.clj:308-317 coerced-type-comparison-value!: for a `date`
+    // attr it `case`s over the value's tag with only :number and :string
+    // branches, so a boolean bound (which the ::comparator spec admits,
+    // instaql.clj:56-58) throws IllegalArgumentException, and
+    // handle-uncaught-err (session.clj:1101-1118) answers a typeless 500.
+    // This server refuses it like any other non-date value: 400
+    // validation-failed, the client's ordinary query error.
+    name: "date-comparison-with-boolean",
+    matches: (op) =>
+      op?.kind === "query" &&
+      whereEntries(op.q).some(
+        ([k, v]) => (k === "tdate" || k.endsWith(".tdate")) && v && typeof v === "object" && ["$gt", "$gte", "$lt", "$lte"].some((c) => typeof v[c] === "boolean"),
+      ),
+    legacy: { status: 500 },
+    rust: { type: "validation-failed", status: 400 },
+  },
+];
+const exceptionHits = {};
+const allowedByException = (l, r) => {
+  const op = script[l?.i];
+  if (l?.i !== r?.i || canon(l?.q) !== canon(r?.q)) return null;
+  const ex = EXCEPTIONS.find(
+    (x) => x.matches(op) && canon(l.error) === canon(x.legacy) && canon(r.error) === canon(x.rust),
+  );
+  if (ex) exceptionHits[ex.name] = (exceptionHits[ex.name] ?? 0) + 1;
+  return ex;
+};
+
 let mismatches = 0;
 const n = Math.max(legacy.queryResults.length, rust.queryResults.length);
 for (let i = 0; i < n; i++) {
   const l = legacy.queryResults[i], r = rust.queryResults[i];
-  if (canon(comparable(l)) !== canon(comparable(r))) {
+  if (canon(comparable(l)) !== canon(comparable(r)) && !allowedByException(l, r)) {
     console.error(`query mismatch at slot ${i}:\n  legacy: ${JSON.stringify(l)}\n  rust:   ${JSON.stringify(r)}`);
     mismatches++;
   }
@@ -692,6 +736,9 @@ for (const [f, c] of Object.entries(floor)) {
   }
 }
 console.log(`grammar floor: ${JSON.stringify(floor)}`);
+for (const [name, hits] of Object.entries(exceptionHits)) {
+  console.log(`exception ${name}: ${hits} result(s) allowed`);
+}
 if (legacy.violations || rust.violations || !finalMatch || mismatches || !floorOk) {
   console.error(
     `FUZZ FAILED: ${mismatches} query mismatches, invariant violations legacy=${legacy.violations} rust=${rust.violations}, final match=${finalMatch}`,
