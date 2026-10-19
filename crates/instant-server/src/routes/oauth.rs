@@ -1,4 +1,4 @@
-//! /runtime/oauth/* — OAuth/OIDC sign-in (Google via generic OIDC discovery).
+//! /runtime/oauth/* — OAuth/OIDC sign-in (generic OIDC discovery: Google, Apple).
 //! Port of LEGACY runtime/routes.clj + auth/oauth.clj.
 
 use std::collections::HashMap;
@@ -186,9 +186,13 @@ async fn fetch_json_cached(state: &AppState, cache_key: &str, url: &str) -> Resu
     }
     // discovery endpoints are app-supplied, and so is everything their
     // documents point at: SSRF-guarded (legacy fetch-discovery / safe-get)
-    let v = crate::ssrf::get_json(url, None, state.cfg.oauth_allow_private)
-        .await
-        .map_err(oauth_err)?;
+    let allow_private = state.cfg.oauth_allow_private;
+    let v = if cache_key.starts_with("disc:") {
+        crate::ssrf::get_discovery_json(url, allow_private).await
+    } else {
+        crate::ssrf::get_json(url, None, allow_private).await
+    }
+    .map_err(oauth_err)?;
     state.oauth_cache.insert(
         cache_key.to_string(),
         (v.clone(), std::time::Instant::now()),
@@ -798,7 +802,9 @@ async fn load_client_by_id(
     }
 }
 
-/// Exchange provider code -> user info {email, sub, imageURL}.
+/// Legacy `GenericOAuthClient` `get-user-info` (auth/oauth.clj:139-199):
+/// exchange the provider code for {email, sub, imageURL}. Every failure is an
+/// oauth-error that redirects back to the app with its message.
 async fn exchange_code(
     state: &AppState,
     client: &OAuthClient,
@@ -810,15 +816,25 @@ async fn exchange_code(
         .get("token_endpoint")
         .and_then(|v| v.as_str())
         .ok_or_else(|| oauth_err("Discovery document missing token_endpoint."))?;
+    let client_id = client.client_id.as_deref().unwrap_or_default();
+    // Apple's client_secret is a short-lived JWT signed with the app's key
+    let secret = match disc.get("issuer").and_then(|v| v.as_str()) {
+        Some(iss) if is_apple_issuer(iss) => apple_client_secret(
+            client.client_id.as_deref(),
+            client.meta.get("teamId").and_then(|v| v.as_str()),
+            client.meta.get("keyId").and_then(|v| v.as_str()),
+            client.client_secret.as_deref(),
+        )
+        .map_err(oauth_err)?,
+        _ => client.client_secret.clone().unwrap_or_default(),
+    };
+    const EXCHANGE_FAILED: &str = "Error exchanging code for token.";
     // legacy safe-post-form: the token endpoint comes from the discovery doc
-    let body = crate::ssrf::post_form_json(
+    let (ok, body) = crate::ssrf::post_form(
         token_endpoint,
         &[
-            ("client_id", client.client_id.as_deref().unwrap_or_default()),
-            (
-                "client_secret",
-                client.client_secret.as_deref().unwrap_or_default(),
-            ),
+            ("client_id", client_id),
+            ("client_secret", &secret),
             ("code", code),
             ("grant_type", "authorization_code"),
             ("redirect_uri", callback_url),
@@ -826,57 +842,109 @@ async fn exchange_code(
         state.cfg.oauth_allow_private,
     )
     .await
-    .map_err(|e| oauth_err(format!("Token exchange failed: {e}")))?;
-    if let Some(err) = body.get("error") {
-        return Err(oauth_err(format!("Provider error: {err}")));
+    .map_err(|_| oauth_err(EXCHANGE_FAILED))?;
+    let body = body.unwrap_or(Value::Null);
+    if !ok {
+        let msg = body
+            .get("error_description")
+            .and_then(|v| v.as_str())
+            .unwrap_or(EXCHANGE_FAILED);
+        return Err(oauth_err(msg));
     }
-    let id_token = body.get("id_token").and_then(|v| v.as_str());
-    let claims = match id_token {
-        Some(jwt) => decode_jwt_payload(jwt)?,
-        None => {
-            // fall back to userinfo endpoint
-            let userinfo = disc
-                .get("userinfo_endpoint")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| oauth_err("No id_token and no userinfo endpoint."))?;
-            let access_token = body
-                .get("access_token")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| oauth_err("No access token in response."))?;
-            crate::ssrf::get_json(userinfo, Some(access_token), state.cfg.oauth_allow_private)
-                .await
-                .map_err(|e| oauth_err(format!("userinfo failed: {e}")))?
+    let mut claims = body
+        .get("id_token")
+        .and_then(|v| v.as_str())
+        .and_then(decode_jwt_payload);
+    if claims.is_none() {
+        // no (decodable) id_token: the userinfo endpoint, when there is one
+        let access_token = body.get("access_token").and_then(|v| v.as_str());
+        let userinfo = disc.get("userinfo_endpoint").and_then(|v| v.as_str());
+        if let (Some(token), Some(url)) = (access_token, userinfo) {
+            if let Ok((true, Some(info))) =
+                crate::ssrf::get_bearer(url, token, state.cfg.oauth_allow_private).await
+            {
+                claims = Some(info);
+            }
         }
-    };
+    }
+    let claims = claims.ok_or_else(|| oauth_err("Invalid token exchanging code for token."))?;
     let email_verified = claims
         .get("email_verified")
         .map(|v| v == &json!(true) || v == &json!("true"))
         .unwrap_or(false);
-    let email = if email_verified {
-        claims.get("email").cloned().unwrap_or(Value::Null)
-    } else {
-        Value::Null
-    };
-    let sub = claims
-        .get("sub")
-        .cloned()
-        .ok_or_else(|| oauth_err("The id_token had no subject."))?;
-    Ok(json!({
-        "email": email,
-        "sub": sub,
-        "imageURL": claims.get("picture").cloned().unwrap_or(Value::Null),
-    }))
+    let email = claims
+        .get("email")
+        .filter(|e| email_verified && !e.is_null())
+        .cloned();
+    let sub = claims.get("sub").filter(|s| !s.is_null()).cloned();
+    match (email, sub) {
+        (Some(email), Some(sub)) => Ok(json!({
+            "email": email,
+            "sub": sub,
+            "imageURL": claims.get("picture").cloned().unwrap_or(Value::Null),
+        })),
+        _ => Err(oauth_err("Missing user info")),
+    }
 }
 
-fn decode_jwt_payload(jwt: &str) -> Result<Value> {
-    let parts: Vec<&str> = jwt.split('.').collect();
-    if parts.len() < 2 {
-        return Err(oauth_err("Malformed id_token."));
+/// Legacy Apple-issuer checks (auth/oauth.clj:141-142, :219-222): Apple's
+/// discovery document and its tokens use either host.
+fn is_apple_issuer(iss: &str) -> bool {
+    matches!(
+        iss,
+        "https://account.apple.com" | "https://appleid.apple.com"
+    )
+}
+
+/// Legacy `jwt/apple-client-secret` (auth/jwt.clj:129-147): an ES256 JWT
+/// signed with the client secret (the PEM contents of Apple's `.p8` key),
+/// `kid` = meta `keyId`, `iss` = meta `teamId`, `sub` = the client id,
+/// `aud` = Apple, valid for two minutes. A missing team or key id is left out
+/// of the JWT, as in legacy, and Apple refuses it at the token exchange.
+fn apple_client_secret(
+    client_id: Option<&str>,
+    team_id: Option<&str>,
+    key_id: Option<&str>,
+    private_key: Option<&str>,
+) -> std::result::Result<String, String> {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    // legacy NPEs into a 500 here (`.value` of no secret, an unreadable PEM);
+    // this server redirects back to the app with what's wrong instead
+    let private_key = private_key.filter(|k| !k.trim().is_empty()).ok_or(
+        "Missing Apple private key: set the client secret to the contents of your .p8 key file.",
+    )?;
+    let invalid = || {
+        "Invalid Apple private key: the client secret must be the contents of your .p8 key file."
+            .to_string()
+    };
+    let key = EncodingKey::from_ec_pem(private_key.trim().as_bytes()).map_err(|_| invalid())?;
+    let mut header = Header::new(Algorithm::ES256);
+    header.kid = key_id.map(str::to_string);
+    let now = chrono::Utc::now().timestamp();
+    let mut claims = serde_json::Map::new();
+    if let Some(team_id) = team_id {
+        claims.insert("iss".into(), json!(team_id));
     }
-    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(parts[1])
-        .map_err(|_| oauth_err("Malformed id_token payload."))?;
-    serde_json::from_slice(&payload).map_err(|_| oauth_err("Malformed id_token payload."))
+    claims.insert("iat".into(), json!(now));
+    claims.insert("exp".into(), json!(now + 120));
+    claims.insert("aud".into(), json!("https://appleid.apple.com"));
+    if let Some(client_id) = client_id {
+        claims.insert("sub".into(), json!(client_id));
+    }
+    encode(&header, &Value::Object(claims), &key).map_err(|_| invalid())
+}
+
+/// The payload of an id_token from the token response, unverified (it came
+/// straight from the provider over TLS); `None` when it doesn't decode.
+fn decode_jwt_payload(jwt: &str) -> Option<Value> {
+    decode_jwt_segment(jwt.split('.').nth(1)?)
+}
+
+fn decode_jwt_segment(segment: &str) -> Option<Value> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(segment.trim_end_matches('='))
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1188,81 +1256,15 @@ async fn id_token_impl(state: &AppState, headers: &HeaderMap, body: &Value) -> R
 
     assert_request_origin(state, app_id, headers).await?;
     let disc = discovery(state, &client).await?;
-    let issuer = disc
-        .get("issuer")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-
-    // verify signature via JWKS
-    let claims = verify_jwt(state, &disc, jwt).await?;
-
-    if claims.get("iss").and_then(|v| v.as_str()) != Some(issuer) {
-        return Err(InstantError::validation_failed(
-            "id_token",
-            format!("The id_token wasn't issued by {issuer}."),
-            json!([]),
-        ));
-    }
-    // nonce: skipped for google
-    if issuer != "https://accounts.google.com" {
-        let req_nonce = body.get("nonce").and_then(|v| v.as_str());
-        let tok_nonce = claims.get("nonce").and_then(|v| v.as_str());
-        match (req_nonce, tok_nonce) {
-            (None, None) => {}
-            (Some(_), None) => {
-                return Err(InstantError::validation_failed(
-                    "id_token",
-                    "The id_token is missing a nonce.",
-                    json!([]),
-                ))
-            }
-            (None, Some(_)) => {
-                return Err(InstantError::validation_failed(
-                    "id_token",
-                    "The nonce parameter was not provided in the request.",
-                    json!([]),
-                ))
-            }
-            (Some(r), Some(t)) => {
-                if r != t && auth::hash_string(r) != t {
-                    return Err(InstantError::validation_failed(
-                        "id_token",
-                        "The nonces do not match.",
-                        json!([]),
-                    ));
-                }
-            }
-        }
-    }
-    // audience (unless secret-less client)
-    if client.client_secret.is_some() {
-        let aud_ok = match claims.get("aud") {
-            Some(Value::String(a)) => Some(a.as_str()) == client.client_id.as_deref(),
-            Some(Value::Array(auds)) => auds
-                .iter()
-                .any(|a| a.as_str() == client.client_id.as_deref()),
-            _ => false,
-        };
-        if !aud_ok {
-            return Err(InstantError::validation_failed(
-                "id_token",
-                "The id_token was generated for the wrong OAuth client.",
-                json!([]),
-            ));
-        }
-    }
-    let sub = claims
-        .get("sub")
-        .cloned()
-        .filter(|s| s.is_string())
-        .ok_or_else(|| {
-            InstantError::validation_failed("id_token", "The id_token had no subject.", json!([]))
-        })?;
-    let allow_unverified = client
-        .meta
-        .get("allowUnverifiedEmail")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let claims = verify_id_token(state, &client, &disc, jwt, body.get("nonce")).await?;
+    let sub = claims.get("sub").cloned().unwrap_or(Value::Null);
+    // legacy reads `allowUnverifiedEmail` for secret-less (native) clients
+    // only (runtime/routes.clj:677-681)
+    let allow_unverified = client.client_secret.is_none()
+        && client
+            .meta
+            .get("allowUnverifiedEmail")
+            .is_some_and(|v| !matches!(v, Value::Null | Value::Bool(false)));
     let email_verified = claims
         .get("email_verified")
         .map(|v| v == &json!(true) || v == &json!("true"))
@@ -1309,15 +1311,121 @@ async fn id_token_impl(state: &AppState, headers: &HeaderMap, body: &Value) -> R
     Ok(json!({"user": user, "created": created}))
 }
 
-async fn verify_jwt(state: &AppState, disc: &Value, jwt: &str) -> Result<Value> {
-    use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-    let jwks_uri = disc
-        .get("jwks_uri")
+/// Legacy `get-user-info-from-id-token` (auth/oauth.clj:201-294): the
+/// verified claims of an id_token the app's client may sign in with. The
+/// checks run in legacy's order and fail with its messages.
+async fn verify_id_token(
+    state: &AppState,
+    client: &OAuthClient,
+    disc: &Value,
+    jwt: &str,
+    nonce: Option<&Value>,
+) -> Result<Value> {
+    let refuse = |msg: &str| {
+        InstantError::validation_failed_input("id_token", json!(jwt), json!([{"message": msg}]))
+    };
+    let non_blank = |k: &str| {
+        disc.get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+    };
+    let (Some(jwks_uri), Some(issuer)) = (non_blank("jwks_uri"), non_blank("issuer")) else {
+        return Err(refuse("OAuth client does not support id_token."));
+    };
+    let (claims, alg) = verify_jwt(state, jwks_uri, jwt).await?;
+
+    let jwt_issuer = claims.get("iss").and_then(|v| v.as_str());
+    // Apple's discovery document and its tokens may use either Apple host
+    let issuer_mismatch = !(jwt_issuer == Some(issuer)
+        || (is_apple_issuer(issuer) && jwt_issuer.is_some_and(is_apple_issuer)));
+    // an empty or missing list is legacy's default (auth/oauth.clj:358-360)
+    let supported: Vec<&str> = disc
+        .get("id_token_signing_alg_values_supported")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .filter(|a: &Vec<&str>| !a.is_empty())
+        .unwrap_or_else(|| vec!["RS256", "HS256"]);
+    let unsupported_alg = !supported.contains(&alg);
+    // a client without a secret is a native client: legacy passes
+    // `ignore-audience? true` (runtime/routes.clj:677-681)
+    let client_id_mismatch = client.client_secret.is_some() && {
+        let client_id = client.client_id.as_deref();
+        match claims.get("aud") {
+            Some(Value::String(a)) => Some(a.as_str()) != client_id,
+            Some(Value::Array(auds)) => !auds.iter().any(|a| a.as_str() == client_id),
+            _ => true,
+        }
+    };
+    let error = if let Some(e) = nonce_error(issuer, nonce, claims.get("nonce")) {
+        e.to_string()
+    } else if issuer_mismatch {
+        format!("The id_token wasn't issued by {issuer}.")
+    } else if unsupported_alg {
+        "The id_token used an unsupported algorithm.".to_string()
+    } else if client_id_mismatch {
+        "The id_token was generated for the wrong OAuth client.".to_string()
+    } else if !claims.get("sub").is_some_and(|s| s.is_string()) {
+        "The id_token had no subject.".to_string()
+    } else {
+        return Ok(claims);
+    };
+    Err(refuse(&error))
+}
+
+/// Legacy's id_token nonce check (auth/oauth.clj:242-263). Google is exempt
+/// (its native sign-in libraries can't set the nonce), and an id_token
+/// carrying the SHA-256 hex of the request's nonce passes: invertase's
+/// react-native-apple-authentication hashes the nonce it hands Apple.
+fn nonce_error(
+    issuer: &str,
+    nonce: Option<&Value>,
+    jwt_nonce: Option<&Value>,
+) -> Option<&'static str> {
+    if issuer == "https://accounts.google.com" {
+        return None;
+    }
+    let nonce = nonce.and_then(|v| v.as_str());
+    let jwt_nonce = jwt_nonce.and_then(|v| v.as_str());
+    let blank = |s: Option<&str>| s.is_none_or(|s| s.trim().is_empty());
+    match (nonce, jwt_nonce) {
+        _ if nonce == jwt_nonce => None,
+        (Some(n), Some(j)) if auth::hash_string(n) == j => None,
+        _ if blank(jwt_nonce) && !blank(nonce) => Some("The id_token is missing a nonce."),
+        _ if blank(nonce) && !blank(jwt_nonce) => {
+            Some("The nonce parameter was not provided in the request.")
+        }
+        _ => Some("The nonces do not match."),
+    }
+}
+
+/// Legacy `jwt/verify-jwt` (auth/jwt.clj:94-127): the signature against the
+/// provider's JWKS (the key whose `kid` is the token's), then `exp`. Returns
+/// the claims and the token's algorithm.
+async fn verify_jwt(state: &AppState, jwks_uri: &str, jwt: &str) -> Result<(Value, &'static str)> {
+    use jsonwebtoken::errors::ErrorKind;
+    use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+    // java-jwt `JWT/decode`: three segments, header and payload JSON objects
+    let parts: Vec<&str> = jwt.split('.').collect();
+    let header = match parts.as_slice() {
+        [h, p, _] => decode_jwt_segment(h)
+            .filter(|h| h.is_object() && decode_jwt_segment(p).is_some_and(|p| p.is_object())),
+        _ => None,
+    }
+    .ok_or_else(|| oauth_err("Invalid JWT."))?;
+    let header_alg = header
+        .get("alg")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| oauth_err("Discovery document missing jwks_uri."))?;
-    let jwks = fetch_json_cached(state, &format!("jwks:{jwks_uri}"), jwks_uri).await?;
-    let header =
-        decode_header(jwt).map_err(|_| oauth_err("Error validating JWT. Malformed token."))?;
+        .unwrap_or_default();
+    let (alg, alg_name) = match header_alg {
+        "RS256" => (Algorithm::RS256, "RS256"),
+        "ES256" => (Algorithm::ES256, "ES256"),
+        other => return Err(oauth_err(format!("Unsupported signing algorithm {other}"))),
+    };
+    let kid = header.get("kid").and_then(|v| v.as_str());
+    let no_key = || oauth_err("Error validating JWT. Could not find signing key.");
+    let jwks = fetch_json_cached(state, &format!("jwks:{jwks_uri}"), jwks_uri)
+        .await
+        .map_err(|_| no_key())?;
     let keys = jwks
         .get("keys")
         .and_then(|k| k.as_array())
@@ -1325,49 +1433,31 @@ async fn verify_jwt(state: &AppState, disc: &Value, jwt: &str) -> Result<Value> 
         .unwrap_or_default();
     let jwk = keys
         .iter()
-        .find(|k| {
-            header
-                .kid
-                .as_deref()
-                .map(|kid| k.get("kid").and_then(|v| v.as_str()) == Some(kid))
-                .unwrap_or(true)
-        })
-        .ok_or_else(|| oauth_err("Error validating JWT. No matching key."))?;
-    let key = match jwk.get("kty").and_then(|v| v.as_str()) {
-        Some("RSA") => DecodingKey::from_rsa_components(
-            jwk.get("n").and_then(|v| v.as_str()).unwrap_or_default(),
-            jwk.get("e").and_then(|v| v.as_str()).unwrap_or_default(),
-        )
-        .map_err(|_| oauth_err("Error validating JWT. Bad RSA key."))?,
-        Some("EC") => DecodingKey::from_ec_components(
-            jwk.get("x").and_then(|v| v.as_str()).unwrap_or_default(),
-            jwk.get("y").and_then(|v| v.as_str()).unwrap_or_default(),
-        )
-        .map_err(|_| oauth_err("Error validating JWT. Bad EC key."))?,
-        _ => return Err(oauth_err("Error validating JWT. Unsupported key type.")),
-    };
-    let alg = match header.alg {
-        Algorithm::RS256 => Algorithm::RS256,
-        Algorithm::ES256 => Algorithm::ES256,
-        _ => return Err(oauth_err("The id_token used an unsupported algorithm.")),
-    };
-    // legacy also rejects algorithms the discovery document doesn't list
-    // (auth/oauth.clj:223-224 `id_token_signing_alg_values_supported`)
-    if let Some(supported) = disc
-        .get("id_token_signing_alg_values_supported")
-        .and_then(|v| v.as_array())
-    {
-        let name = format!("{alg:?}");
-        if !supported.iter().any(|v| v.as_str() == Some(name.as_str())) {
-            return Err(oauth_err("The id_token used an unsupported algorithm."));
+        .find(|k| k.get("kid").and_then(|v| v.as_str()) == kid)
+        .ok_or_else(no_key)?;
+    let component = |k: &str| jwk.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+    let key = match (alg, jwk.get("kty").and_then(|v| v.as_str())) {
+        (Algorithm::RS256, Some("RSA")) => {
+            DecodingKey::from_rsa_components(component("n"), component("e"))
         }
+        (Algorithm::ES256, Some("EC")) => {
+            DecodingKey::from_ec_components(component("x"), component("y"))
+        }
+        _ => return Err(no_key()),
     }
+    .map_err(|_| no_key())?;
     let mut validation = Validation::new(alg);
+    // java-jwt: `exp` only when present, no leeway; `aud` / `iss` are
+    // checked by the caller
     validation.validate_aud = false;
-    validation.validate_exp = true;
-    let data = decode::<Value>(jwt, &key, &validation)
-        .map_err(|_| oauth_err("Error validating JWT. Signature is invalid."))?;
-    Ok(data.claims)
+    validation.leeway = 0;
+    validation.required_spec_claims.clear();
+    let data = decode::<Value>(jwt, &key, &validation).map_err(|e| match e.kind() {
+        ErrorKind::ExpiredSignature => oauth_err("Error validating JWT. Token is expired."),
+        ErrorKind::InvalidSignature => oauth_err("Error validating JWT. Signature is invalid."),
+        _ => oauth_err("Invalid JWT."),
+    })?;
+    Ok((data.claims, alg_name))
 }
 
 // ---------------------------------------------------------------------------
@@ -1564,4 +1654,119 @@ pub async fn well_known(
         "authorization_endpoint": format!("{}/runtime/{}/oauth/start", state.cfg.base_url, app_id),
         "token_endpoint": format!("{}/runtime/{}/oauth/token", state.cfg.base_url, app_id),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // a throwaway P-256 key in Apple's .p8 format (PKCS#8 PEM)
+    const P8: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgTCxnXzSNTv6tMaN4
+idPgFHY6WXqwifoybC77lY1vDqahRANCAAQf8VkmVh1dUx+WEnp3OUkpuW2Jwfij
+C5tqGC4YEXsjY7As3ZoNPJ/G4opjk/huVTBMidmVphLRazoz6seCX0KZ
+-----END PRIVATE KEY-----
+";
+    const PUB: &str = "-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEH/FZJlYdXVMflhJ6dzlJKblticH4
+owubahguGBF7I2OwLN2aDTyfxuKKY5P4blUwTInZlaYS0Ws6M+rHgl9CmQ==
+-----END PUBLIC KEY-----
+";
+
+    fn verified(jwt: &str) -> (jsonwebtoken::Header, Value) {
+        use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+        let mut validation = Validation::new(Algorithm::ES256);
+        validation.set_audience(&["https://appleid.apple.com"]);
+        let key = DecodingKey::from_ec_pem(PUB.as_bytes()).unwrap();
+        let claims = decode::<Value>(jwt, &key, &validation).unwrap().claims;
+        (decode_header(jwt).unwrap(), claims)
+    }
+
+    #[test]
+    fn apple_client_secret_is_legacys_jwt() {
+        let jwt = apple_client_secret(
+            Some("com.example.web"),
+            Some("TEAM123456"),
+            Some("KEY1234567"),
+            Some(&format!("\n  {P8}  \n")),
+        )
+        .unwrap();
+        let (header, claims) = verified(&jwt);
+        assert_eq!(header.kid.as_deref(), Some("KEY1234567"));
+        assert_eq!(claims["iss"], "TEAM123456");
+        assert_eq!(claims["sub"], "com.example.web");
+        assert_eq!(claims["aud"], "https://appleid.apple.com");
+        let (iat, exp) = (
+            claims["iat"].as_i64().unwrap(),
+            claims["exp"].as_i64().unwrap(),
+        );
+        assert_eq!(exp - iat, 120);
+        assert!((iat - chrono::Utc::now().timestamp()).abs() < 5);
+    }
+
+    #[test]
+    fn apple_client_secret_leaves_out_missing_ids() {
+        let jwt = apple_client_secret(Some("com.example.web"), None, None, Some(P8)).unwrap();
+        let (header, claims) = verified(&jwt);
+        assert_eq!(header.kid, None);
+        assert!(claims.get("iss").is_none());
+    }
+
+    #[test]
+    fn apple_client_secret_refuses_unusable_keys() {
+        let missing = apple_client_secret(Some("c"), Some("t"), Some("k"), None).unwrap_err();
+        assert!(
+            missing.starts_with("Missing Apple private key"),
+            "{missing}"
+        );
+        let blank = apple_client_secret(Some("c"), Some("t"), Some("k"), Some("  ")).unwrap_err();
+        assert_eq!(blank, missing);
+        for bad in ["not a pem", PUB] {
+            let e = apple_client_secret(Some("c"), Some("t"), Some("k"), Some(bad)).unwrap_err();
+            assert!(e.starts_with("Invalid Apple private key"), "{e}");
+        }
+    }
+
+    #[test]
+    fn apple_issuers_match_each_other_only() {
+        assert!(is_apple_issuer("https://appleid.apple.com"));
+        assert!(is_apple_issuer("https://account.apple.com"));
+        assert!(!is_apple_issuer("https://appleid.apple.com/"));
+        assert!(!is_apple_issuer("https://accounts.google.com"));
+    }
+
+    #[test]
+    fn nonce_rules_follow_legacy() {
+        const APPLE: &str = "https://appleid.apple.com";
+        let v = |s: &str| json!(s);
+        let check = |n: Option<Value>, j: Option<Value>| nonce_error(APPLE, n.as_ref(), j.as_ref());
+        assert_eq!(check(None, None), None);
+        assert_eq!(check(Some(v("n")), Some(v("n"))), None);
+        // react-native-apple-authentication hands Apple sha256-hex(nonce)
+        let hashed = auth::hash_string("n");
+        assert_eq!(check(Some(v("n")), Some(v(&hashed))), None);
+        assert_eq!(
+            check(Some(v("n")), None),
+            Some("The id_token is missing a nonce.")
+        );
+        assert_eq!(
+            check(None, Some(v("n"))),
+            Some("The nonce parameter was not provided in the request.")
+        );
+        assert_eq!(
+            check(Some(v("n")), Some(v("m"))),
+            Some("The nonces do not match.")
+        );
+        // the hash goes one way only
+        assert_eq!(
+            check(Some(v(&hashed)), Some(v("n"))),
+            Some("The nonces do not match.")
+        );
+        // blank on one side, nothing on the other: legacy falls through to
+        // "do not match"
+        assert_eq!(check(Some(v("")), None), Some("The nonces do not match."));
+        // Google is exempt
+        let g = nonce_error("https://accounts.google.com", Some(&v("n")), Some(&v("m")));
+        assert_eq!(g, None);
+    }
 }

@@ -238,7 +238,15 @@ everything and checks coverage itself, as before.
   (`send_magic_code` hands the code back, `verify_magic_code` signs in);
   step 42 the runtime OAuth routes (the `start` redirect through Google's
   real discovery document, the callback / token / id_token error surfaces,
-  `openid-configuration`).
+  `openid-configuration`); step 44 Apple sign-in on Apple's real discovery
+  documents (appleid.apple.com and account.apple.com): `start`, a callback
+  whose live exchange sends the client-secret JWT to Apple, which refuses
+  the made-up code, so both servers must redirect back with Apple's
+  `error_description`. It also covers clients whose secret can't be turned
+  into the JWT, which is allow-listed because legacy 500s, and the id_token
+  refusals that come before a valid Apple signature. The issuer quirk and
+  the hashed nonce need an Apple-signed token, so
+  `scripts/apple-oauth-test.mjs` covers them against a mock Apple.
   `scripts/dash-login-test.mjs` (the `cargo test + e2e` job) runs the full
   Google round trip against a mock token endpoint.
 - `lib.mjs` — capture clients, normalization, folding.

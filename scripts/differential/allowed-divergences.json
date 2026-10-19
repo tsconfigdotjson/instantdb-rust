@@ -1063,5 +1063,47 @@
     },
     "reason": "Legacy bug, and it over-shares: `_datakey_starts_with` puts the CEL prefix into the LIKE pattern unescaped (cel.clj:1328), so `data.title.startsWith('a_')` becomes `$like 'a_%'` and `_` matches any character. Rows the rule denies (`alpha`, `alphas`) are shown to the guest, and the matched rows skip the per-entity check that would have denied them. This server evaluates `startsWith` per entity and shows only `a_c`. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
     "citation": "LEGACY/server/src/instant/db/cel.clj:1317-1329; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^dash:44-runtime-oauth-apple/callbackNoKey$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "status": 500,
+      "type": "unknown",
+      "message": "Something went wrong. Sorry about this!"
+    },
+    "rust": {
+      "status": 302,
+      "to": "https://app.example.com/after",
+      "state": "apple-state",
+      "marker": "true",
+      "code": false,
+      "error": "Missing Apple private key: set the client secret to the contents of your .p8 key file."
+    },
+    "reason": "Apple client with no client secret (the .p8 private key): legacy's `(.value client-secret)` throws a NullPointerException inside `get-user-info`. The OAuth request is already consumed when the secret is built, so the user lands on a JSON 500 and the app never hears back. This server sends the user back to the app's redirect_uri with error=<what is wrong with the key> and its state, the same way every other exchange failure is reported. No request reaches Apple on either server.",
+    "citation": "LEGACY/server/src/instant/auth/oauth.clj:139-147 (jwt/apple-client-secret on (.value client-secret)); LEGACY/server/src/instant/runtime/routes.clj:557, :585-592 (only ExceptionInfo redirects back); docs/PARITY.md Deliberate divergences"
+  },
+  {
+    "path": "^dash:44-runtime-oauth-apple/callback(BadKey|RsaKey)$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "status": 500,
+      "type": "unknown",
+      "message": "Something went wrong. Sorry about this!"
+    },
+    "rust": {
+      "status": 302,
+      "to": "https://app.example.com/after",
+      "state": "apple-state",
+      "marker": "true",
+      "code": false,
+      "error": "Invalid Apple private key: the client secret must be the contents of your .p8 key file."
+    },
+    "reason": "Apple client whose client secret isn't a PKCS#8 PEM EC key: legacy's PemReader returns nil for non-PEM text (NullPointerException on .getContent), and KeyFactory \"EC\" throws InvalidKeySpecException for an RSA key, both inside `get-user-info`. The OAuth request is already consumed when the secret is built, so the user lands on a JSON 500 and the app never hears back. This server sends the user back to the app's redirect_uri with error=<what is wrong with the key> and its state, the same way every other exchange failure is reported. No request reaches Apple on either server.",
+    "citation": "LEGACY/server/src/instant/auth/jwt.clj:129-136; LEGACY/server/src/instant/runtime/routes.clj:557, :585-592; docs/PARITY.md Deliberate divergences"
   }
 ]

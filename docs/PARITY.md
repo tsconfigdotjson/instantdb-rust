@@ -113,12 +113,13 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | refresh tokens (sha256-hashed, no expiry) | ✅ | |
 | signout | ✅ | |
 | OAuth redirect flow (start/callback/token, PKCE, state+cookie hashes) | ✅ | mock-OIDC integration test (`scripts/oauth-test.mjs`), single-server: no differential step, since legacy fetches and vets the provider's discovery document through its SSRF guard, which rejects a container-local mock provider; Google = discovery OIDC; `/oauth/token` and `/oauth/id_token` assert the request `Origin` against the authorized origins like legacy (runtime/routes.clj:622-623, :670-671); `/oauth/start` and `/:app_id/oauth/token` are rate limited (routes.clj:754-768); a guest's `refresh_token` on either path upgrades the guest in place or links it via `linkedPrimaryUser` (routes.clj:305-333, :625-637, :690-696) |
-| `signInWithIdToken` (JWKS verification, nonce, audience) | ✅ | Google nonce skip honored |
+| `signInWithIdToken` (JWKS verification, nonce, audience) | ✅ | legacy `get-user-info-from-id-token` (auth/oauth.clj:201-294): `verify-jwt`'s messages (`Invalid JWT.`, `Unsupported signing algorithm <alg>`, `Error validating JWT. Could not find signing key.` / `Signature is invalid.` / `Token is expired.`), then the nonce, issuer, discovery-listed algorithm (default `RS256`/`HS256`), audience and subject checks in that order as `validation-failed` for `id_token` with the token as `input`; Google nonce skip honored; a token carrying the SHA-256 hex of the request's nonce passes; `allowUnverifiedEmail` applies to secret-less clients only (runtime/routes.clj:677-681) |
 | `.well-known/openid-configuration` | ✅ | |
 | `POST /runtime/framework/query` (SSR `FrameworkClient`) | ✅ | legacy `framework-query-triples` (runtime/routes.clj:728-743): optional bearer refresh token, `app-id` header, body `{query, versions}` → `{result, attrs}` (differential step 28) |
 | `extra_fields` on signup (`validate-extra-fields!`) | ✅ | `extra-fields` (`extra_fields` on the OAuth routes) is validated against the `$users` schema (unknown / system field → `validation-failed` for `extra-fields`), bound into `data` / `newData` / `auth` for the `$users.allow.create` check, denied when supplied without an explicit create rule, and written with the new row; admin flows validate without the rule check (app_user.clj:22-109; magic code, guest, OAuth, `/admin/refresh_tokens`, `/admin/sign_in_guest`) |
 | authorized redirect origins (generic/custom-scheme/netlify/vercel) | ✅ | nothing is allowed by default: legacy's localhost / `exp://` defaults apply only to shared-credential clients (app_authorized_redirect_origin.clj:77-116), which this server doesn't have; `scripts/create-oauth-client.sh` takes an origin host as its optional 7th argument |
-| shared oauth credentials / Apple secret-JWT / GitHub non-OIDC client | ❌ | bring your own provider credentials; generic OIDC only |
+| Apple sign-in | ✅ | an OIDC client whose discovery document's `issuer` is `https://appleid.apple.com` or `https://account.apple.com` (the dashboard's `apple` provider) exchanges the code with legacy's `jwt/apple-client-secret` (auth/jwt.clj:129-147, auth/oauth.clj:139-147) as `client_secret`: an ES256 JWT signed with the client secret (the `.p8` key's PEM), header `kid` = meta `keyId`, `iss` = meta `teamId`, `sub` = the client id, `aud` = `https://appleid.apple.com`, valid 120 s; a missing `teamId` / `keyId` is left out, as in legacy. Discovery documents are fetched with legacy's browser User-Agent (account.apple.com, auth/oauth.clj:298-302). `/oauth/id_token` treats either Apple issuer as the other's (auth/oauth.clj:215-222) and accepts the SHA-256 hex of the nonce (react-native-apple-authentication, :250-253). The code exchange reports failures with legacy's generic-OIDC messages (the token response's `error_description` / `Error exchanging code for token.`, `Invalid token exchanging code for token.`, `Missing user info` when there is no verified email or no `sub`). Differential dash step 44 (client creation on both Apple discovery documents, start, a live exchange Apple refuses, keys the secret can't be built from, the id_token refusals before a valid Apple signature), `scripts/apple-oauth-test.mjs` (mock Apple round trip: the secret JWT verified with the app's key, the issuer quirk both ways, hashed nonces) |
+| shared oauth credentials / GitHub non-OIDC client | ❌ | bring your own provider credentials; generic OIDC (Apple included) only |
 | custom email templates/senders | 🟡 | `app_email_templates` (`magic-code` type, `{code}` `{app_title}` `{user_email}` `{expiration}` placeholders) and `app_email_senders` are honored on the send path like legacy `magic_code_auth.clj`, and the `/dash/apps/:id/email_templates*` + `send-test-email` routes manage them; a custom sender is used only when its row is marked verified, and the Postmark sender-verification routes that set that flag are hosted-only (out-of-scope.json), so a self-hosted operator verifies a sender by setting the row directly |
 
 ## Admin API
@@ -248,6 +249,7 @@ counted apart.
 | subscription races (`scripts/differential/fuzz-race.mjs`, 3 seeds per PR, 10 nightly) | this server only | Queries registered while transactions are in flight, against a server that pauses at random where add-query and a refresh interleave (`INSTANT_CHAOS_DELAY_MS`): no refresh-ok before a query's add-query-ok, and every settled subscription equals a fresh answer. Legacy runs add-query and refresh on separate group keys and shares paginated results across sessions, so it fails these now and then (issue #51). |
 | multi-node fan-out (`multinode-ws.mjs`, `multinode-storage-test.mjs`) | this server only | Legacy's multi-node path is Hazelcast + a shared WAL consumer, which has no self-hosted counterpart to diff against; the client-visible contract (a write on node A reaches a subscriber on node B, once, with a monotonic tx id) is asserted directly. |
 | OAuth code exchange success path (`oauth-test.mjs`) | this server only | Legacy resolves the provider's discovery document through its DNS-over-HTTPS SSRF guard, which can't reach a container-local mock provider; every error surface of the same routes is compared (replay step 34, dash step 42). |
+| Apple sign-in success path, issuer quirk, hashed nonce (`apple-oauth-test.mjs`) | this server only | A sign-in needs a code Apple issued for a registered Services ID, and the quirk and nonce checks run only after an Apple-signed id_token verifies, which no test credential produces. The mock serves Apple's issuers from localhost; dash step 44 compares everything up to Apple's refusal on both servers. |
 | behaviour under load, timing-dependent paths | two timeout probes, `stress.mjs`, fuzz-perms bursts | Load itself stays a benchmark (`crates/instant-loadtest`), not a parity check: the two servers' latencies are not a contract. Ordering-dependent outcomes are compared where the protocol fixes them (per-session op order, settled state). |
 
 ## Known gaps and differences
@@ -262,7 +264,7 @@ self-hosted counterpart.
 | Gap | Legacy | Here | Workaround |
 |---|---|---|---|
 | `app_files_to_sweep` on the `s3` backend | `storage/sweeper.clj` drains the table migration 52's trigger fills on every `$files` delete and removes the objects | `storage.rs` deletes objects synchronously; the trigger still fills the table and nothing reads it | nothing to do: objects are removed when their file is deleted; the table just accumulates rows |
-| Apple and GitHub sign-in | Apple client-secret JWT + issuer quirk (auth/oauth.clj:141-147, :215), GitHub non-OIDC client (:31-113), Instant's shared credentials | generic OIDC discovery only; the dashboard route accepts a `github` provider that the runtime can't sign anyone in with | use an OIDC provider (Google, or any provider with a discovery document) |
+| GitHub sign-in | GitHub non-OIDC client (auth/oauth.clj:31-113), Instant's shared credentials | generic OIDC discovery (Apple included) only; the dashboard route accepts a `github` provider that the runtime can't sign anyone in with | use an OIDC provider (Google, Apple, or any provider with a discovery document) |
 | email delivery provider | Postmark (with Sendgrid behind a flag) and per-app verified senders | `EMAIL_PROVIDER=log` or `cloudflare`; custom senders only via a hand-set `verified` row | use Cloudflare Email Service, or mark a custom sender's row `verified` directly |
 
 ### Deliberate divergences
@@ -281,7 +283,14 @@ unchanged result; any queued frames coalesce; `stream-append` always inlines
 `content`; rate limits are always on and rule buckets are shared through
 Postgres; webhook ISNs are tx ids, not WAL LSNs; `remove-sync` keeps the
 `sync_subs` row (as legacy does by accident); nothing is allowed as a redirect
-origin by default; per-node session stats.
+origin by default; per-node session stats; an Apple client secret that can't
+be built (no `.p8` key, or one that isn't a PKCS#8 PEM EC key) sends the user
+back to the app with `error=` where legacy throws a 500 after consuming the
+OAuth request (dash step 44, pinned in `allowed-divergences.json`); an OIDC
+`email_verified` claim counts only as `true` or `"true"`, on both the code
+exchange (legacy takes any truthy value, so `"false"` verifies) and
+`/oauth/id_token` (legacy's `.asBoolean` drops the `"true"` string some Apple
+tokens carry, leaving the user without an email).
 
 ### Cosmetic differences
 
