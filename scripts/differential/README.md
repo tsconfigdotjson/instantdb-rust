@@ -121,8 +121,8 @@ everything and checks coverage itself, as before.
   `node storage.mjs <app> <token>`.
 - `fuzz.mjs` — seeded random tx-steps + queries over the whole client
   grammar replayed on both servers; asserts per-server invariants
-  (monotonic tx-ids) and cross-server equality of every query result and
-  error type. The grammar:
+  (monotonic tx-ids) and cross-server equality of every transact outcome,
+  query result and error type, slot by slot. The grammar:
   - tx-steps: every op incl. `mode`, schema churn and malformed steps;
     lookup refs (`[attr-id, value]` on a unique attr) as a step's entity
     (add / deep-merge / retract / delete, a rename through the lookup, on
@@ -144,7 +144,8 @@ everything and checks coverage itself, as before.
   - first / last / after / before cursor walks (also by date, boolean and a
     unique label, with the inclusive flags), limit / offset / order, fields,
     nested links, `$$ruleParams`.
-  An entity a lookup creates on a non-`id` attr gets an id each server picks
+  The eight `fuzz` entities start out typed and linked through all three
+  links. An entity a lookup creates on a non-`id` attr gets an id each server picks
   (`<uuid>` in the comparison), so those creations only happen in the
   `tag` / `profile` namespaces, which are never paged by creation time.
   Besides most transacts committing and the final read holding data, the

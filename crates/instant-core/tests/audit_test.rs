@@ -218,6 +218,48 @@ async fn value_lookup_never_creates_a_phantom_entity() {
 
 /// transaction.clj:532-556 + permissioned_transaction.clj:124-140 run in the
 /// non-admin pre-processing branch only (:683-687).
+/// permissioned_transaction.clj:142-190, :689-691: a non-admin tx resolves
+/// every lookup that names an existing entity before any step runs, so a
+/// write through the lookup after a delete-entity in the same tx lands on
+/// the deleted id (no id triple, nothing a query sees) instead of creating
+/// the entity anew.
+#[tokio::test]
+async fn non_admin_lookups_resolve_before_the_steps_run() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let owner = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", owner, ids.owners_id, owner],
+            ["add-triple", owner, ids.owners_name, "dora"]
+        ]),
+    )
+    .await
+    .unwrap();
+    let guest = AuthCtx {
+        user_id: None,
+        user_map: None,
+        request: Default::default(),
+    };
+    transact_with_perms(
+        &pool,
+        app,
+        &guest,
+        json!([
+            ["delete-entity", owner, "owners"],
+            ["add-triple", [ids.owners_id, owner], ids.owners_name, "dee"]
+        ]),
+    )
+    .await
+    .unwrap();
+    let triples = entity_triples(&pool, app, owner).await;
+    assert_eq!(triples, vec![("owners.name".to_string(), json!("dee"))]);
+}
+
 #[tokio::test]
 async fn lookup_namespaces_validated_for_non_admins_only() {
     let pool = pool().await;

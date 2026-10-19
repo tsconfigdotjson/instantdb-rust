@@ -1289,11 +1289,30 @@ async fn resolve_add_batch(
     items: Vec<(EidRef, Uuid, Value, WriteMode)>,
 ) -> Result<Vec<ResolvedTriple>> {
     let mut out = vec![];
+    // legacy writes a batch's eid-lookup creations and its triples in one
+    // INSERT ... ON CONFLICT DO UPDATE (triple.clj insert-multi!): a triple
+    // of the lookup attr on an entity that lookup creates hits the row the
+    // lookup just inserted, which Postgres refuses ("cannot affect row a
+    // second time") and legacy reports as a `lookup` validation error
+    // (triple.clj:1128-1139). Every eid lookup of the batch is its `input`.
+    let created_before = resolver.created.clone();
+    let mut lookup_refs: Vec<Value> = vec![];
+    let mut writes_created_lookup_attr = false;
     for (eid, attr_id, value, mode) in items {
         let attr = attrs
             .get(&attr_id)
             .cloned()
             .ok_or_else(|| unknown_attr_raise(attr_id))?;
+        let lookup = match &eid {
+            EidRef::Lookup(la, lv) => {
+                let r = json!([la, lv.value()]);
+                if !lookup_refs.contains(&r) {
+                    lookup_refs.push(r);
+                }
+                Some(*la)
+            }
+            EidRef::Id(_) => None,
+        };
         let eid = resolve_eid(
             &mut *conn,
             app_id,
@@ -1352,11 +1371,25 @@ async fn resolve_add_batch(
         } else {
             value
         };
+        if lookup == Some(attr.id)
+            && attr.cardinality == crate::attr::Cardinality::One
+            && resolver.created.contains(&eid)
+            && !created_before.contains(&eid)
+        {
+            writes_created_lookup_attr = true;
+        }
         out.push(ResolvedTriple {
             entity_id: eid,
             attr,
             value,
         });
+    }
+    if writes_created_lookup_attr {
+        return Err(InstantError::validation_failed_input(
+            "lookup",
+            json!(lookup_refs),
+            json!([{"message": "Updates with lookups can only update the lookup attribute if an entity with the unique attribute value already exists."}]),
+        ));
     }
     Ok(out)
 }

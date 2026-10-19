@@ -174,6 +174,22 @@ function buildScript() {
   // not a date on either server
   const badDateQs = ["not-a-date", "2024-13-45", "", true];
   const pickDateQ = () => pick(chance(0.85) ? dateQs : badDateQs);
+  // the entities start out typed and linked through every link kind, so
+  // where paths of several hops have something to match from the start
+  script.push({
+    kind: "tx",
+    steps: entities.flatMap((e, i) => [
+      ["add-triple", e, attrs.id, e],
+      ["add-triple", e, attrs.typedNum, nums[i % nums.length]],
+      ["add-triple", e, attrs.typedStr, strs[i % strs.length]],
+      ["add-triple", e, attrs.typedDate, dates[(i * 3) % dates.length]],
+      ["add-triple", e, attrs.typedBool, i % 2 === 0],
+      ["add-triple", e, attrs.owner, owners[i % owners.length]],
+      ["add-triple", e, attrs.tags, tags[i % tags.length]],
+      ["add-triple", e, attrs.tags, tags[(i + 1) % tags.length]],
+      ...(i < 3 ? [["add-triple", e, attrs.profile, profiles[i]]] : []),
+    ]),
+  });
   const orderKeys = ["serverCreatedAt", "tnum", "tstr", "tdate", "tbool"];
   // where paths through the links: one hop, and two or three hops through
   // every link kind in both directions
@@ -511,6 +527,10 @@ async function runOn(serverName, script) {
           violations++;
         }
         lastTxId = reply["tx-id"];
+        // every outcome takes a slot, so one transact that commits on a
+        // single server shows up as itself instead of shifting every later
+        // comparison
+        queryResults.push({ i, tx: "ok" });
       } else {
         queryResults.push({ i, error: { type: reply.type, status: reply.status } });
       }
@@ -660,7 +680,7 @@ const EXCEPTIONS = [
       whereEntries(op.q).some(
         ([k, v]) => (k === "tdate" || k.endsWith(".tdate")) && v && typeof v === "object" && ["$gt", "$gte", "$lt", "$lte"].some((c) => typeof v[c] === "boolean"),
       ),
-    legacy: { status: 500 },
+    legacy: { type: null, status: 500 },
     rust: { type: "validation-failed", status: 400 },
   },
 ];
