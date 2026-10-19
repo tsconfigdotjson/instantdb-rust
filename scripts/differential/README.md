@@ -230,13 +230,17 @@ everything and checks coverage itself, as before.
   once each session has received the bump (both servers refresh a session's
   txs in order), so a slow recomputation can't spill into the next phase.
   Compared per phase and session (`reftopics:<phase>/<session>`): the
-  queries the session got a `refresh-ok` computation for, with their
-  results, and refresh errors; then each session's folded subscription
+  queries whose result a `refresh-ok` computation changed, with the new
+  result (`refreshed`), the queries that got a computation equal to what the
+  client already held (`unchanged`), and refresh errors; then each session's folded subscription
   state (`reftopics:final/<session>`). Rust only: the `/metrics` refresh
   counters (`instant_refresh_queries_computed_total` / `_skipped_total`)
   must show the unrelated-namespace write (and the write to a member of an
   org without docs) recomputing none of the subscriptions, every one
   skipped by topics, and the first ref-target write recomputing some.
+  One allowlist entry: legacy sends `unchanged` computations when only data
+  the view rules hide changed (its result hash covers the unpermissioned
+  datalog result), which the client applies as a no-op.
   `node ref-topics.mjs <app> <token>`.
 - `errors.mjs` / `errors-allowed.json` — the error matrix: one probe per
   externally reachable legacy error type (`err:*` in surface.json) over HTTP

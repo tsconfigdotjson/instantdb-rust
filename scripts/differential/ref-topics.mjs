@@ -16,9 +16,10 @@
 //       renamed), so visibility flips;
 //   b*  unrelated data (another namespace, an org nobody's docs are in);
 //   c*  the queried entities themselves.
-// Compared per phase and session: the queries each session got a
-// `refresh-ok` computation for, with the results (what the client applies,
-// lib.mjs projectAnyResult), and refresh errors; at the end, every session's
+// Compared per phase and session: the queries whose result a `refresh-ok`
+// computation changed, with the new result (what the client applies,
+// lib.mjs projectAnyResult), the queries that got a computation equal to
+// what the client held, and refresh errors; at the end, every session's
 // folded subscription state. Paths: `reftopics:<phase>/<session>` and
 // `reftopics:final/<session>`.
 //
@@ -236,24 +237,35 @@ async function rustCounters() {
 
 const errView = (m) => normalize({ status: m.status, type: m.type, message: m.message });
 
-// What a session's frames since `from` did to its subscriptions: the
-// queries it got a computation for (the client applies each one,
-// Reactor.js handleRefreshOk), with the result, and any error.
-function phaseView(conn, from) {
+// What a session's frames since `from` did to its subscriptions, folded
+// into `state` (query name -> the result the client holds): the queries
+// whose result a computation changed (the client applies each one,
+// Reactor.js handleRefreshOk), with the new result; the queries that got a
+// computation equal to what the client already held (`unchanged`, a no-op
+// for the client); and refresh errors.
+function phaseView(conn, from, state) {
   const refreshed = {};
+  const unchanged = new Set();
   const errors = [];
   for (const f of conn.frames.slice(from)) {
     if (f.op === "refresh-ok") {
       for (const c of f.computations ?? []) {
         if (canon(normalize(c["instaql-query"])) === SYNC_KEY) continue;
         const k = queryName.get(canon(normalize(c["instaql-query"]))) ?? canon(normalize(c["instaql-query"]));
-        refreshed[k] = projectAnyResult(c["instaql-result"]);
+        const result = projectAnyResult(c["instaql-result"]);
+        if (canon(result) === canon(state[k])) {
+          if (!(k in refreshed)) unchanged.add(k);
+          continue;
+        }
+        refreshed[k] = result;
+        unchanged.delete(k);
+        state[k] = result;
       }
     } else if (f.op === "error") {
       errors.push(errView(f));
     }
   }
-  return { refreshed, errors };
+  return { refreshed, unchanged: [...unchanged].sort(), errors };
 }
 
 // ---------------------------------------------------------------------------
@@ -293,8 +305,9 @@ async function run(name, out, pinFailures) {
     await c.waitFor((m) => m.op === "init-ok");
   }
   let subscriptions = 0;
+  const states = {};
   for (const [s, names] of Object.entries(SESSIONS)) {
-    const initial = {};
+    const initial = (states[s] = {});
     for (const qn of names) {
       const q = QUERIES[qn];
       const ceid = msg(conns[s], { op: "add-query", q });
@@ -302,7 +315,7 @@ async function run(name, out, pinFailures) {
       initial[qn] = r.op === "error" ? errView(r) : projectAnyResult(r.result);
       subscriptions++;
     }
-    record(`00-subscribed/${s}`, initial);
+    record(`00-subscribed/${s}`, { ...initial });
     msg(conns[s], { op: "add-query", q: SYNC_Q });
     await conns[s].waitFor((m) => m.op === "add-query-ok" && canon(m.q) === canon(SYNC_Q));
     subscriptions++;
@@ -344,7 +357,7 @@ async function run(name, out, pinFailures) {
       }
     }
     await barrier(phase.name);
-    for (const [s, c] of Object.entries(conns)) record(`${phase.name}/${s}`, phaseView(c, marks[s]));
+    for (const [s, c] of Object.entries(conns)) record(`${phase.name}/${s}`, phaseView(c, marks[s], states[s]));
     if (before) {
       const computed = after.computed - before.computed;
       const skipped = after.skipped - before.skipped;
@@ -357,17 +370,7 @@ async function run(name, out, pinFailures) {
   }
 
   // the client's folded state: initial results, then every computation
-  for (const [s, c] of Object.entries(conns)) {
-    const state = {};
-    for (const f of c.frames) {
-      if (f.op === "add-query-ok") {
-        const k = queryName.get(canon(normalize(f.q)));
-        if (k) state[k] = projectAnyResult(f.result);
-      }
-    }
-    Object.assign(state, phaseView(c, 0).refreshed);
-    record(`final/${s}`, state);
-  }
+  for (const s of Object.keys(conns)) record(`final/${s}`, states[s]);
   for (const c of [admin, ...sessionConns]) c.close();
 }
 

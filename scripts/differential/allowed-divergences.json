@@ -1063,5 +1063,21 @@
     },
     "reason": "Legacy bug, and it over-shares: `_datakey_starts_with` puts the CEL prefix into the LIKE pattern unescaped (cel.clj:1328), so `data.title.startsWith('a_')` becomes `$like 'a_%'` and `_` matches any character. Rows the rule denies (`alpha`, `alphas`) are shown to the guest, and the matched rows skip the per-entity check that would have denied them. This server evaluates `startsWith` per entity and shows only `a_c`. Only with the operator's `rule-wheres` flag listing the app (off by default on a self-hosted server; this layer turns it on for its own app). With the flag off legacy answers like this server (the rulewheres:flag-off/ comparisons of the same queries match).",
     "citation": "LEGACY/server/src/instant/db/cel.clj:1317-1329; LEGACY/server/src/instant/db/instaql.clj:2116-2152 (get-rule-wheres), :2154-2235 (add-rule-wheres-to-query / extend-where-with-rule-refs), :2009-2028 (checked-by-rule-where skips the per-entity check); flags.clj:383-392 (rule-wheres flag)"
+  },
+  {
+    "path": "^reftopics:c[12]-[a-z-]+/(U1|U2|G)$",
+    "differs": [
+      "^\\.unchanged(\\.\\d+)?$"
+    ],
+    "legacy": {
+      "unchanged": {
+        "$type": "array"
+      }
+    },
+    "rust": {
+      "unchanged": []
+    },
+    "reason": "Legacy re-sends a computation whose client-visible result is unchanged when only data the view rules hide changed (c1: the where-path doc of a form the rules already emptied is retitled; c2: a doc and task the session can't see are created). permissioned-node filters only :join-rows and keeps the rest of the unpermissioned :datalog-result (its :symbol-values name the hidden entities), and the refresh's result-changed? hash covers the whole instaql-result, so a hidden-only change counts as changed. This server hashes the permission-filtered result and sends nothing. The client applies an identical result either way (no state change); what changed for the client (`refreshed`), the errors and the final folded state are still compared strictly.",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:1916-1954 (permissioned-node); LEGACY/server/src/instant/reactive/query.clj:136-139 (result-hash), reactive/store.clj:677-680 and reactive/session.clj:492 (result-changed? gates the computation)"
   }
 ]

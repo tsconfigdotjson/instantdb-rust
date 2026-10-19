@@ -657,9 +657,10 @@ mod tests {
         assert!(tx(&[(Uuid::new_v4(), fx.todos_owner, json!(u1.to_string()))]).matches(&qt));
         assert!(!tx(&[(Uuid::new_v4(), fx.todos_owner, json!(u2.to_string()))]).matches(&qt));
         // an unresolvable lookup degrades the query to catch-all
-        let mut lookups = LookupTopics::default();
-        lookups.catch_all = true;
-        qt.merge_lookups(lookups);
+        qt.merge_lookups(LookupTopics {
+            catch_all: true,
+            ..LookupTopics::default()
+        });
         assert!(tx(&[]).matches(&qt));
     }
 
