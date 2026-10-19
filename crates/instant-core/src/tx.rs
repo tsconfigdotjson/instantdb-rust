@@ -788,7 +788,7 @@ pub async fn transact(
                     check_ref_value(attrs, &attr_id, &value)?;
                     items.push((eid, attr_id, value, mode));
                 }
-                let resolved = resolve_add_batch(
+                let (resolved, refused) = resolve_add_batch(
                     &mut *conn,
                     app_id,
                     attrs,
@@ -804,6 +804,9 @@ pub async fn transact(
                     }
                 }
                 let newly = insert_triples(&mut *conn, app_id, attrs, &resolved).await?;
+                if let Some(e) = refused {
+                    return Err(e);
+                }
                 for eid in newly {
                     if let Some(t) = resolved.iter().find(|t| t.entity_id == eid) {
                         created_etypes.insert(eid, t.attr.etype.clone());
@@ -1287,14 +1290,17 @@ async fn resolve_add_batch(
     resolver: &mut LookupResolver,
     created_etypes: &mut HashMap<Uuid, String>,
     items: Vec<(EidRef, Uuid, Value, WriteMode)>,
-) -> Result<Vec<ResolvedTriple>> {
+) -> Result<(Vec<ResolvedTriple>, Option<InstantError>)> {
     let mut out = vec![];
     // legacy writes a batch's eid-lookup creations and its triples in one
     // INSERT ... ON CONFLICT DO UPDATE (triple.clj insert-multi!): a triple
     // of the lookup attr on an entity that lookup creates hits the row the
     // lookup just inserted, which Postgres refuses ("cannot affect row a
     // second time") and legacy reports as a `lookup` validation error
-    // (triple.clj:1128-1139). Every eid lookup of the batch is its `input`.
+    // (triple.clj:1128-1139) when the value differs from the lookup's. A
+    // value another entity holds is `record-not-unique` first, so the error
+    // is returned for the caller to raise once the insert went through.
+    // Every eid lookup of the batch is its `input`.
     let created_before = resolver.created.clone();
     let mut lookup_refs: Vec<Value> = vec![];
     let mut writes_created_lookup_attr = false;
@@ -1309,7 +1315,7 @@ async fn resolve_add_batch(
                 if !lookup_refs.contains(&r) {
                     lookup_refs.push(r);
                 }
-                Some(*la)
+                Some((*la, lv.clone()))
             }
             EidRef::Id(_) => None,
         };
@@ -1371,7 +1377,11 @@ async fn resolve_add_batch(
         } else {
             value
         };
-        if lookup == Some(attr.id)
+        // the same value is a no-op on that row (the storage upload writes
+        // `path` through its own `path` lookup)
+        if lookup
+            .as_ref()
+            .is_some_and(|(la, lv)| *la == attr.id && *lv != CanonicalValue::of(&value))
             && attr.cardinality == crate::attr::Cardinality::One
             && resolver.created.contains(&eid)
             && !created_before.contains(&eid)
@@ -1384,14 +1394,14 @@ async fn resolve_add_batch(
             value,
         });
     }
-    if writes_created_lookup_attr {
-        return Err(InstantError::validation_failed_input(
+    let refused = writes_created_lookup_attr.then(|| {
+        InstantError::validation_failed_input(
             "lookup",
             json!(lookup_refs),
             json!([{"message": "Updates with lookups can only update the lookup attribute if an entity with the unique attribute value already exists."}]),
-        ));
-    }
-    Ok(out)
+        )
+    });
+    Ok((out, refused))
 }
 
 /// Check the app allows writes (status gate).

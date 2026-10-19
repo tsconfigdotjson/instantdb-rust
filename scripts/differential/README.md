@@ -186,7 +186,12 @@ everything and checks coverage itself, as before.
   For a paginated top-level `or`, the triples only a where row carries are
   left out of the comparison in both fuzz layers. Legacy keeps one where row
   per entity (DISTINCT ON), and which branch survives for an entity matching
-  several branches depends on its query plan.
+  several branches depends on its query plan. `fuzz.mjs` (`pagedWhereOnly`)
+  treats a paginated where path through a link that reaches several
+  entities (has-many, or a reverse link) the same way, since the entity
+  then has a where row per linked entity; a has-many link's triples aren't
+  among an entity's own (cardinality-one) triples, so only the where row or
+  a nested form ships them.
   `node fuzz-perms.mjs <app> <app> <token> [seed] [rounds]`; seeds 7-9 at 120
   rounds per PR (`FUZZ_PERMS_SEEDS` / `FUZZ_PERMS_ROUNDS`), 16 seeds at 300
   nightly, `FUZZ_PERMS_JOBS` (4 nightly) at a time.

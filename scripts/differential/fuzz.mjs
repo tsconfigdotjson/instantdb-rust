@@ -449,8 +449,8 @@ function buildScript() {
   script.push({ kind: "query", q: { [NS]: { owner: {}, tags: {}, profile: {} } } });
   script.push({ kind: "query", q: { [OWNER]: { items: {} } } });
   // what each label of a namespace names: [attr id, namespace a link leads
-  // to, whether it is the link's reverse] (pagedOrWhereOnly resolves where
-  // paths with it)
+  // to, whether it is the link's reverse, whether it can reach several
+  // entities] (pagedWhereOnly resolves where paths with it)
   script.schema = {
     [NS]: {
       ...Object.fromEntries(Object.entries(attrs.labels).map(([l, id]) => [l, [id]])),
@@ -460,11 +460,11 @@ function buildScript() {
       tdate: [attrs.typedDate],
       tbool: [attrs.typedBool],
       owner: [attrs.owner, OWNER],
-      tags: [attrs.tags, TAG],
+      tags: [attrs.tags, TAG, false, true],
       profile: [attrs.profile, PROFILE],
     },
-    [OWNER]: { id: [attrs.ownerId], name: [attrs.ownerName], items: [attrs.owner, NS, true] },
-    [TAG]: { id: [attrs.tagId], label: [attrs.tagLabel], fuzzes: [attrs.tags, NS, true] },
+    [OWNER]: { id: [attrs.ownerId], name: [attrs.ownerName], items: [attrs.owner, NS, true, true] },
+    [TAG]: { id: [attrs.tagId], label: [attrs.tagLabel], fuzzes: [attrs.tags, NS, true, true] },
     [PROFILE]: { id: [attrs.profileId], handle: [attrs.profileHandle], bio: [attrs.profileBio], fuzz: [attrs.profile, NS, true] },
   };
   return script;
@@ -613,40 +613,53 @@ console.log("running against rust…");
 const rust = await runOn("rust", script);
 
 // A paginated form keeps one where row per entity (legacy's page cte is a
-// DISTINCT ON over its where ctes), and a top-level `or` gathers its
-// branches as disjoint rows. For an entity matching several branches, which
-// branch's row survives is up to legacy's query plan; rust keeps the first.
-// So for those queries the triples only a where row carries (a branch attr
-// the `fields` leave out, a link path's triples past the nested forms the
-// query asks for) are compared on neither side. A path that walks a link
-// back (tags.fuzzes) reuses its attr id, which then drops at every hop.
-function pagedOrWhereOnly(q) {
+// DISTINCT ON over its where ctes). An entity has several where rows when a
+// path crosses a link that reaches several entities (a has-many link, the
+// reverse of a has-many or cardinality-one link) or when it matches several
+// branches of an `or` (gathered as disjoint rows). Which row survives is up
+// to legacy's query plan; rust keeps the first. So for those paths the
+// triples only a where row carries are compared on neither side: an attr
+// the `fields` leave out, a has-many link's triples (an entity's own
+// triples are its cardinality-one attrs), a hop past the nested forms the
+// query asks for. A path that walks a link back (tags.fuzzes) reuses its
+// attr id, which then drops at every hop.
+function pagedWhereOnly(q) {
   const form = q?.fuzz;
   const $ = form?.$;
-  if (!$?.where?.or || !($.limit || $.first || $.last)) return null;
+  if (!$?.where || !($.limit || $.first || $.last)) return null;
   const drop = new Set();
-  for (const branch of $.where.or) {
-    for (const path of Object.keys(branch)) {
+  const visit = (where, inOr) => {
+    for (const [path, v] of Object.entries(where)) {
+      if (path === "or" || path === "and") {
+        if (Array.isArray(v)) v.forEach((branch) => visit(branch, inOr || path === "or"));
+        continue;
+      }
       const segs = path.split(".");
       // does the query nest forms along the path down to depth d?
       const nested = (d) => segs.slice(0, d).reduce((node, seg) => node?.[seg], form) !== undefined;
+      const hops = [];
       let ns = "fuzz";
-      segs.forEach((seg, k) => {
-        const [id, next, reverse] = script.schema[ns]?.[seg] ?? [];
-        if (!id) return;
-        // a hop's triple sits on the entity the hop starts from, or for a
-        // reverse link on the one it reaches; it ships without the where row
-        // when the query's own forms read that entity
-        const kept = k === 0 ? !reverse && (!$.fields || $.fields.includes(seg)) : nested(reverse ? k + 1 : k);
-        if (!kept) drop.add(id);
-        ns = next;
+      for (const seg of segs) {
+        const entry = script.schema[ns]?.[seg];
+        if (!entry) break;
+        hops.push(entry);
+        ns = entry[1];
+      }
+      if (!inOr && !hops.some(([, , , many]) => many)) continue;
+      hops.forEach(([id, next, reverse, many], k) => {
+        // a hop's triple ships without the where row when it is one of the
+        // entity's own triples and the query reads that entity, or when the
+        // query nests the link's form
+        const own = !reverse && !many && (k === 0 ? !$.fields || $.fields.includes(segs[0]) : nested(k));
+        if (!own && !(next && nested(k + 1))) drop.add(id);
       });
     }
-  }
+  };
+  visit($.where, false);
   return drop.size ? drop : null;
 }
 const comparable = (entry) => {
-  const drop = entry?.result && pagedOrWhereOnly(entry.q);
+  const drop = entry?.result && pagedWhereOnly(entry.q);
   if (!drop) return entry;
   return { ...entry, result: { ...entry.result, triples: entry.result.triples.filter(([, a]) => !drop.has(a)) } };
 };
