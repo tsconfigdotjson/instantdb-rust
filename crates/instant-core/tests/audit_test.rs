@@ -218,6 +218,48 @@ async fn value_lookup_never_creates_a_phantom_entity() {
 
 /// transaction.clj:532-556 + permissioned_transaction.clj:124-140 run in the
 /// non-admin pre-processing branch only (:683-687).
+/// permissioned_transaction.clj:142-190, :689-691: a non-admin tx resolves
+/// every lookup that names an existing entity before any step runs, so a
+/// write through the lookup after a delete-entity in the same tx lands on
+/// the deleted id (no id triple, nothing a query sees) instead of creating
+/// the entity anew.
+#[tokio::test]
+async fn non_admin_lookups_resolve_before_the_steps_run() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let owner = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", owner, ids.owners_id, owner],
+            ["add-triple", owner, ids.owners_name, "dora"]
+        ]),
+    )
+    .await
+    .unwrap();
+    let guest = AuthCtx {
+        user_id: None,
+        user_map: None,
+        request: Default::default(),
+    };
+    transact_with_perms(
+        &pool,
+        app,
+        &guest,
+        json!([
+            ["delete-entity", owner, "owners"],
+            ["add-triple", [ids.owners_id, owner], ids.owners_name, "dee"]
+        ]),
+    )
+    .await
+    .unwrap();
+    let triples = entity_triples(&pool, app, owner).await;
+    assert_eq!(triples, vec![("owners.name".to_string(), json!("dee"))]);
+}
+
 #[tokio::test]
 async fn lookup_namespaces_validated_for_non_admins_only() {
     let pool = pool().await;
@@ -780,6 +822,30 @@ async fn query_value_validation_matches_legacy() {
         "Validation failed for query: The $like value for `things.name` must be a string, but the query got the value `5` of type `number`."
     );
 
+    // date values go through legacy's parser, not Postgres': a string with
+    // digits that neither parses is a 400 (Postgres' datetime overflow used
+    // to escape as a 500), and a format only legacy reads still matches
+    for bad in ["2024-13-45", "2024-6-5x", ""] {
+        assert_eq!(
+            msg(json!({"things": {"$": {"where": {"when": {"$lt": bad}}}}})).await,
+            format!("Validation failed for query: The data type of `things.when` is `date`, but the query got value `{}` of type `string`.", json!(bad))
+        );
+    }
+    for (v, n) in [
+        ("1/2/2024, 1:00:00 AM", 1),
+        ("2024-01-01 00:00:00", 0),
+        ("2024-01-01T01:00:00+01:00", 0),
+        ("\"2024-01-01T00:00:00.001Z\"", 1),
+    ] {
+        let res = q(
+            &pool,
+            app,
+            json!({"things": {"$": {"where": {"when": {"$lt": v}}}}}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(eids(&res).len(), n, "{v}");
+    }
     // comparison parses relative keywords (every row is in 2024)
     let res = q(
         &pool,

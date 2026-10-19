@@ -2346,6 +2346,92 @@ fn binding_value(v: &Value) -> Value {
     }
 }
 
+/// Legacy `load-entities-map` + `resolve-lookups-tx-steps`
+/// (permissioned_transaction.clj:142-190, :689-691): before any step runs,
+/// every eid lookup (and every lookup value of a link) that names an
+/// existing entity becomes that entity's id, so the tx writes to the entity
+/// as it was found pre-tx even when an earlier step deletes it or renames
+/// the lookup attr. Only lookups that still miss are resolved (and, in the
+/// eid position, created) while the steps run. A lookup outside the step's
+/// namespace is left for the namespace validation that runs with the steps
+/// (legacy `validate-lookup-etypes` comes first). Delete-entity lookups are
+/// resolved by their own pass (`resolve-lookups-for-delete-entity`).
+async fn pre_resolve_lookups(
+    conn: &mut PgConnection,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    steps: Vec<TxStep>,
+) -> Result<Vec<TxStep>> {
+    async fn existing(
+        conn: &mut PgConnection,
+        app_id: Uuid,
+        attrs: &AttrMap,
+        lookup_attr: Uuid,
+        value: &str,
+        etype: Option<&str>,
+    ) -> Result<Option<Uuid>> {
+        let in_ns = attrs
+            .get(&lookup_attr)
+            .is_some_and(|a| a.is_unique && Some(a.etype.as_str()) == etype);
+        if !in_ns {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "SELECT entity_id FROM triples
+             WHERE app_id = $1 AND attr_id = $2 AND av
+               AND json_null_to_null(value) IS NOT DISTINCT FROM json_null_to_null($3::jsonb)",
+        )
+        .bind(app_id)
+        .bind(lookup_attr)
+        .bind(value)
+        .fetch_optional(&mut *conn)
+        .await?;
+        Ok(row.map(|r| r.get("entity_id")))
+    }
+    let mut out = Vec::with_capacity(steps.len());
+    for mut step in steps {
+        // the step's namespace, and a link's target namespace
+        let (etype, rev_etype) = match &step {
+            TxStep::AddTriple { attr_id, .. }
+            | TxStep::DeepMergeTriple { attr_id, .. }
+            | TxStep::RetractTriple { attr_id, .. } => {
+                let a = attrs.get(attr_id);
+                (
+                    a.map(|a| a.etype.clone()),
+                    a.filter(|a| a.value_type == ValueType::Ref)
+                        .and_then(|a| a.reverse_etype.clone()),
+                )
+            }
+            TxStep::RuleParams { etype, .. } => (etype.clone(), None),
+            _ => (None, None),
+        };
+        let (eid, value) = match &mut step {
+            TxStep::AddTriple { eid, value, .. }
+            | TxStep::DeepMergeTriple { eid, value, .. }
+            | TxStep::RetractTriple { eid, value, .. } => (Some(eid), Some(value)),
+            TxStep::RuleParams { eid, .. } => (Some(eid), None),
+            _ => (None, None),
+        };
+        if let Some(eid) = eid {
+            if let EidRef::Lookup(la, lv) = &*eid {
+                let (la, lv) = (*la, lv.0.clone());
+                if let Some(id) = existing(conn, app_id, attrs, la, &lv, etype.as_deref()).await? {
+                    *eid = EidRef::Id(id);
+                }
+            }
+        }
+        if let (Some(value), Some(rev)) = (value, rev_etype.as_deref()) {
+            if let Some((la, lv)) = crate::triple::value_lookup(value) {
+                if let Some(id) = existing(conn, app_id, attrs, la, &lv.0, Some(rev)).await? {
+                    *value = json!(id);
+                }
+            }
+        }
+        out.push(step);
+    }
+    Ok(out)
+}
+
 /// Run tx-steps with permission checks. Must be called inside an open DB tx;
 /// returns Err (aborting) when a check fails.
 pub async fn permissioned_transact(
@@ -2403,6 +2489,7 @@ pub async fn permissioned_transact_checked(
             crate::tx::check_ref_value(attrs, attr_id, value)?;
         }
     }
+    let steps = pre_resolve_lookups(conn, app_id, attrs, steps).await?;
 
     // ---- pre-pass: snapshot old entity data + note link targets ----
     let mut old_maps: HashMap<(Uuid, String), Option<Map<String, Value>>> = HashMap::new();

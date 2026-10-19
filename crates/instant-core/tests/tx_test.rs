@@ -215,6 +215,120 @@ async fn lookup_refs_upsert_and_resolve() {
     .unwrap();
     let triples = entity_triples(&pool, app, todo).await;
     assert!(triples.contains(&("todos.owner".to_string(), json!(bob))));
+
+    // a rename through a lookup that matches nothing writes the lookup attr
+    // on the entity the lookup creates: legacy's one INSERT refuses that
+    // (triple.clj:1128-1139) and nothing is written
+    let err = transact_json(
+        &pool,
+        app,
+        json!([[
+            "add-triple",
+            [ids.owners_name, "carl"],
+            ids.owners_name,
+            "carla"
+        ]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "validation-failed");
+    assert_eq!(
+        err.message,
+        "Validation failed for lookup: Updates with lookups can only update the lookup attribute if an entity with the unique attribute value already exists."
+    );
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM triples WHERE app_id = $1 AND attr_id = $2 AND value IN ('\"carl\"'::jsonb, '\"carla\"'::jsonb)",
+    )
+    .bind(app)
+    .bind(ids.owners_name)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(n, 0);
+    // through a lookup that matches, the rename goes through
+    transact_json(
+        &pool,
+        app,
+        json!([[
+            "add-triple",
+            [ids.owners_name, "bob"],
+            ids.owners_name,
+            "bobby"
+        ]]),
+    )
+    .await
+    .unwrap();
+    let triples = entity_triples(&pool, app, bob).await;
+    assert!(triples.contains(&("owners.name".to_string(), json!("bobby"))));
+    // the same holds when another entity has the new value, and for the
+    // lookup's own value
+    let err = transact_json(
+        &pool,
+        app,
+        json!([[
+            "add-triple",
+            [ids.owners_name, "zoe"],
+            ids.owners_name,
+            "bobby"
+        ]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "validation-failed");
+    let err = transact_json(
+        &pool,
+        app,
+        json!([[
+            "add-triple",
+            [ids.owners_name, "zoe"],
+            ids.owners_name,
+            "zoe"
+        ]]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "validation-failed");
+    // an `id` lookup creates the entity under its own id: writing that id
+    // triple again in the batch is the same row
+    let fresh = Uuid::new_v4();
+    let err = transact_json(
+        &pool,
+        app,
+        json!([
+            [
+                "add-triple",
+                [ids.owners_id, fresh],
+                ids.owners_name,
+                "fresh"
+            ],
+            ["add-triple", fresh, ids.owners_id, fresh]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "validation-failed");
+    // a missing link-value lookup outranks an unknown attr in the batch
+    let todo = Uuid::new_v4();
+    let err = transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", todo, Uuid::new_v4(), 1],
+            [
+                "add-triple",
+                todo,
+                ids.todos_owner,
+                [ids.owners_name, "nobody"]
+            ]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "validation-failed");
+    assert_eq!(
+        err.message,
+        "Validation failed for lookup: The entity for the lookup does not exist."
+    );
 }
 
 #[tokio::test]

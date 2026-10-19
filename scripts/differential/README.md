@@ -120,11 +120,55 @@ everything and checks coverage itself, as before.
   `/storage/serve` and only the fetched content is compared.
   `node storage.mjs <app> <token>`.
 - `fuzz.mjs` — seeded random tx-steps + queries over the whole client
-  grammar (every tx-step op incl. `mode`, links, schema churn, malformed
-  steps; every where operator, dotted link paths, first/last/after/before
-  cursor walks, fields, nested links, `$$ruleParams`) replayed on both
-  servers; asserts per-server invariants (monotonic tx-ids) and cross-server
-  equality of every query result and error type.
+  grammar replayed on both servers; asserts per-server invariants
+  (monotonic tx-ids) and cross-server equality of every transact outcome,
+  query result and error type, slot by slot. The grammar:
+  - tx-steps: every op incl. `mode`, schema churn and malformed steps;
+    lookup refs (`[attr-id, value]` on a unique attr) as a step's entity
+    (add / deep-merge / retract / delete, a rename through the lookup, on
+    the `id` attr and on others, matching an entity or not) and as a
+    link's value (one that matches nothing fails the tx);
+  - typed, indexed attrs of every checked data type: `number`, `string`,
+    `date` (epoch ms, ISO-8601 with `Z`, an offset, no zone, a space for the
+    `T`, date-only, `Date.toUTCString()`) and `boolean`, plus checked-type
+    violations of each;
+  - links of cardinality one (`fuzz.owner`), many (`fuzz.tags`) and
+    one-to-one (`fuzz.profile`, a unique ref), linked and unlinked by id or
+    lookup, their targets deleted and recreated, queried nested in both
+    directions and from every namespace;
+  - every where operator (on dates: comparisons with the same input shapes
+    plus `Date.toLocaleString()`, `now` and strings neither server parses;
+    equality, `$in` (with `null`), `$ne` / `$not`, `$isNull`; on booleans the
+    same plus refused strings and `$like`), dotted link paths of one to
+    three hops through every link kind, `or` / `and`;
+  - first / last / after / before cursor walks (also by date, boolean and a
+    unique label, with the inclusive flags), limit / offset / order, fields,
+    nested links, `$$ruleParams`.
+  The eight `fuzz` entities start out typed and linked through all three
+  links. An entity a lookup creates on a non-`id` attr gets an id each server picks
+  (`<uuid>` in the comparison), so those creations only happen in the
+  `tag` / `profile` namespaces, which are never paged by creation time.
+  Besides most transacts committing and the final read holding data, the
+  success floor asks each new grammar feature (date, bool, tags, profile,
+  lookup, hops) used often enough for at least one committed transact and
+  one query answered with data (`grammar floor:` in the log).
+  **Named exceptions** (`EXCEPTIONS` in fuzz.mjs) each match one op shape
+  and pin both servers' replies whole; hits are logged as `exception
+  <name>: N`. `date-comparison-with-boolean`: a boolean bound on a `date`
+  attr (`{tdate: {$gt: true}}`) crashes legacy's coercion `case`
+  (attr_pat.clj:308-317) into a typeless 500, and this server answers 400
+  `validation-failed`. `lookup-rename-or-unique-violation`: a tx that both
+  renames an entity its lookup creates and writes a value another row of
+  the same INSERT holds fails on legacy with whichever row Postgres reaches
+  first (the created entity's id is random), `record-not-unique` or the
+  `lookup` refusal; this server always refuses the rename first, and its
+  message is pinned. Error messages ride along non-enumerable: mismatch
+  reports print them, comparisons ignore them.
+  Not generated: a link whose value lookup names the entity an eid lookup of
+  the same tx creates. Legacy refuses it ("Could not find the entity for
+  this lookup", a post-create check bug listed in docs/PARITY.md) and this
+  server links it, after which the two states would differ for the rest of
+  the seed.
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
   runs twelve seeds at 250 rounds (42, 99 and the nightly's original 1-10);
   the nightly (`schedule` in ci.yml, or a manual run with the `nightly`
@@ -153,7 +197,12 @@ everything and checks coverage itself, as before.
   For a paginated top-level `or`, the triples only a where row carries are
   left out of the comparison in both fuzz layers. Legacy keeps one where row
   per entity (DISTINCT ON), and which branch survives for an entity matching
-  several branches depends on its query plan.
+  several branches depends on its query plan. `fuzz.mjs` (`pagedWhereOnly`)
+  treats a paginated where path through a link that reaches several
+  entities (has-many, or a reverse link) the same way, since the entity
+  then has a where row per linked entity; a has-many link's triples aren't
+  among an entity's own (cardinality-one) triples, so only the where row or
+  a nested form ships them.
   `node fuzz-perms.mjs <app> <app> <token> [seed] [rounds]`; seeds 7-9 at 120
   rounds per PR (`FUZZ_PERMS_SEEDS` / `FUZZ_PERMS_ROUNDS`), 16 seeds at 300
   nightly, `FUZZ_PERMS_JOBS` (4 nightly) at a time.

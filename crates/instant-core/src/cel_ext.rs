@@ -275,6 +275,8 @@ pub fn parse_date_string(raw: &str) -> Option<DateTime<FixedOffset>> {
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%dT%H:%M",
             "%Y-%m-%d %H:%M",
+            // `Date.toLocaleString()` in en-US (legacy "M/d/yyyy, h:mm:ss a")
+            "%m/%d/%Y, %I:%M:%S %p",
         ] {
             if let Ok(t) = NaiveDateTime::parse_from_str(s, f) {
                 return Some(Utc.from_utc_datetime(&t).fixed_offset());
