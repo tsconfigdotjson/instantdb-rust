@@ -1,4 +1,5 @@
-//! /runtime/oauth/* — OAuth/OIDC sign-in (Google via generic OIDC discovery).
+//! /runtime/oauth/* — OAuth/OIDC sign-in: generic OIDC discovery (Google,
+//! LinkedIn, ...) and GitHub's non-OIDC OAuth client.
 //! Port of LEGACY runtime/routes.clj + auth/oauth.clj.
 
 use std::collections::HashMap;
@@ -113,6 +114,9 @@ pub struct OAuthClient {
     pub client_secret: Option<String>,
     pub discovery_endpoint: Option<String>,
     pub provider_id: Option<Uuid>,
+    /// the `$oauthProviders` name the client belongs to (`github` picks the
+    /// GitHub client when there's no discovery endpoint)
+    pub provider_name: Option<String>,
     pub meta: Value,
     /// the client's custom callback URL (`redirect_to`), sent to the
     /// provider as `redirect_uri` instead of this server's callback
@@ -151,6 +155,7 @@ pub async fn client_by_name(
         client_secret: None,
         discovery_endpoint: None,
         provider_id: None,
+        provider_name: None,
         meta: json!({}),
         redirect_to: None,
     };
@@ -171,7 +176,42 @@ pub async fn client_by_name(
             client.redirect_to = v.as_str().map(|s| s.to_string());
         }
     }
+    if let Some(provider_id) = client.provider_id {
+        let row = sqlx::query(
+            "SELECT value FROM triples WHERE app_id = $1 AND entity_id = $2 AND attr_id = $3 LIMIT 1",
+        )
+        .bind(app_id)
+        .bind(provider_id)
+        .bind(sc::attr_id("$oauthProviders", "name"))
+        .fetch_optional(&state.pool)
+        .await
+        .map_err(InstantError::from)?;
+        client.provider_name =
+            row.and_then(|r| r.get::<Value, _>("value").as_str().map(str::to_string));
+    }
     Ok(Some(client))
+}
+
+/// Which `OAuthClient` record legacy `->OAuthClient` builds
+/// (model/app_oauth_client.clj:144-178): a discovery endpoint makes it a
+/// generic OIDC client whatever the provider is called; otherwise a
+/// `github` provider gets the GitHub client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientKind {
+    Oidc,
+    GitHub,
+}
+
+impl OAuthClient {
+    fn kind(&self) -> ClientKind {
+        if self.discovery_endpoint.is_none() && self.provider_name.as_deref() == Some("github") {
+            ClientKind::GitHub
+        } else {
+            // a non-github client without a discovery endpoint fails on the
+            // discovery lookup (legacy: "Unsupported OAuth client")
+            ClientKind::Oidc
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -418,26 +458,34 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
     }
     service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
 
-    let disc = discovery(state, &client).await?;
-    let auth_endpoint = disc
-        .get("authorization_endpoint")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| oauth_err("Discovery document missing authorization_endpoint."))?;
     let oauth_state = format!("{app_id}{state_uuid}");
-    let mut auth_url =
-        url::Url::parse(auth_endpoint).map_err(|_| oauth_err("Invalid authorization endpoint."))?;
-    {
-        let mut qp = auth_url.query_pairs_mut();
-        qp.append_pair("scope", "email openid");
-        qp.append_pair("response_type", "code");
-        qp.append_pair("response_mode", "form_post");
-        qp.append_pair("state", &oauth_state);
-        qp.append_pair("redirect_uri", &callback_url);
-        qp.append_pair("client_id", client.client_id.as_deref().unwrap_or_default());
-        if let Some(hd) = params.get("hd") {
-            qp.append_pair("hd", hd);
+    let auth_url = match client.kind() {
+        ClientKind::GitHub => {
+            github::authorization_url(state, &client, &oauth_state, &callback_url)?
         }
-    }
+        ClientKind::Oidc => {
+            let disc = discovery(state, &client).await?;
+            let auth_endpoint = disc
+                .get("authorization_endpoint")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| oauth_err("Discovery document missing authorization_endpoint."))?;
+            let mut auth_url = url::Url::parse(auth_endpoint)
+                .map_err(|_| oauth_err("Invalid authorization endpoint."))?;
+            {
+                let mut qp = auth_url.query_pairs_mut();
+                qp.append_pair("scope", "email openid");
+                qp.append_pair("response_type", "code");
+                qp.append_pair("response_mode", "form_post");
+                qp.append_pair("state", &oauth_state);
+                qp.append_pair("redirect_uri", &callback_url);
+                qp.append_pair("client_id", client.client_id.as_deref().unwrap_or_default());
+                if let Some(hd) = params.get("hd") {
+                    qp.append_pair("hd", hd);
+                }
+            }
+            auth_url
+        }
+    };
 
     let cookie = format!(
         "__session=instantdb_{cookie_uuid}; HttpOnly; Path=/runtime/oauth; Max-Age=3600; SameSite=Lax"
@@ -698,16 +746,22 @@ async fn callback_inner(
         .redirect_to
         .clone()
         .unwrap_or_else(|| default_callback_url(state));
-    let user_info = exchange_code(state, &client, code, &redirect_to)
-        .await
-        .map_err(fail)?;
-    if user_info.get("sub").and_then(|v| v.as_str()).is_none() {
-        return Err(fail(oauth_err("Missing sub.")));
+    let user_info = match client.kind() {
+        ClientKind::GitHub => github::user_info(state, &client, code, &redirect_to).await,
+        ClientKind::Oidc => exchange_code(state, &client, code, &redirect_to).await,
     }
-    let email = user_info
-        .get("email")
-        .and_then(|v| v.as_str())
-        .map(|e| e.to_string());
+    .map_err(fail)?;
+    // legacy `(email/coerce (:email user-info))`: lower-cased and trimmed, and
+    // dropped when it isn't an email (GitHub hands back the address as typed)
+    let email = coerce_email(user_info.get("email"));
+    let Some(sub) = user_info.get("sub").filter(|v| v.is_string()).cloned() else {
+        return Err(fail(oauth_err("Missing sub.")));
+    };
+    let user_info = json!({
+        "email": email,
+        "sub": sub,
+        "imageURL": user_info.get("imageURL").cloned().unwrap_or(Value::Null),
+    });
 
     // one-time app-level code
     let app_code = Uuid::new_v4();
@@ -868,6 +922,13 @@ async fn exchange_code(
     }))
 }
 
+/// Legacy `email/coerce` (util/email.clj:15-21) on a provider's email claim.
+fn coerce_email(v: Option<&Value>) -> Option<String> {
+    v.and_then(|v| v.as_str())
+        .map(|e| e.to_lowercase().trim().to_string())
+        .filter(|e| crate::routes::runtime::valid_email(e))
+}
+
 fn decode_jwt_payload(jwt: &str) -> Result<Value> {
     let parts: Vec<&str> = jwt.split('.').collect();
     if parts.len() < 2 {
@@ -919,9 +980,10 @@ async fn assert_request_origin(state: &AppState, app_id: Uuid, headers: &HeaderM
         Err(_) => false,
     };
     if !ok {
-        return Err(InstantError::validation_failed(
+        // `(ex/throw-validation-err! :origin origin ...)`: the hint carries it
+        return Err(InstantError::validation_failed_input(
             "origin",
-            "Unauthorized origin.",
+            json!(origin),
             json!([{"message": "Unauthorized origin."}]),
         ));
     }
@@ -1187,6 +1249,14 @@ async fn id_token_impl(state: &AppState, headers: &HeaderMap, body: &Value) -> R
         })?;
 
     assert_request_origin(state, app_id, headers).await?;
+    if client.kind() == ClientKind::GitHub {
+        // GitHub is OAuth2, not OIDC: no id_tokens (auth/oauth.clj:110-112)
+        return Err(InstantError::validation_failed_input(
+            "id_token",
+            Value::Null,
+            json!([{"message": "GitHub OAuth does not support ID tokens."}]),
+        ));
+    }
     let disc = discovery(state, &client).await?;
     let issuer = disc
         .get("issuer")
@@ -1268,9 +1338,9 @@ async fn id_token_impl(state: &AppState, headers: &HeaderMap, body: &Value) -> R
         .map(|v| v == &json!(true) || v == &json!("true"))
         .unwrap_or(false);
     let email = if email_verified || allow_unverified {
-        claims.get("email").cloned().unwrap_or(Value::Null)
+        coerce_email(claims.get("email"))
     } else {
-        Value::Null
+        None
     };
     let user_info = json!({
         "email": email,
@@ -1408,6 +1478,54 @@ async fn upsert_oauth_link(
     Ok((user_id, created))
 }
 
+/// A `$users` row as `get-by-email-or-oauth-link-qualified` reads it
+/// (model/app_user.clj:225-260).
+struct LinkUser {
+    id: Uuid,
+    email: Option<String>,
+    image_url: Option<String>,
+}
+
+async fn link_user(state: &AppState, app_id: Uuid, id: Uuid) -> Result<LinkUser> {
+    let rows = sqlx::query(
+        "SELECT attr_id, value FROM triples
+         WHERE app_id = $1 AND entity_id = $2 AND attr_id = ANY($3)",
+    )
+    .bind(app_id)
+    .bind(id)
+    .bind(vec![
+        sc::attr_id("$users", "email"),
+        sc::attr_id("$users", "imageURL"),
+    ])
+    .fetch_all(&state.pool)
+    .await
+    .map_err(InstantError::from)?;
+    let mut user = LinkUser {
+        id,
+        email: None,
+        image_url: None,
+    };
+    for r in rows {
+        let attr_id: Uuid = r.get("attr_id");
+        let v: Value = r.get("value");
+        if attr_id == sc::attr_id("$users", "email") {
+            user.email = v.as_str().map(str::to_string);
+        } else {
+            user.image_url = v.as_str().map(str::to_string);
+        }
+    }
+    Ok(user)
+}
+
+/// Legacy `upsert-oauth-link!` (runtime/routes.clj:276-375). The candidates
+/// are the user the provider sub is linked to and, when the provider gave
+/// an email, the user with that email:
+/// - none: a new user (the guest's id when a guest is upgrading) with the
+///   email (possibly none) and image, plus the link;
+/// - one: the image follows the provider's, a changed email is written to
+///   the linked user, and a user found only by email gets the link;
+/// - two (the sub is linked to one user, the email belongs to another): the
+///   email wins and the link moves to that user.
 async fn upsert_oauth_link_inner(
     state: &AppState,
     app_id: Uuid,
@@ -1427,88 +1545,127 @@ async fn upsert_oauth_link_inner(
     let email = user_info.get("email").and_then(|v| v.as_str());
     let image_url = user_info.get("imageURL").and_then(|v| v.as_str());
 
-    // find user by link
+    // the user the sub is linked to
     let comp_attr = sc::attr_id("$oauthUserLinks", "sub+$oauthProvider");
     let link_row = sqlx::query(
-        "SELECT entity_id FROM triples
-         WHERE app_id = $1 AND attr_id = $2 AND av AND value = to_jsonb($3::text) LIMIT 1",
+        "SELECT t.entity_id AS link_id, json_uuid_to_uuid(u.value) AS uid
+           FROM triples t
+           JOIN triples u ON u.app_id = t.app_id AND u.entity_id = t.entity_id AND u.attr_id = $4
+          WHERE t.app_id = $1 AND t.attr_id = $2 AND t.av AND t.value = to_jsonb($3::text)
+          LIMIT 1",
     )
     .bind(app_id)
     .bind(comp_attr)
     .bind(&composite)
+    .bind(sc::attr_id("$oauthUserLinks", "$user"))
     .fetch_optional(&state.pool)
     .await
     .map_err(InstantError::from)?;
-    if let Some(row) = link_row {
-        let link_eid: Uuid = row.get("entity_id");
-        let user_row = sqlx::query(
-            "SELECT json_uuid_to_uuid(value) AS uid FROM triples
-             WHERE app_id = $1 AND entity_id = $2 AND attr_id = $3 LIMIT 1",
-        )
-        .bind(app_id)
-        .bind(link_eid)
-        .bind(sc::attr_id("$oauthUserLinks", "$user"))
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(InstantError::from)?;
-        if let Some(user_row) = user_row {
-            if let Some(uid) = user_row.get::<Option<Uuid>, _>("uid") {
-                // refresh imageURL
-                if let Some(img) = image_url {
-                    let steps =
-                        json!([["add-triple", uid, sc::attr_id("$users", "imageURL"), img]]);
-                    let _ = service::run_system_transact(state, app_id, &steps).await;
-                }
-                return Ok((uid, false));
-            }
-        }
-    }
-
-    // find user by email
-    let mut created = false;
-    let user_id = match email {
+    let linked = link_row.and_then(|r| {
+        let uid: Option<Uuid> = r.get("uid");
+        uid.map(|uid| (r.get::<Uuid, _>("link_id"), uid))
+    });
+    let linked_user = match linked {
+        Some((_, uid)) => Some(link_user(state, app_id, uid).await?),
+        None => None,
+    };
+    // ...and the user with the provider's email (none without one)
+    let email_user = match email {
         Some(email) => match auth::user_by_email(state, app_id, email).await? {
-            Some(u) => u.id,
-            None => {
-                created = true;
-                // legacy `(or guest-user-id (random-uuid))` + assert-signup!
-                let uid = guest_user_id.unwrap_or_else(Uuid::new_v4);
-                auth::assert_signup(state, app_id, uid, Some(email), extra_fields, false).await?;
-                let mut steps = vec![
-                    json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
-                    json!(["add-triple", uid, sc::attr_id("$users", "email"), email]),
-                    json!(["add-triple", uid, sc::attr_id("$users", "type"), "user"]),
-                ];
-                if let Some(img) = image_url {
-                    steps.push(json!([
-                        "add-triple",
-                        uid,
-                        sc::attr_id("$users", "imageURL"),
-                        img
-                    ]));
-                }
-                let attrs = service::load_attrs(state, app_id).await?;
-                steps.extend(auth::extra_field_steps(&attrs, uid, extra_fields));
-                service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
-                uid
-            }
+            Some(u) => Some(link_user(state, app_id, u.id).await?),
+            None => None,
         },
-        None => {
-            created = true;
+        None => None,
+    };
+
+    let (user, moved_link) = match (linked_user, email_user) {
+        (None, None) => {
+            // legacy `(or guest-user-id (random-uuid))` + assert-signup!
             let uid = guest_user_id.unwrap_or_else(Uuid::new_v4);
-            auth::assert_signup(state, app_id, uid, None, extra_fields, false).await?;
-            let mut steps = vec![
-                json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
-                json!(["add-triple", uid, sc::attr_id("$users", "type"), "user"]),
-            ];
+            auth::assert_signup(state, app_id, uid, email, extra_fields, false).await?;
+            let mut steps = vec![json!(["add-triple", uid, sc::attr_id("$users", "id"), uid])];
+            if let Some(email) = email {
+                steps.push(json!([
+                    "add-triple",
+                    uid,
+                    sc::attr_id("$users", "email"),
+                    email
+                ]));
+            }
+            steps.push(json!([
+                "add-triple",
+                uid,
+                sc::attr_id("$users", "type"),
+                "user"
+            ]));
+            if let Some(img) = image_url {
+                steps.push(json!([
+                    "add-triple",
+                    uid,
+                    sc::attr_id("$users", "imageURL"),
+                    img
+                ]));
+            }
             let attrs = service::load_attrs(state, app_id).await?;
             steps.extend(auth::extra_field_steps(&attrs, uid, extra_fields));
             service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
-            uid
+            create_link(state, app_id, uid, sub, &composite, provider_id).await?;
+            return Ok((uid, true));
         }
+        (Some(l), Some(e)) if l.id != e.id => (e, linked.map(|(link_id, _)| link_id)),
+        (Some(u), _) => (u, None),
+        (None, Some(u)) => (u, None),
     };
 
-    // create the link
+    let mut steps = vec![];
+    if let Some(img) = image_url {
+        if user.image_url.as_deref() != Some(img) {
+            steps.push(json!([
+                "add-triple",
+                user.id,
+                sc::attr_id("$users", "imageURL"),
+                img
+            ]));
+        }
+    }
+    let has_link = linked.map(|(_, uid)| uid) == Some(user.id);
+    match (email, moved_link) {
+        // the provider's email changed since the link was made
+        (Some(email), _) if user.email.as_deref() != Some(email) => {
+            steps.push(json!([
+                "add-triple",
+                user.id,
+                sc::attr_id("$users", "email"),
+                email
+            ]));
+        }
+        (_, Some(link_id)) => {
+            steps.push(json!([
+                "add-triple",
+                link_id,
+                sc::attr_id("$oauthUserLinks", "$user"),
+                user.id
+            ]));
+        }
+        _ if !has_link => {
+            create_link(state, app_id, user.id, sub, &composite, provider_id).await?;
+        }
+        _ => {}
+    }
+    if !steps.is_empty() {
+        service::run_system_transact(state, app_id, &Value::Array(steps)).await?;
+    }
+    Ok((user.id, false))
+}
+
+async fn create_link(
+    state: &AppState,
+    app_id: Uuid,
+    user_id: Uuid,
+    sub: &str,
+    composite: &str,
+    provider_id: Uuid,
+) -> Result<()> {
     let link = Uuid::new_v4();
     let steps = json!([
         [
@@ -1543,7 +1700,7 @@ async fn upsert_oauth_link_inner(
         ]
     ]);
     service::run_system_transact(state, app_id, &steps).await?;
-    Ok((user_id, created))
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1564,4 +1721,179 @@ pub async fn well_known(
         "authorization_endpoint": format!("{}/runtime/{}/oauth/start", state.cfg.base_url, app_id),
         "token_endpoint": format!("{}/runtime/{}/oauth/token", state.cfg.base_url, app_id),
     })))
+}
+
+// ---------------------------------------------------------------------------
+// GitHub (non-OIDC) client
+
+/// Legacy `GitHubOAuthClient` (auth/oauth.clj:31-113). GitHub's endpoints are
+/// fixed hosts (operator-overridable for tests, `state.rs`), so unlike the
+/// discovery-driven client nothing here fetches an app-supplied URL.
+mod github {
+    use super::*;
+
+    /// legacy `(:default-scope github-config)`
+    const SCOPE: &str = "read:user user:email";
+    /// GitHub's JSON responses are a few KB; the token response is smaller
+    const MAX_BYTES: usize = 1024 * 1024;
+
+    /// `create-authorization-url`: no `response_mode` (GitHub redirects back
+    /// with a GET) and no extra params (`hd` is Google's).
+    pub(super) fn authorization_url(
+        state: &AppState,
+        client: &OAuthClient,
+        oauth_state: &str,
+        redirect_uri: &str,
+    ) -> Result<url::Url> {
+        let mut url = url::Url::parse(&state.cfg.github_oauth_auth_url)
+            .map_err(|_| oauth_err("Invalid authorization endpoint."))?;
+        url.query_pairs_mut()
+            .append_pair("scope", SCOPE)
+            .append_pair("response_type", "code")
+            .append_pair("state", oauth_state)
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("client_id", client.client_id.as_deref().unwrap_or_default());
+        Ok(url)
+    }
+
+    fn http() -> Result<reqwest::Client> {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| InstantError::internal(format!("http client: {e}")))
+    }
+
+    /// legacy `(:headers github-config)`, plus the bearer token on API calls
+    fn with_headers(req: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
+        let req = req
+            .header(header::ACCEPT, "application/json")
+            .header(header::USER_AGENT, "InstantDB OAuth");
+        match token {
+            Some(t) => req.bearer_auth(t),
+            None => req,
+        }
+    }
+
+    /// legacy `clj-http` with `:throw-exceptions false :as :json :coerce
+    /// :always`: whether the status was a success, and the body as JSON. A
+    /// transport failure or a body that isn't JSON reads as an unsuccessful
+    /// empty response, so the caller's default message applies (legacy's
+    /// client throws there and answers a 500 instead of redirecting back).
+    async fn send(req: reqwest::RequestBuilder) -> (bool, Value) {
+        let Ok(mut resp) = req.send().await else {
+            return (false, Value::Null);
+        };
+        let ok = resp.status().is_success();
+        let mut buf: Vec<u8> = vec![];
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    buf.extend_from_slice(&chunk);
+                    if buf.len() > MAX_BYTES {
+                        return (false, Value::Null);
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => return (false, Value::Null),
+            }
+        }
+        match serde_json::from_slice(&buf) {
+            Ok(v) => (ok, v),
+            Err(_) => (false, Value::Null),
+        }
+    }
+
+    /// clojure truthiness: nil and false are absent
+    fn truthy(v: Option<&Value>) -> Option<&Value> {
+        v.filter(|v| !v.is_null() && **v != Value::Bool(false))
+    }
+
+    /// the message at `key` of an error body, else legacy's default
+    fn message(body: &Value, key: &str, default: &str) -> InstantError {
+        oauth_err(
+            body.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or(default)
+                .to_string(),
+        )
+    }
+
+    /// `fetch-github-primary-email`: the address GitHub marks both primary
+    /// and verified; none (or a failed call) is no email.
+    async fn primary_email(
+        state: &AppState,
+        http: &reqwest::Client,
+        token: &str,
+    ) -> Option<String> {
+        let url = format!("{}/user/emails", state.cfg.github_api_url);
+        let (ok, body) = send(with_headers(http.get(url), Some(token))).await;
+        if !ok {
+            return None;
+        }
+        body.as_array()?.iter().find_map(|e| {
+            (truthy(e.get("verified")).is_some() && truthy(e.get("primary")).is_some())
+                .then(|| e.get("email").and_then(|v| v.as_str()).map(str::to_string))
+                .flatten()
+        })
+    }
+
+    /// `get-user-info`: exchange the code for an access token, then read
+    /// `/user` (id, avatar) and `/user/emails` (the primary verified email).
+    /// Every error message is legacy's; the callback redirects back with it.
+    pub(super) async fn user_info(
+        state: &AppState,
+        client: &OAuthClient,
+        code: &str,
+        redirect_uri: &str,
+    ) -> Result<Value> {
+        let http = http()?;
+        let (ok, token_body) = send(
+            with_headers(http.post(&state.cfg.github_oauth_token_url), None).form(&[
+                ("client_id", client.client_id.as_deref().unwrap_or_default()),
+                (
+                    "client_secret",
+                    client.client_secret.as_deref().unwrap_or_default(),
+                ),
+                ("code", code),
+                ("grant_type", "authorization_code"),
+                ("redirect_uri", redirect_uri),
+            ]),
+        )
+        .await;
+        if !ok {
+            return Err(message(
+                &token_body,
+                "error_description",
+                "Error exchanging code for token.",
+            ));
+        }
+        // GitHub answers a bad or expired code with a 200 that carries an
+        // `error` and no token
+        let Some(access_token) = truthy(token_body.get("access_token")).and_then(|v| v.as_str())
+        else {
+            return Err(oauth_err("No access token received from GitHub."));
+        };
+        let user_url = format!("{}/user", state.cfg.github_api_url);
+        let (ok, user) = send(with_headers(http.get(user_url), Some(access_token))).await;
+        if !ok {
+            return Err(message(
+                &user,
+                "message",
+                "Failed to fetch user info from GitHub.",
+            ));
+        }
+        let email = primary_email(state, &http, access_token).await;
+        // `(str user-id)`: GitHub's numeric id is the subject
+        let sub = match truthy(user.get("id")) {
+            None => return Err(oauth_err("Missing user ID from GitHub")),
+            Some(Value::String(s)) => s.clone(),
+            Some(v) => v.to_string(),
+        };
+        Ok(json!({
+            "email": email,
+            "sub": sub,
+            "imageURL": user.get("avatar_url").cloned().unwrap_or(Value::Null),
+        }))
+    }
 }

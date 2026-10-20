@@ -72,6 +72,14 @@ pub struct Config {
     /// (`INSTANT_DASHBOARD_GOOGLE_OAUTH_AUTH_URL` / `_TOKEN_URL`).
     pub google_oauth_auth_url: String,
     pub google_oauth_token_url: String,
+    /// GitHub's fixed OAuth endpoints for `github`-provider clients (legacy
+    /// `oauth/github-config`, auth/oauth.clj:31-39), overridable for tests
+    /// (`INSTANT_GITHUB_OAUTH_AUTH_URL` / `_TOKEN_URL`, and
+    /// `INSTANT_GITHUB_API_URL` for `/user` + `/user/emails`). Operator
+    /// config, never app-supplied, so not SSRF-guarded.
+    pub github_oauth_auth_url: String,
+    pub github_oauth_token_url: String,
+    pub github_api_url: String,
     /// Per-app size cap in bytes: triples plus `$files` sizes, as tracked in
     /// `triples_size_aggregate` (`INSTANT_APP_SIZE_LIMIT_MB`; unset = no cap).
     /// An app over it can only delete (usage.rs).
@@ -153,6 +161,13 @@ impl Config {
                 .unwrap_or_else(|| "https://accounts.google.com/o/oauth2/v2/auth".into()),
             google_oauth_token_url: env_nonblank("INSTANT_DASHBOARD_GOOGLE_OAUTH_TOKEN_URL")
                 .unwrap_or_else(|| "https://oauth2.googleapis.com/token".into()),
+            github_oauth_auth_url: env_nonblank("INSTANT_GITHUB_OAUTH_AUTH_URL")
+                .unwrap_or_else(|| "https://github.com/login/oauth/authorize".into()),
+            github_oauth_token_url: env_nonblank("INSTANT_GITHUB_OAUTH_TOKEN_URL")
+                .unwrap_or_else(|| "https://github.com/login/oauth/access_token".into()),
+            github_api_url: env_nonblank("INSTANT_GITHUB_API_URL")
+                .map(|s| s.trim_end_matches('/').to_string())
+                .unwrap_or_else(|| "https://api.github.com".into()),
             app_size_limit_bytes: env_nonblank("INSTANT_APP_SIZE_LIMIT_MB")
                 .and_then(|v| v.parse::<i64>().ok())
                 .filter(|mb| *mb > 0)
