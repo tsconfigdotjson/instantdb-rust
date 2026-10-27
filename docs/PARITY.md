@@ -48,7 +48,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | `$like` / `$ilike` / `$gt` `$gte` `$lt` `$lte` (typed) | ✅ | index+type guards with legacy error messages; every checked-type attr, indexed or not, validates the query value with legacy's "The data type of `x.y` is `t`, but the query got the value `v` of type `T`." (attr_pat.clj:228-295, :366-372); date strings go through the port of legacy's `parse-date-value` (triple.clj:1630-1642, `cel_ext::parse_date_string`) and are bound as the instant it reads, so what Postgres would parse differently or not at all (`2024-13-45`, a datetime overflow there) is the same 400 as text no format reads; equality rejects `now`/`today`/`tomorrow`/`yesterday`, comparisons parse them. Differential fuzz (dates as epoch ms and ISO-8601 in writes, where values, order and cursors) |
 | `$entityIdStartsWith` | ✅ | |
 | order by serverCreatedAt / typed attrs, asc/desc, nulls placement | ✅ | `order: {}` is a no-op (instaql.clj:313-315); a row with no triple at all for the order attr (data predating the indexed-null backfill) is left out of an ordered query like legacy, instead of failing the query (differential step 25). The fuzz layer pages by `serverCreatedAt`, every typed kind and a typed attr with duplicate values, explicit nulls and missing triples in both directions, comparing the row pages and each page's cursors |
-| pagination: limit/first/last/offset/before/after/inclusive + page-info | ✅ | top-level only, like legacy. The differential fuzz generates page walks that feed each page's real `pageInfo` cursor into the next request (forward `after`, backward `before`), mixes limit / offset / first / last with where clauses and nested links, and compares every page's full result plus `start-cursor` / `end-cursor` / `has-next-page?` / `has-previous-page?`; cursor timestamps and server-chosen ids are the only normalized parts |
+| pagination: limit/first/last/offset/before/after/inclusive + page-info | ✅ | top-level only, like legacy. The differential fuzz generates page walks that feed each page's real `pageInfo` cursor into the next request (forward `after`, backward `before`), mixes limit / offset / first / last with where clauses and nested links, and compares every page's full result plus `start-cursor` / `end-cursor` / `has-next-page?` / `has-previous-page?`; cursor timestamps and server-chosen ids are the only normalized parts. One result exception (`string-order-page-info-flags`) allows legacy's string-order page flags to disagree when a null cursor is involved: legacy orders strings by raw jsonb value without a `NULLS` clause but compares null cursors like SQL `NULL`, so its flags can contradict the rows it returned (datalog.clj:2362-2431, :2513-2522); this server keeps the logical flags, and the harness pins both boolean values while still comparing every row and cursor |
 | fields projection | ✅ | |
 | aggregate `count` (admin-only) | ✅ | |
 | missing attrs → empty results (no error) | ✅ | |
@@ -278,7 +278,10 @@ config; admin `delete` by ref lookup deletes the doc; invite revoke is scoped
 to the app / org; `$entityId` is rejected; the `permission-evaluation-failed`
 cause text is always "You may have a typo"; `timestamp(string)` parse failures
 are 400s, not 500s; unknown where operators report `query`, not
-`coerced-query`; `processed-tx-id` is `0` before any tx and exact on
+`coerced-query`; a string-order page's `has-next-page?` / `has-previous-page?`
+with a null cursor is logical here while legacy's jsonb-vs-SQL-null cursor
+comparison can contradict the page it returned (fuzz result exception
+`string-order-page-info-flags`); `processed-tx-id` is `0` before any tx and exact on
 `add-query-ok`; empty `refresh-ok`s are not sent to ≤0.20.4 clients for an
 unchanged result; any queued frames coalesce; `stream-append` always inlines
 `content`; rate limits are always on and rule buckets are shared through

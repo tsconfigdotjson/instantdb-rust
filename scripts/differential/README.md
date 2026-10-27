@@ -147,7 +147,10 @@ everything and checks coverage itself, as before.
     Walks order by `serverCreatedAt` and by every indexed typed attr in both
     directions, including an extra typed attr with duplicate values, explicit
     nulls and missing triples so ties and null/missing placement are paged.
-    The paged form also carries generated where clauses and nested links.
+    A string-order walk stops after its first page because legacy's page flags
+    there hit the result exception below; every other typed order follows its
+    real cursors. The paged form also carries generated where clauses and
+    nested links.
     Every page's full result and its whole page-info
     (`start-cursor`/`end-cursor`/`has-next-page?`/`has-previous-page?`) are
     compared; only the server-local timestamp in a cursor and server-chosen
@@ -180,6 +183,16 @@ everything and checks coverage itself, as before.
   `lookup` refusal; this server always refuses the rename first, and its
   message is pinned. Error messages ride along non-enumerable: mismatch
   reports print them, comparisons ignore them.
+  **Result exceptions** (`RESULT_EXCEPTIONS` in fuzz.mjs) keep one documented
+  legacy defect from failing a page walk without loosening the comparison.
+  Each matches one op shape, allows only named sub-paths, and requires every
+  differing leaf to be one of the pinned value pairs; the rest of the page is
+  still compared. `string-order-page-info-flags`: for a string order legacy
+  orders by the raw jsonb value without a `NULLS` clause, while its cursor
+  comparisons treat a null cursor like SQL `NULL`; its `has-next-page?` /
+  `has-previous-page?` then disagree with the page it returned. The rows and
+  cursors match this server, and the exception pins the legacy/rust boolean
+  pair (true/false or false/true).
   Not generated: a link whose value lookup names the entity an eid lookup of
   the same tx creates. Legacy refuses it ("Could not find the entity for
   this lookup", a post-create check bug listed in docs/PARITY.md) and this

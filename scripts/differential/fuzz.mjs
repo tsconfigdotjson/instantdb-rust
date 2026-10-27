@@ -650,6 +650,11 @@ async function runOn(serverName, script) {
           result: { triples: r.result.triples, pageInfo: normalizePageInfo(rawInfo, key) },
         });
         if (pageNo === 0) firstCursor = rawInfo?.[backwards ? "start-cursor" : "end-cursor"] ?? null;
+        // Legacy's string-order page flags are the documented result
+        // exception below, so a tstr walk stops after its first page (its
+        // rows and page-info are still compared; the other typed orders are
+        // the ones that follow real cursors).
+        if (key === "tstr") break;
         const more = backwards ? rawInfo?.["has-previous-page?"] : rawInfo?.["has-next-page?"];
         const next = backwards ? rawInfo?.["start-cursor"] : rawInfo?.["end-cursor"];
         if (!more || !next) break;
@@ -883,11 +888,92 @@ const allowedByException = (l, r) => {
   return ex;
 };
 
+// Result exceptions: a documented legacy defect this server does not copy.
+// Unlike EXCEPTIONS (whole error replies), these allow only named sub-paths
+// of one op shape, and each differing leaf must be one of the pinned value
+// pairs. Everything else on the page stays compared.
+const RESULT_EXCEPTIONS = [
+  {
+    // For a string order legacy orders by the raw jsonb `value` without a
+    // NULLS clause, while its cursor comparisons (add-cursor-comparisons,
+    // datalog.clj:2362-2431) treat a null cursor like SQL NULL. Its
+    // has-next/has-previous flags then disagree with the page it just
+    // returned; the rows and cursors match this server. Keep the logical
+    // flags and pin the legacy/rust boolean pair.
+    name: "string-order-page-info-flags",
+    matches: (op) => op?.kind === "paginate" && op.key === "tstr",
+    pairs: [
+      [true, false],
+      [false, true],
+    ],
+    allows: (segs) => {
+      const flag = segs.at(-1);
+      if (flag !== "has-next-page?" && flag !== "has-previous-page?") return false;
+      if (segs[0] === "inclusivePage") {
+        return segs.length === 4 && segs[1] === "result" && segs[2] === "pageInfo";
+      }
+      return (
+        segs.length === 5 &&
+        segs[0] === "pages" &&
+        /^\d+$/.test(segs[1]) &&
+        segs[2] === "result" &&
+        segs[3] === "pageInfo"
+      );
+    },
+  },
+];
+
+function diffLeaves(a, b, segs, out) {
+  if (canon(a) === canon(b)) return;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) {
+      out.push({ segs: [...segs, "length"], legacy: a.length, rust: b.length });
+      return;
+    }
+    for (let i = 0; i < a.length; i++) diffLeaves(a[i], b[i], [...segs, String(i)], out);
+    return;
+  }
+  if (a !== null && b !== null && typeof a === "object" && typeof b === "object") {
+    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      diffLeaves(a[k], b[k], [...segs, k], out);
+    }
+    return;
+  }
+  out.push({ segs, legacy: a, rust: b });
+}
+
+function setAtPath(v, segs, value) {
+  let cur = v;
+  for (let i = 0; i < segs.length - 1; i++) cur = cur[segs[i]];
+  cur[segs.at(-1)] = value;
+}
+
+const allowedResultException = (l, r) => {
+  const op = script[l?.i];
+  if (l?.i !== r?.i || !op) return null;
+  const ex = RESULT_EXCEPTIONS.find((x) => x.matches(op));
+  if (!ex) return null;
+  const leaves = [];
+  diffLeaves(l, r, [], leaves);
+  if (!leaves.length) return null;
+  if (!leaves.every((x) => ex.allows(x.segs) && ex.pairs.some(([a, b]) => x.legacy === a && x.rust === b))) {
+    return null;
+  }
+  for (const x of leaves) {
+    setAtPath(l, x.segs, null);
+    setAtPath(r, x.segs, null);
+  }
+  exceptionHits[ex.name] = (exceptionHits[ex.name] ?? 0) + leaves.length;
+  return ex;
+};
+
 let mismatches = 0;
 const n = Math.max(legacy.queryResults.length, rust.queryResults.length);
 for (let i = 0; i < n; i++) {
   const l = legacy.queryResults[i], r = rust.queryResults[i];
-  if (canon(comparable(l)) !== canon(comparable(r)) && !allowedByException(l, r)) {
+  if (canon(comparable(l)) !== canon(comparable(r))) {
+    if (allowedResultException(l, r)) continue;
+    if (allowedByException(l, r)) continue;
     const msgs = l?.error || r?.error ? `\n  messages: legacy ${JSON.stringify(l?.error?.message)} / rust ${JSON.stringify(r?.error?.message)}` : "";
     console.error(`query mismatch at slot ${i}:\n  legacy: ${JSON.stringify(l)}\n  rust:   ${JSON.stringify(r)}${msgs}`);
     mismatches++;
