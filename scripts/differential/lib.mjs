@@ -641,6 +641,7 @@ export const DIVERGENCE_PREFIXES = {
   storage: ["storage:"],
   rulewheres: ["rulewheres:"],
   reftopics: ["reftopics:"],
+  fuzzperms: ["fuzzperms:"],
 };
 
 function anchoredRegex(src, what) {

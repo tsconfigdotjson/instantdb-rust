@@ -205,8 +205,9 @@ everything and checks coverage itself, as before.
   every day (`FUZZ_SEED_WINDOW`). `run.sh` runs every seed and lists the
   failing ones at the end.
 - `fuzz-perms.mjs` — the same grammar under **generated permission rules**
-  (view / create / update / delete per namespace, a bind, field rules,
-  `ruleParams`) driven by four concurrent sessions: a guest, two signed-in
+  (view / create / update / delete per namespace, binds, field rules,
+  `ruleParams`, and auth / `data.ref` / `auth.ref` / `request.*`
+  expressions) driven by four concurrent sessions: a guest, two signed-in
   users and an admin. Compared: every transact outcome and one-shot query
   result per session; at settled checkpoints, each session's folded
   subscription state (what the client computes from its `add-query-ok` /
@@ -215,7 +216,14 @@ everything and checks coverage itself, as before.
   can't depend on their order; queries don't order by `serverCreatedAt`,
   whose order across concurrent transacts is arbitrary) and transact /
   add-query / transact on one session sent without waiting (the per-session
-  scheduler). Legacy's known slips are told apart from mismatches:
+  scheduler). The same rules and data also drive the admin SDK's
+  **impersonated HTTP path** every few rounds and at the end: `/admin/query`
+  and `/admin/transact` as `as-guest`, `as-email` and `as-token`, compared
+  by status, error type + message, object-tree result (nested links,
+  `fields`, where paths, order/limit, `$$ruleParams`) and transact outcome.
+  Both transports carry the same `Origin` / `X-Forwarded-For` headers so
+  `request.origin` / `request.ip` rules are exercised. Legacy's known slips
+  are told apart from mismatches:
   - a stale result that a fresh legacy session corrects. Each probe query is
     unique (an `id $ne <random uuid>` clause), so legacy's shared datalog
     cache can't answer it. When the probe still disagrees with the session,
@@ -223,6 +231,12 @@ everything and checks coverage itself, as before.
     entity maps right after a write.
   - `add-query-exists` for a query the session removed (legacy's refresh
     re-registers it): the query is removed and asked again.
+  - an explicit empty nested link in an impersonated admin query. Legacy's
+    permission filter drops the nested form when it has no viewable rows,
+    while this server answers `[]`; the probe runs for all three
+    impersonation headers and allowed-divergences.json pins both complete
+    results (legacy's missing key, this server's `[]`). No other admin
+    result or error is allowed to differ.
   For a paginated top-level `or`, the triples only a where row carries are
   left out of the comparison in both fuzz layers. Legacy keeps one where row
   per entity (DISTINCT ON), and which branch survives for an entity matching
@@ -374,8 +388,8 @@ everything and checks coverage itself, as before.
 
 ## Allowlists
 
-`allowed-divergences.json` (replay, dash, storage, rule-wheres and ref-topics
-layers, keyed by `path`) and `errors-allowed.json` (error matrix, keyed by `probe`) share one
+`allowed-divergences.json` (replay, dash, storage, rule-wheres, ref-topics and
+fuzz-perms layers, keyed by `path`) and `errors-allowed.json` (error matrix, keyed by `probe`) share one
 strict entry format, checked by `loadAllowlist` / `allowDivergence` in
 `lib.mjs`. An entry allows one documented difference, not whatever else later
 shows up at the same path:
@@ -395,7 +409,9 @@ shows up at the same path:
   Replay paths are `step:<step>/<conn>`, `final/<conn>/<section>` and
   `keyset/<op>/<key>`; dash paths `dash:<step>/<key>`; storage paths
   `storage:<step>/<key>`; ref-topics paths `reftopics:<phase>/<session>`;
-  errors-allowed.json uses probe names.
+  fuzz-perms paths `fuzzperms:<probe>/<session>` and
+  `fuzzperms:admin-{query,transact}/<op>/<session>`; errors-allowed.json uses
+  probe names.
 - `differs` (required): anchored regexes over sub-paths of the compared value.
   Object keys and array indexes join with dots, as in the log's "first
   differing sub-path": `.status`, `.hint.debug-uri`, `.0.status`; `^$` is
@@ -412,7 +428,8 @@ shows up at the same path:
   behavior, the entry stops applying and the difference fails.
 - Each layer loads only the entries whose path prefix it owns (replay:
   `step:` / `final/` / `keyset/`; dash: `dash:`; storage: `storage:`;
-  rule-wheres: `rulewheres:`; ref-topics: `reftopics:`). An
+  rule-wheres: `rulewheres:`; ref-topics: `reftopics:`; fuzz-perms:
+  `fuzzperms:`). An
   entry no layer owns is a load error, and so is a malformed entry or an
   unknown field. If an owned entry allowed nothing in a run, the layer fails
   (`[STALE ALLOWLIST]`). The exception is `"flaky": true` with a
