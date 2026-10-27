@@ -1,7 +1,7 @@
 mod common;
 
 use common::*;
-use instant_core::instaql::{query, QueryCtx};
+use instant_core::instaql::{query, query_with_options, QueryCtx, QueryOptions};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -145,6 +145,22 @@ async fn run_query(pool: &PgPool, app: Uuid, q: Value) -> instant_core::instaql:
     query(&mut conn, &ctx, &q).await.unwrap()
 }
 
+async fn run_query_with_options(
+    pool: &PgPool,
+    app: Uuid,
+    q: Value,
+    opts: QueryOptions,
+) -> instant_core::instaql::QueryResult {
+    let attrs = attrs_of(pool, app).await;
+    let ctx = QueryCtx {
+        app_id: app,
+        attrs: &attrs,
+        admin: true,
+    };
+    let mut conn = pool.acquire().await.unwrap();
+    query_with_options(&mut conn, &ctx, &q, opts).await.unwrap()
+}
+
 async fn run_query_err(pool: &PgPool, app: Uuid, q: Value) -> instant_core::error::InstantError {
     let attrs = attrs_of(pool, app).await;
     let ctx = QueryCtx {
@@ -216,6 +232,46 @@ async fn flat_where() {
     )
     .await;
     assert_eq!(handles(&entity_maps(&res, &attrs, "users")), vec!["bob"]);
+}
+
+/// A where clause stands alone, so an entity created by a link/value step
+/// without an `id` triple matches a full query through it. A registered
+/// session's refresh must not add such an entity: it has no id topic to
+/// announce it, so the session would keep where-only rows forever.
+#[tokio::test]
+async fn refresh_query_drops_idless_root_matches() {
+    let pool = pool().await;
+    let fx = fixture(&pool).await;
+    let attrs = attrs_of(&pool, fx.app).await;
+    let ghost = Uuid::new_v4();
+    transact_json(
+        &pool,
+        fx.app,
+        json!([[
+            "add-triple",
+            ghost,
+            attrs.by_fwd_name("users", "nickname").unwrap().id,
+            "ghost"
+        ]]),
+    )
+    .await
+    .unwrap();
+    let q = json!({"users": {"$": {"where": {"or": [
+        {"age": {"$gt": 100}},
+        {"nickname": "ghost"}
+    ]}}}});
+    let full = run_query(&pool, fx.app, q.clone()).await;
+    assert!(full.forms[0].entities.iter().any(|e| e.eid == ghost));
+    let refresh = run_query_with_options(
+        &pool,
+        fx.app,
+        q,
+        QueryOptions {
+            include_idless: false,
+        },
+    )
+    .await;
+    assert!(!refresh.forms[0].entities.iter().any(|e| e.eid == ghost));
 }
 
 #[tokio::test]

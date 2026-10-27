@@ -1512,11 +1512,40 @@ pub struct QueryCtx<'a> {
     pub admin: bool,
 }
 
+/// Query execution options callers can change without changing the wire
+/// query. Registered sessions turn off [`Self::include_idless`] on refresh:
+/// the reactive client keys entity state by id, and legacy's refresh path
+/// cannot admit a new root entity that has no id triple (it only learns
+/// about entities through the id attr's invalidation topic). A full query
+/// still matches such an entity through its where patterns, so the refresh
+/// result must not keep where-only rows a subscription never had.
+#[derive(Debug, Clone, Copy)]
+pub struct QueryOptions {
+    pub include_idless: bool,
+}
+
+impl Default for QueryOptions {
+    fn default() -> Self {
+        QueryOptions {
+            include_idless: true,
+        }
+    }
+}
+
 pub async fn query(conn: &mut PgConnection, ctx: &QueryCtx<'_>, q: &Value) -> Result<QueryResult> {
+    query_with_options(conn, ctx, q, QueryOptions::default()).await
+}
+
+pub async fn query_with_options(
+    conn: &mut PgConnection,
+    ctx: &QueryCtx<'_>,
+    q: &Value,
+    opts: QueryOptions,
+) -> Result<QueryResult> {
     let forms = parse_query(q)?;
     let mut out = vec![];
     for form in &forms {
-        out.push(run_top_form(conn, ctx, form).await?);
+        out.push(run_top_form(conn, ctx, form, opts.include_idless).await?);
     }
     Ok(QueryResult { forms: out })
 }
@@ -1527,7 +1556,12 @@ struct MatchedRow {
     order_t: i64,
 }
 
-async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) -> Result<FormOut> {
+async fn run_top_form(
+    conn: &mut PgConnection,
+    ctx: &QueryCtx<'_>,
+    form: &Form,
+    include_idless: bool,
+) -> Result<FormOut> {
     if form.opts.aggregate && !ctx.admin {
         // legacy instaql.clj:1183-1190
         return Err(qerr(
@@ -1933,7 +1967,7 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
 
     // ---- entity fetch + children ----
     let mut eids: Vec<Uuid> = matched.iter().map(|m| m.eid).collect();
-    if let (Some(w), false) = (&form.opts.where_conds, paginated) {
+    if let (Some(w), false, true) = (&form.opts.where_conds, paginated, include_idless) {
         eids.extend(idless_matches(conn, &sql_ctx, &form.etype, &id_attr, w).await?);
     }
     let where_rows = match &form.opts.where_conds {
