@@ -215,14 +215,14 @@ pub async fn run_query_full(
     .await
 }
 
-/// Refresh-path variant of [`run_query_full`]: a subscription refresh never
-/// admits an entity without an id triple. The entity may match the query's
-/// where patterns (legacy's where clauses stand alone), but a registered
-/// session learns about new entities through the id attr's invalidation
-/// topic; an id-less entity created by a link step alone therefore never
-/// enters an existing subscription. Recomputing without that allowance
-/// keeps the session result equal to what its own refresh can observe and
-/// drops where-only rows that would otherwise linger.
+/// Refresh-path variant of [`run_query_full`]: an id-less entity reached
+/// only through a link/where path is not admitted to a registered session.
+/// Legacy's where patterns stand alone, so a link step alone can create such
+/// an entity and a full query sees it, but a session only learns about new
+/// entities through the id attr's invalidation topic. Keeping those nested
+/// where rows would leave the subscription stale forever. Direct scalar
+/// matches stay: an update that races a delete can legitimately leave
+/// `[e, v, value]`, and the session must track it (fuzz-race).
 #[allow(clippy::too_many_arguments)]
 pub async fn run_refresh_query_full(
     state: &AppState,
@@ -240,7 +240,8 @@ pub async fn run_refresh_query_full(
         q,
         rules,
         instaql::QueryOptions {
-            include_idless: false,
+            include_idless: true,
+            idless_scalar_only: true,
         },
     )
     .await
