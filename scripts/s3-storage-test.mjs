@@ -313,14 +313,15 @@ assert(true, "the sweeper deleted a trigger-fed object and removed its row");
 const staleUp = await upload(NODE1, `s3/stale-${uuid()}.txt`, "stale claim", { "content-type": "text/plain" });
 const staleLoc = staleUp.body.data["location-id"];
 // one transaction: the triple delete queues the key, then replace that fresh
-// row with an old claim from a dead process before the sweeper can see it
+// row with an old claim from a dead process before the sweeper can see it.
+// (Insert the old row instead of updating the trigger's row: the
+// update_updated_at_trigger would reset updated_at to now.)
 psql(
   `BEGIN;
    DELETE FROM triples WHERE app_id = '${appId}' AND entity_id = '${staleUp.body.data.id}';
+   DELETE FROM app_files_to_sweep WHERE app_id = '${appId}' AND location_id = '${staleLoc}';
    INSERT INTO app_files_to_sweep (app_id, location_id, created_at, process_id, updated_at)
-   VALUES ('${appId}', '${staleLoc}', now() - interval '33 days', 'dead-node', now() - interval '10 minutes')
-   ON CONFLICT (app_id, location_id) DO UPDATE
-     SET created_at = EXCLUDED.created_at, process_id = EXCLUDED.process_id, updated_at = EXCLUDED.updated_at;
+   VALUES ('${appId}', '${staleLoc}', now() - interval '33 days', 'dead-node', now() - interval '10 minutes');
    COMMIT;`,
 );
 assert((await s3("HEAD", objectKey(staleLoc))).status === 200, "stale-claim object exists before the sweep");
