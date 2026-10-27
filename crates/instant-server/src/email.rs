@@ -5,6 +5,10 @@
 //!   - `cloudflare`: send via the Cloudflare Email Service REST API
 //!     (POST /accounts/{account_id}/email/sending/send), configured with
 //!     `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`.
+//!   - `postmark`: send through Postmark's Messages API with the server token
+//!     from `POSTMARK_SERVER_TOKEN` (or legacy's `POSTMARK_TOKEN`).
+//!   - `smtp`: send through a generic SMTP relay configured with `SMTP_HOST`,
+//!     `SMTP_PORT`, `SMTP_USERNAME` / `SMTP_PASSWORD` and `SMTP_TLS`.
 //!
 //! The send path honors per-app `app_email_templates` (email_type
 //! 'magic-code', placeholders {code} {app_title} {user_email} {expiration})
@@ -14,10 +18,18 @@
 
 use std::sync::Arc;
 
+use lettre::{
+    message::{header::ContentType, Mailbox},
+    transport::smtp::{
+        authentication::Credentials,
+        client::{Tls, TlsParameters},
+    },
+    Address, AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
+};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::state::AppState;
+use crate::state::{env_nonblank, AppState};
 
 pub enum EmailProvider {
     Log,
@@ -26,6 +38,106 @@ pub enum EmailProvider {
         api_token: String,
         client: reqwest::Client,
     },
+    Postmark {
+        server_token: String,
+        client: reqwest::Client,
+    },
+    Smtp {
+        transport: Box<AsyncSmtpTransport<Tokio1Executor>>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmtpTls {
+    Starttls,
+    Implicit,
+    None,
+}
+
+impl SmtpTls {
+    fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("starttls")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "starttls" => Ok(Self::Starttls),
+            "implicit" | "tls" | "ssl" => Ok(Self::Implicit),
+            "none" | "plain" => Ok(Self::None),
+            other => Err(format!(
+                "unknown SMTP_TLS {other:?} (expected starttls, implicit, or none)"
+            )),
+        }
+    }
+
+    fn default_port(self) -> u16 {
+        match self {
+            Self::Starttls => 587,
+            Self::Implicit => 465,
+            Self::None => 25,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SmtpConfig {
+    host: String,
+    port: u16,
+    tls: SmtpTls,
+    username: Option<String>,
+    password: Option<String>,
+}
+
+impl SmtpConfig {
+    fn from_env() -> Result<Self, String> {
+        let host = env_nonblank("SMTP_HOST").ok_or_else(|| "SMTP_HOST is unset".to_string())?;
+        let tls = SmtpTls::parse(env_nonblank("SMTP_TLS").as_deref())?;
+        let port = smtp_port(env_nonblank("SMTP_PORT").as_deref(), tls)?;
+        let username = env_nonblank("SMTP_USERNAME");
+        let password = env_nonblank("SMTP_PASSWORD");
+        if username.is_some() != password.is_some() {
+            return Err("SMTP_USERNAME and SMTP_PASSWORD must be set together".into());
+        }
+        Ok(Self {
+            host,
+            port,
+            tls,
+            username,
+            password,
+        })
+    }
+
+    fn into_transport(self) -> Result<AsyncSmtpTransport<Tokio1Executor>, String> {
+        let tls = match self.tls {
+            SmtpTls::Starttls => Tls::Required(
+                TlsParameters::new(self.host.clone())
+                    .map_err(|e| format!("SMTP TLS setup failed: {e}"))?,
+            ),
+            SmtpTls::Implicit => Tls::Wrapper(
+                TlsParameters::new(self.host.clone())
+                    .map_err(|e| format!("SMTP TLS setup failed: {e}"))?,
+            ),
+            SmtpTls::None => Tls::None,
+        };
+        let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&self.host)
+            .port(self.port)
+            .tls(tls);
+        if let (Some(username), Some(password)) = (self.username, self.password) {
+            builder = builder.credentials(Credentials::new(username, password));
+        }
+        Ok(builder.build())
+    }
+}
+
+fn smtp_port(value: Option<&str>, tls: SmtpTls) -> Result<u16, String> {
+    match value {
+        Some(raw) => raw
+            .parse::<u16>()
+            .map_err(|_| format!("SMTP_PORT {raw:?} is not a port number")),
+        None => Ok(tls.default_port()),
+    }
 }
 
 pub struct EmailConfig {
@@ -38,8 +150,9 @@ impl EmailConfig {
     pub fn from_env() -> Self {
         let default_sender_email = crate::state::env_nonblank("INSTANT_APP_EMAIL_SENDER_EMAIL")
             .unwrap_or_else(|| "verify@auth-pm.instantdb.com".into());
-        let provider = match std::env::var("EMAIL_PROVIDER").as_deref() {
-            Ok("cloudflare") => {
+        let provider_name = env_nonblank("EMAIL_PROVIDER").map(|v| v.to_ascii_lowercase());
+        let provider = match provider_name.as_deref() {
+            Some("cloudflare") => {
                 let account_id = std::env::var("CLOUDFLARE_ACCOUNT_ID").unwrap_or_default();
                 let api_token = std::env::var("CLOUDFLARE_API_TOKEN").unwrap_or_default();
                 if account_id.is_empty() || api_token.is_empty() {
@@ -56,11 +169,40 @@ impl EmailConfig {
                     }
                 }
             }
-            Ok(other) if other != "log" => {
+            Some("postmark") => {
+                let server_token = env_nonblank("POSTMARK_SERVER_TOKEN")
+                    .or_else(|| env_nonblank("POSTMARK_TOKEN"));
+                match server_token {
+                    Some(server_token) => EmailProvider::Postmark {
+                        server_token,
+                        client: reqwest::Client::new(),
+                    },
+                    None => {
+                        tracing::warn!(
+                            "EMAIL_PROVIDER=postmark but POSTMARK_SERVER_TOKEN or \
+                             POSTMARK_TOKEN is unset; falling back to log-only delivery"
+                        );
+                        EmailProvider::Log
+                    }
+                }
+            }
+            Some("smtp") => match SmtpConfig::from_env().and_then(SmtpConfig::into_transport) {
+                Ok(transport) => EmailProvider::Smtp {
+                    transport: Box::new(transport),
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        "EMAIL_PROVIDER=smtp is not configured ({e}); falling back to \
+                         log-only delivery"
+                    );
+                    EmailProvider::Log
+                }
+            },
+            Some("log") | None => EmailProvider::Log,
+            Some(other) => {
                 tracing::warn!("Unknown EMAIL_PROVIDER {other:?}; using log-only delivery");
                 EmailProvider::Log
             }
-            _ => EmailProvider::Log,
         };
         EmailConfig {
             provider,
@@ -498,7 +640,71 @@ async fn send(state: &AppState, msg: &RenderedEmail) -> Result<(), String> {
             tracing::info!("magic-code email sent to {} via cloudflare", msg.to);
             Ok(())
         }
+        EmailProvider::Postmark {
+            server_token,
+            client,
+        } => send_postmark(client, server_token, msg).await,
+        EmailProvider::Smtp { transport } => {
+            let email = build_smtp_message(msg)?;
+            transport
+                .send(email)
+                .await
+                .map_err(|e| format!("smtp send failed: {e}"))?;
+            tracing::info!("magic-code email sent to {} via smtp", msg.to);
+            Ok(())
+        }
     }
+}
+
+fn postmark_body(msg: &RenderedEmail) -> serde_json::Value {
+    serde_json::json!({
+        "From": format!("{} <{}>", msg.sender_name, msg.sender_email),
+        "To": msg.to,
+        "ReplyTo": msg.sender_email,
+        "Subject": msg.subject,
+        "MessageStream": "outbound",
+        "HTMLBody": msg.html,
+    })
+}
+
+async fn send_postmark(
+    client: &reqwest::Client,
+    server_token: &str,
+    msg: &RenderedEmail,
+) -> Result<(), String> {
+    let resp = client
+        .post("https://api.postmarkapp.com/email")
+        .header("X-Postmark-Server-Token", server_token)
+        .json(&postmark_body(msg))
+        .send()
+        .await
+        .map_err(|e| format!("postmark request error: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("postmark send failed ({status}): {text}"));
+    }
+    tracing::info!("magic-code email sent to {} via postmark", msg.to);
+    Ok(())
+}
+
+fn build_smtp_message(msg: &RenderedEmail) -> Result<Message, String> {
+    let sender: Address = msg
+        .sender_email
+        .parse()
+        .map_err(|e| format!("invalid sender address {:?}: {e}", msg.sender_email))?;
+    let to: Address = msg
+        .to
+        .parse()
+        .map_err(|e| format!("invalid recipient address {:?}: {e}", msg.to))?;
+    Message::builder()
+        .from(Mailbox::new(Some(msg.sender_name.clone()), sender.clone()))
+        .to(Mailbox::new(None, to))
+        .reply_to(Mailbox::new(None, sender))
+        .subject(msg.subject.clone())
+        .header(ContentType::TEXT_HTML)
+        .body(msg.html.clone())
+        .map_err(|e| format!("build smtp message: {e}"))
 }
 
 #[cfg(test)]
@@ -540,5 +746,70 @@ mod tests {
         assert!(body.contains("<strong>123456</strong>"));
         assert!(body.contains("You asked to join My App."));
         assert!(body.contains("expire in 24 hours"));
+    }
+
+    fn rendered() -> RenderedEmail {
+        RenderedEmail {
+            sender_name: "My App".into(),
+            sender_email: "verify@example.com".into(),
+            to: "user@example.com".into(),
+            subject: "123456 is your verification code for My App".into(),
+            html: "<div><strong>123456</strong></div>".into(),
+        }
+    }
+
+    #[test]
+    fn postmark_request_matches_legacy_shape() {
+        let msg = rendered();
+        let body = postmark_body(&msg);
+        assert_eq!(body["From"], "My App <verify@example.com>");
+        assert_eq!(body["To"], "user@example.com");
+        assert_eq!(body["ReplyTo"], "verify@example.com");
+        assert_eq!(
+            body["Subject"],
+            "123456 is your verification code for My App"
+        );
+        assert_eq!(body["MessageStream"], "outbound");
+        assert_eq!(body["HTMLBody"], "<div><strong>123456</strong></div>");
+    }
+
+    #[test]
+    fn smtp_message_carries_from_to_reply_to_and_html() {
+        let msg = rendered();
+        let email = build_smtp_message(&msg).expect("build message");
+        let headers = email.headers();
+        let from = headers.get_raw("From").expect("From");
+        assert!(from.contains("My App"));
+        assert!(from.contains("verify@example.com"));
+        assert_eq!(headers.get_raw("To"), Some("user@example.com"));
+        assert_eq!(headers.get_raw("Reply-To"), Some("verify@example.com"));
+        assert_eq!(
+            headers.get_raw("Subject"),
+            Some("123456 is your verification code for My App")
+        );
+        assert!(headers
+            .get_raw("Content-Type")
+            .is_some_and(|v| v.starts_with("text/html")));
+        let raw = String::from_utf8(email.formatted()).expect("utf-8 message");
+        assert!(raw.contains("123456"));
+    }
+
+    #[test]
+    fn smtp_tls_and_port_parsing() {
+        assert_eq!(SmtpTls::parse(None).unwrap(), SmtpTls::Starttls);
+        assert_eq!(
+            SmtpTls::parse(Some(" STARTTLS ")).unwrap(),
+            SmtpTls::Starttls
+        );
+        assert_eq!(SmtpTls::parse(Some("implicit")).unwrap(), SmtpTls::Implicit);
+        assert_eq!(SmtpTls::parse(Some("ssl")).unwrap(), SmtpTls::Implicit);
+        assert_eq!(SmtpTls::parse(Some("none")).unwrap(), SmtpTls::None);
+        assert!(SmtpTls::parse(Some("bogus")).is_err());
+
+        assert_eq!(smtp_port(None, SmtpTls::Starttls).unwrap(), 587);
+        assert_eq!(smtp_port(None, SmtpTls::Implicit).unwrap(), 465);
+        assert_eq!(smtp_port(None, SmtpTls::None).unwrap(), 25);
+        assert_eq!(smtp_port(Some("2525"), SmtpTls::Starttls).unwrap(), 2525);
+        assert!(smtp_port(Some("not-a-port"), SmtpTls::Starttls).is_err());
     }
 }

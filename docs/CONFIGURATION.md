@@ -34,10 +34,20 @@ Magic-code and invite emails.
 
 | var | default | |
 |---|---|---|
-| `EMAIL_PROVIDER` | `log` | `log` prints codes to the server log; `cloudflare` sends through the [Cloudflare Email Service](https://developers.cloudflare.com/email-service/) REST API |
+| `EMAIL_PROVIDER` | `log` | `log` prints codes to the server log; `cloudflare`, `postmark`, or `smtp` deliver real email. An unknown value or missing credentials logs a warning and falls back to `log` |
 | `CLOUDFLARE_ACCOUNT_ID` | — | required for `EMAIL_PROVIDER=cloudflare` |
 | `CLOUDFLARE_API_TOKEN` | — | API token with Email Sending permission |
-| `INSTANT_APP_EMAIL_SENDER_EMAIL` | `verify@auth-pm.instantdb.com` | default From address; set it to a sender on your verified domain |
+| `POSTMARK_SERVER_TOKEN` / `POSTMARK_TOKEN` | — | Postmark Messages API server token for `EMAIL_PROVIDER=postmark`. `POSTMARK_SERVER_TOKEN` wins when both are set; legacy's `POSTMARK_TOKEN` is also accepted |
+| `SMTP_HOST` | — | relay hostname for `EMAIL_PROVIDER=smtp` (required) |
+| `SMTP_PORT` | `587` / `465` / `25` | relay port. Defaults to `587` for STARTTLS, `465` for implicit TLS, and `25` for `SMTP_TLS=none` |
+| `SMTP_USERNAME` / `SMTP_PASSWORD` | — | optional SMTP AUTH credentials; set both or neither |
+| `SMTP_TLS` | `starttls` | `starttls` requires STARTTLS before authenticating, `implicit` starts in TLS (typically port 465), and `none` is plaintext for a trusted local relay only |
+| `INSTANT_APP_EMAIL_SENDER_EMAIL` | `verify@auth-pm.instantdb.com` | default From address; set it to a sender on your verified domain. A per-app custom sender is used only when its `app_email_verifications` row is verified |
+
+All providers use the same magic-code and invite templates. Postmark requests
+follow the legacy wire shape (`From`, `To`, `ReplyTo`, `Subject`, `HTMLBody`,
+`MessageStream: "outbound"`), and SMTP messages carry the same From/To/Reply-To
+and HTML body.
 
 ## Dashboard and accounts
 
