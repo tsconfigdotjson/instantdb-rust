@@ -1512,11 +1512,49 @@ pub struct QueryCtx<'a> {
     pub admin: bool,
 }
 
+/// Query execution options callers can change without changing the wire
+/// query. Registered sessions turn off [`Self::include_idless`] on refresh:
+/// the reactive client keys entity state by id, and legacy's refresh path
+/// cannot admit a new root entity that has no id triple (it only learns
+/// about entities through the id attr's invalidation topic). A full query
+/// still matches such an entity through its where patterns, so the refresh
+/// result must not keep where-only rows a subscription never had.
+#[derive(Debug, Clone, Copy)]
+pub struct QueryOptions {
+    pub include_idless: bool,
+    /// Keep only id-less entities whose where match includes a direct
+    /// scalar (blob) attr on the root entity. An id-less entity reached only
+    /// through a link/where path (a link step alone created it) cannot be
+    /// announced by the id attr topic, so a session refresh must not keep
+    /// those nested where rows. A direct scalar match, like an update that
+    /// races a delete and leaves only `[e, v, 30]`, is a real row the
+    /// session can and must track.
+    pub idless_scalar_only: bool,
+}
+
+impl Default for QueryOptions {
+    fn default() -> Self {
+        QueryOptions {
+            include_idless: true,
+            idless_scalar_only: false,
+        }
+    }
+}
+
 pub async fn query(conn: &mut PgConnection, ctx: &QueryCtx<'_>, q: &Value) -> Result<QueryResult> {
+    query_with_options(conn, ctx, q, QueryOptions::default()).await
+}
+
+pub async fn query_with_options(
+    conn: &mut PgConnection,
+    ctx: &QueryCtx<'_>,
+    q: &Value,
+    opts: QueryOptions,
+) -> Result<QueryResult> {
     let forms = parse_query(q)?;
     let mut out = vec![];
     for form in &forms {
-        out.push(run_top_form(conn, ctx, form).await?);
+        out.push(run_top_form(conn, ctx, form, opts).await?);
     }
     Ok(QueryResult { forms: out })
 }
@@ -1527,7 +1565,12 @@ struct MatchedRow {
     order_t: i64,
 }
 
-async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) -> Result<FormOut> {
+async fn run_top_form(
+    conn: &mut PgConnection,
+    ctx: &QueryCtx<'_>,
+    form: &Form,
+    opts: QueryOptions,
+) -> Result<FormOut> {
     if form.opts.aggregate && !ctx.admin {
         // legacy instaql.clj:1183-1190
         return Err(qerr(
@@ -1933,8 +1976,18 @@ async fn run_top_form(conn: &mut PgConnection, ctx: &QueryCtx<'_>, form: &Form) 
 
     // ---- entity fetch + children ----
     let mut eids: Vec<Uuid> = matched.iter().map(|m| m.eid).collect();
-    if let (Some(w), false) = (&form.opts.where_conds, paginated) {
-        eids.extend(idless_matches(conn, &sql_ctx, &form.etype, &id_attr, w).await?);
+    if let (Some(w), false, true) = (&form.opts.where_conds, paginated, opts.include_idless) {
+        eids.extend(
+            idless_matches(
+                conn,
+                &sql_ctx,
+                &form.etype,
+                &id_attr,
+                w,
+                opts.idless_scalar_only,
+            )
+            .await?,
+        );
     }
     let where_rows = match &form.opts.where_conds {
         Some(w) if !eids.is_empty() => {
@@ -2409,11 +2462,30 @@ async fn idless_matches(
     etype: &str,
     id_attr: &Attr,
     cond: &WhereCond,
+    scalar_only: bool,
 ) -> Result<Vec<Uuid>> {
     let anchors = match sql_ctx.idless_anchors(etype, cond) {
         Some(a) if !a.is_empty() => a,
         _ => return Ok(vec![]),
     };
+    let scalar_anchors: Vec<Uuid> = if scalar_only {
+        anchors
+            .iter()
+            .filter(|(a, reverse)| {
+                !*reverse
+                    && sql_ctx
+                        .attrs
+                        .get(a)
+                        .is_some_and(|attr| attr.value_type != ValueType::Ref)
+            })
+            .map(|(a, _)| *a)
+            .collect()
+    } else {
+        vec![]
+    };
+    if scalar_only && scalar_anchors.is_empty() {
+        return Ok(vec![]);
+    }
     let ctx = SqlCtx {
         app_id: sql_ctx.app_id,
         attrs: sql_ctx.attrs,
@@ -2443,6 +2515,13 @@ async fn idless_matches(
     qb.push(" AND i.attr_id = ");
     qb.push_bind(id_attr.id);
     qb.push(" AND i.entity_id = c.eid AND i.ea) AND ");
+    if scalar_only {
+        qb.push("EXISTS (SELECT 1 FROM triples s WHERE s.app_id = ");
+        qb.push_bind(ctx.app_id);
+        qb.push(" AND s.entity_id = c.eid AND s.attr_id = ANY(");
+        qb.push_bind(scalar_anchors);
+        qb.push(")) AND ");
+    }
     match ctx.push_cond(&mut qb, etype, "c.eid", cond, 0) {
         Ok(r) => r?,
         Err(MissingAttr) => return Ok(vec![]),

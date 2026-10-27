@@ -679,9 +679,10 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
             async move {
                 METRICS.refresh_queries_computed_total.inc();
                 let started = Instant::now();
-                let out =
-                    service::run_query_full(&state, app_id, &attrs, &job.perms, &job.q, rules)
-                        .await;
+                let out = service::run_refresh_query_full(
+                    &state, app_id, &attrs, &job.perms, &job.q, rules,
+                )
+                .await;
                 let result = match out {
                     Ok(out) => {
                         let (wire, result_meta, hash) = crate::ws::format_query_result(

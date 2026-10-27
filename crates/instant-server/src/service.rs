@@ -203,6 +203,60 @@ pub async fn run_query_full(
     q: &Value,
     rules: Option<&Rules>,
 ) -> Result<QueryOutcome> {
+    run_query_full_with_options(
+        state,
+        app_id,
+        attrs,
+        perms,
+        q,
+        rules,
+        instaql::QueryOptions::default(),
+    )
+    .await
+}
+
+/// Refresh-path variant of [`run_query_full`]: an id-less entity reached
+/// only through a link/where path is not admitted to a registered session.
+/// Legacy's where patterns stand alone, so a link step alone can create such
+/// an entity and a full query sees it, but a session only learns about new
+/// entities through the id attr's invalidation topic. Keeping those nested
+/// where rows would leave the subscription stale forever. Direct scalar
+/// matches stay: an update that races a delete can legitimately leave
+/// `[e, v, value]`, and the session must track it (fuzz-race).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_refresh_query_full(
+    state: &AppState,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    perms: &PermsCtx,
+    q: &Value,
+    rules: Option<&Rules>,
+) -> Result<QueryOutcome> {
+    run_query_full_with_options(
+        state,
+        app_id,
+        attrs,
+        perms,
+        q,
+        rules,
+        instaql::QueryOptions {
+            include_idless: true,
+            idless_scalar_only: true,
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_query_full_with_options(
+    state: &AppState,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    perms: &PermsCtx,
+    q: &Value,
+    rules: Option<&Rules>,
+    opts: instaql::QueryOptions,
+) -> Result<QueryOutcome> {
     let started = std::time::Instant::now();
     let rule_params = q.get("$$ruleParams").cloned();
     let ctx = QueryCtx {
@@ -211,7 +265,7 @@ pub async fn run_query_full(
         admin: perms.admin,
     };
     let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
-    let mut result = instaql::query(&mut conn, &ctx, q).await?;
+    let mut result = instaql::query_with_options(&mut conn, &ctx, q, opts).await?;
     // Topics come from the pre-permissions result: an entity hidden by a
     // view rule is still tracked, so a write that makes it visible refreshes.
     let parsed_forms = instaql::parse_query(q).ok();
