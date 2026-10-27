@@ -2355,7 +2355,9 @@ fn binding_value(v: &Value) -> Value {
 /// eid position, created) while the steps run. A lookup outside the step's
 /// namespace is left for the namespace validation that runs with the steps
 /// (legacy `validate-lookup-etypes` comes first). Delete-entity lookups are
-/// resolved by their own pass (`resolve-lookups-for-delete-entity`).
+/// included too: legacy's `load-entities-map` covers every step with an
+/// eid/etype, so a delete by a lookup an earlier step renames still names
+/// the pre-tx entity (permissioned_transaction.clj:142-190).
 async fn pre_resolve_lookups(
     conn: &mut PgConnection,
     app_id: Uuid,
@@ -2402,14 +2404,16 @@ async fn pre_resolve_lookups(
                         .and_then(|a| a.reverse_etype.clone()),
                 )
             }
-            TxStep::RuleParams { etype, .. } => (etype.clone(), None),
+            TxStep::RuleParams { etype, .. } | TxStep::DeleteEntity { etype, .. } => {
+                (etype.clone(), None)
+            }
             _ => (None, None),
         };
         let (eid, value) = match &mut step {
             TxStep::AddTriple { eid, value, .. }
             | TxStep::DeepMergeTriple { eid, value, .. }
             | TxStep::RetractTriple { eid, value, .. } => (Some(eid), Some(value)),
-            TxStep::RuleParams { eid, .. } => (Some(eid), None),
+            TxStep::RuleParams { eid, .. } | TxStep::DeleteEntity { eid, .. } => (Some(eid), None),
             _ => (None, None),
         };
         if let Some(eid) = eid {

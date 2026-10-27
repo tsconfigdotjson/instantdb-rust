@@ -187,12 +187,12 @@ everything and checks coverage itself, as before.
   legacy defect from failing a page walk without loosening the comparison.
   Each matches one op shape, allows only named sub-paths, and requires every
   differing leaf to be one of the pinned value pairs; the rest of the page is
-  still compared. `string-order-page-info-flags`: for a string order legacy
-  orders by the raw jsonb value without a `NULLS` clause, while its cursor
-  comparisons treat a null cursor like SQL `NULL`; its `has-next-page?` /
-  `has-previous-page?` then disagree with the page it returned. The rows and
-  cursors match this server, and the exception pins the legacy/rust boolean
-  pair (true/false or false/true).
+  still compared. `string-order-page-info-flags`: for a string order
+  (`fuzz.tstr` or `tag.label`) legacy orders by the raw jsonb value without a
+  `NULLS` clause, while its cursor comparisons treat a null cursor like SQL
+  `NULL`; its `has-next-page?` / `has-previous-page?` then disagree with the
+  page it returned. The rows and cursors match this server, and the exception
+  pins the legacy/rust boolean pair (true/false or false/true).
   Not generated: a link whose value lookup names the entity an eid lookup of
   the same tx creates. Legacy refuses it ("Could not find the entity for
   this lookup", a post-create check bug listed in docs/PARITY.md) and this

@@ -471,6 +471,16 @@ function buildScript() {
       if ((opts.first || opts.last) && chance(0.15)) opts[opts.first ? "afterInclusive" : "beforeInclusive"] = pick([true, false, null, "yes", 1]);
       if (chance(0.12)) opts.fields = pick([["p1"], ["tnum", "tstr"], ["id"], ["p3", "owner"], ["tdate", "tbool"], ["tdate", "tags", "profile"]]);
       if (chance(0.04)) opts.aggregate = "count"; // admin-only: rejected alike
+      // A paginated where path through a has-many link keeps one where row per
+      // entity on legacy; nesting the same link then reveals the plan-chosen
+      // row. That known artifact is handled by pagedWhereOnly when the query
+      // does not nest the link; do not generate the ambiguous combination in
+      // the random (non-page-walk) queries. Page walks still combine where
+      // clauses and nested links, using scalar where paths.
+      const pageOpts = opts.limit || opts.first || opts.last || opts.offset;
+      if (pageOpts && opts.where && /(tags|items|fuzzes)/.test(JSON.stringify(opts.where))) {
+        delete opts.where;
+      }
       const form = Object.keys(opts).length ? { $: opts } : {};
       if (chance(0.25)) form.owner = chance(0.5) ? {} : { $: { fields: ["name"] } };
       if (chance(0.2)) form.tags = pick([{}, { $: { where: { label: { $in: [pick(tagLabels), pick(tagLabels)] } } } }, { fuzzes: {} }]);
@@ -651,10 +661,10 @@ async function runOn(serverName, script) {
         });
         if (pageNo === 0) firstCursor = rawInfo?.[backwards ? "start-cursor" : "end-cursor"] ?? null;
         // Legacy's string-order page flags are the documented result
-        // exception below, so a tstr walk stops after its first page (its
-        // rows and page-info are still compared; the other typed orders are
+        // exception below, so a string-order walk stops after its first page
+        // (its rows and page-info are still compared; the other orders are
         // the ones that follow real cursors).
-        if (key === "tstr") break;
+        if (isStringOrderPage(op)) break;
         const more = backwards ? rawInfo?.["has-previous-page?"] : rawInfo?.["has-next-page?"];
         const next = backwards ? rawInfo?.["start-cursor"] : rawInfo?.["end-cursor"];
         if (!more || !next) break;
@@ -747,6 +757,13 @@ function normalizePageInfo(info, orderKey) {
     }
   }
   return out;
+}
+
+// String-order page walks stop after one page: legacy orders by the raw
+// jsonb value but its cursor comparisons treat a null/SQL-null differently,
+// which is the result exception below.
+function isStringOrderPage(op) {
+  return op?.kind === "paginate" && (op.key === "tstr" || (op.ns === "tag" && op.key === "label"));
 }
 
 // Per-feature success floor labels for the page walks.
@@ -901,7 +918,7 @@ const RESULT_EXCEPTIONS = [
     // returned; the rows and cursors match this server. Keep the logical
     // flags and pin the legacy/rust boolean pair.
     name: "string-order-page-info-flags",
-    matches: (op) => op?.kind === "paginate" && op.key === "tstr",
+    matches: isStringOrderPage,
     pairs: [
       [true, false],
       [false, true],
