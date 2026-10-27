@@ -12,7 +12,10 @@
 //!   `S3_PRESIGN=0` proxies through `/storage/serve` instead. S3 has no
 //!   append, so live stream bytes are spooled through the postgres table and
 //!   moved to S3 once the stream is done (legacy likewise flushes finished
-//!   streams to S3).
+//!   streams to S3). Deletes are synchronous, but a periodic sweeper still
+//!   drains `app_files_to_sweep` (migration 52's trigger queue) after the
+//!   legacy 32-day backup grace, covering hard-deleted apps and missed
+//!   deletes.
 //!
 //! `/storage/serve/...` URLs are HMAC-signed with SERVER_SECRET and
 //! day-bucketed like legacy's presigned URLs so browser caches can reuse them.
