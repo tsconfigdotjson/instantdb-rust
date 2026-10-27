@@ -288,13 +288,12 @@ function buildScript() {
       opts.order = { [admin ? "id" : pick(["tnum", "tstr"])]: pick(["asc", "desc"]) };
       opts.limit = 1 + Math.floor(rand() * 4);
     }
-    // legacy's paginated top-level `or` keeps one where row per entity, and
-    // which branch survives is plan-dependent (see project below); don't
-    // invite that artifact into the admin object-tree comparison.
-    if (admin && opts.limit && opts.where?.or) {
-      delete opts.order;
-      delete opts.limit;
-    }
+    // legacy's top-level `or` keeps one where row per entity, and its admin
+    // object tree exposes only that branch's triples (the same artifact
+    // `project` drops for paginated socket queries). The admin comparison
+    // can't recover the other branch's triples, so use one branch for admin
+    // queries; the socket grammar still fuzzes top-level `or`.
+    if (admin && opts.where?.or) opts.where = pick(opts.where.or);
     const form = Object.keys(opts).length ? { $: opts } : {};
     if (!admin && chance(0.3)) form.owner = chance(0.5) ? {} : { $: { fields: ["name"] } };
     const root = !admin && chance(0.15)
