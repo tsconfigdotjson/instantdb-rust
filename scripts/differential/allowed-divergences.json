@@ -1079,5 +1079,43 @@
     },
     "reason": "Legacy re-sends a computation whose client-visible result is unchanged when only data the view rules hide changed (c1: the where-path doc of a form the rules already emptied is retitled; c2: a doc and task the session can't see are created). permissioned-node filters only :join-rows and keeps the rest of the unpermissioned :datalog-result (its :symbol-values name the hidden entities), and the refresh's result-changed? hash covers the whole instaql-result, so a hidden-only change counts as changed. This server hashes the permission-filtered result and sends nothing. The client applies an identical result either way (no state change); what changed for the client (`refreshed`), the errors and the final folded state are still compared strictly.",
     "citation": "LEGACY/server/src/instant/db/instaql.clj:1916-1954 (permissioned-node); LEGACY/server/src/instant/reactive/query.clj:136-139 (result-hash), reactive/store.clj:677-680 and reactive/session.clj:492 (result-changed? gates the computation)"
+  },
+  {
+    "path": "^fuzzperms:empty-nested/(G|U1|U2)$",
+    "differs": [
+      "^\\.result\\.pzowner\\.0\\.items$"
+    ],
+    "legacy": {
+      "status": 200,
+      "result": {
+        "pzowner": [
+          {
+            "id": {
+              "$regex": "^[0-9a-f]{8}-0000-4000-8000-[0-9a-f]{12}$"
+            },
+            "name": "empty",
+            "items": {
+              "$absent": true
+            }
+          }
+        ]
+      }
+    },
+    "rust": {
+      "status": 200,
+      "result": {
+        "pzowner": [
+          {
+            "id": {
+              "$regex": "^[0-9a-f]{8}-0000-4000-8000-[0-9a-f]{12}$"
+            },
+            "name": "empty",
+            "items": []
+          }
+        ]
+      }
+    },
+    "reason": "Legacy bug: the permission filter drops a nested link form without viewable rows (instaql.clj:1945-1954), so an impersonated admin query for an owner with no items (`db.asUser(...).query({ pzowner: { $: { where: { id } }, items: {} } })`) has no `items` key where the same admin query answers `items: []`. This server returns `[]` either way; the admin SDK's result types promise an array. The fuzz-perms layer runs this probe for as-guest / as-email / as-token with a view rule that keeps the parent visible, and pins both sides' whole result.",
+    "citation": "LEGACY/server/src/instant/db/instaql.clj:1932-1954 (permissioned-node drops child-nodes with no join-rows); LEGACY/client/packages/admin/src/index.ts:1150-1220 (asUser query result types)"
   }
 ]

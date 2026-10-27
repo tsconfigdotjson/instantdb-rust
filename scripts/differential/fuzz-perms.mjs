@@ -10,25 +10,38 @@
 //   - bursts: transacts from several sessions (disjoint entities, so the
 //     outcome can't depend on their order) and transact / add-query /
 //     transact on one session sent without waiting, which exercises the
-//     per-session scheduler (#44); compared by outcome and settled state.
+//     per-session scheduler (#44); compared by outcome and settled state;
+//   - the admin SDK's impersonated HTTP path: /admin/query and
+//     /admin/transact with as-guest / as-email / as-token, compared by
+//     status, error type + message, object-tree result (nested links
+//     included) and transact outcome, under the same rules and data.
 //
 // Rules are generated from the seed (view / create / update / delete per
-// namespace, a bind, field rules, ruleParams) and written to both
-// databases before the script runs.
+// namespace, binds, field rules, ruleParams, and auth / data.ref / auth.ref /
+// request.* expressions) and written to both databases before the script
+// runs.
 //
 // Usage: node fuzz-perms.mjs <app-id-legacy> <app-id-rust> <admin-token> [seed] [rounds]
 // Env: LEGACY_URL, RUST_URL, LEGACY_DATABASE_URL, RUST_DATABASE_URL
 
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
-  connect,
-  settle,
-  makeIdFactory,
-  projectAnyResult,
   canon,
+  connect,
+  describeAllowVerdict,
+  DIVERGENCE_PREFIXES,
+  loadAllowlist,
+  makeIdFactory,
   normalize,
+  projectAnyResult,
+  projectTree,
   psql,
+  settle,
   uuid,
 } from "./lib.mjs";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 const appIdLegacy = process.argv[2];
 const appIdRust = process.argv[3];
@@ -58,7 +71,13 @@ const CHECKPOINT_QUIET_MS = 900;
 // how long a legacy probe that disagreed with everything waits to ask again
 const LEGACY_RESETTLE_MS = 2000;
 const SESSIONS = ["G", "U1", "U2", "ADM"];
+const IMPERSONATIONS = ["G", "U1", "U2"];
 const EMAILS = { U1: "u1@fuzz.example", U2: "u2@fuzz.example" };
+// request.* bindings on both transports: the same two headers ride on the ws
+// upgrade and every impersonated /admin request, as a browser / proxy would
+// send them. Legacy reads request.ip from the second-to-last x-forwarded-for
+// hop (util/http.clj:95-105), so the value is the first here.
+const REQUEST_HEADERS = { origin: "https://fuzz.example", "x-forwarded-for": "10.0.0.1, 10.0.0.2" };
 
 function prng(a) {
   return () => {
@@ -87,21 +106,35 @@ function buildScript() {
     tnum: mk(), tstr: mk(),
     owner: mk(), ownerRev: mk(),
     ownerId: mk(), ownerName: mk(),
+    creator: mk(), creatorRev: mk(),
   };
   const entities = Array.from({ length: 10 }, () => mk());
   const owners = Array.from({ length: 3 }, () => mk());
+  // never touched by the script: a visible owner/linked entity for a nested
+  // link whose child rows are guaranteed, and a visible entity with no owner
+  // for the empty-nested-link probe.
+  const visibleOwner = mk();
+  const visibleEntity = mk();
+  // an owner with no items, for the empty reverse link (the shape legacy's
+  // permission filter drops; rule-wheres.mjs pins the same bug)
+  const emptyOwner = mk();
   const names = ["ann", "bob", "cy"];
   const values = ["a", "b", "c", 1, true, null, EMAILS.U1, EMAILS.U2, "x"];
   const nums = [0, 1, 7, 49, 51, -3];
   const strs = ["alpha", "beta", "gamma", "Zed"];
 
   // ---- rules
-  const bind = ["isMine", "auth.email != null && data.p2 == auth.email"];
+  const bind = [
+    "isMine", "auth.email != null && data.p2 == auth.email",
+    "isOwned", "size(auth.ref('$user.pzOwned.id')) > 0",
+  ];
+  // The visibleOwner / visibleEntity / emptyOwner disjuncts keep the two
+  // nested-link probes meaningful whatever the generated view rule says.
   const rules = {
     [NS]: {
       bind,
       allow: {
-        view: pick([
+        view: `${pick([
           "true",
           "auth.id != null",
           "data.p1 != 'b'",
@@ -110,15 +143,32 @@ function buildScript() {
           "data.p2 == auth.email",
           "ruleParams.k == 1 || auth.id != null",
           "isMine || data.owner != null",
+          "isOwned || data.p1 == 'a'",
+          "'ann' in data.ref('owner.name')",
+          "size(data.ref('owner.id')) > 0",
+          "size(auth.ref('$user.pzOwned.id')) > 0",
+          "request.origin == 'https://fuzz.example'",
+          "request.ip == '10.0.0.1' && auth.id != null",
+          "request.time > timestamp('2000-01-01T00:00:00Z')",
+        ])} || data.id == '${visibleEntity}'`,
+        create: pick(["true", "auth.id != null", "newData.p1 != 'c'", "false", "newData.p2 == auth.email", "request.origin == 'https://fuzz.example'"]),
+        update: pick([
+          "true",
+          "auth.id != null",
+          "isMine",
+          "newData.p1 != 'c'",
+          "false",
+          "data.tnum == null || newData.tnum == null || newData.tnum >= data.tnum",
+          "'ann' in data.ref('owner.name')",
+          "request.origin == 'https://fuzz.example' || auth.id != null",
+          "request.ip == '10.0.0.1'",
         ]),
-        create: pick(["true", "auth.id != null", "newData.p1 != 'c'", "false", "newData.p2 == auth.email"]),
-        update: pick(["true", "auth.id != null", "isMine", "newData.p1 != 'c'", "false", "data.tnum == null || newData.tnum == null || newData.tnum >= data.tnum"]),
-        delete: pick(["true", "auth.id != null", "isMine", "false", "data.tstr != 'Zed'"]),
+        delete: pick(["true", "auth.id != null", "isMine", "false", "data.tstr != 'Zed'", "size(data.ref('owner.id')) == 0", "request.origin == 'https://fuzz.example'"]),
       },
     },
     [OWNER]: {
       allow: {
-        view: pick(["true", "data.name != 'cy'", "auth.id != null", "false"]),
+        view: `${pick(["true", "data.name != 'cy'", "auth.id != null", "false", "request.origin == 'https://fuzz.example'"])} || data.id == '${visibleOwner}' || data.id == '${emptyOwner}'`,
         create: "true",
         update: "true",
         delete: "true",
@@ -126,8 +176,8 @@ function buildScript() {
     },
   };
   const fields = {};
-  if (chance(0.5)) fields.p3 = pick(["auth.id != null", "false", "data.p1 == 'a'"]);
-  if (chance(0.4)) fields.tstr = pick(["data.tnum == null || data.tnum > 0", "isMine"]);
+  if (chance(0.5)) fields.p3 = pick(["auth.id != null", "false", "data.p1 == 'a'", "'ann' in data.ref('owner.name')"]);
+  if (chance(0.4)) fields.tstr = pick(["data.tnum == null || data.tnum > 0", "isMine", "request.origin == 'https://fuzz.example'"]);
   if (Object.keys(fields).length) rules[NS].fields = fields;
 
   const schema = [
@@ -152,6 +202,19 @@ function buildScript() {
         isUnsynced: true,
       },
     ],
+    [
+      "add-attr",
+      {
+        id: attrs.creator,
+        "forward-identity": [attrs.creator, NS, "creator"],
+        "reverse-identity": [attrs.creatorRev, "$users", "pzOwned"],
+        "value-type": "ref",
+        cardinality: "one",
+        "unique?": false,
+        "index?": false,
+        isUnsynced: true,
+      },
+    ],
   ];
   const seedData = [
     ...owners.flatMap((o, i) => [
@@ -166,6 +229,13 @@ function buildScript() {
       ["add-triple", e, attrs.tstr, pick(strs)],
       ...(chance(0.6) ? [["add-triple", e, attrs.owner, pick(owners)]] : []),
     ]),
+    ["add-triple", visibleOwner, attrs.ownerId, visibleOwner],
+    ["add-triple", visibleOwner, attrs.ownerName, "vee"],
+    ["add-triple", visibleEntity, attrs.id, visibleEntity],
+    ["add-triple", visibleEntity, attrs.p1, "a"],
+    ["add-triple", visibleEntity, attrs.owner, visibleOwner],
+    ["add-triple", emptyOwner, attrs.ownerId, emptyOwner],
+    ["add-triple", emptyOwner, attrs.ownerName, "empty"],
   ];
 
   const txSteps = (e) => {
@@ -198,7 +268,7 @@ function buildScript() {
     return steps;
   };
 
-  const randomQuery = () => {
+  const randomQuery = (admin = false) => {
     const opts = {};
     const q = rand();
     if (q < 0.15) opts.where = { p1: pick(["a", "b", "c"]) };
@@ -213,17 +283,62 @@ function buildScript() {
       // no serverCreatedAt: a burst creates entities in concurrent
       // transacts, whose creation order is arbitrary on either server
       // (fuzz.mjs covers serverCreatedAt pages, one session at a time)
-      opts.order = { [pick(["tnum", "tstr"])]: pick(["asc", "desc"]) };
+      // admin queries order by the unique id, so no tie can pick a different
+      // page on the two servers
+      opts.order = { [admin ? "id" : pick(["tnum", "tstr"])]: pick(["asc", "desc"]) };
       opts.limit = 1 + Math.floor(rand() * 4);
     }
+    // legacy's paginated top-level `or` keeps one where row per entity, and
+    // which branch survives is plan-dependent (see project below); don't
+    // invite that artifact into the admin object-tree comparison.
+    if (admin && opts.limit && opts.where?.or) {
+      delete opts.order;
+      delete opts.limit;
+    }
     const form = Object.keys(opts).length ? { $: opts } : {};
-    if (chance(0.3)) form.owner = chance(0.5) ? {} : { $: { fields: ["name"] } };
-    const root = chance(0.15)
+    if (!admin && chance(0.3)) form.owner = chance(0.5) ? {} : { $: { fields: ["name"] } };
+    const root = !admin && chance(0.15)
       ? { [OWNER]: { items: chance(0.5) ? {} : { $: { where: { tnum: { $gt: 0 } } } } } }
       : { [NS]: form };
     if (chance(0.1)) root.$$ruleParams = { k: 1 };
     return root;
   };
+
+  // Admin steps are the SDK's /admin/transact grammar (create / update /
+  // merge / link / unlink / delete / ruleParams), not the socket tx-steps.
+  const adminTxSteps = (e) => {
+    const k = rand();
+    let steps;
+    if (k < 0.26) {
+      steps = [["update", NS, e, { p1: pick(values), ...(chance(0.5) ? { tnum: pick(nums) } : {}) }]];
+    } else if (k < 0.4) {
+      steps = [["create", NS, e, { p1: pick(values), p2: pick([EMAILS.U1, EMAILS.U2, "x"]) }]];
+    } else if (k < 0.5) {
+      steps = [["merge", NS, e, { p3: { [`k${Math.floor(rand() * 2)}`]: pick(values) } }]];
+    } else if (k < 0.62) {
+      steps = [["link", NS, e, { owner: pick(owners) }]];
+    } else if (k < 0.72) {
+      steps = [["unlink", NS, e, { owner: pick(owners) }]];
+    } else if (k < 0.82) {
+      steps = [["delete", NS, e]];
+    } else if (k < 0.92) {
+      steps = [["update", OWNER, pick(owners), { name: pick(names) }]];
+    } else {
+      steps = [["create", NS, e, { p1: pick(values) }]];
+    }
+    if (chance(0.12)) steps.push(["ruleParams", NS, e, { k: pick([0, 1]) }]);
+    return steps;
+  };
+
+  // A nested link with a child row that the generated view rules cannot hide
+  // (visibleOwner / visibleEntity are pinned in the rules above), plus the
+  // deliberately empty nested link run separately at the end.
+  const adminQuery = () =>
+    chance(0.5)
+      ? chance(0.5)
+        ? { [NS]: { $: { where: { "owner.id": visibleOwner } }, owner: {} } }
+        : { [OWNER]: { $: { where: { id: visibleOwner } }, items: {} } }
+      : randomQuery(true);
 
   const script = [];
   const subs = Object.fromEntries(SESSIONS.map((s) => [s, []]));
@@ -269,27 +384,43 @@ function buildScript() {
       script.push({ kind: "checkpoint" });
     }
     if (i % 6 === 5) script.push({ kind: "checkpoint" });
+    // one impersonated admin HTTP query + transact per few rounds, rotating
+    // through as-guest / as-email / as-token
+    if (i % 5 === 4) {
+      script.push({ kind: "admin-query", session: pick(IMPERSONATIONS), q: adminQuery() });
+      script.push({ kind: "admin-transact", session: pick(IMPERSONATIONS), steps: adminTxSteps(pick(entities)) });
+    }
   }
   script.push({ kind: "checkpoint" });
   for (const s of SESSIONS) script.push({ kind: "query", session: s, q: { [NS]: { owner: {} } } });
+  // The documented legacy bug: a nested link with no viewable rows loses its
+  // key, while the same admin query answers `[]`. Run it for every
+  // impersonation and pin both sides in allowed-divergences.json.
+  for (const s of IMPERSONATIONS) {
+    script.push({ kind: "empty-nested", session: s, q: { [OWNER]: { $: { where: { id: emptyOwner } }, items: {} } } });
+  }
   // the attrs a where path reads, by path (see project below)
   const pathAttrs = {
     p1: [attrs.p1], p2: [attrs.p2], p3: [attrs.p3], tnum: [attrs.tnum], tstr: [attrs.tstr],
     owner: [attrs.owner], "owner.name": [attrs.owner, attrs.ownerName],
   };
-  return { rules, schema, seedData, script, pathAttrs };
+  const linkUsers = (users) => [
+    ["add-triple", entities[2], attrs.creator, users.U1.id],
+    ["add-triple", entities[3], attrs.creator, users.U2.id],
+  ];
+  return { rules, schema, seedData, script, pathAttrs, linkUsers };
 }
 
-async function mintRefreshToken(url, appId, email) {
+async function mintUser(url, appId, email) {
   const resp = await fetch(`${url}/admin/refresh_tokens`, {
     method: "POST",
     headers: { "content-type": "application/json", "app-id": appId, authorization: `Bearer ${adminToken}` },
     body: JSON.stringify({ email }),
   });
   const body = await resp.json();
-  const token = body?.user?.refresh_token;
-  if (!token) throw new Error(`no refresh token for ${email}: ${JSON.stringify(body).slice(0, 300)}`);
-  return token;
+  const user = body?.user;
+  if (!user?.refresh_token || !user?.id) throw new Error(`no user for ${email}: ${JSON.stringify(body).slice(0, 300)}`);
+  return { token: user.refresh_token, id: user.id };
 }
 
 // A paginated form keeps one where row per entity (legacy's page cte is a
@@ -323,6 +454,16 @@ async function runOn(serverName, plan) {
   psql(db, `INSERT INTO rules (app_id, code) VALUES ('${appId}', $rules$${JSON.stringify(plan.rules)}$rules$::jsonb) ON CONFLICT (app_id) DO UPDATE SET code = EXCLUDED.code`);
   await new Promise((r) => setTimeout(r, RULES_SETTLE_MS));
 
+  // one user per impersonated email, minted once and reused by the socket
+  // sessions, the fresh probes and the admin HTTP as-email / as-token calls
+  const users = {};
+  for (const s of ["U1", "U2"]) users[s] = await mintUser(url, appId, EMAILS[s]);
+  const impersonationHeaders = {
+    G: { "as-guest": "true" },
+    U1: { "as-email": EMAILS.U1 },
+    U2: { "as-token": users.U2.token },
+  };
+
   const conns = {};
   // at every one-shot query and checkpoint the same question is also asked
   // on a brand-new connection with the session's auth, so a result the
@@ -330,11 +471,11 @@ async function runOn(serverName, plan) {
   // moment (legacy caches datalog results per session, so the probe can't
   // be a long-lived connection either)
   const open = async (s, tag) => {
-    const c = connect(url, appId, `${serverName}:pz:${s}${tag}`);
+    const c = connect(url, appId, `${serverName}:pz:${s}${tag}`, REQUEST_HEADERS);
     await c.open;
     const init = { "client-event-id": uuid(), op: "init", "app-id": appId, versions: { "@instantdb/core": "v0.21.0" } };
     if (s === "ADM") init["__admin-token"] = adminToken;
-    if (EMAILS[s]) init["refresh-token"] = await mintRefreshToken(url, appId, EMAILS[s]);
+    if (users[s]) init["refresh-token"] = users[s].token;
     c.send(init);
     const ok = await c.waitFor((m) => m.op === "init-ok" || m.op === "error");
     if (ok.op !== "init-ok") throw new Error(`[${serverName}] init ${s}${tag} failed: ${JSON.stringify(ok).slice(0, 400)}`);
@@ -393,10 +534,50 @@ async function runOn(serverName, plan) {
   };
   const txOutcome = (r) => (r.op === "transact-ok" ? { ok: true } : errView(r));
 
+  // impersonated /admin calls: the SDK sends app-id + (when configured) the
+  // admin bearer; as-email needs it, as-token / as-guest accept it too. The
+  // origin / forwarded-for headers are the same ones on the socket upgrades,
+  // so request.* rules see the same facts on both transports.
+  const adminCall = async (s, route, body) => {
+    const res = await fetch(`${url}${route}?app_id=${appId}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "app-id": appId,
+        authorization: `Bearer ${adminToken}`,
+        ...REQUEST_HEADERS,
+        ...impersonationHeaders[s],
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = undefined;
+    }
+    return { status: res.status, body: parsed, raw: parsed === undefined ? text.slice(0, 200) : null };
+  };
+  const errorView = (r) => ({ status: r.status, type: r.body?.type ?? null, message: r.body?.message ?? null, ...(r.body === undefined ? { raw: r.raw } : {}) });
+  // The object tree is the SDK's result. Sort every array (top-level order is
+  // not part of the comparison, and entities seeded in one tx share their
+  // created-at); the explicit nested-link probes still pin their shape.
+  const adminQueryView = (r) => (r.status === 200 ? { status: 200, result: projectTree(r.body, false) } : errorView(r));
+  const adminTransactView = (r) => (r.status === 200 ? { status: 200, ok: true } : errorView(r));
+
   for (const steps of [plan.schema, plan.seedData]) {
     const ceid = send("ADM", { op: "transact", "tx-steps": steps });
     const r = await txReply("ADM", ceid);
     if (r.op !== "transact-ok") throw new Error(`[${serverName}] setup tx failed: ${JSON.stringify(r).slice(0, 500)}`);
+  }
+  // auth.ref rules read this reverse link from $users; the targets are not
+  // touched by the generated script.
+  const linkUsers = plan.linkUsers(users);
+  {
+    const ceid = send("ADM", { op: "transact", "tx-steps": linkUsers });
+    const r = await txReply("ADM", ceid);
+    if (r.op !== "transact-ok") throw new Error(`[${serverName}] user-link setup tx failed: ${JSON.stringify(r).slice(0, 500)}`);
   }
   await settle(all, CHECKPOINT_QUIET_MS);
 
@@ -469,6 +650,15 @@ async function runOn(serverName, plan) {
       }
       outcomes.push({ i, kind: op.kind, session: op.session, q: op.q, ...(r.op === "add-query-ok" ? { result: project(plan, op.q, r.result) } : r.op === "error" ? errView(r) : { op: r.op }) });
       if (r.op === "add-query-ok") fresh[i] = await probe(op.session, op.q);
+    } else if (op.kind === "admin-query") {
+      const view = adminQueryView(await adminCall(op.session, "/admin/query", { query: op.q }));
+      outcomes.push({ i, kind: op.kind, session: op.session, q: op.q, ...view });
+    } else if (op.kind === "admin-transact") {
+      const view = adminTransactView(await adminCall(op.session, "/admin/transact", { steps: op.steps }));
+      outcomes.push({ i, kind: op.kind, session: op.session, steps: op.steps, ...view });
+    } else if (op.kind === "empty-nested") {
+      const view = adminQueryView(await adminCall(op.session, "/admin/query", { query: op.q }));
+      outcomes.push({ i, kind: op.kind, session: op.session, q: op.q, ...view });
     } else if (op.kind === "subscribe") {
       fold();
       subs[op.session].set(canon(normalize(op.q)), null);
@@ -582,6 +772,18 @@ function legacyStale(l, r) {
 }
 let staleLegacy = 0;
 
+// strict entries (lib.mjs loadAllowlist): this layer owns fuzzperms: paths.
+// Only the explicit empty-nested-link probe has an entry; every other admin
+// query / transact difference must match or be fixed.
+const allowlist = loadAllowlist(path.join(here, "allowed-divergences.json"), { prefixes: DIVERGENCE_PREFIXES.fuzzperms });
+const adminPath = (op) => {
+  if (!op) return null;
+  if (op.kind === "empty-nested") return `fuzzperms:empty-nested/${op.session}`;
+  if (op.kind === "admin-query" || op.kind === "admin-transact") return `fuzzperms:${op.kind}/${op.i}/${op.session}`;
+  return null;
+};
+let allowedAdmin = 0;
+
 let mismatches = 0;
 // what differs between two projected results, small enough for a CI log:
 // the triples only one side has, and the page-info of each side
@@ -600,6 +802,19 @@ const n = Math.max(legacy.length, rust.length);
 for (let k = 0; k < n; k++) {
   const l = legacy[k], r = rust[k];
   if (canon(l) === canon(r)) continue;
+  const op = plan.script[l?.i ?? r?.i];
+  const p = adminPath(op);
+  if (p) {
+    const verdict = allowlist.check(p, l, r);
+    if (verdict.entry) {
+      allowedAdmin++;
+      console.log(`[ALLOWED] ${p}: ${verdict.differed.join(", ") || "(whole value)"} (legacy empty nested link)`);
+      continue;
+    }
+    if (verdict.rejected.length) {
+      for (const line of describeAllowVerdict(verdict)) console.error(line);
+    }
+  }
   if (legacyStale(l, r)) {
     staleLegacy++;
     console.log(`legacy served a stale result at op ${l.i} (${l.kind}); a fresh legacy session agreed with rust`);
@@ -607,7 +822,6 @@ for (let k = 0; k < n; k++) {
   }
   mismatches++;
   if (mismatches > 12) continue;
-  const op = plan.script[l?.i ?? r?.i];
   console.error(`mismatch at op ${l?.i ?? r?.i} (${op?.kind}${op?.session ? ` on ${op.session}` : ""}):`);
   if (op && op.kind !== "checkpoint") console.error(`  op:     ${JSON.stringify(op).slice(0, 1500)}`);
   if (op?.kind === "checkpoint") {
@@ -650,8 +864,11 @@ console.log(`legacy: ${txOkLegacy}/${txTotal} user transacts committed, ${viewed
 // a script whose rules deny everything compares nothing but errors; that is
 // still a valid comparison (rules must deny alike), but say so
 if (!txOkLegacy && !viewedLegacy) console.log("note: the generated rules denied every user transact and hid every result");
-if (mismatches) {
-  console.error(`FUZZ-PERMS FAILED: ${mismatches} mismatches (seed ${seed})`);
+const adminQueries = legacy.filter((o) => o.kind === "admin-query").length;
+const adminTx = legacy.filter((o) => o.kind === "admin-transact").length;
+const staleAllows = allowlist.reportStale();
+if (mismatches || staleAllows) {
+  console.error(`FUZZ-PERMS FAILED: ${mismatches} mismatches, ${staleAllows} stale allowlist entries (seed ${seed})`);
   process.exit(1);
 }
-console.log(`FUZZ-PERMS PASSED: ${plan.script.length} ops, ${legacy.filter((o) => o.kind === "checkpoint").length} checkpoints identical, ${staleLegacy} stale legacy results (seed ${seed})`);
+console.log(`FUZZ-PERMS PASSED: ${plan.script.length} ops, ${legacy.filter((o) => o.kind === "checkpoint").length} checkpoints identical, ${adminQueries} impersonated admin queries, ${adminTx} impersonated admin transacts, ${allowedAdmin} allowed empty-nested links, ${staleLegacy} stale legacy results (seed ${seed})`);
