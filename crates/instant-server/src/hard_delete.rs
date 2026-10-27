@@ -20,7 +20,10 @@ use crate::state::AppState;
 const BATCH: i64 = 1000;
 /// Arbitrary key for the sweeper's session advisory lock.
 const LOCK_KEY: i64 = 0x1a5d_e1e7_0000_0001;
-/// Server tables keyed by app without a foreign key to `apps`.
+/// Server tables keyed by app without a foreign key to `apps`. S3 objects are
+/// deliberately not cleaned directly here: deleting the app's triples fires
+/// migration 52's trigger, which queues every `$files.location-id` in
+/// `app_files_to_sweep` for storage_sweeper to delete after its grace period.
 const RUST_APP_TABLES: &[&str] = &[
     "rust_blobs",
     "rust_tx_changes",

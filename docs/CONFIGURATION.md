@@ -84,6 +84,7 @@ These only matter if you run the self-hosted Instant dashboard or use
 | `INSTANT_INDEXING_STALE_SECS` | `600` | an indexing job with no progress for this long is treated as orphaned and reclaimed |
 | `INSTANT_SIZE_COLLECT_SECS` | `60` | how often per-app sizes are rolled up and the size cap re-checked |
 | `INSTANT_HARD_DELETE_GRACE_HOURS` / `_SWEEP_SECS` | `48` / `3600` | deleted apps and attributes can be restored for this long; then the sweeper purges their data |
+| `INSTANT_STORAGE_SWEEP_GRACE_HOURS` / `_SWEEP_SECS` | `768` / `3600` | how long `$files` deletions (including a hard-deleted app's files) stay in `app_files_to_sweep` for the backup window before the storage sweeper removes their S3 objects, and how often it runs. Legacy's grace is 32 days |
 
 ## Testing only
 

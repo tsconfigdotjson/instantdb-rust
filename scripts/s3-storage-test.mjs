@@ -11,9 +11,11 @@
 //        with S3_PRESIGN=0), S3_ENDPOINT (default http://localhost:9000),
 //        S3_BUCKET (default instant-rust-bucket), AWS_REGION (us-east-1),
 //        AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (minioadmin),
-//        DATABASE_URL (rust postgres, for the stream-spool check via psql)
+//        DATABASE_URL (rust postgres, for the stream-spool check via psql).
+//        The sweeper checks require INSTANT_STORAGE_SWEEP_GRACE_HOURS=0 and a
+//        short INSTANT_STORAGE_SWEEP_SECS (CI boots the S3 nodes that way).
 import { createHash, createHmac } from "node:crypto";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 
 const [appId, adminToken] = process.argv.slice(2);
 if (!appId || !adminToken) throw new Error("usage: node s3-storage-test.mjs <app-id> <admin-token>");
@@ -32,6 +34,16 @@ const assert = (c, m) => {
   console.log("ok:", m);
 };
 const uuid = () => crypto.randomUUID();
+const psql = (sql) => execFileSync("psql", [DB, "-tA", "-v", "ON_ERROR_STOP=1", "-c", sql]).toString().trim();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitFor = async (what, pred, ms = 20000) => {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (await pred()) return;
+    await sleep(500);
+  }
+  throw new Error("timed out waiting for " + what);
+};
 
 // ---------------------------------------------------------------------------
 // independent SigV4 signer (header auth) for talking to the bucket directly
@@ -282,5 +294,40 @@ if (PROXY_NODE) {
   assert(pres.headers.get("content-type") === "text/plain" && pres.headers.get("content-disposition") === "inline", "proxy sets content-type + disposition from the $files row");
   assert(pres.headers.get("cache-control") === "public, max-age=86400, immutable", "proxy sets legacy's cache-control");
 }
+
+// 10. the storage sweeper drains the trigger-fed queue and removes the object
+// (deleting the triples directly bypasses the synchronous delete_blob, like a
+// hard-deleted app's triple purge does)
+const sweepUp = await upload(NODE1, `s3/sweep-${uuid()}.txt`, "sweeper bytes", { "content-type": "text/plain" });
+const sweepLoc = sweepUp.body.data["location-id"];
+assert((await s3("HEAD", objectKey(sweepLoc))).status === 200, "sweeper test object exists before the delete");
+psql(`DELETE FROM triples WHERE app_id = '${appId}' AND entity_id = '${sweepUp.body.data.id}'`);
+await waitFor("the storage sweeper to delete the trigger-fed object", async () => {
+  const row = psql(`SELECT count(*) FROM app_files_to_sweep WHERE app_id = '${appId}' AND location_id = '${sweepLoc}'`);
+  return row === "0" && (await s3("HEAD", objectKey(sweepLoc))).status === 404;
+});
+assert(true, "the sweeper deleted a trigger-fed object and removed its row");
+
+// 11. a row left claimed by a process that stopped updating it is reclaimed
+// (legacy's 5-minute process-id reclaim), still respecting the 32-day grace
+const staleUp = await upload(NODE1, `s3/stale-${uuid()}.txt`, "stale claim", { "content-type": "text/plain" });
+const staleLoc = staleUp.body.data["location-id"];
+// one transaction: the triple delete queues the key, then replace that fresh
+// row with an old claim from a dead process before the sweeper can see it
+psql(
+  `BEGIN;
+   DELETE FROM triples WHERE app_id = '${appId}' AND entity_id = '${staleUp.body.data.id}';
+   INSERT INTO app_files_to_sweep (app_id, location_id, created_at, process_id, updated_at)
+   VALUES ('${appId}', '${staleLoc}', now() - interval '33 days', 'dead-node', now() - interval '10 minutes')
+   ON CONFLICT (app_id, location_id) DO UPDATE
+     SET created_at = EXCLUDED.created_at, process_id = EXCLUDED.process_id, updated_at = EXCLUDED.updated_at;
+   COMMIT;`,
+);
+assert((await s3("HEAD", objectKey(staleLoc))).status === 200, "stale-claim object exists before the sweep");
+await waitFor("the storage sweeper to reclaim a stale claim", async () => {
+  const row = psql(`SELECT count(*) FROM app_files_to_sweep WHERE app_id = '${appId}' AND location_id = '${staleLoc}'`);
+  return row === "0" && (await s3("HEAD", objectKey(staleLoc))).status === 404;
+});
+assert(true, "the sweeper reclaimed a stale process claim and removed the object");
 
 console.log("S3 STORAGE TEST PASSED");

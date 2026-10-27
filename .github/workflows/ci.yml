@@ -204,6 +204,12 @@ jobs:
           AWS_REGION: us-east-1
           AWS_ACCESS_KEY_ID: minioadmin
           AWS_SECRET_ACCESS_KEY: minioadmin
+          # lets the e2e prove the sweeper paths without waiting out the
+          # production 32-day backup grace / 48-hour app deletion grace
+          INSTANT_STORAGE_SWEEP_SECS: 1
+          INSTANT_STORAGE_SWEEP_GRACE_HOURS: 0
+          INSTANT_HARD_DELETE_GRACE_HOURS: 0
+          INSTANT_HARD_DELETE_SWEEP_SECS: 1
         run: |
           PORT=8898 BASE_URL=http://localhost:8898 ./target/debug/instant-server > /tmp/server-s3-1.log 2>&1 &
           PORT=8899 BASE_URL=http://localhost:8899 ./target/debug/instant-server > /tmp/server-s3-2.log 2>&1 &
@@ -226,6 +232,14 @@ jobs:
           S3_TOKEN=$(grep '^admin_token=' /tmp/s3-app.txt | cut -d= -f2)
           node scripts/s3-storage-test.mjs "$S3_APP" "$S3_TOKEN"
           node scripts/multinode-storage-test.mjs "$S3_APP" "$S3_TOKEN"
+      - name: "e2e: s3 hard delete cleans the bucket"
+        env:
+          SERVER_URL: http://localhost:8898
+        run: |
+          ./scripts/create-app.sh "s3 hard delete app" | tee /tmp/s3-hard-delete-app.txt
+          node scripts/s3-hard-delete-test.mjs \
+            "$(grep '^app_id=' /tmp/s3-hard-delete-app.txt | cut -d= -f2)" \
+            "$(grep '^admin_token=' /tmp/s3-hard-delete-app.txt | cut -d= -f2)"
 
       - name: Server logs
         if: failure()

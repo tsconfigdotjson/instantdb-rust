@@ -90,6 +90,11 @@ pub struct Config {
     /// `INSTANT_HARD_DELETE_SWEEP_SECS`.
     pub hard_delete_grace_hours: u64,
     pub hard_delete_sweep_secs: u64,
+    /// How long a `$files` deletion waits before `app_files_to_sweep` releases
+    /// it to the storage sweeper (`INSTANT_STORAGE_SWEEP_GRACE_HOURS`, legacy
+    /// 32 days) and how often the sweeper runs (`INSTANT_STORAGE_SWEEP_SECS`).
+    pub storage_sweep_grace_hours: u64,
+    pub storage_sweep_secs: u64,
     /// Lets OIDC discovery / token / userinfo / JWKS fetches reach private
     /// addresses (`INSTANT_OAUTH_ALLOW_PRIVATE`): test providers on
     /// localhost only, never in production.
@@ -167,6 +172,8 @@ impl Config {
             ),
             hard_delete_grace_hours: env_num("INSTANT_HARD_DELETE_GRACE_HOURS", 48u64),
             hard_delete_sweep_secs: env_num("INSTANT_HARD_DELETE_SWEEP_SECS", 3600u64).max(1),
+            storage_sweep_grace_hours: env_num("INSTANT_STORAGE_SWEEP_GRACE_HOURS", 768u64),
+            storage_sweep_secs: env_num("INSTANT_STORAGE_SWEEP_SECS", 3600u64).max(1),
             oauth_allow_private: matches!(
                 std::env::var("INSTANT_OAUTH_ALLOW_PRIVATE").as_deref(),
                 Ok("1") | Ok("true") | Ok("on")
