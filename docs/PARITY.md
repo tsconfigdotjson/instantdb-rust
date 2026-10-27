@@ -108,7 +108,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 
 | Feature | Status | Notes |
 |---|---|---|
-| magic codes (send/verify, expiry, one-time) | ✅ | delivery is a provider seam (`email.rs`): `EMAIL_PROVIDER=log` (default) prints the code to the server log, `EMAIL_PROVIDER=cloudflare` sends through the Cloudflare Email Service API; legacy uses Postmark, so a Postmark provider is one env-selected arm away |
+| magic codes (send/verify, expiry, one-time) | ✅ | delivery is a provider seam (`email.rs`): `EMAIL_PROVIDER=log` (default) prints the code to the server log, `cloudflare` sends through the Cloudflare Email Service API, `postmark` uses the Postmark Messages API with legacy's From/To/ReplyTo/Subject/HTMLBody shape, and `smtp` sends through a generic relay (STARTTLS, implicit TLS, or plaintext). Every provider honors per-app templates and a custom sender only when its verification row is verified |
 | guest sign-in + guest→user linking | ✅ | |
 | refresh tokens (sha256-hashed, no expiry) | ✅ | |
 | signout | ✅ | |
@@ -266,7 +266,12 @@ self-hosted counterpart.
 |---|---|---|---|
 | `app_files_to_sweep` on the `s3` backend | `storage/sweeper.clj` drains the table migration 52's trigger fills on every `$files` delete and removes the objects | `storage.rs` deletes objects synchronously; the trigger still fills the table and nothing reads it | nothing to do: objects are removed when their file is deleted; the table just accumulates rows |
 | Apple and GitHub sign-in | Apple client-secret JWT + issuer quirk (auth/oauth.clj:141-147, :215), GitHub non-OIDC client (:31-113), Instant's shared credentials | generic OIDC discovery only; the dashboard route accepts a `github` provider that the runtime can't sign anyone in with | use an OIDC provider (Google, or any provider with a discovery document) |
-| email delivery provider | Postmark (with Sendgrid behind a flag) and per-app verified senders | `EMAIL_PROVIDER=log` or `cloudflare`; custom senders only via a hand-set `verified` row | use Cloudflare Email Service, or mark a custom sender's row `verified` directly |
+
+Postmark's per-app sender-verification flow (the hosted service's DNS/Postmark
+verification routes under `/dash/apps/:id/sender-verification*`) remains a
+hosted-only feature and is out of scope (`scripts/differential/out-of-scope.json`);
+a self-hosted operator can still use a custom sender by marking its
+`app_email_verifications` row verified, exactly as before.
 
 ### Deliberate divergences
 

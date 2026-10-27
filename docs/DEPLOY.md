@@ -131,6 +131,11 @@ Caddy issues certificates from its internal CA for `*.localhost`.
    `EMAIL_PROVIDER=cloudflare`, `CLOUDFLARE_ACCOUNT_ID`,
    `CLOUDFLARE_API_TOKEN` and `INSTANT_APP_EMAIL_SENDER_EMAIL` (an address on
    that domain; the default, `verify@auth-pm.instantdb.com`, won't send).
+   Alternatively use `EMAIL_PROVIDER=postmark` with `POSTMARK_SERVER_TOKEN`
+   (or legacy's `POSTMARK_TOKEN`), or `EMAIL_PROVIDER=smtp` with `SMTP_HOST`
+   plus `SMTP_PORT`, `SMTP_USERNAME`/`SMTP_PASSWORD` and
+   `SMTP_TLS=starttls|implicit|none` as needed (see
+   [CONFIGURATION.md](CONFIGURATION.md)).
 
 ### Building images in GitHub Actions
 
