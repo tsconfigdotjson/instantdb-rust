@@ -141,9 +141,20 @@ everything and checks coverage itself, as before.
     equality, `$in` (with `null`), `$ne` / `$not`, `$isNull`; on booleans the
     same plus refused strings and `$like`), dotted link paths of one to
     three hops through every link kind, `or` / `and`;
-  - first / last / after / before cursor walks (also by date, boolean and a
-    unique label, with the inclusive flags), limit / offset / order, fields,
-    nested links, `$$ruleParams`.
+  - generated page walks over `limit`, `offset`, `first` / `after` and
+    `last` / `before`: each page's real `pageInfo` cursor is fed into the
+    next request until that page says there is no next (or previous) page.
+    Walks order by `serverCreatedAt` and by every indexed typed attr in both
+    directions, including an extra typed attr with duplicate values, explicit
+    nulls and missing triples so ties and null/missing placement are paged.
+    The paged form also carries generated where clauses and nested links.
+    Every page's full result and its whole page-info
+    (`start-cursor`/`end-cursor`/`has-next-page?`/`has-previous-page?`) are
+    compared; only the server-local timestamp in a cursor and server-chosen
+    ids are normalized, while the order value itself stays raw (it can be an
+    epoch-ms date). The walks also probe `afterInclusive` / `beforeInclusive`
+    from a real boundary cursor, and the random queries use limit / offset /
+    first / last / order / fields / nested links and `$$ruleParams`.
   The eight `fuzz` entities start out typed and linked through all three
   links. An entity a lookup creates on a non-`id` attr gets an id each server picks
   (`<uuid>` in the comparison), so those creations only happen in the
@@ -151,7 +162,12 @@ everything and checks coverage itself, as before.
   Besides most transacts committing and the final read holding data, the
   success floor asks each new grammar feature (date, bool, tags, profile,
   lookup, hops) used often enough for at least one committed transact and
-  one query answered with data (`grammar floor:` in the log).
+  one query answered with data (`grammar floor:` in the log). Page-walk
+  features carry their own floor: once a seed makes enough walks, every
+  modifier (`limit` / `offset` / `first` / `last`), cursor direction
+  (`after` / `before`), inclusive flag, where clause, nested form, order kind
+  (`serverCreatedAt`, typed, ties, nulls) and direction must have been
+  requested at least twice and answered with data.
   **Named exceptions** (`EXCEPTIONS` in fuzz.mjs) each match one op shape
   and pin both servers' replies whole; hits are logged as `exception
   <name>: N`. `date-comparison-with-boolean`: a boolean bound on a `date`
