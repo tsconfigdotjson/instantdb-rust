@@ -14,8 +14,11 @@
 // directions; where ops = / $in / in / $ne / $not / $isNull / $gt / $gte /
 // $lt / $lte / $like / $ilike / $entityIdStartsWith, or / and, dotted link
 // paths of one to three hops, limit / offset / first / last / order / after /
-// before (cursor walks, also by date and boolean), fields, nested links,
-// $$ruleParams, and admin-only options that must be rejected alike.
+// before (generated page walks feed each page's real pageInfo cursor into the
+// next request, compare every page's full result plus page-info, and cover
+// serverCreatedAt and typed orders, ties, nulls and missing order values,
+// where clauses and nested links), fields, nested links, $$ruleParams, and
+// admin-only options that must be rejected alike.
 //
 // Usage: node fuzz.mjs <app-id-legacy> <app-id-rust> <admin-token> [seed] [rounds]
 // Env: LEGACY_URL, RUST_URL (defaults as in replay.mjs)
@@ -91,6 +94,10 @@ function buildScript() {
     typedStr: mk(),
     typedDate: mk(),
     typedBool: mk(),
+    // pagination-only typed indexed attr: duplicate values, explicit nulls
+    // and missing triples, so ordered pages exercise ties and null/missing
+    // placement without the random tx churn touching it
+    typedPage: mk(),
     // link fuzz.owner -> owner (reverse owner.items), cardinality one
     owner: mk(),
     ownerId: mk(),
@@ -123,6 +130,7 @@ function buildScript() {
     blob(attrs.typedStr, NS, "tstr", { "index?": true, "checked-data-type": "string" }),
     blob(attrs.typedDate, NS, "tdate", { "index?": true, "checked-data-type": "date" }),
     blob(attrs.typedBool, NS, "tbool", { "index?": true, "checked-data-type": "boolean" }),
+    blob(attrs.typedPage, NS, "tpage", { "index?": true, "checked-data-type": "number" }),
     blob(attrs.ownerId, OWNER, "id", { "unique?": true, "index?": true }),
     blob(attrs.ownerName, OWNER, "name", { "index?": true, "checked-data-type": "string" }),
     blob(attrs.tagId, TAG, "id", { "unique?": true, "index?": true }),
@@ -184,13 +192,43 @@ function buildScript() {
       ["add-triple", e, attrs.typedStr, strs[i % strs.length]],
       ["add-triple", e, attrs.typedDate, dates[(i * 3) % dates.length]],
       ["add-triple", e, attrs.typedBool, i % 2 === 0],
+      // tpage: two rows with 1, two with 0, two explicit nulls, two with no
+      // triple at all (i % 4 === 3)
+      ...(i % 4 === 0 ? [["add-triple", e, attrs.typedPage, 1]] : []),
+      ...(i % 4 === 1 ? [["add-triple", e, attrs.typedPage, null]] : []),
+      ...(i % 4 === 2 ? [["add-triple", e, attrs.typedPage, 0]] : []),
       ["add-triple", e, attrs.owner, owners[i % owners.length]],
       ["add-triple", e, attrs.tags, tags[i % tags.length]],
       ["add-triple", e, attrs.tags, tags[(i + 1) % tags.length]],
       ...(i < 3 ? [["add-triple", e, attrs.profile, profiles[i]]] : []),
     ]),
   });
-  const orderKeys = ["serverCreatedAt", "tnum", "tstr", "tdate", "tbool"];
+  const orderKeys = ["serverCreatedAt", "tnum", "tstr", "tdate", "tbool", "tpage"];
+  // order keys for generated page walks: the first walks rotate through
+  // serverCreatedAt and each typed kind (tpage carries ties, nulls and
+  // missing rows), later walks randomize.
+  const pageKeys = ["serverCreatedAt", "tpage", "tnum", "tstr", "tdate", "tbool"];
+  const pageWhere = () =>
+    pick([
+      () => ({ tnum: { $gte: pick([-100, -3, 0, 1]) } }),
+      () => ({ tstr: { $in: [pick(strs), pick(strs), ...strs.slice(0, 2)] } }),
+      () => ({ tdate: { $gte: pick([0, -86400000, 946684800000, 1704067200000]) } }),
+      () => ({ tbool: pick([true, false]) }),
+      () => ({ "owner.name": pick(names) }),
+      () => ({ tdate: { $lt: pick([946684800000, 1704067200000, 1718445600000]) } }),
+    ])();
+  // nested links on a paged form: the page's full result includes them.
+  const pageNested = (ns) =>
+    ns === TAG
+      ? pick([{ fuzzes: {} }, { fuzzes: { $: { where: { tbool: pick([true, false]) } } } }])
+      : pick([
+          { owner: {} },
+          { tags: {} },
+          { profile: {} },
+          { owner: {}, tags: {} },
+          { owner: {}, tags: {}, profile: {} },
+          { owner: { $: { fields: ["name"] } }, tags: {} },
+        ]);
   // where paths through the links: one hop, and two or three hops through
   // every link kind in both directions
   const linkPaths = ["owner.name", "owner.id", "tags.label", "tags.id", "profile.handle", "profile.id"];
@@ -242,6 +280,7 @@ function buildScript() {
       () => ["delete-entity", [attrs.tagLabel, pick(tagLabels)], TAG],
     ])();
   let p2Deleted = false;
+  let pageWalk = 0;
   for (let i = 0; i < rounds; i++) {
     const r = rand();
     if (r < 0.6) {
@@ -350,13 +389,31 @@ function buildScript() {
       } else {
         script.push({ kind: "tx", steps: [["update-attr", { id: attrs.labels.num, "index?": chance(0.5), "checked-data-type": "number" }]] });
       }
-    } else if (r < 0.7) {
-      // cursor walk: page through a namespace by a typed order (tags by
-      // their unique label)
-      const dir = pick(["asc", "desc"]);
-      const [ns, key] = chance(0.85) ? [NS, pick(orderKeys)] : [TAG, "label"];
+    } else if (r < 0.74) {
+      // Page walk: ask for one page, feed its real pageInfo cursor into the
+      // next request, and repeat while that page says there is another one.
+      // The first walks rotate through serverCreatedAt / every typed order,
+      // first / last / limit, both directions, offset, where, nested links
+      // and the inclusive flag so the floor reaches all of them; later walks
+      // randomize. A last walk pages backwards with before; first and limit
+      // walks page forwards with after.
+      const pageIx = pageWalk++;
+      const fixedKeys = ["serverCreatedAt", "tpage", "tnum", "tstr", "tdate", "tbool", "serverCreatedAt", "tpage"];
+      let ns = NS;
+      let key = pageIx < fixedKeys.length ? fixedKeys[pageIx] : pick(pageKeys);
+      if (pageIx >= fixedKeys.length && chance(0.15)) {
+        ns = TAG;
+        key = "label";
+      }
+      const modifier = ["first", "last", "limit"][pageIx % 3];
+      const backwards = modifier === "last";
+      const dir = pageIx % 2 === 0 ? "asc" : "desc";
       const size = 1 + Math.floor(rand() * 3);
-      script.push({ kind: "paginate", ns, key, dir, size, backwards: chance(0.3), inclusive: chance(0.3) });
+      const offset = pageIx % 3 === 2 ? 1 + Math.floor(rand() * 2) : 0;
+      const where = pageIx % 2 === 0 || chance(0.4) ? pageWhere() : null;
+      const nested = pageIx % 3 !== 0 || chance(0.5) ? pageNested(ns) : null;
+      const inclusive = pageIx % 4 === 3 || chance(0.25);
+      script.push({ kind: "paginate", ns, key, dir, size, modifier, backwards, offset, where, nested, inclusive });
     } else {
       // random query over the where grammar, links, fields, pagination
       const opts = {};
@@ -408,12 +465,22 @@ function buildScript() {
       if ((opts.limit || opts.first || opts.last) && rand() < 0.75) {
         opts.order = { [pick(orderKeys)]: pick(["asc", "desc"]) };
       }
-      if (opts.limit && rand() < 0.3) opts.offset = Math.floor(rand() * 3);
+      if ((opts.limit || opts.first || opts.last) && rand() < 0.3) opts.offset = Math.floor(rand() * 3);
       // the inclusive flags are validated as booleans whether or not a cursor
       // is given; null is "absent"
       if ((opts.first || opts.last) && chance(0.15)) opts[opts.first ? "afterInclusive" : "beforeInclusive"] = pick([true, false, null, "yes", 1]);
       if (chance(0.12)) opts.fields = pick([["p1"], ["tnum", "tstr"], ["id"], ["p3", "owner"], ["tdate", "tbool"], ["tdate", "tags", "profile"]]);
       if (chance(0.04)) opts.aggregate = "count"; // admin-only: rejected alike
+      // A paginated where path through a has-many link keeps one where row per
+      // entity on legacy; nesting the same link then reveals the plan-chosen
+      // row. That known artifact is handled by pagedWhereOnly when the query
+      // does not nest the link; do not generate the ambiguous combination in
+      // the random (non-page-walk) queries. Page walks still combine where
+      // clauses and nested links, using scalar where paths.
+      const pageOpts = opts.limit || opts.first || opts.last || opts.offset;
+      if (pageOpts && opts.where && /(tags|items|fuzzes)/.test(JSON.stringify(opts.where))) {
+        delete opts.where;
+      }
       const form = Object.keys(opts).length ? { $: opts } : {};
       if (chance(0.25)) form.owner = chance(0.5) ? {} : { $: { fields: ["name"] } };
       if (chance(0.2)) form.tags = pick([{}, { $: { where: { label: { $in: [pick(tagLabels), pick(tagLabels)] } } } }, { fuzzes: {} }]);
@@ -471,6 +538,7 @@ function buildScript() {
       tstr: [attrs.typedStr],
       tdate: [attrs.typedDate],
       tbool: [attrs.typedBool],
+      tpage: [attrs.typedPage],
       owner: [attrs.owner, OWNER],
       tags: [attrs.tags, TAG, false, true],
       profile: [attrs.profile, PROFILE],
@@ -550,41 +618,78 @@ async function runOn(serverName, script) {
       const r = await query(op.q);
       queryResults.push({ i, q: op.q, ...(r.error ? { error: r.error } : { result: r.result }) });
     } else if (op.kind === "paginate") {
-      // walk every page with each server's own cursors; page boundaries may
-      // differ on ties, the union and the page count may not
-      const { ns, key, dir, size, backwards, inclusive } = op;
-      const seen = new Map();
-      let cursor = null;
-      let pages = 0;
-      let error = null;
-      let firstCursor = null;
-      for (;;) {
-        const $ = backwards ? { last: size, order: { [key]: dir } } : { first: size, order: { [key]: dir } };
+      // Walk the pages with each server's own pageInfo cursors, and compare
+      // every page's full result plus its page-info. Cursors are sent back
+      // raw (the fourth slot is the server-local triple timestamp) but
+      // compared normalized.
+      const { ns, key, dir, size, modifier, backwards, offset, where, nested, inclusive } = op;
+      const formFor = (cursor, first) => {
+        const $ = { order: { [key]: dir } };
+        if (modifier === "last") $.last = size;
+        else if (modifier === "first") $.first = size;
+        else $.limit = size;
+        if (first && offset > 0) $.offset = offset;
         if (cursor) $[backwards ? "before" : "after"] = cursor;
-        const r = await query({ [ns]: { $ } });
+        if (where) $.where = where;
+        return { [ns]: { $, ...(nested ?? {}) } };
+      };
+      const featuresFor = (cursor, first, extra = []) => {
+        const f = [`pagination.${modifier}`, ...pageFeatures(key, dir), ...extra];
+        if (first && offset > 0) f.push("pagination.offset");
+        if (cursor) f.push(`pagination.${backwards ? "before" : "after"}`);
+        if (where) f.push("pagination.where");
+        if (nested && Object.keys(nested).length) f.push("pagination.nested");
+        return f;
+      };
+      const pages = [];
+      let cursor = null;
+      let firstCursor = null;
+      let error = null;
+      for (let pageNo = 0; pageNo < 30; pageNo++) {
+        const r = await query(formFor(cursor, pageNo === 0));
+        const features = featuresFor(cursor, pageNo === 0);
         if (r.error) {
+          pages.push({ features, error: r.error });
           error = r.error;
           break;
         }
-        pages++;
-        for (const t of r.result.triples) seen.set(canon(t), t);
-        const info = r.raw?.[0]?.data?.["page-info"]?.[ns] ?? r.raw?.[0]?.data?.["page-info"] ?? {};
-        const more = backwards ? info["has-previous-page?"] : info["has-next-page?"];
-        const next = backwards ? info["start-cursor"] : info["end-cursor"];
-        if (pages === 1) firstCursor = next ?? null;
-        if (!more || !next || pages > 50) break;
+        const rawInfo = pageInfoOf(r.raw, ns);
+        if (rawInfo) features.push("pagination.pageInfo");
+        pages.push({
+          features,
+          result: { triples: r.result.triples, pageInfo: normalizePageInfo(rawInfo, key) },
+        });
+        if (pageNo === 0) firstCursor = rawInfo?.[backwards ? "start-cursor" : "end-cursor"] ?? null;
+        // Legacy's string-order page flags are the documented result
+        // exception below, so a string-order walk stops after its first page
+        // (its rows and page-info are still compared; the other orders are
+        // the ones that follow real cursors).
+        if (isStringOrderPage(op)) break;
+        const more = backwards ? rawInfo?.["has-previous-page?"] : rawInfo?.["has-next-page?"];
+        const next = backwards ? rawInfo?.["start-cursor"] : rawInfo?.["end-cursor"];
+        if (!more || !next) break;
         cursor = next;
       }
-      // an inclusive page from the first page's boundary cursor: the boundary
-      // row comes back on both servers (each with its own cursor); compared
-      // as the set of entity ids since cursor values differ by server
+      // An inclusive page from the first page's boundary cursor: the
+      // boundary row must come back with its page-info on both servers.
       let inclusivePage;
-      if (inclusive && !error && firstCursor) {
-        const $ = backwards ? { last: size, order: { [key]: dir }, before: firstCursor, beforeInclusive: true } : { first: size, order: { [key]: dir }, after: firstCursor, afterInclusive: true };
-        const r = await query({ [ns]: { $ } });
-        inclusivePage = r.error ? { error: r.error } : { entities: [...new Set(r.result.triples.map((t) => t[0]))].sort(), boundaryIncluded: r.result.triples.some((t) => t[0] === firstCursor[0]) };
+      if (inclusive && firstCursor) {
+        const $ = { order: { [key]: dir } };
+        if (modifier === "last") $.last = size;
+        else if (modifier === "first") $.first = size;
+        else $.limit = size;
+        $[backwards ? "before" : "after"] = firstCursor;
+        $[backwards ? "beforeInclusive" : "afterInclusive"] = true;
+        if (where) $.where = where;
+        const r = await query({ [ns]: { $, ...(nested ?? {}) } });
+        const features = featuresFor(firstCursor, false, ["pagination.inclusive"]);
+        const rawInfo = r.error ? null : pageInfoOf(r.raw, ns);
+        if (rawInfo) features.push("pagination.pageInfo");
+        inclusivePage = r.error
+          ? { features, error: r.error }
+          : { features, result: { triples: r.result.triples, pageInfo: normalizePageInfo(rawInfo, key) } };
       }
-      queryResults.push({ i, paginate: op, ...(error ? { error } : { pages, union: [...seen.values()].sort((x, y) => (canon(x) < canon(y) ? -1 : 1)), inclusivePage }) });
+      queryResults.push({ i, paginate: op, pages, ...(inclusivePage ? { inclusivePage } : {}), ...(error ? { error } : {}) });
     }
   }
   if (watermarkLags) {
@@ -624,6 +729,53 @@ function projectTriples(result) {
   const deduped = [...new Map(triples.map((t) => [canon(t), t])).values()];
   deduped.sort((x, y) => (canon(x) < canon(y) ? -1 : 1));
   return { triples: deduped, aggregate: normalize(result?.[0]?.data?.aggregate ?? null) };
+}
+
+// page-info is keyed by the top-level form key.
+function pageInfoOf(result, ns) {
+  return result?.[0]?.data?.["page-info"]?.[ns] ?? null;
+}
+
+// A page cursor is [e, a, v, t]. The entity/attr can name an entity a
+// lookup created with a server-chosen id, and t is the server-local triple
+// timestamp; both normalize. The order value v stays raw (it can be an
+// epoch-ms date), except under serverCreatedAt where it is the entity id.
+function normalizePageInfo(info, orderKey) {
+  if (!info) return null;
+  const out = {};
+  for (const [k, v] of Object.entries(info)) {
+    if (k === "start-cursor" || k === "end-cursor") {
+      out[k] = Array.isArray(v)
+        ? v.map((part, idx) => {
+            if (idx === 0 || idx === 1 || idx === 3) return normalize(part);
+            if (idx === 2 && orderKey === "serverCreatedAt") return normalize(part);
+            return part;
+          })
+        : normalize(v);
+    } else {
+      out[k] = normalize(v);
+    }
+  }
+  return out;
+}
+
+// String-order page walks stop after one page: legacy orders by the raw
+// jsonb value but its cursor comparisons treat a null/SQL-null differently,
+// which is the result exception below.
+function isStringOrderPage(op) {
+  return op?.kind === "paginate" && (op.key === "tstr" || (op.ns === "tag" && op.key === "label"));
+}
+
+// Per-feature success floor labels for the page walks.
+function pageFeatures(key, dir) {
+  const f = [`pagination.order.${dir}`];
+  if (key === "serverCreatedAt") {
+    f.push("pagination.order.serverCreatedAt");
+  } else {
+    f.push("pagination.order.typed");
+    if (key === "tpage") f.push("pagination.order.nulls", "pagination.order.ties");
+  }
+  return f;
 }
 
 const script = buildScript();
@@ -753,11 +905,92 @@ const allowedByException = (l, r) => {
   return ex;
 };
 
+// Result exceptions: a documented legacy defect this server does not copy.
+// Unlike EXCEPTIONS (whole error replies), these allow only named sub-paths
+// of one op shape, and each differing leaf must be one of the pinned value
+// pairs. Everything else on the page stays compared.
+const RESULT_EXCEPTIONS = [
+  {
+    // For a string order legacy orders by the raw jsonb `value` without a
+    // NULLS clause, while its cursor comparisons (add-cursor-comparisons,
+    // datalog.clj:2362-2431) treat a null cursor like SQL NULL. Its
+    // has-next/has-previous flags then disagree with the page it just
+    // returned; the rows and cursors match this server. Keep the logical
+    // flags and pin the legacy/rust boolean pair.
+    name: "string-order-page-info-flags",
+    matches: isStringOrderPage,
+    pairs: [
+      [true, false],
+      [false, true],
+    ],
+    allows: (segs) => {
+      const flag = segs.at(-1);
+      if (flag !== "has-next-page?" && flag !== "has-previous-page?") return false;
+      if (segs[0] === "inclusivePage") {
+        return segs.length === 4 && segs[1] === "result" && segs[2] === "pageInfo";
+      }
+      return (
+        segs.length === 5 &&
+        segs[0] === "pages" &&
+        /^\d+$/.test(segs[1]) &&
+        segs[2] === "result" &&
+        segs[3] === "pageInfo"
+      );
+    },
+  },
+];
+
+function diffLeaves(a, b, segs, out) {
+  if (canon(a) === canon(b)) return;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) {
+      out.push({ segs: [...segs, "length"], legacy: a.length, rust: b.length });
+      return;
+    }
+    for (let i = 0; i < a.length; i++) diffLeaves(a[i], b[i], [...segs, String(i)], out);
+    return;
+  }
+  if (a !== null && b !== null && typeof a === "object" && typeof b === "object") {
+    for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      diffLeaves(a[k], b[k], [...segs, k], out);
+    }
+    return;
+  }
+  out.push({ segs, legacy: a, rust: b });
+}
+
+function setAtPath(v, segs, value) {
+  let cur = v;
+  for (let i = 0; i < segs.length - 1; i++) cur = cur[segs[i]];
+  cur[segs.at(-1)] = value;
+}
+
+const allowedResultException = (l, r) => {
+  const op = script[l?.i];
+  if (l?.i !== r?.i || !op) return null;
+  const ex = RESULT_EXCEPTIONS.find((x) => x.matches(op));
+  if (!ex) return null;
+  const leaves = [];
+  diffLeaves(l, r, [], leaves);
+  if (!leaves.length) return null;
+  if (!leaves.every((x) => ex.allows(x.segs) && ex.pairs.some(([a, b]) => x.legacy === a && x.rust === b))) {
+    return null;
+  }
+  for (const x of leaves) {
+    setAtPath(l, x.segs, null);
+    setAtPath(r, x.segs, null);
+  }
+  exceptionHits[ex.name] = (exceptionHits[ex.name] ?? 0) + leaves.length;
+  return ex;
+};
+
 let mismatches = 0;
 const n = Math.max(legacy.queryResults.length, rust.queryResults.length);
 for (let i = 0; i < n; i++) {
   const l = legacy.queryResults[i], r = rust.queryResults[i];
-  if (canon(comparable(l)) !== canon(comparable(r)) && !allowedByException(l, r)) {
+  if (canon(comparable(l)) !== canon(comparable(r))) {
+    if (allowedResultException(l, r)) continue;
+    if (allowedByException(l, r)) continue;
     const msgs = l?.error || r?.error ? `\n  messages: legacy ${JSON.stringify(l?.error?.message)} / rust ${JSON.stringify(r?.error?.message)}` : "";
     console.error(`query mismatch at slot ${i}:\n  legacy: ${JSON.stringify(l)}\n  rust:   ${JSON.stringify(r)}${msgs}`);
     mismatches++;
@@ -799,19 +1032,62 @@ for (const [f, k] of Object.entries(legacy.txOkBy)) floor[f].txOkLegacy = k;
 for (const [f, k] of Object.entries(rust.txOkBy)) floor[f].txOkRust = k;
 for (const entry of legacy.queryResults) {
   const op = script[entry.i];
-  if (op.kind !== "query" && op.kind !== "paginate") continue;
-  const data = entry.result ? entry.result.triples.length > 0 : (entry.union?.length ?? 0) > 0;
+  if (op.kind === "query") {
+    const data = entry.result ? entry.result.triples.length > 0 : false;
+    for (const f of queryFeatures(op)) {
+      tally(f, "queries");
+      if (data) tally(f, "withData");
+    }
+    continue;
+  }
+  if (op.kind !== "paginate") continue;
+  const pages = [...(entry.pages ?? []), ...(entry.inclusivePage ? [entry.inclusivePage] : [])];
+  const anyData = pages.some((p) => (p.result?.triples?.length ?? 0) > 0);
+  // keep the old per-namespace/kind feature floor for page walks too
   for (const f of queryFeatures(op)) {
     tally(f, "queries");
-    if (data) tally(f, "withData");
+    if (anyData) tally(f, "withData");
+  }
+  // Per page-request features: modifier, cursor direction, offset, where,
+  // nested links, inclusive flag and the order kinds/directions. A feature
+  // only counts when a request carrying it actually came back with data.
+  for (const p of pages) {
+    const data = (p.result?.triples?.length ?? 0) > 0;
+    for (const f of p.features ?? []) {
+      tally(f, "queries");
+      if (data) tally(f, "withData");
+    }
   }
 }
 for (const [f, c] of Object.entries(floor)) {
-  const txFloor = c.tx < 5 || (c.txOkLegacy > 0 && c.txOkRust > 0);
-  const queryFloor = c.queries < 10 || c.withData > 0;
+  // Pagination features are query-only, and a couple of requests with data
+  // already proves the path was reached; the older grammar features keep
+  // their transact + 10-query floors.
+  const pageFeature = f.startsWith("pagination.");
+  const txFloor = pageFeature || c.tx < 5 || (c.txOkLegacy > 0 && c.txOkRust > 0);
+  const queryFloor = c.queries < (pageFeature ? 2 : 10) || c.withData > 0;
   if (!txFloor || !queryFloor) {
     console.error(`FUZZ FLOOR NOT MET for ${f}: ${JSON.stringify(c)}`);
     floorOk = false;
+  }
+}
+// When a seed makes enough page walks, every pagination path must have
+// actually been requested with data, not merely generated.
+const pageWalks = script.filter((op) => op.kind === "paginate").length;
+if (pageWalks >= 8) {
+  const expected = [
+    "pagination.first", "pagination.last", "pagination.limit",
+    "pagination.after", "pagination.before",
+    "pagination.offset", "pagination.where", "pagination.nested", "pagination.inclusive", "pagination.pageInfo",
+    "pagination.order.serverCreatedAt", "pagination.order.typed",
+    "pagination.order.asc", "pagination.order.desc",
+    "pagination.order.nulls", "pagination.order.ties",
+  ];
+  for (const f of expected) {
+    if (!floor[f] || floor[f].queries < 2 || floor[f].withData === 0) {
+      console.error(`FUZZ FLOOR NOT MET for ${f}: ${JSON.stringify(floor[f] ?? null)}`);
+      floorOk = false;
+    }
   }
 }
 console.log(`grammar floor: ${JSON.stringify(floor)}`);
