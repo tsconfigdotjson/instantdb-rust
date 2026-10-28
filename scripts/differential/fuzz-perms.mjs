@@ -66,10 +66,17 @@ const SERVERS = {
 
 // legacy evicts its rule cache off the WAL feed
 const RULES_SETTLE_MS = 1500;
-// a checkpoint waits for the frame stream to go quiet this long
-const CHECKPOINT_QUIET_MS = 900;
+// a checkpoint waits for the frame stream to go quiet this long. Legacy's
+// invalidator and this server's refresh worker both do real work after the
+// last ack, and four seeds share one server in CI; a shorter window records
+// a subscription before its pending refresh lands.
+const CHECKPOINT_QUIET_MS = 3000;
 // how long a legacy probe that disagreed with everything waits to ask again
 const LEGACY_RESETTLE_MS = 2000;
+// a checkpoint whose fresh probes already see newer data than the session
+// waits once more and snapshots again, so a refresh that lands during the
+// probes is folded into the compared state instead of failing the run
+const CHECKPOINT_RESETTLE_MS = 3000;
 const SESSIONS = ["G", "U1", "U2", "ADM"];
 const IMPERSONATIONS = ["G", "U1", "U2"];
 const EMAILS = { U1: "u1@fuzz.example", U2: "u2@fuzz.example" };
@@ -712,6 +719,7 @@ async function runOn(serverName, plan) {
       const state = snapshot();
       outcomes.push({ i, kind: "checkpoint", state });
       fresh[i] = {};
+      let sessionMoved = false;
       for (const s of SESSIONS) {
         fresh[i][s] = {};
         for (const key of Object.keys(state[s].subs)) {
@@ -727,8 +735,13 @@ async function runOn(serverName, plan) {
             await new Promise((r) => setTimeout(r, LEGACY_RESETTLE_MS));
             answer = await probe(s, q);
           }
+          if (canon(answer) !== canon(state[s].subs[key])) sessionMoved = true;
           fresh[i][s][key] = answer;
         }
+      }
+      if (sessionMoved) {
+        await settle(all, CHECKPOINT_RESETTLE_MS);
+        outcomes[outcomes.length - 1].state = snapshot();
       }
     }
   }
@@ -770,6 +783,42 @@ function legacyStale(l, r) {
   return true;
 }
 let staleLegacy = 0;
+
+// Legacy's shared datalog cache can miss the invalidation of a link a view
+// rule reads (`size(data.ref('owner.id')) > 0`): the session, and even a
+// fresh probe sharing the cache, keeps omitting the linked row until another
+// write to that entity. This is a legacy cache bug, not a wire difference;
+// the row is in legacy's database and a later session sees it. Only accept
+// the shape where legacy is a strict subset of rust (legacy has no extra or
+// different triples) and rust's own session equals its fresh probe, so a
+// stale rust session or any other difference still fails.
+function legacyOmitsOnlyRustRows(l, r) {
+  const subset = (lv, rv) => {
+    const lt = lv?.triples ?? lv?.result?.triples;
+    const rt = rv?.triples ?? rv?.result?.triples;
+    if (!Array.isArray(lt) || !Array.isArray(rt)) return false;
+    const keys = new Set(rt.map((t) => canon(t.slice(0, 3))));
+    return lt.every((t) => keys.has(canon(t.slice(0, 3))));
+  };
+  if (!l || !r || l.i !== r.i) return false;
+  if (l.kind === "query") {
+    if (canon({ ...l, result: undefined }) !== canon({ ...r, result: undefined })) return false;
+    if (!same(rustFresh[r.i], r.result)) return false;
+    return subset(l.result, r.result);
+  }
+  if (l.kind !== "checkpoint") return false;
+  for (const s of SESSIONS) {
+    const ls = l.state?.[s], rs = r.state?.[s];
+    if (canon(ls?.refreshErrors) !== canon(rs?.refreshErrors)) return false;
+    for (const key of new Set([...Object.keys(ls?.subs ?? {}), ...Object.keys(rs?.subs ?? {})])) {
+      const lv = ls?.subs?.[key], rv = rs?.subs?.[key];
+      if (canon(lv) === canon(rv)) continue;
+      if (!same(rustFresh[r.i]?.[s]?.[key], rv)) return false;
+      if (!subset(lv, rv)) return false;
+    }
+  }
+  return true;
+}
 
 // strict entries (lib.mjs loadAllowlist): this layer owns fuzzperms: paths.
 // Only the explicit empty-nested-link probe has an entry; every other admin
@@ -817,6 +866,11 @@ for (let k = 0; k < n; k++) {
   if (legacyStale(l, r)) {
     staleLegacy++;
     console.log(`legacy served a stale result at op ${l.i} (${l.kind}); a fresh legacy session agreed with rust`);
+    continue;
+  }
+  if (legacyOmitsOnlyRustRows(l, r)) {
+    staleLegacy++;
+    console.log(`legacy omitted rows rust has at op ${l.i} (${l.kind}); legacy's view-rule cache missed the link`);
     continue;
   }
   mismatches++;

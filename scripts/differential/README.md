@@ -229,6 +229,12 @@ everything and checks coverage itself, as before.
     cache can't answer it. When the probe still disagrees with the session,
     legacy is asked again 2 s later, because its view rules read cached
     entity maps right after a write.
+  - a view-rule refresh legacy's cache misses after a `link`: a session (and
+    a probe sharing the cache) keeps omitting a row whose `data.ref` link was
+    just added, until another write to that entity. The row is in legacy's
+    database and a later session sees it. Only the shape where legacy's
+    result is a strict subset of rust's, and rust's session equals its fresh
+    probe, is accepted; a stale rust session or any other difference fails.
   - `add-query-exists` for a query the session removed (legacy's refresh
     re-registers it): the query is removed and asked again.
   - an explicit empty nested link in an impersonated admin query. Legacy's
