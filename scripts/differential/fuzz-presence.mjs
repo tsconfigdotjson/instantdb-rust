@@ -198,19 +198,25 @@ function buildPlan() {
   };
 
   for (let i = 0; i < rounds; i++) {
-    // Concurrent joins on one room from two or three sessions: each session
-    // writes only its own presence entry, so the settled state is ordered.
+    // Concurrent presence updates on one room from two or three sessions.
+    // Each session writes only its own entry, so the settled state is ordered.
+    // Joins are awaited first: legacy's coalesced room events can lose a
+    // concurrent joiner's first snapshot, which is a legacy defect this
+    // server does not reproduce (so the fuzz doesn't make it the baseline).
     if (i > 0 && i % 18 === 0) {
       const room = pick(ROOMS);
-      const ops = shuffle(ROLES)
-        .slice(0, 2 + Math.floor(rand() * 2))
-        .map((r, k) => {
-          const data = dataFor(r.name, i * 10 + k);
-          const msg = { op: "join-room", "room-type": room.type, "room-id": room.id };
-          if (data.has) msg.data = data.value;
-          joined[r.name].add(room.id);
-          return { session: r.name, msg, ceid: mk(), name: `burst-join-${r.name}-${i}` };
-        });
+      const roles = shuffle(ROLES).slice(0, 2 + Math.floor(rand() * 2));
+      for (const [k, r] of roles.entries()) {
+        if (!joined[r.name].has(room.id)) {
+          join(r.name, room, dataFor(r.name, i * 10 + k), `burst-join-${r.name}-${i}`, { settle: true });
+        }
+      }
+      const ops = roles.map((r, k) => {
+        const data = dataFor(r.name, i * 10 + k);
+        const msg = { op: "set-presence", "room-id": room.id };
+        if (data.has) msg.data = data.value;
+        return { session: r.name, msg, ceid: mk(), name: `burst-set-${r.name}-${i}` };
+      });
       script.push({ kind: "burst", name: `burst-${i}`, ops });
       continue;
     }

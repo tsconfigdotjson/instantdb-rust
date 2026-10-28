@@ -255,9 +255,13 @@ everything and checks coverage itself, as before.
   signed-in users and an admin, over three named rooms and room types plus
   the empty room id. Random ops cover join-room, leave-room, set-presence
   (objects, null, false, scalars and a missing `data`), client-broadcast,
-  re-joins, concurrent join bursts, invalid room ids (missing / null / false /
-  number / object / array), set-presence and broadcast outside a room, and
-  unknown ops. The client versions use legacy's own feature gate: an old
+  re-joins, concurrent set-presence bursts, invalid room ids (missing / null /
+  false / number / object / array), set-presence and broadcast outside a room,
+  and unknown ops. The concurrent burst joins its sessions first: legacy's
+  coalesced room events can leave a concurrent joiner without its first
+  snapshot until a later event, a legacy defect this server does not
+  reproduce, so the fuzz does not make the missing snapshot the baseline. The
+  client versions use legacy's own feature gate: an old
   client must never receive `patch-presence` (only full
   `refresh-presence`), while a modern client must receive at least one patch
   in the run. Both frame shapes are applied to a per-session client model at
