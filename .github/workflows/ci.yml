@@ -502,9 +502,30 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('LEGACY/client/pnpm-lock.yaml') }}
+      # `--with-deps` runs apt-get on every job, even on a browser cache hit.
+      # The runner image already carries chromium's shared libraries; the only
+      # packages apt still wanted were optional fonts and a few upgrades. When
+      # the Azure apt mirror throttled, that step took 10+ minutes (649s on
+      # run 40519797449, 618s on run 40516940875) and set the critical path.
+      # Install the browser only, then launch it once as a guard: run
+      # Playwright's apt deps only if the image really is missing something.
       - name: Install playwright chromium
         working-directory: LEGACY/client/packages/core
-        run: pnpm exec playwright install --with-deps chromium
+        run: |
+          pnpm exec playwright install chromium
+          if ! timeout 60s node --input-type=module -e '
+            import { chromium } from "playwright";
+            const browser = await chromium.launch({ headless: true });
+            await browser.close();
+          '; then
+            echo "chromium failed to launch; installing Playwright system dependencies"
+            pnpm exec playwright install-deps chromium
+            timeout 60s node --input-type=module -e '
+              import { chromium } from "playwright";
+              const browser = await chromium.launch({ headless: true });
+              await browser.close();
+            '
+          fi
 
       - name: Wait for legacy server
         if: matrix.server == 'legacy'
