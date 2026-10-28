@@ -741,13 +741,9 @@ async fn handle_join_room(
         "room-id": room_id,
         "client-event-id": msg.get("client-event-id"),
     }));
-    // immediate snapshot for the joiner (peers get theirs via NOTIFY)
-    let snapshot = crate::presence::room_snapshot(state, app_id, room_id).await?;
-    session.send(json!({
-        "op": "refresh-presence",
-        "room-id": room_id,
-        "data": snapshot,
-    }));
+    // The joiner's snapshot comes through the same ordered NOTIFY stream as
+    // its peers' updates. Reading it here as a separate query let a stale
+    // snapshot land after a concurrent join's patch and hide that peer.
     Ok(())
 }
 

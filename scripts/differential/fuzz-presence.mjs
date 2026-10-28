@@ -458,7 +458,12 @@ async function runOn(serverName, plan) {
   const states = Object.fromEntries(
     ROLES.map((r) => [
       r.name,
-      { rooms: {}, leftRooms: new Set(), kinds: { refresh: 0, patch: 0 } },
+      {
+        rooms: {},
+        leftRooms: new Set(),
+        joining: new Set(),
+        kinds: { refresh: 0, patch: 0 },
+      },
     ]),
   );
   const cursors = Object.fromEntries(ROLES.map((r) => [r.name, conns[r.name].frames.length]));
@@ -478,13 +483,13 @@ async function runOn(serverName, plan) {
           st.leftRooms.add(room);
         }
       } else if (m.op === "refresh-presence") {
-        if (typeof room !== "string" || st.leftRooms.has(room)) continue;
+        if (typeof room !== "string" || (st.leftRooms.has(room) && !st.joining.has(room))) continue;
         st.kinds.refresh++;
         st.rooms[room] = Object.fromEntries(
           Object.entries(m.data ?? {}).map(([sid, entry]) => [label(sid), entry?.data ?? null]),
         );
       } else if (m.op === "patch-presence") {
-        if (typeof room !== "string" || st.leftRooms.has(room)) continue;
+        if (typeof room !== "string" || (st.leftRooms.has(room) && !st.joining.has(room))) continue;
         st.kinds.patch++;
         const peers = (st.rooms[room] ??= {});
         for (const edit of m.edits ?? []) applyEdit(peers, edit, label);
@@ -553,11 +558,19 @@ async function runOn(serverName, plan) {
   for (const op of plan.script) {
     if (op.kind === "send") {
       const isBroadcast = op.msg.op === "client-broadcast";
+      const isJoin = op.msg.op === "join-room" && typeof op.msg["room-id"] === "string";
       if (isBroadcast) await settle(Object.values(conns), SETTLE_MS);
       const before = Object.fromEntries(ROLES.map((r) => [r.name, conns[r.name].frames.length]));
       const ceid = op.ceid;
+      // a re-join snapshot may reach the client before join-room-ok; apply it
+      // just like Reactor does, but keep ignoring stragglers after a leave
+      if (isJoin) states[op.session].joining.add(op.msg["room-id"]);
       conns[op.session].send({ "client-event-id": ceid, ...op.msg });
       const reply = await waitReply(op.session, ceid);
+      if (isJoin) {
+        fold(op.session);
+        states[op.session].joining.delete(op.msg["room-id"]);
+      }
       if (isBroadcast) {
         await settle(Object.values(conns), BROADCAST_SETTLE_MS);
         outcomes.push({
@@ -570,11 +583,21 @@ async function runOn(serverName, plan) {
         outcomes.push({ name: op.name, ...ackView(reply) });
       }
     } else if (op.kind === "burst") {
+      for (const o of op.ops) {
+        if (o.msg.op === "join-room" && typeof o.msg["room-id"] === "string") {
+          states[o.session].joining.add(o.msg["room-id"]);
+        }
+      }
       const pending = op.ops.map((o) => {
         conns[o.session].send({ "client-event-id": o.ceid, ...o.msg });
         return waitReply(o.session, o.ceid);
       });
       const replies = await Promise.all(pending);
+      for (const o of op.ops) {
+        if (!states[o.session].joining.size) continue;
+        fold(o.session);
+        for (const room of states[o.session].joining) states[o.session].joining.delete(room);
+      }
       await settle(Object.values(conns), SETTLE_MS);
       outcomes.push({
         name: op.name,
