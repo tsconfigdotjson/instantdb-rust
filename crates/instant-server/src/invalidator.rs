@@ -134,13 +134,8 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                 // them inline keeps a stale full snapshot from an earlier
                 // event from overwriting a newer presence update (concurrent
                 // joins were losing peers when each event was spawned).
-                crate::presence::broadcast_room_refresh(
-                    state,
-                    app_id,
-                    &room_id,
-                    delta.as_ref(),
-                )
-                .await;
+                crate::presence::broadcast_room_refresh(state, app_id, &room_id, delta.as_ref())
+                    .await;
             }
             "instant_broadcast" => {
                 let (Some(app_id), Some(room_id)) = (
