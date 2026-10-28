@@ -20,14 +20,24 @@ pub async fn join_room(
     let row = sqlx::query(
         r#"
         INSERT INTO rust_presence (app_id, room_id, session_id, user_json, data, node_id)
-        VALUES ($1, $2, $3, $4, coalesce(nullif($5, 'false'::jsonb), '{}'::jsonb), $6)
+        VALUES (
+          $1, $2, $3, $4,
+          CASE
+            WHEN $5 IS NULL OR $5 = 'null'::jsonb OR $5 = 'false'::jsonb
+            THEN '{}'::jsonb
+            ELSE $5
+          END,
+          $6
+        )
         ON CONFLICT (app_id, room_id, session_id)
         DO UPDATE SET
           -- legacy join-room keeps an existing truthy data value and otherwise
           -- falls back to the join data / {}, updating user and node too
           -- (hazelcast.clj:123-134)
           data = CASE
-            WHEN rust_presence.data IS NULL OR rust_presence.data = 'false'::jsonb
+            WHEN rust_presence.data IS NULL
+              OR rust_presence.data = 'null'::jsonb
+              OR rust_presence.data = 'false'::jsonb
             THEN EXCLUDED.data
             ELSE rust_presence.data
           END,
