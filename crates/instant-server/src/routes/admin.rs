@@ -1071,7 +1071,9 @@ async fn refresh_tokens_impl(
             Some(u) => (u.id, false),
             None => {
                 auth::validate_extra_fields(&attrs, extra_fields)?;
-                let uid = Uuid::new_v4();
+                // legacy refresh-tokens-post uses the caller's id when given,
+                // even on the email branch (admin/routes.clj:415)
+                let uid = id.unwrap_or_else(Uuid::new_v4);
                 let mut steps = vec![
                     json!(["add-triple", uid, sc::attr_id("$users", "id"), uid]),
                     json!(["add-triple", uid, sc::attr_id("$users", "email"), email]),

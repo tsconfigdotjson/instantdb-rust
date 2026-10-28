@@ -20,9 +20,28 @@ pub async fn join_room(
     let row = sqlx::query(
         r#"
         INSERT INTO rust_presence (app_id, room_id, session_id, user_json, data, node_id)
-        VALUES ($1, $2, $3, $4, coalesce($5, '{}'::jsonb), $6)
+        VALUES (
+          $1, $2, $3, $4,
+          CASE
+            WHEN $5 IS NULL OR $5 = 'null'::jsonb OR $5 = 'false'::jsonb
+            THEN '{}'::jsonb
+            ELSE $5
+          END,
+          $6
+        )
         ON CONFLICT (app_id, room_id, session_id)
-        DO UPDATE SET data = rust_presence.data, updated_at = now()
+        DO UPDATE SET
+          -- legacy join-room keeps presence data already set (including
+          -- false); only absent / JSON-null data falls back to the join data
+          -- or {} (hazelcast.clj:123-134)
+          data = CASE
+            WHEN rust_presence.data IS NULL OR rust_presence.data = 'null'::jsonb
+            THEN EXCLUDED.data
+            ELSE rust_presence.data
+          END,
+          user_json = EXCLUDED.user_json,
+          node_id = EXCLUDED.node_id,
+          updated_at = now()
         RETURNING user_json, data
         "#,
     )
@@ -46,14 +65,22 @@ pub async fn join_room(
         state,
         app_id,
         room_id,
-        delta_set(session_id, state.node_id, user, data),
+        json!({
+            "join": true,
+            "set": {
+                "session_id": session_id,
+                "instance_id": state.node_id,
+                "user": user,
+                "data": data
+            }
+        }),
     )
     .await;
     Ok(())
 }
 
-/// NOTIFY delta for a peer joining/updating: nodes with a cached snapshot
-/// apply it instead of re-reading the room.
+/// NOTIFY delta for a peer updating its presence: nodes with a cached
+/// snapshot apply it instead of re-reading the room.
 fn delta_set(session_id: Uuid, node_id: Uuid, user: Option<Value>, data: Value) -> Value {
     json!({"set": {"session_id": session_id, "instance_id": node_id, "user": user, "data": data}})
 }
@@ -261,7 +288,16 @@ pub async fn broadcast_room_refresh(
             "edits": edits,
         })
     });
+    // Legacy sends a full snapshot to the session that just joined (even if
+    // the diff has a "+ self" edit, which would leave it without its peers).
+    let joined_sid = delta
+        .filter(|d| d.get("join").and_then(Value::as_bool).unwrap_or(false))
+        .and_then(|d| d.get("set"))
+        .and_then(|set| set.get("session_id"))
+        .and_then(Value::as_str)
+        .and_then(|s| Uuid::parse_str(s).ok());
     for s in sessions {
+        let just_joined = joined_sid == Some(s.id);
         let use_patch = {
             let st = s.state.try_lock();
             match st {
@@ -269,7 +305,7 @@ pub async fn broadcast_room_refresh(
                 Err(_) => false,
             }
         };
-        match (&patch_msg, use_patch) {
+        match (&patch_msg, use_patch && !just_joined) {
             (Some(p), true) => s.send(p.clone()),
             _ => s.send(refresh_msg.clone()),
         }

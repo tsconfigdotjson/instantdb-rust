@@ -186,14 +186,14 @@ pub(crate) fn param_malformed_at(path: &[&str], input: &Value) -> InstantError {
         Some(json!({"in": path, "original-input": input})),
     )
 }
-/// `ex/get-param! event [key] coercer` for a non-blank string.
+/// Legacy `validate-room-id` (session.clj:638-641) through `ex/get-param!`:
+/// nil / false are missing, any string (including an empty one) is valid, and
+/// every other JSON type is malformed.
 fn required_str<'a>(msg: &'a Value, key: &str) -> Result<&'a str, InstantError> {
     match msg.get(key) {
-        None | Some(Value::Null) => Err(param_missing_at(&[key])),
-        Some(v) => v
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| param_malformed_at(&[key], v)),
+        None | Some(Value::Null) | Some(Value::Bool(false)) => Err(param_missing_at(&[key])),
+        Some(Value::String(s)) => Ok(s),
+        Some(v) => Err(param_malformed_at(&[key], v)),
     }
 }
 
@@ -715,6 +715,9 @@ async fn handle_join_room(
     msg: &Value,
 ) -> HandlerResult {
     let (app_id, _) = session_ctx(session).await?;
+    // legacy asserts the app read gate before validating the room id
+    // (session.clj:643-649)
+    service::assert_read_allowed(state, app_id).await?;
     let room_id = required_str(msg, "room-id")?;
     let user = {
         let st = session.state.lock().await;
@@ -738,13 +741,9 @@ async fn handle_join_room(
         "room-id": room_id,
         "client-event-id": msg.get("client-event-id"),
     }));
-    // immediate snapshot for the joiner (peers get theirs via NOTIFY)
-    let snapshot = crate::presence::room_snapshot(state, app_id, room_id).await?;
-    session.send(json!({
-        "op": "refresh-presence",
-        "room-id": room_id,
-        "data": snapshot,
-    }));
+    // The joiner's snapshot comes through the same ordered NOTIFY stream as
+    // its peers' updates. Reading it here as a separate query let a stale
+    // snapshot land after a concurrent join's patch and hide that peer.
     Ok(())
 }
 
@@ -776,7 +775,9 @@ async fn handle_set_presence(
     let (app_id, _) = session_ctx(session).await?;
     let room_id = required_str(msg, "room-id")?;
     assert_in_room(session, room_id).await?;
-    let data = msg.get("data").cloned().unwrap_or(json!({}));
+    // set-presence passes a missing data through as null, like legacy
+    // (hazelcast.clj:167-168); join-room has its own {} fallback.
+    let data = msg.get("data").cloned().unwrap_or(Value::Null);
     crate::presence::set_presence(state, app_id, room_id, session.id, data).await?;
     // legacy acks with set-presence-ok (session.clj:679-681); the client has
     // no handler for it but suppresses it from logs.
@@ -795,7 +796,7 @@ async fn assert_in_room(session: &Arc<Session>, room_id: &str) -> HandlerResult 
     if !st.rooms.contains(room_id) {
         return Err(InstantError::validation_failed_input(
             "room",
-            json!({"app-id": st.app_id, "room-id": room_id}),
+            json!({"app-id": st.app_id, "room-id": room_id, "session-id": session.id}),
             json!([{"message": "You have not entered this room yet."}]),
         ));
     }

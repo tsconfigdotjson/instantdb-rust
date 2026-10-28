@@ -249,6 +249,34 @@ everything and checks coverage itself, as before.
   `node fuzz-perms.mjs <app> <app> <token> [seed] [rounds]`; seeds 7-9 at 120
   rounds per PR (`FUZZ_PERMS_SEEDS` / `FUZZ_PERMS_ROUNDS`), 16 seeds at 300
   nightly, `FUZZ_PERMS_JOBS` (4 nightly) at a time.
+- `fuzz-presence.mjs` — seeded rooms / presence sequences over several
+  concurrent sessions: two old clients (`@instantdb/core` 0.17.5), two modern
+  clients (0.21.0 / 0.22.76, the latter also exercising array frames), two
+  signed-in users and an admin, over three named rooms and room types plus
+  the empty room id. Random ops cover join-room, leave-room, set-presence
+  (objects, null, false, scalars and a missing `data`), client-broadcast,
+  re-joins, concurrent set-presence bursts, invalid room ids (missing / null /
+  false / number / object / array), set-presence and broadcast outside a room,
+  and unknown ops. The concurrent burst joins its sessions first: legacy's
+  coalesced room events can leave a concurrent joiner without its first
+  snapshot until a later event, a legacy defect this server does not
+  reproduce, so the fuzz does not make the missing snapshot the baseline. The
+  client versions use legacy's own feature gate: an old
+  client must never receive `patch-presence` (only full
+  `refresh-presence`), while a modern client must receive at least one patch
+  in the run. Both frame shapes are applied to a per-session client model at
+  settled checkpoints (including the client's own peer entry); every ack
+  (op + key set) and every error (status, type, message, hint) is compared,
+  as is each broadcast's exact recipient set and envelope (peer, user, topic,
+  payload, duplicates / missing deliveries). `/admin/rooms/presence` is read
+  for every room, an unpopulated room and the route's missing / blank
+  parameter errors; each entry's key set, peer, instance-id shape, user
+  entity (`id`, `app_id`, `email`, `isGuest`, `created_at`, extra fields) and
+  data are compared. Only session ids (mapped back to their role), instance
+  ids and timestamps are normalized; user ids are seeded deterministically
+  on both servers and stay raw. `node fuzz-presence.mjs <app> <app> <token>
+  [seed] [rounds]`; seeds 101-103 at 100 rounds per PR
+  (`FUZZ_PRESENCE_SEEDS` / `FUZZ_PRESENCE_ROUNDS`), 12 seeds at 250 nightly.
 - `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):
   seeded bursts of unawaited transacts and add-queries of order/limit pages
   (a transact then a subscription to the page it changes, as an infinite
@@ -388,8 +416,9 @@ everything and checks coverage itself, as before.
 
 ## Allowlists
 
-`allowed-divergences.json` (replay, dash, storage, rule-wheres, ref-topics and
-fuzz-perms layers, keyed by `path`) and `errors-allowed.json` (error matrix, keyed by `probe`) share one
+`allowed-divergences.json` (replay, dash, storage, rule-wheres, ref-topics,
+fuzz-perms and fuzz-presence layers, keyed by `path`) and
+`errors-allowed.json` (error matrix, keyed by `probe`) share one
 strict entry format, checked by `loadAllowlist` / `allowDivergence` in
 `lib.mjs`. An entry allows one documented difference, not whatever else later
 shows up at the same path:
@@ -410,8 +439,9 @@ shows up at the same path:
   `keyset/<op>/<key>`; dash paths `dash:<step>/<key>`; storage paths
   `storage:<step>/<key>`; ref-topics paths `reftopics:<phase>/<session>`;
   fuzz-perms paths `fuzzperms:<probe>/<session>` and
-  `fuzzperms:admin-{query,transact}/<op>/<session>`; errors-allowed.json uses
-  probe names.
+  `fuzzperms:admin-{query,transact}/<op>/<session>`; fuzz-presence paths
+  `presence:<probe>/<session>`, `presence:final/<session>` and
+  `presence:<checkpoint>`; errors-allowed.json uses probe names.
 - `differs` (required): anchored regexes over sub-paths of the compared value.
   Object keys and array indexes join with dots, as in the log's "first
   differing sub-path": `.status`, `.hint.debug-uri`, `.0.status`; `^$` is
@@ -429,7 +459,7 @@ shows up at the same path:
 - Each layer loads only the entries whose path prefix it owns (replay:
   `step:` / `final/` / `keyset/`; dash: `dash:`; storage: `storage:`;
   rule-wheres: `rulewheres:`; ref-topics: `reftopics:`; fuzz-perms:
-  `fuzzperms:`). An
+  `fuzzperms:`; presence: `presence:`). An
   entry no layer owns is a load error, and so is a malformed entry or an
   unknown field. If an owned entry allowed nothing in a run, the layer fails
   (`[STALE ALLOWLIST]`). The exception is `"flaky": true` with a

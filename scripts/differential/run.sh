@@ -208,6 +208,20 @@ for SEED in $PERMS_RUN; do
   fi
 done
 rm -rf "$PERMS_LOGS"
+# rooms / presence fuzz: concurrent old and new clients join / leave / set
+# presence / broadcast over several rooms, with re-joins, invalid ops and
+# /admin/rooms/presence reads (fuzz-presence.mjs). Each seed folds the settled
+# client state and compares every ack / error / broadcast / admin shape.
+PRESENCE_SEEDS="${FUZZ_PRESENCE_SEEDS:-101 102 103}"
+for SEED in $PRESENCE_SEEDS; do
+  want "presence:$SEED" || continue
+  PZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+  PZ_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+  ./provision.sh "$PZ_APP" "$PZ_TOKEN" > /dev/null
+  if ! node fuzz-presence.mjs "$PZ_APP" "$PZ_APP" "$PZ_TOKEN" "$SEED" "${FUZZ_PRESENCE_ROUNDS:-100}"; then
+    FUZZ_FAILED="$FUZZ_FAILED presence:$SEED"
+  fi
+done
 # subscription race fuzz (issue #51): rust-only invariants for queries
 # registered while transactions are in flight, against a rust server booted
 # with INSTANT_CHAOS_DELAY_MS (RACE_URL; defaults to RUST_URL)
@@ -221,7 +235,8 @@ for SEED in ${FUZZ_RACE_SEEDS:-1 2 3}; do
   fi
 done
 if [ -n "$FUZZ_FAILED" ]; then
-  echo "FUZZ FAILED for seeds:$FUZZ_FAILED (rerun one with: FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60} ./run.sh)"
+  echo "FUZZ FAILED for seeds:$FUZZ_FAILED"
+  echo "  (rerun a fuzz seed with FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60}, a presence seed with FUZZ_PRESENCE_SEEDS=<seed> FUZZ_PRESENCE_ROUNDS=${FUZZ_PRESENCE_ROUNDS:-100}; LAYERS narrows the run)"
   FAILED_LAYERS="$FAILED_LAYERS fuzz"
 fi
 
