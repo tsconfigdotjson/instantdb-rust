@@ -2290,6 +2290,9 @@ enum Check {
         etype: String,
         eid: Uuid,
         old: Map<String, Value>,
+        /// a delete-entity step for an entity that did not exist pre-tx
+        /// (legacy still runs its delete pre-check, but with a nil data map)
+        existed: bool,
     },
     ViewLinked {
         etype: String,
@@ -2844,11 +2847,7 @@ pub async fn permissioned_transact_checked(
             if rules.program(&key.1, "delete").is_true() {
                 continue;
             }
-            let old = old_maps
-                .get(key)
-                .cloned()
-                .flatten()
-                .unwrap_or_else(|| base_entity_map(attrs, &key.1, key.0));
+            let old = old_maps.get(key).cloned().flatten().unwrap_or_default();
             out.push(("delete", key.clone(), old, None));
         }
         // the link / unlink fallback views a target that exists before the
@@ -2979,15 +2978,12 @@ pub async fn permissioned_transact_checked(
         });
     }
     for (e, et) in &report.deleted {
-        let old = old_maps
-            .get(&(*e, et.clone()))
-            .cloned()
-            .flatten()
-            .unwrap_or_else(|| base_entity_map(attrs, et, *e));
+        let old = old_maps.get(&(*e, et.clone())).cloned().flatten();
         checks.push(Check::Delete {
             etype: et.clone(),
             eid: *e,
-            old,
+            old: old.clone().unwrap_or_default(),
+            existed: old.is_some(),
         });
     }
     // legacy's pre-checks run an update check for every add / merge step on
@@ -3070,7 +3066,7 @@ pub async fn permissioned_transact_checked(
 
     // ---- evaluate ----
     for check in checks {
-        let (action, etype, eid, data, new_data) = match &check {
+        let (action, etype, eid, data, new_data, attach_data_refs) = match &check {
             Check::Create { etype, eid } => {
                 // legacy binds its approximated post-tx entity, the steps
                 // applied locally (update-entities-map), so a create the tx
@@ -3084,7 +3080,14 @@ pub async fn permissioned_transact_checked(
                         .await?
                         .unwrap_or_else(|| base_entity_map(attrs, etype, *eid))
                 };
-                ("create", etype.clone(), *eid, Value::Object(new), None)
+                (
+                    "create",
+                    etype.clone(),
+                    *eid,
+                    Value::Object(new),
+                    None,
+                    true,
+                )
             }
             Check::Update { etype, eid, old } => {
                 let new = apply_local_steps(old, &local_steps, &(*eid, etype.clone()));
@@ -3094,20 +3097,27 @@ pub async fn permissioned_transact_checked(
                     *eid,
                     Value::Object(old.clone()),
                     Some(Value::Object(new)),
+                    true,
                 )
             }
-            Check::Delete { etype, eid, old } => (
+            Check::Delete {
+                etype,
+                eid,
+                old,
+                existed,
+            } => (
                 "delete",
                 etype.clone(),
                 *eid,
                 Value::Object(old.clone()),
                 None,
+                *existed,
             ),
             Check::ViewLinked { etype, eid } => {
                 let m = fetch_entity_map(conn, app_id, attrs, etype, *eid)
                     .await?
                     .unwrap_or_else(|| base_entity_map(attrs, etype, *eid));
-                ("view", etype.clone(), *eid, Value::Object(m), None)
+                ("view", etype.clone(), *eid, Value::Object(m), None, true)
             }
             Check::LinkRule {
                 action,
@@ -3278,10 +3288,12 @@ pub async fn permissioned_transact_checked(
         // data refs prefetch (update / delete snapshots already carry their
         // pre-tx paths; create / view read the post-tx graph)
         let mut data = data;
-        if let Value::Object(ref mut m) = data {
-            let sources = program.all_sources();
-            let paths = extract_ref_paths(&sources, "data");
-            attach_refs(conn, app_id, attrs, &etype, eid, &paths, m, None).await?;
+        if attach_data_refs {
+            if let Value::Object(ref mut m) = data {
+                let sources = program.all_sources();
+                let paths = extract_ref_paths(&sources, "data");
+                attach_refs(conn, app_id, attrs, &etype, eid, &paths, m, None).await?;
+            }
         }
         let auth_val = match (&pre_auth, action) {
             (Some(v), "update" | "delete") => v.clone(),

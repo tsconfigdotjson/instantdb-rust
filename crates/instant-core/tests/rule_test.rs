@@ -942,6 +942,54 @@ async fn update_and_delete_refs_are_pre_tx() {
     assert_eq!(err.error_type, "permission-denied");
 }
 
+/// A delete-entity step for an entity that does not exist still runs its
+/// delete pre-check, but with a nil data map and the pre-tx ref graph
+/// (permissioned_transaction.clj pre-checks + cel.clj ref-impl). The check
+/// must not see links the same tx then writes, or a delete-then-create tx
+/// would be denied by `size(data.ref('owner.id')) == 0`.
+#[tokio::test]
+async fn delete_of_missing_entity_does_not_see_same_tx_links() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {
+            "create": "true",
+            "update": "false",
+            "delete": "size(data.ref('owner.id')) == 0"
+        }}}),
+    )
+    .await;
+    let owner = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", owner, ids.owners_id, owner],
+            ["add-triple", owner, ids.owners_name, "ann"]
+        ]),
+    )
+    .await
+    .unwrap();
+    // the entity is absent pre-tx; the link is written after the delete step
+    let t = Uuid::new_v4();
+    transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([
+            ["delete-entity", t, "todos"],
+            ["add-triple", t, ids.todos_owner, owner],
+            ["add-triple", t, ids.todos_id, t]
+        ]),
+    )
+    .await
+    .unwrap();
+}
+
 /// `attrs.allow.create` (falling back to `$default`) governs schemaless
 /// add-attr steps (permissioned_transaction.clj:519-527); `data` is the attr.
 #[tokio::test]
