@@ -399,9 +399,11 @@ jobs:
           FUZZ_PERMS_JOBS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '4' || '1' }}
           FUZZ_PRESENCE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '101 102 103 104 105 106 107 108 109 110 111 112' || '101 102 103' }}
           FUZZ_PRESENCE_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '250' || '100' }}
-          # schema evolution: 2 seeds per PR, 12 nightly (rounds is the total
-          # op target; the mandatory schema scenarios are ~170 ops)
-          FUZZ_SCHEMA_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '31 32 33 34 35 36 37 38 39 40 41 42' || '31 32' }}
+          # schema evolution: 7 seeds per PR, 12 nightly (rounds is the total
+          # op target; the mandatory schema scenarios are ~170 ops).
+          # 33/34/36/37/41 are the nightly seeds that caught multi-conflict
+          # unique values and the legacy refresh re-register race.
+          FUZZ_SCHEMA_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '31 32 33 34 35 36 37 38 39 40 41 42' || '31 32 33 34 36 37 41' }}
           FUZZ_SCHEMA_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '350' || '200' }}
           FUZZ_RACE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '1 2 3 4 5 6 7 8 9 10' || '1 2 3' }}
           RACE_URL: http://localhost:8885

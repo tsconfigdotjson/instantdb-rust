@@ -232,13 +232,22 @@ everything and checks coverage itself, as before.
   caught up is accepted only when a fresh legacy probe agrees with both the
   rust session and the rust fresh probe (the same stale-session rule
   fuzz-perms uses); every other difference, including a stale rust session,
-  still fails. Admin-gated schema mutations run on the admin session;
-  inline add-attr and data transacts use both sessions. Raw `update-attr`
-  checked-type changes are no-ops in legacy and here (they go through
-  indexing jobs instead), and the layer pins that instead of applying a type
-  unchecked. `node fuzz-schema.mjs <app> <app> <token> [seed] [rounds]`; seeds
-  31-32 at 200 rounds per PR (`FUZZ_SCHEMA_SEEDS` / `FUZZ_SCHEMA_ROUNDS`),
-  12 seeds at 350 nightly.
+  still fails. An `update-attr` `unique?` flip over several already-duplicated
+  values reports whichever duplicate Postgres reaches first; that choice
+  changes between runs on both servers, so for that op shape the layer keeps
+  the error envelope, type, attr id, etype and label and masks only the
+  chosen value (seed 34's body/label and seeds 36/41's dynIdx picks vary).
+  A query removed while a legacy refresh is recomputing it can be
+  re-registered by the refresh, so a later add-query answers
+  `add-query-exists`; that is the same legacy race fuzz-perms handles, so
+  the layer removes the stray query and asks again. Admin-gated schema
+  mutations run on the admin session; inline add-attr and data transacts use
+  both sessions. Raw `update-attr` checked-type changes are no-ops in legacy
+  and here (they go through indexing jobs instead), and the layer pins that
+  instead of applying a type unchecked.
+  `node fuzz-schema.mjs <app> <app> <token> [seed] [rounds]`; seeds 31-32 at
+  200 rounds per PR plus the nightly regression seeds 33, 34, 36, 37 and 41
+  (`FUZZ_SCHEMA_SEEDS` / `FUZZ_SCHEMA_ROUNDS`), 12 seeds at 350 nightly.
 - `fuzz-perms.mjs` — the same grammar under **generated permission rules**
   (view / create / update / delete per namespace, binds, field rules,
   `ruleParams`, and auth / `data.ref` / `auth.ref` / `request.*`

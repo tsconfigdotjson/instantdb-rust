@@ -484,6 +484,26 @@ pub(crate) fn format_query_result(
     }
 }
 
+/// Legacy keys a session's queries by Clojure map equality, which ignores
+/// JSON object key order. serde_json uses `preserve_order`, so `q.to_string()`
+/// would not: `{where, order}` and `{order, where}` are the same legacy query
+/// but different rust keys (and add-query would answer ok instead of exists).
+/// Sort object keys recursively so both servers dedupe the same query.
+fn canonical_query_key(q: &Value) -> String {
+    fn sorted(v: &Value) -> Value {
+        match v {
+            Value::Object(m) => {
+                let entries: std::collections::BTreeMap<_, _> =
+                    m.iter().map(|(k, v)| (k.clone(), sorted(v))).collect();
+                Value::Object(entries.into_iter().collect())
+            }
+            Value::Array(a) => Value::Array(a.iter().map(sorted).collect()),
+            _ => v.clone(),
+        }
+    }
+    sorted(q).to_string()
+}
+
 async fn handle_add_query(
     state: &Arc<AppState>,
     session: &Arc<Session>,
@@ -504,7 +524,7 @@ async fn handle_add_query(
     // special, anything else renders join-rows (session.clj:249, query.clj:139-144)
     let tree = msg.get("return-type").and_then(|v| v.as_str()) == Some("tree");
     service::assert_read_allowed(state, app_id).await?;
-    let key = q.to_string();
+    let key = canonical_query_key(&q);
     let inference = {
         let st = session.state.lock().await;
         if st.queries.contains_key(&key) {
@@ -668,7 +688,7 @@ async fn handle_remove_query(session: &Arc<Session>, msg: &Value) -> HandlerResu
     session_ctx(session).await?;
     let q = msg.get("q").cloned().unwrap_or(Value::Null);
     if !q.is_null() {
-        let key = q.to_string();
+        let key = canonical_query_key(&q);
         let mut st = session.state.lock().await;
         st.queries.remove(&key);
     }
@@ -869,6 +889,26 @@ mod tests {
         assert!(!supports_skip_attrs(Some(
             &json!({"@instantdb/react": "v9.9.9"})
         )));
+    }
+
+    #[test]
+    fn query_keys_ignore_object_key_order_like_legacy_maps() {
+        let a = json!({"todos": {"$": {"where": {"done": false}, "limit": 2}}});
+        let b = json!({"todos": {"$": {"limit": 2, "where": {"done": false}}}});
+        assert_eq!(canonical_query_key(&a), canonical_query_key(&b));
+        assert_eq!(
+            canonical_query_key(&json!({"todos": {"$": {"where": {"a": 1, "b": 2}}}})),
+            canonical_query_key(&json!({"todos": {"$": {"where": {"b": 2, "a": 1}}}}))
+        );
+        // Values and array order still distinguish queries.
+        assert_ne!(
+            canonical_query_key(&a),
+            canonical_query_key(&json!({"todos": {"$": {"where": {"done": true}, "limit": 2}}}))
+        );
+        assert_ne!(
+            canonical_query_key(&json!({"todos": {"$": {"where": {"x": {"$in": [1, 2]}}}}})),
+            canonical_query_key(&json!({"todos": {"$": {"where": {"x": {"$in": [2, 1]}}}}}))
+        );
     }
 
     #[test]
