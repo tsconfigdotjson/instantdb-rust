@@ -24,7 +24,10 @@ pub enum WriteMode {
 
 #[derive(Debug, Clone)]
 pub enum TxStep {
-    AddAttr(Attr),
+    AddAttr {
+        attr: Attr,
+        raw: Value,
+    },
     UpdateAttr(Value),
     DeleteAttr(Uuid),
     RestoreAttr(Uuid),
@@ -69,7 +72,7 @@ impl TxStep {
         let at = |i: usize| arr.get(i).cloned().unwrap_or(Value::Null);
         let op = at(0);
         match self {
-            TxStep::AddAttr(_) | TxStep::UpdateAttr(_) => json!({"op": op, "value": at(1)}),
+            TxStep::AddAttr { .. } | TxStep::UpdateAttr(_) => json!({"op": op, "value": at(1)}),
             TxStep::DeleteAttr(_) | TxStep::RestoreAttr(_) => json!({"op": op, "aid": at(1)}),
             TxStep::AddTriple { attr_id, .. }
             | TxStep::DeepMergeTriple { attr_id, .. }
@@ -109,7 +112,7 @@ impl TxStep {
             WriteMode::Upsert => Value::Null,
         };
         match self {
-            TxStep::AddAttr(a) => json!(["add-attr", a.to_wire()]),
+            TxStep::AddAttr { attr: a, .. } => json!(["add-attr", a.to_wire()]),
             TxStep::UpdateAttr(v) => json!(["update-attr", v]),
             TxStep::DeleteAttr(id) => json!(["delete-attr", id]),
             TxStep::RestoreAttr(id) => json!(["restore-attr", id]),
@@ -141,7 +144,7 @@ impl TxStep {
 
     fn group_key(&self) -> &'static str {
         match self {
-            TxStep::AddAttr(_) => "add-attr",
+            TxStep::AddAttr { .. } => "add-attr",
             TxStep::UpdateAttr(_) => "update-attr",
             TxStep::DeleteAttr(_) => "delete-attr",
             TxStep::RestoreAttr(_) => "restore-attr",
@@ -364,7 +367,11 @@ pub fn parse_tx_steps(steps: &Value) -> Result<Vec<TxStep>> {
         let parsed = match op {
             "add-attr" => {
                 arity(2, 2)?;
-                TxStep::AddAttr(Attr::from_wire(step_arr.get(1).unwrap_or(&Value::Null))?)
+                let raw = step_arr.get(1).cloned().unwrap_or(Value::Null);
+                TxStep::AddAttr {
+                    attr: Attr::from_wire(&raw)?,
+                    raw,
+                }
             }
             "update-attr" => {
                 arity(2, 2)?;
@@ -729,7 +736,7 @@ pub async fn transact(
         match op {
             "add-attr" => {
                 for step in group {
-                    let TxStep::AddAttr(attr) = step else {
+                    let TxStep::AddAttr { attr, raw } = step else {
                         unreachable!()
                     };
                     // A second attr under an existing forward name trips
@@ -752,7 +759,7 @@ pub async fn transact(
                     }
                     // legacy validate-add-required! (attr.clj:334-350)
                     if attr.is_required {
-                        crate::attr::validate_add_required(&mut *conn, app_id, &attr).await?;
+                        crate::attr::validate_add_required(&mut *conn, app_id, &attr, &raw).await?;
                     }
                     crate::attr::insert(&mut *conn, app_id, &attr).await?;
                     backfill_nulls_for_new_attr(&mut *conn, app_id, attrs, &attr).await?;
@@ -768,9 +775,12 @@ pub async fn transact(
                         unreachable!()
                     };
                     let id = parse_attr_uuid(patch.get("id"))?;
-                    let existing = attrs.get(&id).cloned().ok_or_else(|| {
-                        InstantError::record_not_found("attr", format!("attr {id} not found"))
-                    })?;
+                    // Legacy update-multi! is a plain UPDATE ... WHERE id IN
+                    // (...): an unknown id matches no row and is a no-op, like
+                    // delete-attr / restore-attr.
+                    let Some(existing) = attrs.get(&id).cloned() else {
+                        continue;
+                    };
                     if existing.is_system {
                         return Err(InstantError::validation_failed(
                             "attributes",

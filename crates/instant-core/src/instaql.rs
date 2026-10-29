@@ -584,6 +584,21 @@ impl SqlCtx<'_> {
             message,
         )
     }
+
+    fn link_uuid_error(&self, attr: &Attr, got: Value) -> InstantError {
+        let joined = self.cur_where.lock().unwrap().join(".");
+        qerr(
+            self.root,
+            "expected",
+            "uuid?",
+            in_path(self.path, &["$", "where", joined.as_str()]),
+            format!(
+                "Expected {} to be a uuid, got {}",
+                attr.label,
+                serde_json::to_string(&got).unwrap_or_default()
+            ),
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -1475,8 +1490,27 @@ impl<'a> SqlCtx<'a> {
                 qb.push(")");
                 Ok(())
             }
-            LeafEmit::Cmp(..) | LeafEmit::Like(..) => {
-                Err(verr("Comparison operators are not supported on links."))
+            LeafEmit::Cmp(op, v) => {
+                // Legacy has no link-specific comparison branch: the map is
+                // handed to coerce-value-uuid, which reports the same
+                // expected-uuid error as any other non-uuid link value (with
+                // the parsed map shown as [json-type value]).
+                let wire_op = match *op {
+                    ">" => "$gt",
+                    ">=" => "$gte",
+                    "<" => "$lt",
+                    "<=" => "$lte",
+                    other => other,
+                };
+                let mut got = Map::new();
+                got.insert(wire_op.to_string(), json!([json_type_name(v), v]));
+                Err(self.link_uuid_error(attr, Value::Object(got)))
+            }
+            LeafEmit::Like(pattern, ci) => {
+                let op = if *ci { "$ilike" } else { "$like" };
+                let mut got = Map::new();
+                got.insert(op.to_string(), json!(["string", pattern]));
+                Err(self.link_uuid_error(attr, Value::Object(got)))
             }
         }
     }
@@ -1638,6 +1672,18 @@ async fn run_top_form(
         });
     }
 
+    // Legacy coerces/validates the where clause before it validates the
+    // order attr, so a query with both an unusable comparison and an
+    // unorderable attr reports the comparison error first. Build the where
+    // expression into a throwaway builder to get that precedence without
+    // running it (the real builder below emits the same expression).
+    if let Some(w) = &form.opts.where_conds {
+        let mut probe = QueryBuilder::<Postgres>::new("");
+        if let Ok(r) = sql_ctx.push_cond(&mut probe, &form.etype, "NULL", w, 0) {
+            r?;
+        }
+    }
+
     // ---- matching + ordering + pagination ----
     let paginated = form.opts.is_paginated();
     let order = form.opts.order.clone().unwrap_or(OrderSpec {
@@ -1701,9 +1747,9 @@ async fn run_top_form(
                     })
                 })
                 .collect();
-            return Err(InstantError::validation_failed(
+            return Err(InstantError::validation_failed_input(
                 "query",
-                order_errors.join(", "),
+                (*form.root).clone(),
                 Value::Array(errors),
             ));
         }

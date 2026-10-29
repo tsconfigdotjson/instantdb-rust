@@ -2775,7 +2775,7 @@ pub async fn permissioned_transact_checked(
     let added_attrs: Vec<Value> = steps
         .iter()
         .filter_map(|s| match s {
-            TxStep::AddAttr(a) => Some(a.to_wire()),
+            TxStep::AddAttr { attr: a, .. } => Some(a.to_wire()),
             _ => None,
         })
         .collect();

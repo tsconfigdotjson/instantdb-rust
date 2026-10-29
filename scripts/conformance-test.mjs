@@ -776,7 +776,7 @@ await expectError(
     op: "transact",
     "tx-steps": [["add-triple", dupe, idAttr, dupe], ["add-triple", dupe, scoreAttr, 1]],
   },
-  { type: "record-not-unique", hint: { "record-type": "triples" } },
+  { type: "record-not-unique", hint: { "record-type": "triple" } },
   "transact: unique violation",
 );
 // legacy also raises validation-failed here (transaction.clj:349-358)

@@ -176,6 +176,23 @@ for SEED in $SEEDS; do
     FUZZ_FAILED="$FUZZ_FAILED $SEED"
   fi
 done
+# schema-evolution fuzz: inline add-attr / update-attr / delete-attr /
+# restore-attr interleaved with data writes, one-shot queries (where / order /
+# pagination) and live subscriptions, with admin and non-admin sessions
+# (fuzz-schema.mjs). Every transact outcome (including the full error envelope),
+# query result, settled subscription state and the attrs seen in init-ok /
+# refresh-ok are compared; a legacy session whose cache has not caught up is
+# accepted only when a fresh legacy probe agrees with rust.
+SCHEMA_SEEDS="${FUZZ_SCHEMA_SEEDS:-31 32}"
+for SEED in $SCHEMA_SEEDS; do
+  want "fuzzschema:$SEED" || continue
+  SCHEMA_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+  SCHEMA_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+  ./provision.sh "$SCHEMA_APP" "$SCHEMA_TOKEN" > /dev/null
+  if ! node fuzz-schema.mjs "$SCHEMA_APP" "$SCHEMA_APP" "$SCHEMA_TOKEN" "$SEED" "${FUZZ_SCHEMA_ROUNDS:-200}"; then
+    FUZZ_FAILED="$FUZZ_FAILED fuzzschema:$SEED"
+  fi
+done
 # permissions + concurrency fuzz: generated rules, four concurrent sessions,
 # subscriptions compared at settled checkpoints (fuzz-perms.mjs). A seed is
 # mostly waiting for streams to go quiet, and each runs on its own apps, so
@@ -236,7 +253,7 @@ for SEED in ${FUZZ_RACE_SEEDS:-1 2 3}; do
 done
 if [ -n "$FUZZ_FAILED" ]; then
   echo "FUZZ FAILED for seeds:$FUZZ_FAILED"
-  echo "  (rerun a fuzz seed with FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60}, a presence seed with FUZZ_PRESENCE_SEEDS=<seed> FUZZ_PRESENCE_ROUNDS=${FUZZ_PRESENCE_ROUNDS:-100}; LAYERS narrows the run)"
+  echo "  (rerun a fuzz seed with FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60}, a presence seed with FUZZ_PRESENCE_SEEDS=<seed> FUZZ_PRESENCE_ROUNDS=${FUZZ_PRESENCE_ROUNDS:-100}, a schema seed with FUZZ_SCHEMA_SEEDS=<seed> FUZZ_SCHEMA_ROUNDS=${FUZZ_SCHEMA_ROUNDS:-200}; LAYERS narrows the run)"
   FAILED_LAYERS="$FAILED_LAYERS fuzz"
 fi
 

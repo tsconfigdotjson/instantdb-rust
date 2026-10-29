@@ -266,8 +266,9 @@ jobs:
     name: differential vs legacy (${{ matrix.leg }})
     runs-on: ubuntu-latest
     # nightly depth (inputs.nightly runs it on demand): 16 perms seeds of
-    # ~2.7 min each, 4 at a time, plus the 40-seed fuzz window; run one
-    # after another they took about 65 minutes, past the old 45-minute cap
+    # ~2.7 min each, 4 at a time, plus the 40-seed fuzz window and the schema
+    # seeds; run one after another they took about 65 minutes, past the old
+    # 45-minute cap
     timeout-minutes: ${{ (github.event_name == 'schedule' || inputs.nightly) && 120 || 45 }}
     strategy:
       fail-fast: false
@@ -293,13 +294,13 @@ jobs:
             shard: 3/3
           # the remaining seeded layers are short; three legs carry them
           - leg: seeds-1
-            layers: fuzz presence race conflicts
+            layers: fuzz fuzzschema presence race conflicts
             shard: 1/3
           - leg: seeds-2
-            layers: fuzz presence race conflicts
+            layers: fuzz fuzzschema presence race conflicts
             shard: 2/3
           - leg: seeds-3
-            layers: fuzz presence race conflicts
+            layers: fuzz fuzzschema presence race conflicts
             shard: 3/3
     services:
       postgres:
@@ -398,6 +399,10 @@ jobs:
           FUZZ_PERMS_JOBS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '4' || '1' }}
           FUZZ_PRESENCE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '101 102 103 104 105 106 107 108 109 110 111 112' || '101 102 103' }}
           FUZZ_PRESENCE_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '250' || '100' }}
+          # schema evolution: 2 seeds per PR, 12 nightly (rounds is the total
+          # op target; the mandatory schema scenarios are ~170 ops)
+          FUZZ_SCHEMA_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '31 32 33 34 35 36 37 38 39 40 41 42' || '31 32' }}
+          FUZZ_SCHEMA_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '350' || '200' }}
           FUZZ_RACE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '1 2 3 4 5 6 7 8 9 10' || '1 2 3' }}
           RACE_URL: http://localhost:8885
         run: KEEP=1 ./scripts/differential/run.sh

@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
@@ -194,19 +194,294 @@ impl LookupResolver {
     }
 }
 
-pub fn translate_unique_violation(e: sqlx::Error, attrs: &AttrMap) -> InstantError {
+/// `DatabaseError` itself exposes message/constraint/table; the Postgres
+/// driver keeps the detail line (the failing row / key values) on its own
+/// concrete error type.
+fn pg_detail(db: &dyn sqlx::error::DatabaseError) -> Option<&str> {
+    db.try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+        .and_then(|d| d.detail())
+}
+
+/// Split a Postgres detail tuple/CSV without breaking commas inside JSON
+/// values, quoted strings, arrays or nested tuples.
+fn split_pg_list(s: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut cur = String::new();
+    let mut quote = false;
+    let mut escape = false;
+    let mut depth = 0i32;
+    for c in s.chars() {
+        if quote {
+            cur.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                quote = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                quote = true;
+                cur.push(c);
+            }
+            '(' | '[' | '{' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' | ']' | '}' => {
+                depth -= 1;
+                cur.push(c);
+            }
+            ',' if depth == 0 => {
+                out.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    out.push(cur.trim().to_string());
+    out
+}
+
+/// Parse the column/value map of an error detail: a unique violation's
+/// `Key (a, b)=(1, 2)` or a check violation's `Failing row contains (...)`
+/// (the triples column order from migration 01). Mirrors legacy
+/// `parse-unique-detail` / `extract-triple-from-constraint`.
+fn pg_detail_map(detail: &str) -> Option<HashMap<String, String>> {
+    if let Some(rest) = detail.strip_prefix("Key (") {
+        let (cols, vals) = rest.split_once(")=(")?;
+        let vals = vals.rsplit_once(')').map(|(v, _)| v).unwrap_or(vals);
+        let cols = split_pg_list(cols);
+        let vals = split_pg_list(vals);
+        return Some(cols.into_iter().zip(vals).collect());
+    }
+    let pos = detail.find("Failing row contains (")?;
+    let rest = &detail[pos + "Failing row contains (".len()..];
+    let rest = rest.rsplit_once(')').map(|(v, _)| v).unwrap_or(rest);
+    let cols = [
+        "app_id",
+        "entity_id",
+        "attr_id",
+        "value",
+        "value_md5",
+        "ea",
+        "eav",
+        "av",
+        "ave",
+        "vae",
+        "created_at",
+        "checked_data_type",
+    ];
+    let vals = split_pg_list(rest);
+    Some(
+        cols.into_iter()
+            .zip(vals)
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
+}
+
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn triple_unique_error(detail: &str, attrs: &AttrMap) -> Option<InstantError> {
+    let m = pg_detail_map(detail)?;
+    let attr_id = m.get("attr_id").and_then(|s| Uuid::parse_str(s).ok())?;
+    let value = m.get("json_null_to_null(value)")?.clone();
+    let attr = attrs.get(&attr_id)?;
+    let message = format!(
+        "`{}` is a unique attribute on `{}` and an entity already exists with `{}.{}` = {}",
+        attr.label, attr.etype, attr.etype, attr.label, value
+    );
+    Some(InstantError::new(
+        "record-not-unique",
+        400,
+        message,
+        Some(json!({
+            "record-type": "triple",
+            "attr-id": attr_id,
+            "etype": attr.etype,
+            "label": attr.label,
+            "value": value,
+        })),
+    ))
+}
+
+fn triple_check_error(
+    detail: &str,
+    attrs: &AttrMap,
+    constraint: Option<&str>,
+) -> Option<InstantError> {
+    let m = pg_detail_map(detail)?;
+    let attr_id = m.get("attr_id").and_then(|s| Uuid::parse_str(s).ok());
+    let attr = attr_id.and_then(|id| attrs.get(&id));
+    let value_raw = m.get("value")?.clone();
+    let (value, truncated) = match serde_json::from_str::<Value>(&value_raw) {
+        Ok(v) => (v, false),
+        Err(_) => (
+            Value::String(value_raw.trim().trim_matches('"').to_string()),
+            true,
+        ),
+    };
+    let name = attr.map(|a| format!("{}.{}", a.etype, a.label));
+    let checked = m
+        .get("checked_data_type")
+        .cloned()
+        .filter(|s| s != "null" && !s.is_empty());
+    let message = match constraint {
+        Some("valid_value_data_type") => {
+            let mut msg = String::from("Invalid value type");
+            if let Some(name) = &name {
+                msg.push_str(&format!(" for {name}."));
+            } else {
+                msg.push('.');
+            }
+            if let Some(cdt) = &checked {
+                msg.push_str(&format!(" Value must be a {cdt}"));
+                if truncated {
+                    msg.push('.');
+                } else {
+                    msg.push_str(&format!(
+                        " but the provided value type is {}.",
+                        json_type_name(&value)
+                    ));
+                }
+            }
+            msg
+        }
+        Some("indexed_values_are_constrained") => {
+            if m.get("av").map(String::as_str) == Some("t") {
+                "Value is too large for a unique attribute.".to_string()
+            } else {
+                "Value is too large for an indexed attribute.".to_string()
+            }
+        }
+        Some("valid_ref_value") => "Linked value must be a valid uuid.".to_string(),
+        other => format!("Check Violation: {}", other.unwrap_or("unknown")),
+    };
+    let mut hint = Map::new();
+    if let Some(attr) = attr {
+        hint.insert("namespace".into(), json!(attr.etype));
+        hint.insert("attribute".into(), json!(attr.label));
+    }
+    hint.insert("value".into(), value);
+    hint.insert(
+        "checked-data-type".into(),
+        checked.map(Value::String).unwrap_or(Value::Null),
+    );
+    hint.insert(
+        "attr-id".into(),
+        attr_id.map(|id| json!(id)).unwrap_or(Value::Null),
+    );
+    hint.insert(
+        "entity-id".into(),
+        m.get("entity_id")
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .map(|id| json!(id))
+            .unwrap_or(Value::Null),
+    );
+    if constraint == Some("indexed_values_are_constrained") {
+        hint.insert("value-too-large?".into(), json!(true));
+    }
+    Some(InstantError::new(
+        "validation-failed",
+        400,
+        message,
+        Some(Value::Object(hint)),
+    ))
+}
+
+/// A write against an attr update (av/ea/attrs unique constraints): legacy's
+/// update-multi! goes through the same SQL exception translation as triple
+/// writes, so a flag flip that makes existing values collide reports the
+/// detailed unique-triple error, while a rename colliding on an attr/ident
+/// unique row is the generic `Record not unique: attr`.
+pub fn translate_attr_write_violation(e: sqlx::Error, attr: &Attr) -> InstantError {
     if let sqlx::Error::Database(db) = &e {
         if db.code().as_deref() == Some("23505") {
-            let detail = db.message().to_string();
-            // Try to find which attr from the constraint detail; fall back generic.
-            for attr in attrs.iter() {
-                if detail.contains(&attr.id.to_string()) {
-                    return InstantError::record_not_unique(
-                        &attr.etype,
-                        &attr.label,
-                        Some(&attr.id.to_string()),
-                        None,
-                    );
+            let constraint = db.constraint();
+            let detail = pg_detail(db.as_ref()).unwrap_or_default();
+            if constraint == Some("av_index") {
+                if let Some(m) = pg_detail_map(detail) {
+                    if let Some(value) = m.get("json_null_to_null(value)") {
+                        let message = format!(
+                            "`{}` is a unique attribute on `{}` and an entity already exists with `{}.{}` = {}",
+                            attr.label, attr.etype, attr.etype, attr.label, value
+                        );
+                        return InstantError::new(
+                            "record-not-unique",
+                            400,
+                            message,
+                            Some(json!({
+                                "record-type": "triple",
+                                "attr-id": attr.id,
+                                "etype": attr.etype,
+                                "label": attr.label,
+                                "value": value,
+                            })),
+                        );
+                    }
+                }
+            }
+            if constraint == Some("app_ident_uq") {
+                if let Some(m) = pg_detail_map(detail) {
+                    if let (Some(etype), Some(label)) = (m.get("etype"), m.get("label")) {
+                        return InstantError::new(
+                            "record-not-unique",
+                            400,
+                            format!("`{label}` already exists on `{etype}`"),
+                            Some(json!({"record-type": "ident", "etype": etype, "label": label})),
+                        );
+                    }
+                }
+            }
+            if matches!(
+                constraint,
+                Some("attrs_etype_label_unique" | "attrs_reverse_etype_label_unique")
+            ) {
+                return InstantError::new(
+                    "record-not-unique",
+                    400,
+                    "Record not unique: attr",
+                    Some(json!({"record-type": "attr"})),
+                );
+            }
+        }
+    }
+    e.into()
+}
+
+pub fn translate_unique_violation(e: sqlx::Error, attrs: &AttrMap) -> InstantError {
+    if let sqlx::Error::Database(db) = &e {
+        let constraint = db.constraint();
+        let detail = pg_detail(db.as_ref()).unwrap_or_default();
+        if db.code().as_deref() == Some("23505") {
+            if constraint == Some("av_index") {
+                if let Some(err) = triple_unique_error(detail, attrs) {
+                    return err;
+                }
+            }
+            if constraint == Some("app_ident_uq") {
+                if let Some(m) = pg_detail_map(detail) {
+                    if let (Some(etype), Some(label)) = (m.get("etype"), m.get("label")) {
+                        return InstantError::new(
+                            "record-not-unique",
+                            400,
+                            format!("`{label}` already exists on `{etype}`"),
+                            Some(json!({"record-type": "ident", "etype": etype, "label": label})),
+                        );
+                    }
                 }
             }
             return InstantError::new(
@@ -217,30 +492,8 @@ pub fn translate_unique_violation(e: sqlx::Error, attrs: &AttrMap) -> InstantErr
             );
         }
         if db.code().as_deref() == Some("23514") {
-            let msg = db.message().to_string();
-            if msg.contains("valid_value_data_type") {
-                return InstantError::new(
-                    "validation-failed",
-                    400,
-                    "Invalid value type for a type-checked attribute.",
-                    Some(json!({"data-type": "triples"})),
-                );
-            }
-            if msg.contains("indexed_values_are_constrained") {
-                return InstantError::new(
-                    "validation-failed",
-                    400,
-                    "Value is too large for a unique/indexed attribute (max 1024 bytes).",
-                    Some(json!({"data-type": "triples"})),
-                );
-            }
-            if msg.contains("valid_ref_value") {
-                return InstantError::new(
-                    "validation-failed",
-                    400,
-                    "Link values must be valid uuids.",
-                    Some(json!({"data-type": "triples"})),
-                );
+            if let Some(err) = triple_check_error(detail, attrs, constraint) {
+                return err;
             }
         }
     }
@@ -881,9 +1134,13 @@ pub async fn validate_required(
                         etype, attr.label, eid
                     ),
                     // legacy hint (triple.clj:227-235): the failing rows, no data-type
-                    Some(
-                        json!({"records": [{"entity_id": eid, "etype": etype, "label": attr.label}]}),
-                    ),
+                    Some(json!({"records": [{
+                        "entity_id": eid,
+                        "attr_id": attr.id,
+                        "etype": etype,
+                        "label": attr.label,
+                        "is_required": true,
+                    }]})),
                 ));
             }
         }
