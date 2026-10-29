@@ -507,6 +507,69 @@ pub struct TxOptions {
     pub admin: bool,
 }
 
+/// Legacy `resolve-lookups-for-delete-entity` (transaction.clj:360-378):
+/// resolve every delete-entity lookup against the pre-tx state before any
+/// step runs. A lookup that names an entity becomes that id, even when an
+/// earlier step in this tx renames the lookup value; a lookup that misses is
+/// dropped, so it cannot name an entity an earlier step creates. Rule-params
+/// steps naming the same lookup take the resolved id too, like legacy.
+async fn resolve_delete_lookups(
+    conn: &mut PgConnection,
+    app_id: Uuid,
+    steps: Vec<TxStep>,
+) -> Result<Vec<TxStep>> {
+    let mut resolved: HashMap<(Uuid, CanonicalValue), Option<Uuid>> = HashMap::new();
+    for step in &steps {
+        if let TxStep::DeleteEntity {
+            eid: EidRef::Lookup(attr_id, value),
+            ..
+        } = step
+        {
+            let key = (*attr_id, value.clone());
+            if resolved.contains_key(&key) {
+                continue;
+            }
+            let row = sqlx::query(
+                "SELECT entity_id FROM triples
+                 WHERE app_id = $1 AND attr_id = $2 AND av
+                   AND json_null_to_null(value) IS NOT DISTINCT FROM json_null_to_null($3::jsonb)",
+            )
+            .bind(app_id)
+            .bind(attr_id)
+            .bind(&value.0)
+            .fetch_optional(&mut *conn)
+            .await?;
+            resolved.insert(key, row.map(|r| r.get("entity_id")));
+        }
+    }
+    if resolved.is_empty() {
+        return Ok(steps);
+    }
+    let mut out = Vec::with_capacity(steps.len());
+    for mut step in steps {
+        match &mut step {
+            TxStep::DeleteEntity { eid, .. } => {
+                if let EidRef::Lookup(attr_id, value) = eid {
+                    match resolved.get(&(*attr_id, value.clone())).copied().flatten() {
+                        Some(id) => *eid = EidRef::Id(id),
+                        None => continue,
+                    }
+                }
+            }
+            TxStep::RuleParams { eid, .. } => {
+                if let EidRef::Lookup(attr_id, value) = eid {
+                    if let Some(Some(id)) = resolved.get(&(*attr_id, value.clone())).copied() {
+                        *eid = EidRef::Id(id);
+                    }
+                }
+            }
+            _ => {}
+        }
+        out.push(step);
+    }
+    Ok(out)
+}
+
 /// legacy `throw-tx-step-validation-err!` (permissioned_transaction.clj:38-42):
 /// the offending step, vectorized, rides in `hint.input`.
 fn tx_step_validation_err(step: &TxStep, message: String) -> InstantError {
@@ -616,6 +679,13 @@ pub async fn transact(
     // legacy validate-mode (transaction.clj:283-358): one pre-pass over the
     // pre-tx state before any step runs
     validate_modes(&mut *conn, app_id, attrs, &steps, opts.admin).await?;
+
+    // legacy resolve-lookups-for-delete-entity (transaction.clj:360-378):
+    // delete-entity lookups are resolved before any step runs, and a lookup
+    // that misses is dropped. Leaving a miss for the delete group would let
+    // it name an entity an earlier step in this same tx created or renamed
+    // into that value, which legacy never does.
+    let steps = resolve_delete_lookups(&mut *conn, app_id, steps).await?;
 
     // Group steps by op, groups ordered by first appearance.
     let mut groups: Vec<(&'static str, Vec<TxStep>)> = vec![];
