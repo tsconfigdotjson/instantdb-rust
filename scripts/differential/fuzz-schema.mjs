@@ -575,6 +575,8 @@ const errView = (m) => ({
   hint: normalize(m.hint ?? null),
 });
 
+let reregistered = 0;
+
 async function runOn(serverName, plan) {
   const { url, appId } = SERVERS[serverName];
   const initMessage = (session) => {
@@ -710,29 +712,46 @@ async function runOn(serverName, plan) {
     return { attrs: projectAttrs(init.attrs ?? []), subs };
   };
 
+  // Queries each session holds as far as the script knows. Legacy's refresh
+  // can re-register a query removed while it recomputes it (query.clj
+  // instaql-query-reactive! -> bump-instaql-version!), and a later add-query
+  // of it then answers add-query-exists. That is the same legacy race
+  // fuzz-perms handles: remove the stray query and ask again.
+  const held = Object.fromEntries(SESSIONS.map((s) => [s, new Set()]));
   const addQuery = async (session, q) => {
     const key = canon(normalize(q));
-    fold();
-    subs[session].set(key, null);
-    subQ[session].set(key, q);
-    const ceid = conns[session].send({ "client-event-id": uuid(), op: "add-query", q });
-    const r = await conns[session].waitFor(
-      (m) => ["add-query-ok", "add-query-exists", "error"].includes(m.op) && m["client-event-id"] === ceid,
-      20000,
-    );
-    if (r.op === "add-query-ok") {
-      subs[session].set(key, projectQueryResult(r.result, q));
-      return { ok: r.op };
+    const ask = async () => {
+      fold();
+      subs[session].set(key, null);
+      subQ[session].set(key, q);
+      const ceid = conns[session].send({ "client-event-id": uuid(), op: "add-query", q });
+      const r = await conns[session].waitFor(
+        (m) => ["add-query-ok", "add-query-exists", "error"].includes(m.op) && m["client-event-id"] === ceid,
+        20000,
+      );
+      if (r.op === "add-query-ok") {
+        subs[session].set(key, projectQueryResult(r.result, q));
+        held[session].add(key);
+        return { ok: r.op };
+      }
+      subs[session].delete(key);
+      subQ[session].delete(key);
+      return r.op === "error" ? { error: errView(r) } : { ok: r.op };
+    };
+    let r = await ask();
+    if (r.ok === "add-query-exists" && serverName === "legacy" && !held[session].has(key)) {
+      reregistered++;
+      await removeQuery(session, q);
+      r = await ask();
     }
-    subs[session].delete(key);
-    subQ[session].delete(key);
-    return r.op === "error" ? { error: errView(r) } : { ok: r.op };
+    return r;
   };
   const removeQuery = async (session, q) => {
     fold();
     const key = canon(normalize(q));
     subs[session].delete(key);
     subQ[session].delete(key);
+    held[session].delete(key);
     const ceid = conns[session].send({ "client-event-id": uuid(), op: "remove-query", q });
     const r = await conns[session].waitFor(
       (m) => ["remove-query-ok", "error"].includes(m.op) && m["client-event-id"] === ceid,
@@ -853,6 +872,30 @@ function legacyStaleState(l, r) {
 }
 let staleLegacy = 0;
 
+// An update-attr unique? flip rewrites av for every triple of the attr in one
+// UPDATE. With several already-duplicated values, Postgres reports whichever
+// duplicate row it reaches first, and that order changes between runs on both
+// servers (seed 34's body/label and seed 36/41's dynIdx picks vary). The
+// winning value is not a client contract; keep the envelope and the attr
+// identity, mask only the chosen value.
+const isUniqueFlagFlip = (op) =>
+  op?.kind === "tx" &&
+  (op.steps ?? []).some(([kind, value]) => kind === "update-attr" && value?.["unique?"] === true);
+const multiConflictUniqueView = (op, o) => {
+  if (!isUniqueFlagFlip(op)) return o;
+  const e = o?.error;
+  if (e?.type !== "record-not-unique" || e.hint?.["record-type"] !== "triple") return o;
+  return {
+    ...o,
+    error: {
+      ...e,
+      message: "<conflicting unique value>",
+      hint: { ...e.hint, value: "<conflicting unique value>" },
+    },
+  };
+};
+let multiConflict = 0;
+
 let allowed = 0;
 let mismatches = 0;
 const n = Math.max(legacy.outcomes.length, rust.outcomes.length);
@@ -871,6 +914,13 @@ for (let k = 0; k < n; k++) {
   if (verdict.entry) {
     allowed++;
     console.log(`[ALLOWED] ${p}: ${verdict.differed.join(", ") || "(whole value)"}`);
+    continue;
+  }
+  if (canon(multiConflictUniqueView(op, l)) === canon(multiConflictUniqueView(op, r))) {
+    multiConflict++;
+    console.log(
+      `${p}: legacy and rust chose different conflicting unique values; compared type/attr-id/etype/label only`,
+    );
     continue;
   }
   mismatches++;
@@ -927,4 +977,4 @@ if (mismatches || stale || !floorOk) {
   console.error(`FUZZ-SCHEMA FAILED: ${mismatches} mismatches, ${stale} stale allowlist entries (seed ${seed})`);
   process.exit(1);
 }
-console.log(`FUZZ-SCHEMA PASSED: ${plan.script.length} ops, ${legacy.outcomes.filter((o) => o.kind === "checkpoint").length} checkpoints, ${allowed} allowed differences, ${staleLegacy} stale legacy snapshots (seed ${seed})`);
+console.log(`FUZZ-SCHEMA PASSED: ${plan.script.length} ops, ${legacy.outcomes.filter((o) => o.kind === "checkpoint").length} checkpoints, ${allowed} allowed differences, ${multiConflict} multi-conflict unique values, ${reregistered} legacy re-registered removed queries, ${staleLegacy} stale legacy snapshots (seed ${seed})`);
