@@ -15,8 +15,12 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
 
 ### Parallel legs in CI
 
-CI's `differential` job runs `run.sh` as a five-leg matrix. Each leg boots its
-own legacy stack and rust servers and runs part of the harness:
+CI's `differential` job runs `run.sh` as an eight-leg matrix. Each leg boots
+its own legacy stack and rust servers and runs part of the harness. The
+unseeded replay/dash layers have a leg each; so does every `perms` seed (a
+perms seed is as long as the whole dash leg, so stacking the other seeded
+layers behind it set the critical path). The remaining seeded layers share
+three round-robin shards:
 
 ```
 LAYERS="schema replay stress" ./run.sh   # only these layers

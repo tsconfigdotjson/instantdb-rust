@@ -259,8 +259,9 @@ jobs:
   # uploads its run records + coverage records. differential-merge checks
   # that the legs together made every run of the full harness exactly once
   # and enforces the coverage baseline on the union of their records.
-  # Run one after another the layers took ~11 minutes (PR depth) and the
-  # legs here are balanced at ~2 minutes of harness work each.
+  # Run one after another the layers took ~11 minutes (PR depth). The dash,
+  # replay and other seeded legs are balanced at ~2.5 minutes of harness work;
+  # a perms seed is ~2.5-3 minutes on its own, so each gets its own leg.
   differential:
     name: differential vs legacy (${{ matrix.leg }})
     runs-on: ubuntu-latest
@@ -278,14 +279,27 @@ jobs:
           - leg: dash
             layers: dash storage rulewheres errors
             shard: 1/1
+          # a perms seed is mostly waiting for its streams to settle and takes
+          # as long as the whole dash leg; one per leg keeps every seeded leg
+          # shorter than dash instead of stacking perms behind presence/race.
+          - leg: perms-1
+            layers: perms
+            shard: 1/3
+          - leg: perms-2
+            layers: perms
+            shard: 2/3
+          - leg: perms-3
+            layers: perms
+            shard: 3/3
+          # the remaining seeded layers are short; three legs carry them
           - leg: seeds-1
-            layers: fuzz perms presence race conflicts
+            layers: fuzz presence race conflicts
             shard: 1/3
           - leg: seeds-2
-            layers: fuzz perms presence race conflicts
+            layers: fuzz presence race conflicts
             shard: 2/3
           - leg: seeds-3
-            layers: fuzz perms presence race conflicts
+            layers: fuzz presence race conflicts
             shard: 3/3
     services:
       postgres:
@@ -305,9 +319,13 @@ jobs:
       DATABASE_URL: postgres://instant:instant@localhost:5432/instant
     steps:
       - uses: actions/checkout@v4
-      # boots while the rust server builds; run.sh waits for it
-      - name: Start legacy server stack
-        run: docker compose -f scripts/differential/docker-compose.yml up -d --quiet-pull
+      # Boot in the background: the legacy image pulls (up to ~80s, the ghcr
+      # server image dominates) overlap the rust cache restore/migrations/
+      # build below instead of sitting on the critical path. Waited on before
+      # the harness; run.sh's own compose up is then a no-op.
+      - name: Start legacy server stack (background)
+        run: |
+          nohup bash -c 'docker compose -f scripts/differential/docker-compose.yml up -d --quiet-pull; echo $? > /tmp/legacy-up.rc' > /tmp/legacy-up.log 2>&1 &
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -331,6 +349,27 @@ jobs:
             sleep 1
           done
           echo "rust server failed to boot"; cat /tmp/rust-server.log /tmp/rust-chaos-server.log; exit 1
+      - name: Wait for legacy server stack
+        run: |
+          for i in $(seq 1 180); do
+            [ -f /tmp/legacy-up.rc ] && break
+            sleep 1
+          done
+          if [ ! -f /tmp/legacy-up.rc ]; then
+            echo "legacy compose did not finish"; cat /tmp/legacy-up.log; exit 1
+          fi
+          if [ "$(cat /tmp/legacy-up.rc)" != "0" ]; then
+            echo "legacy compose failed"; cat /tmp/legacy-up.log; exit 1
+          fi
+          for i in $(seq 1 180); do
+            if curl -sf http://localhost:8891/ > /dev/null 2>&1; then
+              echo "legacy server is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "legacy server failed to come up"
+          docker compose -f scripts/differential/docker-compose.yml logs legacy-server | tail -200
+          exit 1
       # every leg must shard the same fuzz window, also across midnight and
       # on a re-run: pin it to the day the workflow run was created
       - name: Pin the fuzz seed window day
@@ -450,10 +489,12 @@ jobs:
       SDK_REPORT_DIR: ${{ github.workspace }}/sdk-suite-reports
     steps:
       - uses: actions/checkout@v4
-      # boots while the SDKs install; waited on below
-      - name: Start legacy server stack
+      # Boot in the background while the SDKs install/build and playwright is
+      # cached; waited on below. The legacy image pulls are the slow part.
+      - name: Start legacy server stack (background)
         if: matrix.server == 'legacy'
-        run: docker compose -f scripts/differential/docker-compose.yml up -d --quiet-pull
+        run: |
+          nohup bash -c 'docker compose -f scripts/differential/docker-compose.yml up -d --quiet-pull; echo $? > /tmp/legacy-up.rc' > /tmp/legacy-up.log 2>&1 &
       - uses: dtolnay/rust-toolchain@stable
         if: matrix.server == 'rust'
       - uses: Swatinem/rust-cache@v2
@@ -534,6 +575,16 @@ jobs:
       - name: Wait for legacy server
         if: matrix.server == 'legacy'
         run: |
+          for i in $(seq 1 180); do
+            [ -f /tmp/legacy-up.rc ] && break
+            sleep 1
+          done
+          if [ ! -f /tmp/legacy-up.rc ]; then
+            echo "legacy compose did not finish"; cat /tmp/legacy-up.log; exit 1
+          fi
+          if [ "$(cat /tmp/legacy-up.rc)" != "0" ]; then
+            echo "legacy compose failed"; cat /tmp/legacy-up.log; exit 1
+          fi
           for i in $(seq 1 180); do
             if curl -sf "$SERVER_URL/" > /dev/null 2>&1; then
               echo "legacy server is up"; exit 0
