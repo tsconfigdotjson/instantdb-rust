@@ -138,7 +138,7 @@ pub fn size_limit_error(limit: i64) -> InstantError {
 fn adds_data(step: &TxStep) -> bool {
     matches!(
         step,
-        TxStep::AddAttr(_) | TxStep::AddTriple { .. } | TxStep::DeepMergeTriple { .. }
+        TxStep::AddAttr { .. } | TxStep::AddTriple { .. } | TxStep::DeepMergeTriple { .. }
     )
 }
 

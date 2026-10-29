@@ -697,6 +697,7 @@ pub async fn validate_add_required<'e, E: PgExecutor<'e>>(
     exec: E,
     app_id: Uuid,
     attr: &Attr,
+    input: &Value,
 ) -> Result<()> {
     let row = sqlx::query(
         "SELECT 1 AS x FROM attrs JOIN triples ON attrs.id = triples.attr_id
@@ -711,9 +712,9 @@ pub async fn validate_add_required<'e, E: PgExecutor<'e>>(
             "Can't create attribute `{}` as required because `{}` already have entities",
             attr.label, attr.etype
         );
-        return Err(InstantError::validation_failed(
+        return Err(InstantError::validation_failed_input(
             "attributes",
-            m.clone(),
+            input.clone(),
             json!([{"message": m}]),
         ));
     }
@@ -754,9 +755,11 @@ pub async fn validate_update_required(
                 "Can't update attribute `{}` to required because `{}` already have entities without it",
                 attr.label, attr.etype
             );
-            return Err(InstantError::validation_failed(
+            // legacy's update-required check sees the mapified update, whose
+            // only stable field is the attr id.
+            return Err(InstantError::validation_failed_input(
                 "attributes",
-                m.clone(),
+                json!({"id": id}),
                 json!([{"message": m}]),
             ));
         }
@@ -858,12 +861,9 @@ pub async fn update<'e, E: PgExecutor<'e>>(
     if let Some(c) = patch.get("cardinality").and_then(|v| v.as_str()) {
         updated.cardinality = Cardinality::parse(c)?;
     }
-    if let Some(cdt) = patch.get("checked-data-type") {
-        updated.checked_data_type = match cdt.as_str() {
-            Some(s) => Some(CheckedDataType::parse(s)?),
-            None => None,
-        };
-    }
+    // Legacy update-multi! does not write `checked-data-type` for a raw
+    // update-attr step (the CLI changes checked types through indexing jobs,
+    // not this step): patch that field is ignored, not applied unchecked.
     if let Some(od) = patch.get("on-delete") {
         updated.on_delete_cascade = od.as_str() == Some("cascade");
     }
@@ -877,24 +877,22 @@ pub async fn update<'e, E: PgExecutor<'e>>(
         r#"
         WITH attr_up AS (
           UPDATE attrs SET value_type = $3, cardinality = $4, is_unique = $5, is_indexed = $6,
-                 is_required = $7, checked_data_type = $8::checked_data_type,
-                 on_delete = CASE WHEN $9 THEN 'cascade'::attr_on_delete END,
-                 on_delete_reverse = CASE WHEN $10 THEN 'cascade'::attr_on_delete END,
-                 etype = $11, label = $12, reverse_etype = $13, reverse_label = $14
+                 is_required = $7,
+                 on_delete = CASE WHEN $8 THEN 'cascade'::attr_on_delete END,
+                 on_delete_reverse = CASE WHEN $9 THEN 'cascade'::attr_on_delete END,
+                 etype = $10, label = $11, reverse_etype = $12, reverse_label = $13
           WHERE app_id = $1 AND id = $2
         ), fwd_up AS (
-          UPDATE idents SET etype = $11, label = $12
-          WHERE app_id = $1 AND attr_id = $2 AND id = $15
+          UPDATE idents SET etype = $10, label = $11
+          WHERE app_id = $1 AND attr_id = $2 AND id = $14
         ), rev_up AS (
-          UPDATE idents SET etype = $13, label = $14
-          WHERE app_id = $1 AND attr_id = $2 AND id = $16 AND $16 IS NOT NULL
+          UPDATE idents SET etype = $12, label = $13
+          WHERE app_id = $1 AND attr_id = $2 AND id = $15 AND $15 IS NOT NULL
         )
-        UPDATE triples SET ea = $17, eav = $18, av = $19, ave = $20, vae = $21,
-               checked_data_type = $8::checked_data_type
+        UPDATE triples SET ea = $16, eav = $17, av = $18, ave = $19, vae = $20
         WHERE app_id = $1 AND attr_id = $2
-          AND (ea IS DISTINCT FROM $17 OR eav IS DISTINCT FROM $18 OR av IS DISTINCT FROM $19
-               OR ave IS DISTINCT FROM $20 OR vae IS DISTINCT FROM $21
-               OR checked_data_type IS DISTINCT FROM $8::checked_data_type)
+          AND (ea IS DISTINCT FROM $16 OR eav IS DISTINCT FROM $17 OR av IS DISTINCT FROM $18
+               OR ave IS DISTINCT FROM $19 OR vae IS DISTINCT FROM $20)
         "#,
     )
     .bind(app_id)
@@ -904,7 +902,6 @@ pub async fn update<'e, E: PgExecutor<'e>>(
     .bind(updated.is_unique)
     .bind(updated.is_indexed)
     .bind(updated.is_required)
-    .bind(updated.checked_data_type.map(|c| c.as_str()))
     .bind(updated.on_delete_cascade)
     .bind(updated.on_delete_reverse_cascade)
     .bind(&updated.etype)
@@ -919,7 +916,8 @@ pub async fn update<'e, E: PgExecutor<'e>>(
     .bind(updated.flags().ave)
     .bind(updated.flags().vae)
     .execute(exec)
-    .await?;
+    .await
+    .map_err(|e| crate::triple::translate_attr_write_violation(e, &updated))?;
     Ok(updated)
 }
 

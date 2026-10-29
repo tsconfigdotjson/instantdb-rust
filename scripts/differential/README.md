@@ -24,10 +24,10 @@ three round-robin shards:
 
 ```
 LAYERS="schema replay stress" ./run.sh   # only these layers
-LAYERS="fuzz perms race" SHARD=2/3 ./run.sh   # every 3rd seed of each, from the 2nd
+LAYERS="fuzz fuzzschema perms race" SHARD=2/3 ./run.sh   # every 3rd seed of each, from the 2nd
 ```
 
-A seeded layer makes one run per seed (`fuzz:42`, `perms:7`, `race:1`, …) and
+A seeded layer makes one run per seed (`fuzz:42`, `fuzzschema:31`, `perms:7`, `race:1`, …) and
 an unseeded layer makes one run, which lands in shard 1. With `RUNS_DIR` set,
 a leg lists every run of the full harness in `$RUNS_DIR/planned` and the runs
 it made in `$RUNS_DIR/ran`. A partial run (`LAYERS` or `SHARD` set) skips the
@@ -208,6 +208,37 @@ everything and checks coverage itself, as before.
   input) runs them at 400 rounds plus a window of 40 fresh seeds that moves
   every day (`FUZZ_SEED_WINDOW`). `run.sh` runs every seed and lists the
   failing ones at the end.
+- `fuzz-schema.mjs` — seeded **schema evolution** interleaved with data and
+  subscriptions, which no other layer generates. A fixed catalog plus
+  seed-chosen values drives inline `add-attr` (blob and ref, forward and
+  reverse identities, cardinality one/many, unique, indexed, checked data
+  types, required), data writes before and after every change, `update-attr`
+  flag flips (index / unique on and off with and without existing duplicates,
+  checked-type changes over existing data, required on populated and
+  incomplete namespaces) and renames (blob and both link identities),
+  `delete-attr` soft deletes and `restore-attr`; the 2/12 seeds and extra
+  rounds add more seeded writes, flag flips, queries and subscription churn.
+  A link is added, renamed, deleted and restored; an indexed attr is deleted
+  and restored (restore drops the index); unknown attr ids are no-ops; a
+  non-admin session adds attrs and writes data but has its update / delete /
+  restore attempts compared as `permission-denied`. Every transact outcome is
+  compared including the complete error envelope (status, type, message,
+  hint); one-shot queries on the mutated attrs compare where / order /
+  pagination (each server's own page cursors are fed back page by page) and
+  full results; long-lived subscriptions are folded at settled checkpoints
+  and compared with the refresh errors; attrs are folded from `init-ok` and
+  `refresh-ok` and compared as the client's attr map, with a fresh `init-ok`
+  probe at every checkpoint. A legacy session whose cache/refresh has not
+  caught up is accepted only when a fresh legacy probe agrees with both the
+  rust session and the rust fresh probe (the same stale-session rule
+  fuzz-perms uses); every other difference, including a stale rust session,
+  still fails. Admin-gated schema mutations run on the admin session;
+  inline add-attr and data transacts use both sessions. Raw `update-attr`
+  checked-type changes are no-ops in legacy and here (they go through
+  indexing jobs instead), and the layer pins that instead of applying a type
+  unchecked. `node fuzz-schema.mjs <app> <app> <token> [seed] [rounds]`; seeds
+  31-32 at 200 rounds per PR (`FUZZ_SCHEMA_SEEDS` / `FUZZ_SCHEMA_ROUNDS`),
+  12 seeds at 350 nightly.
 - `fuzz-perms.mjs` — the same grammar under **generated permission rules**
   (view / create / update / delete per namespace, binds, field rules,
   `ruleParams`, and auth / `data.ref` / `auth.ref` / `request.*`
@@ -427,7 +458,7 @@ everything and checks coverage itself, as before.
 ## Allowlists
 
 `allowed-divergences.json` (replay, dash, storage, rule-wheres, ref-topics,
-fuzz-perms and fuzz-presence layers, keyed by `path`) and
+fuzz-perms, fuzz-schema and fuzz-presence layers, keyed by `path`) and
 `errors-allowed.json` (error matrix, keyed by `probe`) share one
 strict entry format, checked by `loadAllowlist` / `allowDivergence` in
 `lib.mjs`. An entry allows one documented difference, not whatever else later
@@ -449,7 +480,9 @@ shows up at the same path:
   `keyset/<op>/<key>`; dash paths `dash:<step>/<key>`; storage paths
   `storage:<step>/<key>`; ref-topics paths `reftopics:<phase>/<session>`;
   fuzz-perms paths `fuzzperms:<probe>/<session>` and
-  `fuzzperms:admin-{query,transact}/<op>/<session>`; fuzz-presence paths
+  `fuzzperms:admin-{query,transact}/<op>/<session>`; fuzz-schema paths
+  `fuzzschema:<kind>/<op>[/<session>]`, with checkpoints named
+  `fuzzschema:checkpoint/<label>`; fuzz-presence paths
   `presence:<probe>/<session>`, `presence:final/<session>` and
   `presence:<checkpoint>`; errors-allowed.json uses probe names.
 - `differs` (required): anchored regexes over sub-paths of the compared value.
