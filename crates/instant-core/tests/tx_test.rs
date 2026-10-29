@@ -331,6 +331,69 @@ async fn lookup_refs_upsert_and_resolve() {
     );
 }
 
+/// Legacy preprocesses delete-entity lookups against the pre-tx state
+/// (transaction.clj:360-378) before any step runs and drops lookups that
+/// miss. Without that, a delete by lookup could name an entity an earlier
+/// step in the same tx created or renamed into the lookup value.
+#[tokio::test]
+async fn delete_entity_lookup_resolves_against_pre_tx_state() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+
+    let owner = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", owner, ids.owners_id, owner],
+            ["add-triple", owner, ids.owners_name, "dora"]
+        ]),
+    )
+    .await
+    .unwrap();
+
+    // A lookup that missed before the tx must stay missed even when an
+    // earlier add step writes that value: the new owner survives.
+    let fresh = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", fresh, ids.owners_id, fresh],
+            ["add-triple", fresh, ids.owners_name, "ghost"],
+            ["delete-entity", [ids.owners_name, "ghost"], "owners"]
+        ]),
+    )
+    .await
+    .unwrap();
+    let triples = entity_triples(&pool, app, fresh).await;
+    assert!(triples.contains(&("owners.id".to_string(), json!(fresh))));
+    assert!(triples.contains(&("owners.name".to_string(), json!("ghost"))));
+
+    // A lookup that matched before the tx must still delete that pre-tx
+    // entity even when an earlier step renames the lookup value.
+    transact_json(
+        &pool,
+        app,
+        json!([
+            [
+                "add-triple",
+                [ids.owners_name, "dora"],
+                ids.owners_name,
+                "dee"
+            ],
+            ["delete-entity", [ids.owners_name, "dee"], "owners"]
+        ]),
+    )
+    .await
+    .unwrap();
+    let triples = entity_triples(&pool, app, owner).await;
+    assert!(triples.contains(&("owners.name".to_string(), json!("dee"))));
+    assert_eq!(triples.len(), 2);
+}
+
 #[tokio::test]
 async fn deep_merge_merges_and_deletes_keys() {
     let pool = pool().await;
