@@ -139,7 +139,6 @@ STORAGE_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
 STORAGE_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
 ./provision.sh "$STORAGE_APP" "$STORAGE_TOKEN"
 layer storage node storage.mjs "$STORAGE_APP" "$STORAGE_TOKEN"
-
 echo "== rule-where rewriter =="
 # legacy's rule-wheres flag on for this app only (rule-wheres.mjs)
 RW_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
@@ -259,6 +258,21 @@ for SEED in $PRESENCE_SEEDS; do
     FUZZ_FAILED="$FUZZ_FAILED presence:$SEED"
   fi
 done
+# storage / $files fuzz: admin and client uploads, signed upload consumption,
+# overwrites, odd / blank paths, content-type / disposition variants, deletes,
+# signed downloads, $files queries / pagination / links, impersonated admin
+# calls and generated $files rules (fuzz-storage.mjs). Every HTTP response,
+# query result, download fetch and settled subscription state is compared.
+STORAGE_SEEDS="${FUZZ_STORAGE_SEEDS:-201 202}"
+for SEED in $STORAGE_SEEDS; do
+  want "storagefuzz:$SEED" || continue
+  ST_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+  ST_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+  ./provision.sh "$ST_APP" "$ST_TOKEN" > /dev/null
+  if ! node fuzz-storage.mjs "$ST_APP" "$ST_APP" "$ST_TOKEN" "$SEED" "${FUZZ_STORAGE_ROUNDS:-80}"; then
+    FUZZ_FAILED="$FUZZ_FAILED storagefuzz:$SEED"
+  fi
+done
 # subscription race fuzz (issue #51): rust-only invariants for queries
 # registered while transactions are in flight, against a rust server booted
 # with INSTANT_CHAOS_DELAY_MS (RACE_URL; defaults to RUST_URL)
@@ -273,7 +287,7 @@ for SEED in ${FUZZ_RACE_SEEDS:-1 2 3}; do
 done
 if [ -n "$FUZZ_FAILED" ]; then
   echo "FUZZ FAILED for seeds:$FUZZ_FAILED"
-  echo "  (rerun a fuzz seed with FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60}, a presence seed with FUZZ_PRESENCE_SEEDS=<seed> FUZZ_PRESENCE_ROUNDS=${FUZZ_PRESENCE_ROUNDS:-100}, a schema seed with FUZZ_SCHEMA_SEEDS=<seed> FUZZ_SCHEMA_ROUNDS=${FUZZ_SCHEMA_ROUNDS:-200}; LAYERS narrows the run)"
+  echo "  (rerun a fuzz seed with FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60}, a presence seed with FUZZ_PRESENCE_SEEDS=<seed> FUZZ_PRESENCE_ROUNDS=${FUZZ_PRESENCE_ROUNDS:-100}, a schema seed with FUZZ_SCHEMA_SEEDS=<seed> FUZZ_SCHEMA_ROUNDS=${FUZZ_SCHEMA_ROUNDS:-200}, a storage seed with FUZZ_STORAGE_SEEDS=<seed> FUZZ_STORAGE_ROUNDS=${FUZZ_STORAGE_ROUNDS:-80}; LAYERS narrows the run)"
   FAILED_LAYERS="$FAILED_LAYERS fuzz"
 fi
 

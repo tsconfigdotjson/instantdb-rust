@@ -1312,26 +1312,15 @@ async fn storage_upload_impl(
 ) -> Result<Value> {
     let ctx = authed(state, headers, params).await?;
     // legacy upload-put (admin/routes.clj:628-643): path header, storage
-    // perms skipped for the admin token, `create` rule for impersonation
-    let path = headers
-        .get("path")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            // legacy get-param! params ["path"] (admin/routes.clj:631)
-            InstantError::new(
-                "param-missing",
-                400,
-                "Missing parameter: [\"path\"]",
-                Some(json!({"in": ["path"]})),
-            )
-        })?;
+    // perms skipped for the admin token, `create` rule for impersonation.
+    // Legacy reads and coerces every header param before upload-file! runs
+    // the permission check, so a blank content-disposition is malformed even
+    // when the caller would be denied.
+    let path = single_param(header_string(headers, "path"), &["path"])?;
+    let meta = blob_meta_from_headers(headers)?;
     if !ctx.perms.admin {
         check_files_perm(state, ctx.app_id, &ctx.perms, "create", &path).await?;
     }
-    let meta = blob_meta_from_headers(headers)?;
     store_file(state, ctx.app_id, &path, &body, &meta).await
 }
 
@@ -1475,9 +1464,9 @@ async fn storage_delete_impl(
     let ctx = authed(state, headers, params).await?;
     let filename = admin_filename_param(params)?;
     if !ctx.perms.admin {
-        check_files_perm(state, ctx.app_id, &ctx.perms, "delete", filename).await?;
+        check_files_perm(state, ctx.app_id, &ctx.perms, "delete", &filename).await?;
     }
-    let id = delete_file_by_path(state, ctx.app_id, filename).await?;
+    let id = delete_file_by_path(state, ctx.app_id, &filename).await?;
     Ok(json!({"data": {"id": id}}))
 }
 
@@ -1631,7 +1620,7 @@ async fn admin_signed_download_url_impl(
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
     let filename = admin_filename_param(params)?;
-    let url = file_location_by_path(state, ctx.app_id, filename)
+    let url = file_location_by_path(state, ctx.app_id, &filename)
         .await
         .map(|loc| crate::storage::download_url(state, ctx.app_id, &loc));
     Ok(json!({"data": url}))
@@ -1672,20 +1661,8 @@ async fn admin_signed_upload_url_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
-    let filename = body
-        .get("filename")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            InstantError::new(
-                "param-missing",
-                400,
-                "Missing parameter: [\"body\" \"filename\"]",
-                Some(json!({"in": ["body", "filename"]})),
-            )
-        })?;
-    let url = create_upload_url(state, ctx.app_id, filename).await?;
+    let filename = single_param(body_string(body, "filename"), &["body", "filename"])?;
+    let url = create_upload_url(state, ctx.app_id, &filename).await?;
     Ok(json!({"data": url}))
 }
 
@@ -1721,15 +1698,12 @@ async fn client_signed_upload_url_impl(
         .storage_upload
         .check(app_id, 1.0)
         .map_err(crate::rate_limit::rate_limited_err)?;
-    let path = body
-        .get("path")
-        .or_else(|| body.get("filename"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| client_param_missing("path", "filename"))?;
-    check_files_perm(state, app_id, &perms, "create", path).await?;
-    let url = create_upload_url(state, app_id, path).await?;
+    let path = some_param(&[
+        ("path", body_string(body, "path")),
+        ("filename", body_string(body, "filename")),
+    ])?;
+    check_files_perm(state, app_id, &perms, "create", &path).await?;
+    let url = create_upload_url(state, app_id, &path).await?;
     Ok(json!({"data": url}))
 }
 
@@ -2060,20 +2034,85 @@ fn client_param_missing(name: &str, alt: &str) -> InstantError {
     )
 }
 
+fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
+fn body_string(body: &Value, name: &str) -> Option<String> {
+    body.get(name)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn coerce_non_blank_param(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// Clojure prints a parameter path as `["params" "filename"]` (spaces between
+/// elements), not as compact JSON.
+fn format_param_path(path: &[&str]) -> String {
+    let parts: Vec<String> = path.iter().map(|p| format!("\"{p}\"")).collect();
+    format!("[{}]", parts.join(" "))
+}
+
+/// `ex/get-param!` with `coerce-non-blank-str`: absent is param-missing,
+/// present-but-blank is param-malformed (exception.clj:421-428).
+fn single_param(value: Option<String>, path: &[&str]) -> Result<String> {
+    let Some(raw) = value else {
+        return Err(InstantError::new(
+            "param-missing",
+            400,
+            format!("Missing parameter: {}", format_param_path(path)),
+            Some(json!({"in": path})),
+        ));
+    };
+    coerce_non_blank_param(&raw).ok_or_else(|| {
+        InstantError::new(
+            "param-malformed",
+            400,
+            format!("Malformed parameter: {}", format_param_path(path)),
+            Some(json!({"in": path, "original-input": raw})),
+        )
+    })
+}
+
+/// `ex/get-some-param!` with `coerce-non-blank-str` over ordered candidates
+/// (`[:path]` then `[:filename]`): a present candidate wins even when blank,
+/// so blank is malformed rather than missing (exception.clj:440-457).
+fn some_param(candidates: &[(&str, Option<String>)]) -> Result<String> {
+    let Some((name, raw)) = candidates.iter().find(|(_, v)| v.is_some()) else {
+        let first = candidates.first().map(|(n, _)| *n).unwrap_or("path");
+        let rest: Vec<Value> = candidates.iter().skip(1).map(|(n, _)| json!([n])).collect();
+        return Err(InstantError::new(
+            "param-missing",
+            400,
+            format!("Missing parameter: [\"{first}\"]"),
+            Some(json!({"in": [first], "possible-ins": rest})),
+        ));
+    };
+    let raw = raw.clone().unwrap_or_default();
+    coerce_non_blank_param(&raw).ok_or_else(|| {
+        let possible: Vec<Value> = candidates.iter().map(|(n, _)| json!([n])).collect();
+        InstantError::new(
+            "param-malformed",
+            400,
+            format!("Malformed parameter: [\"{name}\"]"),
+            Some(json!({"in": [name], "possible-ins": possible, "original-input": raw})),
+        )
+    })
+}
+
 /// legacy `get-param! req [:params :filename]` on the admin storage routes.
-fn admin_filename_param(params: &HashMap<String, String>) -> Result<&str> {
-    params
-        .get("filename")
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            InstantError::new(
-                "param-missing",
-                400,
-                "Missing parameter: [\"params\" \"filename\"]",
-                Some(json!({"in": ["params", "filename"]})),
-            )
-        })
+fn admin_filename_param(params: &HashMap<String, String>) -> Result<String> {
+    single_param(params.get("filename").cloned(), &["params", "filename"])
 }
 
 pub async fn client_storage_upload(
@@ -2097,17 +2136,14 @@ async fn client_storage_upload_impl(
         .storage_upload
         .check(app_id, 1.0)
         .map_err(crate::rate_limit::rate_limited_err)?;
-    // legacy req->app-file! reads `path` or `filename` (storage/routes.clj:14-27)
-    let path = headers
-        .get("path")
-        .or_else(|| headers.get("filename"))
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .ok_or_else(|| client_param_missing("path", "filename"))?;
-    check_files_perm(state, app_id, &perms, "create", &path).await?;
+    // legacy req->app-file! reads `path` or `filename` (storage/routes.clj:14-27),
+    // coercing the header before upload-file! runs the permission check.
+    let path = some_param(&[
+        ("path", header_string(headers, "path")),
+        ("filename", header_string(headers, "filename")),
+    ])?;
     let meta = blob_meta_from_headers(headers)?;
+    check_files_perm(state, app_id, &perms, "create", &path).await?;
     store_file(state, app_id, &path, &body, &meta).await
 }
 
@@ -2130,10 +2166,11 @@ async fn client_storage_delete_impl(
         .storage_upload
         .check(app_id, 1.0)
         .map_err(crate::rate_limit::rate_limited_err)?;
-    let filename = params
-        .get("filename")
-        .ok_or_else(|| client_param_missing("path", "filename"))?;
-    check_files_perm(state, app_id, &perms, "delete", filename).await?;
+    let filename = some_param(&[
+        ("path", params.get("path").cloned()),
+        ("filename", params.get("filename").cloned()),
+    ])?;
+    check_files_perm(state, app_id, &perms, "delete", &filename).await?;
     use sqlx::Row;
     let path_attr = sc::attr_id("$files", "path");
     let row = sqlx::query(
@@ -2142,14 +2179,14 @@ async fn client_storage_delete_impl(
     )
     .bind(app_id)
     .bind(path_attr)
-    .bind(filename)
+    .bind(&filename)
     .fetch_optional(&state.pool)
     .await
     .map_err(InstantError::from)?;
     match row {
         Some(row) => {
             let id: Uuid = row.get("entity_id");
-            let old = file_location_by_path(state, app_id, filename).await;
+            let old = file_location_by_path(state, app_id, &filename).await;
             service::run_system_transact(state, app_id, &json!([["delete-entity", id, "$files"]]))
                 .await?;
             if let Some(old) = old {
@@ -2180,10 +2217,11 @@ async fn client_signed_download_url_impl(
         .storage_serve
         .check(app_id, 1.0)
         .map_err(crate::rate_limit::rate_limited_err)?;
-    let filename = params
-        .get("filename")
-        .ok_or_else(|| client_param_missing("path", "filename"))?;
-    check_files_perm(state, app_id, &perms, "view", filename).await?;
+    let filename = some_param(&[
+        ("path", params.get("path").cloned()),
+        ("filename", params.get("filename").cloned()),
+    ])?;
+    check_files_perm(state, app_id, &perms, "view", &filename).await?;
     use sqlx::Row;
     let path_attr = sc::attr_id("$files", "path");
     let loc_attr = sc::attr_id("$files", "location-id");
@@ -2195,7 +2233,7 @@ async fn client_signed_download_url_impl(
     .bind(app_id)
     .bind(path_attr)
     .bind(loc_attr)
-    .bind(filename)
+    .bind(&filename)
     .fetch_optional(&state.pool)
     .await
     .map_err(InstantError::from)?;

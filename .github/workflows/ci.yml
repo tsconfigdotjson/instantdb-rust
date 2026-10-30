@@ -288,7 +288,7 @@ jobs:
             layers: schema replay reftopics stress
             shard: 1/1
           - leg: dash
-            layers: dash storage rulewheres errors
+            layers: dash storage storagefuzz rulewheres errors
             shard: 1/1
           # a perms seed is mostly waiting for its streams to settle and takes
           # as long as the whole dash leg; one per leg keeps every seeded leg
@@ -450,6 +450,8 @@ jobs:
           # unique values and the legacy refresh re-register race.
           FUZZ_SCHEMA_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '31 32 33 34 35 36 37 38 39 40 41 42' || '31 32 33 34 36 37 41' }}
           FUZZ_SCHEMA_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '350' || '200' }}
+          FUZZ_STORAGE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '201 202 203 204 205 206 207 208 209 210' || '201 202 203' }}
+          FUZZ_STORAGE_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '160' || '80' }}
           FUZZ_RACE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '1 2 3 4 5 6 7 8 9 10' || '1 2 3' }}
           RACE_URL: http://localhost:8885
         run: KEEP=1 ./scripts/differential/run.sh

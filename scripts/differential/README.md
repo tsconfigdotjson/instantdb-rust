@@ -333,6 +333,26 @@ everything and checks coverage itself, as before.
   on both servers and stay raw. `node fuzz-presence.mjs <app> <app> <token>
   [seed] [rounds]`; seeds 101-103 at 100 rounds per PR
   (`FUZZ_PRESENCE_SEEDS` / `FUZZ_PRESENCE_ROUNDS`), 12 seeds at 250 nightly.
+- `fuzz-storage.mjs` — seeded storage / `$files` sequences: admin and client
+  uploads, the deprecated signed-upload-url + consume flow, overwrites of the
+  same path, odd / unicode / nested / whitespace-padded paths, missing and
+  blank path / filename parameters, content-type and content-disposition
+  variants, single / bulk / missing-file deletes, signed download URLs fetched
+  and compared by status, bytes, content-type, content-disposition and
+  cache-control, and `$files` queries over the socket and `/admin/query`
+  (where, order, fields projections, limit/offset, cursor pagination and
+  page-info) plus a custom entity linked to `$files`. Generated `$files`
+  create / view / delete rules run against client routes, socket
+  subscriptions and impersonated admin calls (`as-guest` / `as-email` /
+  `as-token`). Every response envelope, query result and settled folded
+  subscription is compared; only server-chosen ids, timestamps and the
+  documented download-URL text (legacy presigns S3, rust proxies through
+  `/storage/serve` unless `STORAGE_BACKEND=s3`) are normalized. File ids are
+  mapped to their path so link triples stay comparable, and a legacy session
+  whose cache lags is accepted only when a fresh legacy probe agrees with
+  rust (and rust's fresh probe). `node fuzz-storage.mjs <app> <app> <token>
+  [seed] [rounds]`; seeds 201-203 at 80 rounds per PR
+  (`FUZZ_STORAGE_SEEDS` / `FUZZ_STORAGE_ROUNDS`), 10 seeds at 160 nightly.
 - `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):
   seeded bursts of unawaited transacts and add-queries of order/limit pages
   (a transact then a subscription to the page it changes, as an infinite
