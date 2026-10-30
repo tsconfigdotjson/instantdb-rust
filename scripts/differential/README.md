@@ -175,7 +175,12 @@ everything and checks coverage itself, as before.
   Besides most transacts committing and the final read holding data, the
   success floor asks each new grammar feature (date, bool, tags, profile,
   lookup, hops) used often enough for at least one committed transact and
-  one query answered with data (`grammar floor:` in the log). Page-walk
+  one query answered with data (`grammar floor:` in the log). Random churn
+  can delete or unlink every entity a generated hop path would match, so the
+  script ends by re-creating one owner, tag and entity with a known chain and
+  reading it through a three-segment `owner.items.tstr` path; that keeps the
+  `hops` floor on a real result instead of tripping when all its queries
+  happened to hit empty data (seed 31255). Page-walk
   features carry their own floor: once a seed makes enough walks, every
   modifier (`limit` / `offset` / `first` / `last`), cursor direction
   (`after` / `before`), inclusive flag, where clause, nested form, order kind
@@ -209,7 +214,8 @@ everything and checks coverage itself, as before.
   server links it, after which the two states would differ for the rest of
   the seed.
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
-  runs twelve seeds at 250 rounds (42, 99 and the nightly's original 1-10);
+  runs fourteen seeds at 250 rounds (42, 99, the nightly's original 1-10 and
+  the regression seeds 31201 and 31255);
   the nightly (`schedule` in ci.yml, or a manual run with the `nightly`
   input) runs them at 400 rounds plus a window of 40 fresh seeds that moves
   every day (`FUZZ_SEED_WINDOW`). `run.sh` runs every seed and lists the
@@ -246,7 +252,16 @@ everything and checks coverage itself, as before.
   A query removed while a legacy refresh is recomputing it can be
   re-registered by the refresh, so a later add-query answers
   `add-query-exists`; that is the same legacy race fuzz-perms handles, so
-  the layer removes the stray query and asks again. Admin-gated schema
+  the layer removes the stray query and asks again. `schowner.id` is written
+  immediately after the schema transact that creates it, and the attrs
+  refresh a session receives can be computed before or after that write
+  lands (the schema insert refreshes every session, while the later
+  inferred-types attr update only reaches sessions whose queries mention the
+  attr). The same seed therefore observes `null` or `["string"]` for its
+  inferred-types at setup/subscriptions depending on timing (seed 33 under
+  #80, seed 34 nightly), so that one field is masked only when exactly one
+  side is `null` and the other is an observed type list; every other attr,
+  field and session still has to match. Admin-gated schema
   mutations run on the admin session; inline add-attr and data transacts use
   both sessions. Raw `update-attr` checked-type changes are no-ops in legacy
   and here (they go through indexing jobs instead), and the layer pins that
@@ -350,7 +365,9 @@ everything and checks coverage itself, as before.
   `/storage/serve` unless `STORAGE_BACKEND=s3`) are normalized. File ids are
   mapped to their path so link triples stay comparable, and a legacy session
   whose cache lags is accepted only when a fresh legacy probe agrees with
-  rust (and rust's fresh probe). `node fuzz-storage.mjs <app> <app> <token>
+  rust (and rust's fresh probe). A checkpoint mismatch also names the
+  differing rows per subscription (legacy-only / rust-only triples), since
+  the full state dump is too large to reach them. `node fuzz-storage.mjs <app> <app> <token>
   [seed] [rounds]`; seeds 201-203 at 80 rounds per PR
   (`FUZZ_STORAGE_SEEDS` / `FUZZ_STORAGE_ROUNDS`), 10 seeds at 160 nightly.
 - `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):

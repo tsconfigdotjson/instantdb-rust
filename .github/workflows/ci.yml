@@ -435,8 +435,9 @@ jobs:
           # (a 250-round seed takes ~10s); the nightly adds a fresh window
           # of 40 seeds every day (FUZZ_SEED_WINDOW, see run.sh), deeper.
           # 31201 is the nightly seed that caught delete-entity lookups
-          # resolving against writes earlier in the same tx.
-          FUZZ_SEEDS: "42 99 1 2 3 4 5 6 7 8 9 10 31201"
+          # resolving against writes earlier in the same tx; 31255 is the
+          # nightly hops seed whose generated where paths all hit empty data.
+          FUZZ_SEEDS: "42 99 1 2 3 4 5 6 7 8 9 10 31201 31255"
           FUZZ_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '400' || '250' }}
           FUZZ_SEED_WINDOW: ${{ (github.event_name == 'schedule' || inputs.nightly) && '40' || '0' }}
           FUZZ_PERMS_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22' || '7 8 9' }}

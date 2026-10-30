@@ -1139,6 +1139,43 @@ const outcomePath = (op, fallback) => {
   const label = op?.label ?? op?.key ?? op?.session ?? "";
   return `storagefuzz:${op?.kind ?? "unknown"}/${label || fallback}`;
 };
+// The full checkpoint states are too large for the generic first-difference
+// dump (the ADMIN subscriptions alone fill it), so name the rows that differ
+// per subscription: usually one side's refresh is missing a just-uploaded
+// file.
+function printCheckpointDiff(lv, rv) {
+  for (const s of ["ADMIN", "GUEST", "USER"]) {
+    const ls = lv.state?.[s]?.subs ?? {};
+    const rs = rv.state?.[s]?.subs ?? {};
+    for (const key of new Set([...Object.keys(ls), ...Object.keys(rs)])) {
+      const left = ls[key];
+      const right = rs[key];
+      if (canon(left) === canon(right)) continue;
+      const lt = left?.triples ?? [];
+      const rt = right?.triples ?? [];
+      const lset = new Map(lt.map((t) => [canon(t), t]));
+      const rset = new Map(rt.map((t) => [canon(t), t]));
+      const onlyL = [...lset].filter(([k]) => !rset.has(k)).map(([, t]) => t);
+      const onlyR = [...rset].filter(([k]) => !lset.has(k)).map(([, t]) => t);
+      console.error(
+        `  ${s} ${key}: triples legacy=${lt.length} rust=${rt.length}; only legacy=${onlyL.length} only rust=${onlyR.length}`,
+      );
+      if (onlyL.length) console.error(`    only legacy: ${JSON.stringify(onlyL.slice(0, 24))}`);
+      if (onlyR.length) console.error(`    only rust:   ${JSON.stringify(onlyR.slice(0, 24))}`);
+      if (canon(left?.pageInfo) !== canon(right?.pageInfo)) {
+        console.error(`    pageInfo legacy=${JSON.stringify(left?.pageInfo)} rust=${JSON.stringify(right?.pageInfo)}`);
+      }
+      if (canon(left?.aggregate) !== canon(right?.aggregate)) {
+        console.error(`    aggregate legacy=${JSON.stringify(left?.aggregate)} rust=${JSON.stringify(right?.aggregate)}`);
+      }
+    }
+    if (canon(lv.state?.[s]?.refreshErrors) !== canon(rv.state?.[s]?.refreshErrors)) {
+      console.error(
+        `  ${s} refreshErrors legacy=${JSON.stringify(lv.state?.[s]?.refreshErrors)} rust=${JSON.stringify(rv.state?.[s]?.refreshErrors)}`,
+      );
+    }
+  }
+}
 let allowed = 0;
 let mismatches = 0;
 let staleLegacy = 0;
@@ -1168,6 +1205,7 @@ for (let i = 0; i < n; i++) {
     continue;
   }
   mismatches++;
+  if (mismatches <= 6 && op?.kind === "checkpoint") printCheckpointDiff(lv, rv);
   if (mismatches > 12) continue;
   const fd = firstDifference(lv, rv);
   console.error(`DIVERGENCE ${p} (${op?.kind}/${op?.label ?? op?.path ?? ""})`);
