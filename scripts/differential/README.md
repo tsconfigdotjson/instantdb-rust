@@ -15,27 +15,33 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
 
 ### Parallel legs in CI
 
-CI's `differential` job runs `run.sh` as an eight-leg matrix. Each leg boots
+CI's `differential` job runs `run.sh` as a twelve-leg matrix. Each leg boots
 its own legacy stack and rust servers and runs part of the harness. The
 unseeded replay/dash layers have a leg each; so does every `perms` seed (a
 perms seed is as long as the whole dash leg, so stacking the other seeded
-layers behind it set the critical path). The remaining seeded layers share
-three round-robin shards:
+layers behind it set the critical path). The other seven legs each carry one
+schema-evolution seed (~2 minutes at PR depth; the nightly's 12 seeds spread
+over the same 7 shards) plus a measured-cost share of the remaining seeded
+layers, which `LAYER_SHARDS` spreads independently:
 
 ```
 LAYERS="schema replay stress" ./run.sh   # only these layers
-LAYERS="fuzz fuzzschema perms race" SHARD=2/3 ./run.sh   # every 3rd seed of each, from the 2nd
+LAYERS="fuzzschema fuzz presence" SHARD=2/7 LAYER_SHARDS="presence:2/3" ./run.sh
+LAYERS="fuzz presence race" SHARD=2/3 ./run.sh   # every 3rd seed of each, from the 2nd
 ```
 
 A seeded layer makes one run per seed (`fuzz:42`, `fuzzschema:31`, `perms:7`, `race:1`, …) and
-an unseeded layer makes one run, which lands in shard 1. With `RUNS_DIR` set,
-a leg lists every run of the full harness in `$RUNS_DIR/planned` and the runs
-it made in `$RUNS_DIR/ran`. A partial run (`LAYERS` or `SHARD` set) skips the
-coverage check. `differential-merge` (check name `differential vs legacy
-server`) then runs `legs.sh inventory`, which fails unless every planned run
-was made by exactly one leg. That catches a new layer that no leg lists. When
-every leg passed, `legs.sh coverage` runs `coverage.mjs --check` on the union
-of the legs' coverage records. Without `LAYERS` and `SHARD`, `run.sh` runs
+an unseeded layer makes one run, which lands in shard 1. `SHARD` applies to
+every layer; a `LAYER_SHARDS` entry (`layer:k/n`, space separated) overrides
+it for that layer, so one leg can take, say, the first presence seed and the
+third conflicts seed. With `RUNS_DIR` set, a leg lists every run of the full
+harness in `$RUNS_DIR/planned` and the runs it made in `$RUNS_DIR/ran`. A
+partial run (`LAYERS`, `SHARD` or `LAYER_SHARDS` set) skips the coverage
+check. `differential-merge` (check name `differential vs legacy server`)
+then runs `legs.sh inventory`, which fails unless every planned run was made
+by exactly one leg. That catches a new layer that no leg lists. When every
+leg passed, `legs.sh coverage` runs `coverage.mjs --check` on the union of
+the legs' coverage records. Without `LAYERS` and `SHARD`, `run.sh` runs
 everything and checks coverage itself, as before.
 
 ## Pieces

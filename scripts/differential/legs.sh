@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Joins the records of the CI legs that each ran part of run.sh (LAYERS /
-# SHARD, see run.sh). <dir> holds one directory per leg with that leg's
-# RUNS_DIR: `planned` (every run the whole harness makes), `ran` (the runs the
-# leg made) and `coverage.jsonl` (its COVERAGE_FILE).
+# SHARD / LAYER_SHARDS, see run.sh). <dir> holds one directory per leg with
+# that leg's RUNS_DIR: `planned` (every run the whole harness makes), `ran`
+# (the runs the leg made) and `coverage.jsonl` (its COVERAGE_FILE).
 #
 #   ./legs.sh inventory <dir>   every leg planned the same runs, and the legs
 #                               together made each planned run exactly once

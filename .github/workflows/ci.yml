@@ -255,13 +255,23 @@ jobs:
 
   # The differential harness (scripts/differential/run.sh) split over parallel
   # legs: each boots its own legacy stack + rust servers and runs part of the
-  # layers (LAYERS) or every third seed of the seeded layers (SHARD), and
+  # layers (LAYERS) or every n-th seed of the seeded layers (SHARD), and
   # uploads its run records + coverage records. differential-merge checks
   # that the legs together made every run of the full harness exactly once
   # and enforces the coverage baseline on the union of their records.
-  # Run one after another the layers took ~11 minutes (PR depth). The dash,
-  # replay and other seeded legs are balanced at ~2.5 minutes of harness work;
-  # a perms seed is ~2.5-3 minutes on its own, so each gets its own leg.
+  # Run one after another the layers took ~11 minutes (PR depth). The dash
+  # and replay legs are ~2.5 minutes of harness work; a perms seed is
+  # ~2.5-3 minutes on its own, so each gets its own leg.
+  #
+  # Schema-evolution seeds are the expensive part of the old seeds-1/2/3
+  # legs: each fuzzschema seed is ~1m55-2m05 at PR depth, so stacking three
+  # of them on one leg made seeds-1 ~8m28s of harness time while seeds-2/3
+  # were ~6m25s/6m45s. On run 40874377056 the other seeded layers measured
+  # ~5s per fuzz seed, ~1m per presence seed and ~20-35s per race/conflicts
+  # seed. Seven legs now carry one fuzzschema seed each (the nightly's 12
+  # seeds spread as 2/2/2/2/2/1/1 over the same 7 shards); LAYER_SHARDS
+  # spreads the measured per-seed cost of the other layers so no leg stacks
+  # a presence seed, a race seed and a conflicts seed behind its schema seed.
   differential:
     name: differential vs legacy (${{ matrix.leg }})
     runs-on: ubuntu-latest
@@ -292,16 +302,39 @@ jobs:
           - leg: perms-3
             layers: perms
             shard: 3/3
-          # the remaining seeded layers are short; three legs carry them
+          # One schema seed per leg (the nightly's 12 seeds spread over the
+          # same 7 shards), plus a measured-cost share of the other seeded
+          # layers. Presence seeds land on legs 1-3, race on 4-6 and
+          # conflicts on 4/6/7, so no leg carries two ~1-minute presence
+          # seeds or stacks a race and a conflict behind the schema seed.
           - leg: seeds-1
-            layers: fuzz fuzzschema presence race conflicts
-            shard: 1/3
+            layers: fuzzschema fuzz presence
+            shard: 1/7
+            layer_shards: presence:1/3
           - leg: seeds-2
-            layers: fuzz fuzzschema presence race conflicts
-            shard: 2/3
+            layers: fuzzschema fuzz presence
+            shard: 2/7
+            layer_shards: presence:2/3
           - leg: seeds-3
-            layers: fuzz fuzzschema presence race conflicts
-            shard: 3/3
+            layers: fuzzschema fuzz presence
+            shard: 3/7
+            layer_shards: presence:3/3
+          - leg: seeds-4
+            layers: fuzzschema fuzz race conflicts
+            shard: 4/7
+            layer_shards: race:1/3 conflicts:3/3
+          - leg: seeds-5
+            layers: fuzzschema fuzz race
+            shard: 5/7
+            layer_shards: race:2/3
+          - leg: seeds-6
+            layers: fuzzschema fuzz race conflicts
+            shard: 6/7
+            layer_shards: conflicts:1/3 race:3/3
+          - leg: seeds-7
+            layers: fuzzschema fuzz conflicts
+            shard: 7/7
+            layer_shards: conflicts:2/3
     services:
       postgres:
         image: postgres:17
@@ -384,6 +417,7 @@ jobs:
         env:
           LAYERS: ${{ matrix.layers }}
           SHARD: ${{ matrix.shard }}
+          LAYER_SHARDS: ${{ matrix.layer_shards }}
           RUNS_DIR: ${{ github.workspace }}/differential-leg/${{ matrix.leg }}
           COVERAGE_FILE: ${{ github.workspace }}/differential-leg/${{ matrix.leg }}/coverage.jsonl
           # PRs and main run the nightly's original seeds at nightly depth
