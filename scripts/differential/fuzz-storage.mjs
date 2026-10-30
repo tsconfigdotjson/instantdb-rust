@@ -1143,7 +1143,7 @@ const outcomePath = (op, fallback) => {
 // dump (the ADMIN subscriptions alone fill it), so name the rows that differ
 // per subscription: usually one side's refresh is missing a just-uploaded
 // file.
-function printCheckpointDiff(lv, rv) {
+function printCheckpointDiff(lv, rv, index) {
   for (const s of ["ADMIN", "GUEST", "USER"]) {
     const ls = lv.state?.[s]?.subs ?? {};
     const rs = rv.state?.[s]?.subs ?? {};
@@ -1162,6 +1162,18 @@ function printCheckpointDiff(lv, rv) {
       );
       if (onlyL.length) console.error(`    only legacy: ${JSON.stringify(onlyL.slice(0, 24))}`);
       if (onlyR.length) console.error(`    only rust:   ${JSON.stringify(onlyR.slice(0, 24))}`);
+      const lf = legacy.fresh[index]?.[s]?.[key];
+      const rf = rust.fresh[index]?.[s]?.[key];
+      const freshOnly = (a, b) => {
+        const aset = new Map((a?.triples ?? []).map((t) => [canon(t), t]));
+        const bset = new Set((b?.triples ?? []).map((t) => canon(t)));
+        return [...aset].filter(([k]) => !bset.has(k)).map(([, t]) => t);
+      };
+      console.error(
+        `    fresh triples legacy=${lf?.triples?.length ?? null} rust=${rf?.triples?.length ?? null}; ` +
+          `fresh legacy-vs-rust only legacy=${JSON.stringify(freshOnly(lf, rf).slice(0, 8))} ` +
+          `only rust=${JSON.stringify(freshOnly(rf, lf).slice(0, 8))}`,
+      );
       if (canon(left?.pageInfo) !== canon(right?.pageInfo)) {
         console.error(`    pageInfo legacy=${JSON.stringify(left?.pageInfo)} rust=${JSON.stringify(right?.pageInfo)}`);
       }
@@ -1205,7 +1217,7 @@ for (let i = 0; i < n; i++) {
     continue;
   }
   mismatches++;
-  if (mismatches <= 6 && op?.kind === "checkpoint") printCheckpointDiff(lv, rv);
+  if (mismatches <= 6 && op?.kind === "checkpoint") printCheckpointDiff(lv, rv, l.i);
   if (mismatches > 12) continue;
   const fd = firstDifference(lv, rv);
   console.error(`DIVERGENCE ${p} (${op?.kind}/${op?.label ?? op?.path ?? ""})`);
