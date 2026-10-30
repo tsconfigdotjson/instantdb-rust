@@ -53,6 +53,7 @@ Legend: ✅ implemented + tested · 🟡 implemented, partial/simplified · ❌ 
 | aggregate `count` (admin-only) | ✅ | |
 | missing attrs → empty results (no error) | ✅ | |
 | `$files` url synthesis / location-id hiding | ✅ | |
+| query + permission checks share one snapshot | ✅ | the datalog query and the per-entity view/field checks run in one `REPEATABLE READ` read-only transaction. A `$files` delete committing between the query and a check's entity re-read otherwise left the result holding a deleted entity, whose null `data.path` made the view rule fail and removed the subscription from the refresh (fuzz-storage seed 202) |
 | BYOP (bring-your-own-postgres proxy tables) | ❌ | separate legacy subsystem |
 | query modifiers by hash (ops flag) | ❌ | internal ops tooling |
 

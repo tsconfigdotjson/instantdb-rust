@@ -368,7 +368,9 @@ everything and checks coverage itself, as before.
   rust (and rust's fresh probe). A tx that writes a `$files` entity forces
   every registered `$files` query stale, not just the ones whose derived
   topics matched, so file subscriptions always see lookup-created path/id
-  rows. A checkpoint mismatch also names the differing rows per subscription
+  rows. The query and its permission checks share one repeatable-read
+  snapshot, so a file delete racing a refresh cannot turn a result row into a
+  missing entity and fail the view rule. A checkpoint mismatch also names the differing rows per subscription
   (legacy-only / rust-only triples) and both fresh probes, since the full
   state dump is too large to reach them. `node fuzz-storage.mjs <app> <app> <token>
   [seed] [rounds]`; seeds 201-203 at 80 rounds per PR
