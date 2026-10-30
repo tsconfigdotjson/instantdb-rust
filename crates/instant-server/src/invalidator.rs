@@ -729,6 +729,13 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
                         })
                     }
                     Err(e) => {
+                        if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+                            tracing::info!(
+                                target: "refresh_trace",
+                                %app_id, query = %job.q, error = %e,
+                                "refresh query failed"
+                            );
+                        }
                         tracing::debug!("refresh query failed: {e}");
                         METRICS.refresh_queries_failed_total.inc();
                         Err(e)
