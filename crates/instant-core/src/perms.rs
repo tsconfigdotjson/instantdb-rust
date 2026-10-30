@@ -1507,6 +1507,14 @@ pub fn eval_program_pure(
             // (plain admin HTTP calls, which never evaluate rules); every
             // session that reaches here sees "You may have a typo"
             tracing::debug!(rule = ?program.rule, error = %e, "permission rule evaluation failed");
+            if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+                tracing::info!(
+                    target: "refresh_trace",
+                    rule = ?program.rule, error = %e,
+                    data = %data, auth = %auth,
+                    "permission rule evaluation failed"
+                );
+            }
             return Err(permission_evaluation_failed(
                 program,
                 "You may have a typo",
