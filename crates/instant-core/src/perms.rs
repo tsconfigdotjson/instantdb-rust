@@ -2047,10 +2047,17 @@ impl<'a> PermsFilter<'a> {
                     && std::env::var_os("INSTANT_TRACE_REFRESH").is_some()
                 {
                     let fresh = fetch_entity_map(conn, app_id, attrs, etype, *eid).await?;
+                    let owners: Vec<Uuid> = sqlx::query_scalar(
+                        "SELECT DISTINCT app_id FROM triples WHERE entity_id = $1",
+                    )
+                    .bind(eid)
+                    .fetch_all(&mut *conn)
+                    .await
+                    .unwrap_or_default();
                     tracing::info!(
                         target: "refresh_trace",
                         %app_id, %eid, memo = ?data,
-                        db = ?fresh,
+                        db = ?fresh, owners = ?owners,
                         "files view data missing path"
                     );
                 }
