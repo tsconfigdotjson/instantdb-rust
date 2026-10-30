@@ -355,11 +355,19 @@ jobs:
       - uses: actions/checkout@v4
       # Boot in the background: the legacy image pulls (up to ~80s, the ghcr
       # server image dominates) overlap the rust cache restore/migrations/
-      # build below instead of sitting on the critical path. Waited on before
-      # the harness; run.sh's own compose up is then a no-op.
+      # build below instead of sitting on the critical path. Pull the images
+      # in parallel first: compose otherwise fetches the dependency images in
+      # order and leaves the large ghcr server image last, which made one leg
+      # of the 12-leg matrix wait an extra ~70s on run 41009536933. Waited on
+      # before the harness; run.sh's own compose up is then a no-op.
       - name: Start legacy server stack (background)
         run: |
-          nohup bash -c 'docker compose -f scripts/differential/docker-compose.yml up -d --quiet-pull; echo $? > /tmp/legacy-up.rc' > /tmp/legacy-up.log 2>&1 &
+          nohup bash -c '
+            docker compose -f scripts/differential/docker-compose.yml config --images |
+              xargs -r -n1 -P4 docker pull --quiet || true
+            docker compose -f scripts/differential/docker-compose.yml up -d --quiet-pull
+            echo $? > /tmp/legacy-up.rc
+          ' > /tmp/legacy-up.log 2>&1 &
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -531,11 +539,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # Boot in the background while the SDKs install/build and playwright is
-      # cached; waited on below. The legacy image pulls are the slow part.
+      # cached; waited on below. The legacy image pulls are the slow part, so
+      # fetch them in parallel before compose starts the dependency chain.
       - name: Start legacy server stack (background)
         if: matrix.server == 'legacy'
         run: |
-          nohup bash -c 'docker compose -f scripts/differential/docker-compose.yml up -d --quiet-pull; echo $? > /tmp/legacy-up.rc' > /tmp/legacy-up.log 2>&1 &
+          nohup bash -c '
+            docker compose -f scripts/differential/docker-compose.yml config --images |
+              xargs -r -n1 -P4 docker pull --quiet || true
+            docker compose -f scripts/differential/docker-compose.yml up -d --quiet-pull
+            echo $? > /tmp/legacy-up.rc
+          ' > /tmp/legacy-up.log 2>&1 &
       - uses: dtolnay/rust-toolchain@stable
         if: matrix.server == 'rust'
       - uses: Swatinem/rust-cache@v2
