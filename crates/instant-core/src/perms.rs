@@ -2042,6 +2042,18 @@ impl<'a> PermsFilter<'a> {
                 true
             } else {
                 let mut data = memo.data(conn, app_id, attrs, etype, *eid).await?;
+                if etype == "$files"
+                    && data.get("path").is_none_or(Value::is_null)
+                    && std::env::var_os("INSTANT_TRACE_REFRESH").is_some()
+                {
+                    let fresh = fetch_entity_map(conn, app_id, attrs, etype, *eid).await?;
+                    tracing::info!(
+                        target: "refresh_trace",
+                        %app_id, %eid, memo = ?data,
+                        db = ?fresh,
+                        "files view data missing path"
+                    );
+                }
                 if let Some(t) = topics.as_deref_mut() {
                     note_entity_map(t, attrs, etype, *eid);
                 }
