@@ -276,7 +276,7 @@ async fn run_query_full_with_options(
         .execute(&mut *tx)
         .await
         .map_err(InstantError::from)?;
-    let mut result = instaql::query_with_options(&mut *tx, &ctx, q, opts).await?;
+    let mut result = instaql::query_with_options(&mut tx, &ctx, q, opts).await?;
     // Topics come from the pre-permissions result: an entity hidden by a
     // view rule is still tracked, so a write that makes it visible refreshes.
     let parsed_forms = instaql::parse_query(q).ok();
@@ -289,7 +289,7 @@ async fn run_query_full_with_options(
         let rules = match rules {
             Some(r) => r,
             None => {
-                loaded = Rules::load(&mut *tx, app_id).await?;
+                loaded = Rules::load(&mut tx, app_id).await?;
                 &loaded
             }
         };
@@ -311,7 +311,7 @@ async fn run_query_full_with_options(
         let mut lookups = instant_core::topics::LookupTopics::default();
         filter
             .filter_with_forms_tracked(
-                &mut *tx,
+                &mut tx,
                 app_id,
                 attrs,
                 &mut result,
