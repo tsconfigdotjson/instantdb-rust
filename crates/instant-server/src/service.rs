@@ -575,6 +575,11 @@ pub struct TxNotice {
     /// attrs whose rows changed: queries mentioning them are refreshed
     /// (legacy topics-for-attr-upsert)
     pub changed_attrs: Vec<Uuid>,
+    /// a `$files` entity was added, updated or deleted. File rows are linked
+    /// to every `$files` query (id/path membership), so those queries are
+    /// always refreshed even if a derived topic misses the write (e.g. a
+    /// lookup-created path/id triple).
+    pub files_changed: bool,
 }
 
 impl From<&instant_core::tx::TxReport> for TxNotice {
@@ -585,6 +590,12 @@ impl From<&instant_core::tx::TxReport> for TxNotice {
             schema_changed: r.schema_changed,
             requery_all: r.requery_all,
             changed_attrs: r.changed_attrs.clone(),
+            files_changed: r
+                .created
+                .iter()
+                .chain(r.deleted.iter())
+                .chain(r.touched.iter())
+                .any(|(_, etype)| etype == "$files"),
         }
     }
 }
@@ -599,6 +610,7 @@ pub async fn notify_tx(state: &AppState, app_id: Uuid, notice: &TxNotice) {
         schema_changed,
         requery_all,
         changed_attrs,
+        files_changed,
     } = notice;
     if *attrs_changed {
         // Local requests racing the NOTIFY must not serve the old catalog.
@@ -611,6 +623,7 @@ pub async fn notify_tx(state: &AppState, app_id: Uuid, notice: &TxNotice) {
         "schema_changed": schema_changed,
         "requery_all": requery_all,
         "changed_attrs": changed_attrs,
+        "files_changed": files_changed,
         "ts": chrono::Utc::now().timestamp_millis(),
     })
     .to_string();
@@ -618,7 +631,7 @@ pub async fn notify_tx(state: &AppState, app_id: Uuid, notice: &TxNotice) {
         tracing::info!(
             target: "refresh_trace",
             %app_id, tx_id, attrs_changed, schema_changed, requery_all,
-            changed_attrs = ?changed_attrs,
+            files_changed, changed_attrs = ?changed_attrs,
             "tx notify"
         );
     }
