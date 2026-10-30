@@ -639,6 +639,7 @@ export const DIVERGENCE_PREFIXES = {
   replay: ["step:", "final/", "keyset/"],
   dash: ["dash:"],
   storage: ["storage:"],
+  storagefuzz: ["storagefuzz:"],
   rulewheres: ["rulewheres:"],
   reftopics: ["reftopics:"],
   fuzzperms: ["fuzzperms:"],
