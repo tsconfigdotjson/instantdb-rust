@@ -107,6 +107,14 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                 if attrs_changed {
                     service::invalidate_attrs(state, app_id);
                 }
+                if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+                    tracing::info!(
+                        target: "refresh_trace",
+                        %app_id, tx_id, attrs_changed, schema_changed, requery_all,
+                        changed_attrs = ?changed_attrs,
+                        "tx received"
+                    );
+                }
                 enqueue_tx(
                     state,
                     app_id,
@@ -587,6 +595,15 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
         // picked (a stale query, or every socket on a schema change); a
         // session with nothing stale gets no frame, not even an attrs-only
         // refresh-ok when the attrs hash moved (session.clj:467-530)
+        if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+            let files: Vec<&String> = stale.iter().filter(|k| k.contains("$files")).collect();
+            tracing::info!(
+                target: "refresh_trace",
+                %app_id, session = %session.id, admin = st.admin,
+                tx_ids = ?tx_ids, stale = stale.len(), files = ?files,
+                "refresh session"
+            );
+        }
         if stale.is_empty() && !schema_changed {
             continue;
         }
@@ -815,6 +832,18 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
                 }
             }
         };
+        if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+            let keys: Vec<&String> = outcomes
+                .iter()
+                .map(|(k, _)| k)
+                .filter(|k| k.contains("$files"))
+                .collect();
+            tracing::info!(
+                target: "refresh_trace",
+                %app_id, session = %plan.session.id, recomputed = outcomes.len(), files = ?keys,
+                "refresh send"
+            );
+        }
         METRICS.refresh_ok_sent_total.inc();
         plan.session.send_raw(frame);
     }

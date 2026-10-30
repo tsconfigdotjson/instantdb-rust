@@ -385,10 +385,14 @@ jobs:
       - name: Boot rust server
         run: |
           cargo build -p instant-server
-          PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/rust-server.log 2>&1 &
+          # INSTANT_TRACE_REFRESH logs each tx notification and the $files
+          # queries each refresh batch recomputes/sends. The logs are uploaded
+          # as artifacts even when a leg passes, so an intermittent missed
+          # refresh can be diagnosed from the run that caught it.
+          INSTANT_TRACE_REFRESH=1 PORT=8888 BASE_URL=http://localhost:8888 ./target/debug/instant-server > /tmp/rust-server.log 2>&1 &
           # same database, random pauses where add-query and refreshes
           # interleave: the subscription race fuzz (fuzz-race.mjs) runs here
-          INSTANT_CHAOS_DELAY_MS=30 PORT=8885 BASE_URL=http://localhost:8885 ./target/debug/instant-server > /tmp/rust-chaos-server.log 2>&1 &
+          INSTANT_TRACE_REFRESH=1 INSTANT_CHAOS_DELAY_MS=30 PORT=8885 BASE_URL=http://localhost:8885 ./target/debug/instant-server > /tmp/rust-chaos-server.log 2>&1 &
           for i in $(seq 1 60); do
             curl -sf http://localhost:8888/health >/dev/null && curl -sf http://localhost:8885/health >/dev/null && exit 0
             sleep 1
@@ -462,6 +466,15 @@ jobs:
         with:
           name: differential-leg-${{ matrix.leg }}
           path: differential-leg/
+          if-no-files-found: ignore
+      - name: Upload rust server logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-server-logs-${{ matrix.leg }}
+          path: |
+            /tmp/rust-server.log
+            /tmp/rust-chaos-server.log
           if-no-files-found: ignore
       - name: Server logs
         if: failure()

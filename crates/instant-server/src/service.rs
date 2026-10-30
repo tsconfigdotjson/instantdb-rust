@@ -614,6 +614,14 @@ pub async fn notify_tx(state: &AppState, app_id: Uuid, notice: &TxNotice) {
         "ts": chrono::Utc::now().timestamp_millis(),
     })
     .to_string();
+    if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+        tracing::info!(
+            target: "refresh_trace",
+            %app_id, tx_id, attrs_changed, schema_changed, requery_all,
+            changed_attrs = ?changed_attrs,
+            "tx notify"
+        );
+    }
     let _ = sqlx::query("SELECT pg_notify('instant_tx', $1)")
         .bind(payload)
         .execute(&state.pool)
