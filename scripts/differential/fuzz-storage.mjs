@@ -1181,10 +1181,10 @@ function printCheckpointDiff(lv, rv, index) {
         console.error(`    aggregate legacy=${JSON.stringify(left?.aggregate)} rust=${JSON.stringify(right?.aggregate)}`);
       }
     }
-    if (canon(lv.state?.[s]?.refreshErrors) !== canon(rv.state?.[s]?.refreshErrors)) {
-      console.error(
-        `  ${s} refreshErrors legacy=${JSON.stringify(lv.state?.[s]?.refreshErrors)} rust=${JSON.stringify(rv.state?.[s]?.refreshErrors)}`,
-      );
+    const lerr = lv.state?.[s]?.refreshErrors ?? [];
+    const rerr = rv.state?.[s]?.refreshErrors ?? [];
+    if (lerr.length || rerr.length) {
+      console.error(`  ${s} refreshErrors legacy=${JSON.stringify(lerr)} rust=${JSON.stringify(rerr)}`);
     }
   }
 }
