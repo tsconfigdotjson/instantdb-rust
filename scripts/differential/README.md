@@ -365,9 +365,12 @@ everything and checks coverage itself, as before.
   `/storage/serve` unless `STORAGE_BACKEND=s3`) are normalized. File ids are
   mapped to their path so link triples stay comparable, and a legacy session
   whose cache lags is accepted only when a fresh legacy probe agrees with
-  rust (and rust's fresh probe). A checkpoint mismatch also names the
-  differing rows per subscription (legacy-only / rust-only triples), since
-  the full state dump is too large to reach them. `node fuzz-storage.mjs <app> <app> <token>
+  rust (and rust's fresh probe). A tx that writes a `$files` entity forces
+  every registered `$files` query stale, not just the ones whose derived
+  topics matched, so file subscriptions always see lookup-created path/id
+  rows. A checkpoint mismatch also names the differing rows per subscription
+  (legacy-only / rust-only triples) and both fresh probes, since the full
+  state dump is too large to reach them. `node fuzz-storage.mjs <app> <app> <token>
   [seed] [rounds]`; seeds 201-203 at 80 rounds per PR
   (`FUZZ_STORAGE_SEEDS` / `FUZZ_STORAGE_ROUNDS`), 10 seeds at 160 nightly.
 - `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):
