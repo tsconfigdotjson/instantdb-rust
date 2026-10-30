@@ -13,7 +13,10 @@ KEEP="${KEEP:-0}"
 # CI spreads the layers over parallel legs (the `differential` matrix in
 # ci.yml). LAYERS="replay dash ..." runs only the named layers (default: all);
 # SHARD=k/n runs only every n-th run of each layer, starting at the k-th (a
-# seeded layer runs once per seed, an unseeded one once, so in shard 1). With
+# seeded layer runs once per seed, an unseeded one once, so in shard 1).
+# LAYER_SHARDS="presence:1/3 race:2/3" overrides the shard for individual
+# layers, so one leg can spread expensive seeds of different layers apart (CI
+# uses this to keep every seeded leg near the same measured cost). With
 # RUNS_DIR set, every run the full script would make is appended to
 # $RUNS_DIR/planned and every run this invocation makes to $RUNS_DIR/ran;
 # legs.sh checks that the legs together made each planned run exactly once.
@@ -24,6 +27,16 @@ SHARD_N="${SHARD#*/}"
 if ! [[ "$SHARD" =~ ^[0-9]+/[0-9]+$ ]] || [ "$SHARD_K" -lt 1 ] || [ "$SHARD_K" -gt "$SHARD_N" ]; then
   echo "SHARD must be k/n with 1 <= k <= n, got: $SHARD"; exit 1
 fi
+LAYER_SHARDS="${LAYER_SHARDS:-}"
+for spec in $LAYER_SHARDS; do
+  if [[ "$spec" != *:* ]]; then
+    echo "LAYER_SHARDS entries must be <layer>:k/n, got: $spec"; exit 1
+  fi
+  lk="${spec#*:}"; lk="${lk%/*}"; ln="${spec##*/}"
+  if ! [[ "${spec#*:}" =~ ^[0-9]+/[0-9]+$ ]] || [ "$lk" -lt 1 ] || [ "$lk" -gt "$ln" ]; then
+    echo "LAYER_SHARDS entries must be <layer>:k/n with 1 <= k <= n, got: $spec"; exit 1
+  fi
+done
 RUNS_DIR="${RUNS_DIR:-}"
 if [ -n "$RUNS_DIR" ]; then
   mkdir -p "$RUNS_DIR"
@@ -32,12 +45,19 @@ fi
 declare -A RUN_COUNT=()
 # want <layer>[:<seed>]: whether this invocation makes that run
 want() {
-  local base="${1%%:*}" i
+  local base="${1%%:*}" i k="$SHARD_K" n="$SHARD_N" spec override
   i="${RUN_COUNT[$base]:-0}"
   RUN_COUNT[$base]=$((i + 1))
   if [ -n "$RUNS_DIR" ]; then echo "$1" >> "$RUNS_DIR/planned"; fi
   if [ -n "$LAYERS" ] && [[ " $LAYERS " != *" $base "* ]]; then return 1; fi
-  if [ $((i % SHARD_N)) -ne $((SHARD_K - 1)) ]; then return 1; fi
+  for spec in $LAYER_SHARDS; do
+    if [ "${spec%%:*}" = "$base" ]; then
+      override="${spec#*:}"
+      k="${override%/*}"
+      n="${override#*/}"
+    fi
+  done
+  if [ $((i % n)) -ne $((k - 1)) ]; then return 1; fi
   if [ -n "$RUNS_DIR" ]; then echo "$1" >> "$RUNS_DIR/ran"; fi
 }
 
@@ -262,10 +282,10 @@ if [ -n "$FAILED_LAYERS" ]; then
   exit 1
 fi
 
-if [ -n "$LAYERS" ] || [ "$SHARD" != "1/1" ]; then
+if [ -n "$LAYERS" ] || [ "$SHARD" != "1/1" ] || [ -n "$LAYER_SHARDS" ]; then
   # a part of the harness covers part of the surface: CI checks the baseline
   # against the union of every leg's records (legs.sh)
-  echo "DIFFERENTIAL HARNESS PASSED (LAYERS=${LAYERS:-all} SHARD=$SHARD; coverage is checked across legs)"
+  echo "DIFFERENTIAL HARNESS PASSED (LAYERS=${LAYERS:-all} SHARD=$SHARD LAYER_SHARDS=${LAYER_SHARDS:-none}; coverage is checked across legs)"
   exit 0
 fi
 
