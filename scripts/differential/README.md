@@ -331,7 +331,11 @@ everything and checks coverage itself, as before.
   and unknown ops. The concurrent burst joins its sessions first: legacy's
   coalesced room events can leave a concurrent joiner without its first
   snapshot until a later event, a legacy defect this server does not
-  reproduce, so the fuzz does not make the missing snapshot the baseline. The
+  reproduce, so the fuzz does not make the missing snapshot the baseline. A
+  new join also waits for its full `refresh-presence` before the next op:
+  legacy's receive queue can combine that snapshot with a following patch and
+  deliver only the patch, leaving the new client without the peers that did
+  not change in between (presence seed 103's `periodic-64`). The
   client versions use legacy's own feature gate: an old
   client must never receive `patch-presence` (only full
   `refresh-presence`), while a modern client must receive at least one patch
