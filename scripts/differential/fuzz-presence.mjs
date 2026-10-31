@@ -19,6 +19,12 @@
 // that a new client got at least one patch, then folds both frame shapes the
 // way the client does.
 //
+// A session's first join into a room waits for the full refresh-presence
+// snapshot before the next op is sent. Legacy's receive queue can combine that
+// snapshot with a following patch and deliver only the patch, which leaves a
+// modern client without the peers that did not change in between; that is a
+// legacy lost-snapshot defect, not a contract (see docs/PARITY.md).
+//
 // Only genuinely nondeterministic values are normalized: session ids are
 // mapped back to their role, instance ids and timestamps are placeholders.
 // Room ids, presence data, user ids (seeded deterministically on both
@@ -131,7 +137,12 @@ function buildPlan() {
   const join = (role, room, data, name, opts = {}) => {
     const msg = { op: "join-room", "room-type": room.type, "room-id": room.id };
     if (data.has) msg.data = data.value;
-    add(name, role, msg, opts);
+    // A session that was not already in the room needs the full snapshot the
+    // server sends for a join. The runner waits for it before the next op:
+    // legacy's receive queue can combine that snapshot with a following patch
+    // and deliver only the patch (see the comment in runOn).
+    const newJoin = !joined[role].has(room.id);
+    add(name, role, msg, newJoin ? { ...opts, newJoin: true } : opts);
     joined[role].add(room.id);
   };
   const leave = (role, room, name, opts = {}) => {
@@ -568,14 +579,33 @@ async function runOn(serverName, plan) {
       if (isBroadcast) await settle(Object.values(conns), SETTLE_MS);
       const before = Object.fromEntries(ROLES.map((r) => [r.name, conns[r.name].frames.length]));
       const ceid = op.ceid;
+      const joinRoom = isJoin ? op.msg["room-id"] : null;
+      const joinFrameMark = isJoin ? conns[op.session].frames.length : 0;
       // a re-join snapshot may reach the client before join-room-ok; apply it
       // just like Reactor does, but keep ignoring stragglers after a leave
-      if (isJoin) states[op.session].joining.add(op.msg["room-id"]);
+      if (isJoin) states[op.session].joining.add(joinRoom);
       conns[op.session].send({ "client-event-id": ceid, ...op.msg });
       const reply = await waitReply(op.session, ceid);
       if (isJoin) {
         fold(op.session);
-        states[op.session].joining.delete(op.msg["room-id"]);
+        if (op.newJoin && reply.op === "join-room-ok") {
+          // Wait for the joiner's full refresh-presence before sending another
+          // op. Legacy's grouped receive queue combines a just-joined full
+          // snapshot (edits nil) with a later patch by keeping only the patch
+          // (grouped_queue.clj:37-52, session.clj:1526-1528); a modern client
+          // that applies that patch against no snapshot then misses every peer
+          // that did not change between the two events. Rust always sends the
+          // joiner a full snapshot; waiting here keeps the fuzz from making
+          // legacy's lost-snapshot defect the baseline (docs/PARITY.md).
+          const c = conns[op.session];
+          const isFullSnapshot = (m) =>
+            m.op === "refresh-presence" && m["room-id"] === joinRoom;
+          if (!c.frames.slice(joinFrameMark).some(isFullSnapshot)) {
+            await c.waitFor(isFullSnapshot);
+          }
+          fold(op.session);
+        }
+        states[op.session].joining.delete(joinRoom);
       }
       if (isBroadcast) {
         await settle(Object.values(conns), BROADCAST_SETTLE_MS);
