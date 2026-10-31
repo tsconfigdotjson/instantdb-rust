@@ -264,8 +264,19 @@ async fn run_query_full_with_options(
         attrs,
         admin: perms.admin,
     };
-    let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
-    let mut result = instaql::query_with_options(&mut conn, &ctx, q, opts).await?;
+    // One repeatable-read snapshot for the datalog query and the permission
+    // checks that follow it. They are separate statements (and the entity
+    // fetch re-reads an entity the view rule needs), so a delete committing
+    // between them would leave the result holding an entity whose row is gone;
+    // the view rule would then evaluate against a null path and fail the whole
+    // refresh. A refresh racing a `$files` delete could remove the
+    // subscription this way (fuzz-storage seed 202).
+    let mut tx = state.pool.begin().await.map_err(InstantError::from)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(InstantError::from)?;
+    let mut result = instaql::query_with_options(&mut tx, &ctx, q, opts).await?;
     // Topics come from the pre-permissions result: an entity hidden by a
     // view rule is still tracked, so a write that makes it visible refreshes.
     let parsed_forms = instaql::parse_query(q).ok();
@@ -278,7 +289,7 @@ async fn run_query_full_with_options(
         let rules = match rules {
             Some(r) => r,
             None => {
-                loaded = Rules::load(&mut conn, app_id).await?;
+                loaded = Rules::load(&mut tx, app_id).await?;
                 &loaded
             }
         };
@@ -300,7 +311,7 @@ async fn run_query_full_with_options(
         let mut lookups = instant_core::topics::LookupTopics::default();
         filter
             .filter_with_forms_tracked(
-                &mut conn,
+                &mut tx,
                 app_id,
                 attrs,
                 &mut result,
@@ -310,7 +321,7 @@ async fn run_query_full_with_options(
             .await?;
         topics.merge_lookups(lookups);
     }
-    drop(conn);
+    tx.commit().await.map_err(InstantError::from)?;
     inject_file_urls(state, app_id, attrs, q, &mut result);
     crate::metrics::METRICS.query_seconds.observe_since(started);
     Ok(QueryOutcome { result, topics })
@@ -575,6 +586,11 @@ pub struct TxNotice {
     /// attrs whose rows changed: queries mentioning them are refreshed
     /// (legacy topics-for-attr-upsert)
     pub changed_attrs: Vec<Uuid>,
+    /// a `$files` entity was added, updated or deleted. File rows are linked
+    /// to every `$files` query (id/path membership), so those queries are
+    /// always refreshed even if a derived topic misses the write (e.g. a
+    /// lookup-created path/id triple).
+    pub files_changed: bool,
 }
 
 impl From<&instant_core::tx::TxReport> for TxNotice {
@@ -585,6 +601,12 @@ impl From<&instant_core::tx::TxReport> for TxNotice {
             schema_changed: r.schema_changed,
             requery_all: r.requery_all,
             changed_attrs: r.changed_attrs.clone(),
+            files_changed: r
+                .created
+                .iter()
+                .chain(r.deleted.iter())
+                .chain(r.touched.iter())
+                .any(|(_, etype)| etype == "$files"),
         }
     }
 }
@@ -599,6 +621,7 @@ pub async fn notify_tx(state: &AppState, app_id: Uuid, notice: &TxNotice) {
         schema_changed,
         requery_all,
         changed_attrs,
+        files_changed,
     } = notice;
     if *attrs_changed {
         // Local requests racing the NOTIFY must not serve the old catalog.
@@ -611,9 +634,18 @@ pub async fn notify_tx(state: &AppState, app_id: Uuid, notice: &TxNotice) {
         "schema_changed": schema_changed,
         "requery_all": requery_all,
         "changed_attrs": changed_attrs,
+        "files_changed": files_changed,
         "ts": chrono::Utc::now().timestamp_millis(),
     })
     .to_string();
+    if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+        tracing::info!(
+            target: "refresh_trace",
+            %app_id, tx_id, attrs_changed, schema_changed, requery_all,
+            files_changed, changed_attrs = ?changed_attrs,
+            "tx notify"
+        );
+    }
     let _ = sqlx::query("SELECT pg_notify('instant_tx', $1)")
         .bind(payload)
         .execute(&state.pool)

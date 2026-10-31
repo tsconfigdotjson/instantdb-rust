@@ -1139,6 +1139,55 @@ const outcomePath = (op, fallback) => {
   const label = op?.label ?? op?.key ?? op?.session ?? "";
   return `storagefuzz:${op?.kind ?? "unknown"}/${label || fallback}`;
 };
+// The full checkpoint states are too large for the generic first-difference
+// dump (the ADMIN subscriptions alone fill it), so name the rows that differ
+// per subscription: usually one side's refresh is missing a just-uploaded
+// file.
+function printCheckpointDiff(lv, rv, index) {
+  for (const s of ["ADMIN", "GUEST", "USER"]) {
+    const ls = lv.state?.[s]?.subs ?? {};
+    const rs = rv.state?.[s]?.subs ?? {};
+    for (const key of new Set([...Object.keys(ls), ...Object.keys(rs)])) {
+      const left = ls[key];
+      const right = rs[key];
+      if (canon(left) === canon(right)) continue;
+      const lt = left?.triples ?? [];
+      const rt = right?.triples ?? [];
+      const lset = new Map(lt.map((t) => [canon(t), t]));
+      const rset = new Map(rt.map((t) => [canon(t), t]));
+      const onlyL = [...lset].filter(([k]) => !rset.has(k)).map(([, t]) => t);
+      const onlyR = [...rset].filter(([k]) => !lset.has(k)).map(([, t]) => t);
+      console.error(
+        `  ${s} ${key}: triples legacy=${lt.length} rust=${rt.length}; only legacy=${onlyL.length} only rust=${onlyR.length}`,
+      );
+      if (onlyL.length) console.error(`    only legacy: ${JSON.stringify(onlyL.slice(0, 24))}`);
+      if (onlyR.length) console.error(`    only rust:   ${JSON.stringify(onlyR.slice(0, 24))}`);
+      const lf = legacy.fresh[index]?.[s]?.[key];
+      const rf = rust.fresh[index]?.[s]?.[key];
+      const freshOnly = (a, b) => {
+        const aset = new Map((a?.triples ?? []).map((t) => [canon(t), t]));
+        const bset = new Set((b?.triples ?? []).map((t) => canon(t)));
+        return [...aset].filter(([k]) => !bset.has(k)).map(([, t]) => t);
+      };
+      console.error(
+        `    fresh triples legacy=${lf?.triples?.length ?? null} rust=${rf?.triples?.length ?? null}; ` +
+          `fresh legacy-vs-rust only legacy=${JSON.stringify(freshOnly(lf, rf).slice(0, 8))} ` +
+          `only rust=${JSON.stringify(freshOnly(rf, lf).slice(0, 8))}`,
+      );
+      if (canon(left?.pageInfo) !== canon(right?.pageInfo)) {
+        console.error(`    pageInfo legacy=${JSON.stringify(left?.pageInfo)} rust=${JSON.stringify(right?.pageInfo)}`);
+      }
+      if (canon(left?.aggregate) !== canon(right?.aggregate)) {
+        console.error(`    aggregate legacy=${JSON.stringify(left?.aggregate)} rust=${JSON.stringify(right?.aggregate)}`);
+      }
+    }
+    const lerr = lv.state?.[s]?.refreshErrors ?? [];
+    const rerr = rv.state?.[s]?.refreshErrors ?? [];
+    if (lerr.length || rerr.length) {
+      console.error(`  ${s} refreshErrors legacy=${JSON.stringify(lerr)} rust=${JSON.stringify(rerr)}`);
+    }
+  }
+}
 let allowed = 0;
 let mismatches = 0;
 let staleLegacy = 0;
@@ -1168,6 +1217,7 @@ for (let i = 0; i < n; i++) {
     continue;
   }
   mismatches++;
+  if (mismatches <= 6 && op?.kind === "checkpoint") printCheckpointDiff(lv, rv, l.i);
   if (mismatches > 12) continue;
   const fd = firstDifference(lv, rv);
   console.error(`DIVERGENCE ${p} (${op?.kind}/${op?.label ?? op?.path ?? ""})`);

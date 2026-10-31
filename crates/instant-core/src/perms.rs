@@ -1507,6 +1507,14 @@ pub fn eval_program_pure(
             // (plain admin HTTP calls, which never evaluate rules); every
             // session that reaches here sees "You may have a typo"
             tracing::debug!(rule = ?program.rule, error = %e, "permission rule evaluation failed");
+            if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+                tracing::info!(
+                    target: "refresh_trace",
+                    rule = ?program.rule, error = %e,
+                    data = %data, auth = %auth,
+                    "permission rule evaluation failed"
+                );
+            }
             return Err(permission_evaluation_failed(
                 program,
                 "You may have a typo",
@@ -2034,6 +2042,25 @@ impl<'a> PermsFilter<'a> {
                 true
             } else {
                 let mut data = memo.data(conn, app_id, attrs, etype, *eid).await?;
+                if etype == "$files"
+                    && data.get("path").is_none_or(Value::is_null)
+                    && std::env::var_os("INSTANT_TRACE_REFRESH").is_some()
+                {
+                    let fresh = fetch_entity_map(conn, app_id, attrs, etype, *eid).await?;
+                    let owners: Vec<Uuid> = sqlx::query_scalar(
+                        "SELECT DISTINCT app_id FROM triples WHERE entity_id = $1",
+                    )
+                    .bind(eid)
+                    .fetch_all(&mut *conn)
+                    .await
+                    .unwrap_or_default();
+                    tracing::info!(
+                        target: "refresh_trace",
+                        %app_id, %eid, memo = ?data,
+                        db = ?fresh, owners = ?owners,
+                        "files view data missing path"
+                    );
+                }
                 if let Some(t) = topics.as_deref_mut() {
                     note_entity_map(t, attrs, etype, *eid);
                 }

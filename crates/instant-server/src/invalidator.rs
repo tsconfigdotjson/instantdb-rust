@@ -89,6 +89,10 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                     .get("requery_all")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(schema_changed);
+                let files_changed = payload
+                    .get("files_changed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let changed_attrs: Vec<Uuid> = payload
                     .get("changed_attrs")
                     .and_then(|v| v.as_array())
@@ -107,12 +111,21 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
                 if attrs_changed {
                     service::invalidate_attrs(state, app_id);
                 }
+                if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+                    tracing::info!(
+                        target: "refresh_trace",
+                        %app_id, tx_id, attrs_changed, schema_changed, requery_all,
+                        files_changed, changed_attrs = ?changed_attrs,
+                        "tx received"
+                    );
+                }
                 enqueue_tx(
                     state,
                     app_id,
                     tx_id,
                     schema_changed,
                     requery_all,
+                    files_changed,
                     changed_attrs,
                 );
             }
@@ -232,6 +245,8 @@ struct Pending {
     schema_changed: bool,
     /// a pending tx stales every query (a blob attr restored)
     requery_all: bool,
+    /// a pending tx changed a `$files` row
+    files_changed: bool,
     /// attrs whose rows a pending tx changed (attr-wildcard topics)
     changed_attrs: HashSet<Uuid>,
     /// queries to recompute whatever the batch's topics say, by session id:
@@ -272,6 +287,7 @@ pub fn enqueue_tx(
     tx_id: i64,
     schema_changed: bool,
     requery_all: bool,
+    files_changed: bool,
     changed_attrs: Vec<Uuid>,
 ) {
     let queue = state.refresh_queues.entry(app_id).or_default().clone();
@@ -280,6 +296,7 @@ pub fn enqueue_tx(
         p.tx_ids.insert(tx_id);
         p.schema_changed |= schema_changed;
         p.requery_all |= requery_all;
+        p.files_changed |= files_changed;
         p.changed_attrs.extend(changed_attrs);
         RefreshQueue::claim_worker(&mut p)
     };
@@ -331,6 +348,7 @@ async fn refresh_worker(state: Arc<AppState>, app_id: Uuid, queue: Arc<RefreshQu
                 tx_ids,
                 schema_changed: std::mem::take(&mut p.schema_changed),
                 requery_all: std::mem::take(&mut p.requery_all),
+                files_changed: std::mem::take(&mut p.files_changed),
                 changed_attrs: std::mem::take(&mut p.changed_attrs),
                 recheck: std::mem::take(&mut p.recheck),
             };
@@ -394,6 +412,7 @@ pub struct Batch {
     pub latest: i64,
     pub schema_changed: bool,
     pub requery_all: bool,
+    pub files_changed: bool,
     pub changed_attrs: HashSet<Uuid>,
     pub recheck: HashMap<Uuid, HashSet<String>>,
 }
@@ -505,6 +524,7 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
         latest,
         schema_changed,
         requery_all,
+        files_changed,
         changed_attrs,
         recheck,
     } = batch;
@@ -565,6 +585,7 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
         let rechecked = recheck.get(&session.id);
         for (key, entry) in &st.queries {
             let matched = rechecked.is_some_and(|keys| keys.contains(key))
+                || (*files_changed && key.contains("$files"))
                 || match &entry.topics {
                     Some(t) => tx_topics.matches(t),
                     None => true,
@@ -587,6 +608,15 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
         // picked (a stale query, or every socket on a schema change); a
         // session with nothing stale gets no frame, not even an attrs-only
         // refresh-ok when the attrs hash moved (session.clj:467-530)
+        if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+            let files: Vec<&String> = stale.iter().filter(|k| k.contains("$files")).collect();
+            tracing::info!(
+                target: "refresh_trace",
+                %app_id, session = %session.id, admin = st.admin,
+                tx_ids = ?tx_ids, files_changed, stale = stale.len(), files = ?files,
+                "refresh session"
+            );
+        }
         if stale.is_empty() && !schema_changed {
             continue;
         }
@@ -699,6 +729,13 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
                         })
                     }
                     Err(e) => {
+                        if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+                            tracing::info!(
+                                target: "refresh_trace",
+                                %app_id, query = %job.q, error = %e,
+                                "refresh query failed"
+                            );
+                        }
                         tracing::debug!("refresh query failed: {e}");
                         METRICS.refresh_queries_failed_total.inc();
                         Err(e)
@@ -815,6 +852,18 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
                 }
             }
         };
+        if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+            let keys: Vec<&String> = outcomes
+                .iter()
+                .map(|(k, _)| k)
+                .filter(|k| k.contains("$files"))
+                .collect();
+            tracing::info!(
+                target: "refresh_trace",
+                %app_id, session = %plan.session.id, recomputed = outcomes.len(), files = ?keys,
+                "refresh send"
+            );
+        }
         METRICS.refresh_ok_sent_total.inc();
         plan.session.send_raw(frame);
     }

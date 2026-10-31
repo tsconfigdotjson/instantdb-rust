@@ -522,6 +522,31 @@ function buildScript() {
       script.push({ kind: "query", q: root });
     }
   }
+  // A final hop seed and read: random churn can delete or unlink every entity
+  // a generated multi-hop where clause would match, which used to leave the
+  // `hops` floor with ten queries and no data (seed 31255). Re-create one
+  // owner, tag and entity with a known chain, then read it through a
+  // three-segment path so the feature always compares rows, not only errors.
+  const hopOwner = mk();
+  const hopTag = mk();
+  const hopLabel = `hop-${seed}`;
+  script.push({
+    kind: "tx",
+    steps: [
+      ["add-triple", hopOwner, attrs.ownerId, hopOwner],
+      ["add-triple", hopOwner, attrs.ownerName, hopLabel],
+      ["add-triple", hopTag, attrs.tagId, hopTag],
+      ["add-triple", hopTag, attrs.tagLabel, hopLabel],
+      ["add-triple", entities[0], attrs.id, entities[0]],
+      ["add-triple", entities[0], attrs.typedStr, hopLabel],
+      ["add-triple", entities[0], attrs.owner, hopOwner],
+      ["add-triple", entities[0], attrs.tags, hopTag],
+    ],
+  });
+  script.push({
+    kind: "query",
+    q: { [NS]: { $: { where: { "owner.items.tstr": { $isNull: false } } }, owner: {} } },
+  });
   // final full queries on every namespace, both directions of every link
   script.push({ kind: "query", q: { [TAG]: { fuzzes: {} } } });
   script.push({ kind: "query", q: { [PROFILE]: { fuzz: {} } } });

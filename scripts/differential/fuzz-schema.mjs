@@ -872,6 +872,37 @@ function legacyStaleState(l, r) {
 }
 let staleLegacy = 0;
 
+// `schowner.id` is written by the seed-link-target transact right after the
+// schema transact creates it. Legacy infers the type from the write, but the
+// attrs refresh its sessions receive can be computed before or after that
+// write lands (the schema insert refreshes every session, while the later
+// inferred-types attr update reaches only sessions whose queries mention the
+// attr). The same seed therefore observes null or ["string"] at setup and
+// subscriptions, on either server, depending on refresh timing (seed 33 under
+// #80, seed 34 nightly). Allow only that one attr's inferred-types field when
+// exactly one side is null and the other is an observed type list; every
+// other attr, field and session still has to match.
+const INFERRED_RACE_PATH = ["schowner.id", "inferred-types"];
+function inferredTypeRaceView(op, lv, rv) {
+  if (!["checkpoint", "final-state"].includes(op?.kind ?? lv?.kind)) return null;
+  const left = JSON.parse(JSON.stringify(lv));
+  const right = JSON.parse(JSON.stringify(rv));
+  let masked = 0;
+  for (const s of SESSIONS) {
+    const attrs = [left.state?.[s]?.attrs, right.state?.[s]?.attrs];
+    const values = attrs.map((a) => a?.[INFERRED_RACE_PATH[0]]?.[INFERRED_RACE_PATH[1]]);
+    if (values.some((v) => v === undefined)) continue;
+    const [la, ra] = values;
+    if ((la === null && Array.isArray(ra)) || (Array.isArray(la) && ra === null)) {
+      attrs[0][INFERRED_RACE_PATH[0]][INFERRED_RACE_PATH[1]] = null;
+      attrs[1][INFERRED_RACE_PATH[0]][INFERRED_RACE_PATH[1]] = null;
+      masked++;
+    }
+  }
+  return masked ? { left, right } : null;
+}
+let inferredTypeRace = 0;
+
 // An update-attr unique? flip rewrites av for every triple of the attr in one
 // UPDATE. With several already-duplicated values, Postgres reports whichever
 // duplicate row it reaches first, and that order changes between runs on both
@@ -905,6 +936,12 @@ for (let k = 0; k < n; k++) {
   if (canon(l) === canon(r)) continue;
   const op = plan.script[l?.i ?? r?.i];
   const p = outcomePath(op, l?.i ?? r?.i);
+  const race = inferredTypeRaceView(op, l, r);
+  if (race && canon(race.left) === canon(race.right)) {
+    inferredTypeRace++;
+    console.log(`${p}: schowner.id inferred-types landed on only one side (refresh timing); compared every other field`);
+    continue;
+  }
   if (legacyStaleState(l, r)) {
     staleLegacy++;
     console.log(`legacy session state was stale at ${p}; a fresh legacy probe agreed with rust`);
@@ -977,4 +1014,4 @@ if (mismatches || stale || !floorOk) {
   console.error(`FUZZ-SCHEMA FAILED: ${mismatches} mismatches, ${stale} stale allowlist entries (seed ${seed})`);
   process.exit(1);
 }
-console.log(`FUZZ-SCHEMA PASSED: ${plan.script.length} ops, ${legacy.outcomes.filter((o) => o.kind === "checkpoint").length} checkpoints, ${allowed} allowed differences, ${multiConflict} multi-conflict unique values, ${reregistered} legacy re-registered removed queries, ${staleLegacy} stale legacy snapshots (seed ${seed})`);
+console.log(`FUZZ-SCHEMA PASSED: ${plan.script.length} ops, ${legacy.outcomes.filter((o) => o.kind === "checkpoint").length} checkpoints, ${allowed} allowed differences, ${multiConflict} multi-conflict unique values, ${inferredTypeRace} inferred-type refresh races, ${reregistered} legacy re-registered removed queries, ${staleLegacy} stale legacy snapshots (seed ${seed})`);

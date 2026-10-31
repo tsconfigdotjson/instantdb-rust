@@ -1000,6 +1000,7 @@ async fn update_attr(
             attrs_changed: true,
             schema_changed: false,
             requery_all: false,
+            files_changed: false,
             changed_attrs: vec![job.attr_id],
         },
     )
