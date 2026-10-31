@@ -259,9 +259,15 @@ jobs:
   # uploads its run records + coverage records. differential-merge checks
   # that the legs together made every run of the full harness exactly once
   # and enforces the coverage baseline on the union of their records.
-  # Run one after another the layers took ~11 minutes (PR depth). The dash
-  # and replay legs are ~2.5 minutes of harness work; a perms seed is
-  # ~2.5-3 minutes on its own, so each gets its own leg.
+  # Run one after another the layers took ~11 minutes (PR depth). The replay
+  # leg is ~2.5 minutes of harness work; a perms seed is ~2.5-3 minutes on its
+  # own, so each gets its own leg. On run 41160944444 the dash leg carried
+  # dash/storage/storagefuzz/rulewheres/errors and took 356s of harness work
+  # (a 7m15s job) while every other leg was 151-210s. The three storage seeds
+  # alone were 71s/72s/65s, so they get their own leg: storagefuzz takes shard
+  # 1/2 (~137s at PR depth) and dash takes the complementary 2/2 (one ~72s
+  # seed), keeping both near the ~180-210s seeded legs instead of stacking all
+  # three behind dash. The nightly's ten storage seeds split 5/5 the same way.
   #
   # Schema-evolution seeds are the expensive part of the old seeds-1/2/3
   # legs: each fuzzschema seed is ~1m55-2m05 at PR depth, so stacking three
@@ -271,7 +277,7 @@ jobs:
   # seed. Seven legs now carry one fuzzschema seed each (the nightly's 12
   # seeds spread as 2/2/2/2/2/1/1 over the same 7 shards); LAYER_SHARDS
   # spreads the measured per-seed cost of the other layers so the slowest
-  # PR leg is ~200s of harness work instead of seeds-1's old ~508s.
+  # PR leg is ~215s of harness work instead of seeds-1's old ~508s.
   differential:
     name: differential vs legacy (${{ matrix.leg }})
     runs-on: ubuntu-latest
@@ -290,9 +296,16 @@ jobs:
           - leg: dash
             layers: dash storage storagefuzz rulewheres errors
             shard: 1/1
+            # the storage fuzz seeds have their own leg; take the other half
+            # here so a PR run keeps one ~72s seed and the nightly's ten
+            # seeds divide 5/5 instead of piling onto one leg
+            layer_shards: storagefuzz:2/2
+          - leg: storagefuzz
+            layers: storagefuzz
+            shard: 1/2
           # a perms seed is mostly waiting for its streams to settle and takes
-          # as long as the whole dash leg; one per leg keeps every seeded leg
-          # shorter than dash instead of stacking perms behind presence/race.
+          # ~2.5-3 minutes on its own; one per leg so perms never stacks
+          # behind presence/race work.
           - leg: perms-1
             layers: perms
             shard: 1/3
@@ -361,7 +374,7 @@ jobs:
       # build below instead of sitting on the critical path. Pull the images
       # in parallel first: compose otherwise fetches the dependency images in
       # order and leaves the large ghcr server image last, which made one leg
-      # of the 12-leg matrix wait an extra ~70s on run 41009536933. Waited on
+      # of the leg matrix wait an extra ~70s on run 41009536933. Waited on
       # before the harness; run.sh's own compose up is then a no-op.
       - name: Start legacy server stack (background)
         run: |

@@ -15,14 +15,17 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
 
 ### Parallel legs in CI
 
-CI's `differential` job runs `run.sh` as a twelve-leg matrix. Each leg boots
+CI's `differential` job runs `run.sh` as a thirteen-leg matrix. Each leg boots
 its own legacy stack and rust servers and runs part of the harness. The
-unseeded replay/dash layers have a leg each; so does every `perms` seed (a
-perms seed is as long as the whole dash leg, so stacking the other seeded
-layers behind it set the critical path). The other seven legs each carry one
-schema-evolution seed (~2 minutes at PR depth; the nightly's 12 seeds spread
-over the same 7 shards) plus a measured-cost share of the remaining seeded
-layers, which `LAYER_SHARDS` spreads independently:
+unseeded replay layers have a leg each, and the dash/storage/rulewheres/errors
+layers share a leg; every `perms` seed gets its own leg because a perms seed
+is ~2.5-3 minutes on its own. The storage/`$files` fuzz seeds also have their
+own leg: `storagefuzz` takes shard 1/2 (~137s at PR depth) while the dash leg
+takes the complementary 2/2 (one ~72s seed), so neither stacks all three; the
+nightly's ten storage seeds split 5/5 the same way. The other seven legs each
+carry one schema-evolution seed (~2 minutes at PR depth; the nightly's 12
+seeds spread over the same 7 shards) plus a measured-cost share of the
+remaining seeded layers, which `LAYER_SHARDS` spreads independently:
 
 ```
 LAYERS="schema replay stress" ./run.sh   # only these layers
