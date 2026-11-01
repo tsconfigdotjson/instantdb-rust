@@ -864,8 +864,9 @@ const comparable = (entry) => {
 
 // Named exceptions: a documented legacy defect this server doesn't copy.
 // Each matches one script op shape and pins both servers' replies whole, so
-// anything else that differs, or either side changing, still fails. Hits
-// are counted and reported.
+// anything else that differs, or either side changing, still fails. A reply
+// may be an error or a committed transact (`{tx: "ok"}`). Hits are counted
+// and reported.
 const whereEntries = (v, out = []) => {
   if (Array.isArray(v)) v.forEach((x) => whereEntries(x, out));
   else if (v && typeof v === "object") {
@@ -914,17 +915,52 @@ const EXCEPTIONS = [
     rustMessage:
       "Validation failed for lookup: Updates with lookups can only update the lookup attribute if an entity with the unique attribute value already exists.",
   },
+  {
+    // An entity an `id`-attr lookup creates in this tx, then deleted by id
+    // before the tx ends. Legacy's post-create checks fetch the tx's
+    // lookups back after the writes (create-lookups-map /
+    // fetch-lookups->eid, permissioned_transaction.clj:727-729), so the
+    // lookup no longer resolves and run-checks! refuses the whole tx
+    // (:619-621) although the create step ran. Rust accepts the create and
+    // the later delete, which leaves the same final database state; the
+    // legacy refusal is a bug (the same post-create lookup bug listed in
+    // docs/PARITY.md for a link target) and is not copied.
+    name: "lookup-created-entity-deleted-in-same-tx",
+    matches: (op) => {
+      if (op?.kind !== "tx") return false;
+      const idAttrs = new Set(
+        script[0].steps
+          .filter(([o, a]) => o === "add-attr" && a["forward-identity"]?.[2] === "id")
+          .map(([, a]) => a.id),
+      );
+      const idsCreatedByLookup = new Set(
+        op.steps
+          .filter(([o, e]) => (o === "add-triple" || o === "deep-merge-triple") && Array.isArray(e) && idAttrs.has(e[0]))
+          .map(([, e]) => e[1])
+          .filter((v) => typeof v === "string"),
+      );
+      return op.steps.some(
+        ([o, e]) => o === "delete-entity" && typeof e === "string" && idsCreatedByLookup.has(e),
+      );
+    },
+    legacy: { type: "validation-failed", status: 400 },
+    rust: { tx: "ok" },
+    legacyMessage: "Validation failed for lookup: Could not find the entity for this lookup",
+  },
 ];
 const exceptionHits = {};
+const matchesReply = (entry, expected) =>
+  expected.tx === "ok" ? entry?.tx === "ok" && !entry.error : canon(entry?.error) === canon(expected);
 const allowedByException = (l, r) => {
   const op = script[l?.i];
   if (l?.i !== r?.i || canon(l?.q) !== canon(r?.q)) return null;
   const ex = EXCEPTIONS.find(
     (x) =>
       x.matches(op) &&
-      canon(l.error) === canon(x.legacy) &&
-      canon(r.error) === canon(x.rust) &&
-      (x.rustMessage === undefined || r.error.message === x.rustMessage),
+      matchesReply(l, x.legacy) &&
+      matchesReply(r, x.rust) &&
+      (x.legacyMessage === undefined || l.error.message === x.legacyMessage) &&
+      (x.rustMessage === undefined || r.error?.message === x.rustMessage),
   );
   if (ex) exceptionHits[ex.name] = (exceptionHits[ex.name] ?? 0) + 1;
   return ex;
