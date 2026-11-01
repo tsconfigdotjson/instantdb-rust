@@ -206,9 +206,13 @@ everything and checks coverage itself, as before.
   "Could not find the entity for this lookup", while this server commits
   the create and delete (same final state). That is the post-create lookup
   bug documented in docs/PARITY.md, so the exception pins legacy's refusal
-  and this server's `tx: ok` instead of copying it. Error messages ride
-  along non-enumerable: mismatch reports print them, comparisons ignore
-  them.
+  and this server's `tx: ok` instead of copying it. Every seed appends that
+  create-then-delete tx as a fixed regression and makes the run fail unless
+  the exception fires; it also appends a truly missing link-value lookup
+  (without a same-tx create/delete) as a negative control, which must stay
+  a strict two-sided validation error and must not be covered by the
+  exception. Error messages ride along non-enumerable: mismatch reports
+  print them, comparisons ignore them.
   **Result exceptions** (`RESULT_EXCEPTIONS` in fuzz.mjs) keep one documented
   legacy defect from failing a page walk without loosening the comparison.
   Each matches one op shape, allows only named sub-paths, and requires every

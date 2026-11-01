@@ -522,6 +522,30 @@ function buildScript() {
       script.push({ kind: "query", q: root });
     }
   }
+  // Fixed regression cases from nightly seed 31299. Its own slot (round 346)
+  // is past PR depth (250 rounds), so keep the shape here to exercise it on
+  // every run: an `id`-attr lookup creates an entity that the same tx then
+  // deletes. Legacy's post-create lookup fetch refuses this tx (documented
+  // bug); Rust commits the create + delete. The named exception below pins
+  // both replies. The second tx is the negative control: a truly missing
+  // link-value lookup with no same-tx create/delete must stay a strict
+  // two-sided validation error, not be swallowed by that exception.
+  const lookupRegressionId = mk();
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [
+      ["add-triple", [attrs.profileId, lookupRegressionId], attrs.profileBio, "lookup-create-then-delete"],
+      ["delete-entity", lookupRegressionId, PROFILE],
+    ],
+  });
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [
+      ["add-triple", entities[0], attrs.profile, [attrs.profileHandle, "lookup-regression-missing"]],
+    ],
+  });
   // A final hop seed and read: random churn can delete or unlink every entity
   // a generated multi-hop where clause would match, which used to leave the
   // `hops` floor with ten queries and no data (seed 31255). Re-create one
@@ -804,6 +828,15 @@ function pageFeatures(key, dir) {
 }
 
 const script = buildScript();
+const LOOKUP_REGRESSION_EXCEPTION = "lookup-created-entity-deleted-in-same-tx";
+const lookupRegressionSlot = script.findIndex(
+  (op) => op.kind === "tx" && op.steps.some(([, , , v]) => v === "lookup-create-then-delete"),
+);
+const missingLookupSlot = script.findIndex(
+  (op) =>
+    op.kind === "tx" &&
+    op.steps.some(([, , , v]) => Array.isArray(v) && v[1] === "lookup-regression-missing"),
+);
 console.log(`fuzz: seed=${seed} rounds=${rounds} ops=${script.length}`);
 console.log("running against legacy…");
 const legacy = await runOn("legacy", script);
@@ -949,6 +982,7 @@ const EXCEPTIONS = [
   },
 ];
 const exceptionHits = {};
+const exceptionSlots = {};
 const matchesReply = (entry, expected) =>
   expected.tx === "ok" ? entry?.tx === "ok" && !entry.error : canon(entry?.error) === canon(expected);
 const allowedByException = (l, r) => {
@@ -962,7 +996,10 @@ const allowedByException = (l, r) => {
       (x.legacyMessage === undefined || l.error.message === x.legacyMessage) &&
       (x.rustMessage === undefined || r.error?.message === x.rustMessage),
   );
-  if (ex) exceptionHits[ex.name] = (exceptionHits[ex.name] ?? 0) + 1;
+  if (ex) {
+    exceptionHits[ex.name] = (exceptionHits[ex.name] ?? 0) + 1;
+    (exceptionSlots[ex.name] ??= []).push(l.i);
+  }
   return ex;
 };
 
@@ -1057,6 +1094,40 @@ for (let i = 0; i < n; i++) {
     mismatches++;
   }
 }
+// The fixed regression must hit its pinned exception, and the missing
+// link-value lookup control must not be covered by it.
+const lookupRegressionHit = (exceptionSlots[LOOKUP_REGRESSION_EXCEPTION] ?? []).includes(lookupRegressionSlot);
+const lrLegacy = legacy.queryResults[lookupRegressionSlot];
+const lrRust = rust.queryResults[lookupRegressionSlot];
+const lookupRegressionAsExpected =
+  lrLegacy?.error?.type === "validation-failed" &&
+  lrLegacy.error.status === 400 &&
+  lrLegacy.error.message === "Validation failed for lookup: Could not find the entity for this lookup" &&
+  lrRust?.tx === "ok";
+if (!lookupRegressionHit || !lookupRegressionAsExpected) {
+  console.error(
+    `LOOKUP REGRESSION CASE FAILED at slot ${lookupRegressionSlot}: exception hit=${lookupRegressionHit}, ` +
+      `legacy=${JSON.stringify(lrLegacy)}, rust=${JSON.stringify(lrRust)}`,
+  );
+  mismatches++;
+}
+const missingLookupCoveredByException = (exceptionSlots[LOOKUP_REGRESSION_EXCEPTION] ?? []).includes(missingLookupSlot);
+const mlLegacy = legacy.queryResults[missingLookupSlot];
+const mlRust = rust.queryResults[missingLookupSlot];
+const missingLookupAsExpected =
+  mlLegacy?.error?.type === "validation-failed" &&
+  mlLegacy.error.status === 400 &&
+  mlRust?.error?.type === "validation-failed" &&
+  mlRust.error.status === 400 &&
+  mlLegacy.error.message === mlRust.error.message;
+if (!missingLookupAsExpected || missingLookupCoveredByException) {
+  console.error(
+    `MISSING LOOKUP CONTROL FAILED at slot ${missingLookupSlot}: ` +
+      `legacy=${JSON.stringify(mlLegacy)}, rust=${JSON.stringify(mlRust)}, ` +
+      `covered by exception=${missingLookupCoveredByException}`,
+  );
+  mismatches++;
+}
 const finalL = legacy.queryResults.at(-1);
 const finalR = rust.queryResults.at(-1);
 const finalMatch = canon(finalL?.result) === canon(finalR?.result);
@@ -1066,7 +1137,7 @@ if (!finalMatch) {
 // success floor: identical failure on both sides is not parity. Most of the
 // script's transacts must have committed and the final full-table read must
 // hold data, or the comparison compared nothing.
-const txTotal = script.filter((op) => op.kind === "tx").length;
+const txTotal = script.filter((op) => op.kind === "tx" && !op.regression).length;
 let floorOk = legacy.txOk > txTotal / 2 && rust.txOk > txTotal / 2 && (finalL?.result?.triples?.length ?? 0) > 0;
 if (!floorOk) {
   console.error(`FUZZ FLOOR NOT MET: transact-ok legacy=${legacy.txOk} rust=${rust.txOk} of ${txTotal}, final triples=${finalL?.result?.triples?.length ?? 0}`);
