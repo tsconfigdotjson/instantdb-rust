@@ -300,9 +300,14 @@ everything and checks coverage itself, as before.
   - a view-rule refresh legacy's cache misses after a `link`: a session (and
     a probe sharing the cache) keeps omitting a row whose `data.ref` link was
     just added, until another write to that entity. The row is in legacy's
-    database and a later session sees it. Only the shape where legacy's
-    result is a strict subset of rust's, and rust's session equals its fresh
-    probe, is accepted; a stale rust session or any other difference fails.
+    database and a later session sees it. On a paginated query the stale
+    session can also hold an older page slot while its probe still hides all
+    linked rows (seed 17 op 336). Only legacy omitting rows rust has, or a
+    same-size page whose legacy probe is a non-empty strict subset of both
+    the legacy session and rust (same start cursor / has-next, both legacy
+    views sharing at least one hidden row), with rust's session equal to its
+    fresh probe and a `data.ref` view rule, is accepted; a stale rust session,
+    a different page shape or any other difference fails.
   - `add-query-exists` for a query the session removed (legacy's refresh
     re-registers it): the query is removed and asked again.
   - an explicit empty nested link in an impersonated admin query. Legacy's
