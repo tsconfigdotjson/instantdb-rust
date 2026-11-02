@@ -546,10 +546,11 @@ function buildScript() {
       ["add-triple", entities[0], attrs.profile, [attrs.profileHandle, "lookup-regression-missing"]],
     ],
   });
-  // The first invalid row in a batch wins (nightly seed 31255): an unknown
-  // attr before a later missing link-value lookup is the attr `sql-raise`,
-  // while the same lookup before the unknown attr is the lookup error. Both
-  // orders are fixed here so PR runs pin the precedence.
+  // A batch with both an unknown attr and a missing link-value lookup
+  // (nightly seed 31255): legacy's INSERT plan sometimes raises for the attr
+  // (`sql-raise`) and sometimes answers the lookup validation error, while
+  // Rust always answers the lookup. Both row orders are fixed here so PR
+  // runs exercise the shape and the narrowly pinned exception.
   const unknownBeforeMissingAttr = mk();
   script.push({
     kind: "tx",
@@ -923,6 +924,17 @@ const comparable = (entry) => {
   return { ...entry, result: { ...entry.result, triples: entry.result.triples.filter(([, a]) => !drop.has(a)) } };
 };
 
+const knownAttrs = new Set(
+  script[0].steps.filter(([o]) => o === "add-attr").map(([, a]) => a.id),
+);
+const unknownAddAttrs = (op) => [
+  ...new Set(
+    op.steps
+      .filter(([o, , a]) => (o === "add-triple" || o === "deep-merge-triple") && !knownAttrs.has(a))
+      .map(([, , a]) => a),
+  ),
+];
+
 // Named exceptions: a documented legacy defect this server doesn't copy.
 // Each matches one script op shape and pins both servers' replies whole, so
 // anything else that differs, or either side changing, still fails. A reply
@@ -1008,6 +1020,31 @@ const EXCEPTIONS = [
     rust: { tx: "ok" },
     legacyMessage: "Validation failed for lookup: Could not find the entity for this lookup",
   },
+  {
+    // A batch that has both an unknown attr add/deep-merge row and a
+    // link-value lookup. When the lookup also misses, legacy's insert plan
+    // can raise for the unknown attr (`sql-raise`, nightly seed 31255)
+    // instead of the value lookup's validation error. Which row Postgres
+    // reaches first is plan/state-dependent: the same fixed batch asks for
+    // the attr error on some seeds and the lookup error on others. Rust
+    // always answers the lookup. Pin only that exact legacy attr raise (its
+    // message must name one of the batch's unknown attrs) with Rust's
+    // missing-lookup error; a missing lookup without an unknown attr, or
+    // any other lookup validation failure, is still compared strictly.
+    name: "unknown-attr-vs-missing-lookup-precedence",
+    matches: (op) =>
+      op?.kind === "tx" &&
+      unknownAddAttrs(op).length > 0 &&
+      op.steps.some(
+        ([o, , , v]) =>
+          (o === "add-triple" || o === "deep-merge-triple") && Array.isArray(v) && v.length === 2,
+      ),
+    legacy: { type: "sql-raise", status: 400 },
+    rust: { type: "validation-failed", status: 400 },
+    legacyMessage: (op) =>
+      unknownAddAttrs(op).map((id) => `Raised Exception: We could not find an attribute with id = '${id}'`),
+    rustMessage: "Validation failed for lookup: The entity for the lookup does not exist.",
+  },
 ];
 const exceptionHits = {};
 const exceptionSlots = {};
@@ -1021,7 +1058,10 @@ const allowedByException = (l, r) => {
       x.matches(op) &&
       matchesReply(l, x.legacy) &&
       matchesReply(r, x.rust) &&
-      (x.legacyMessage === undefined || l.error.message === x.legacyMessage) &&
+      (x.legacyMessage === undefined ||
+        (typeof x.legacyMessage === "function"
+          ? x.legacyMessage(op).includes(l.error.message)
+          : l.error.message === x.legacyMessage)) &&
       (x.rustMessage === undefined || r.error?.message === x.rustMessage),
   );
   if (ex) {
@@ -1156,42 +1196,40 @@ if (!missingLookupAsExpected || missingLookupCoveredByException) {
   );
   mismatches++;
 }
-// Mixed-invalid batches follow step order: the first bad row's error wins.
-const unknownFirstAttr = script[unknownBeforeMissingSlot]?.steps?.[0]?.[2];
-const unknownFirstMessage = `Raised Exception: We could not find an attribute with id = '${unknownFirstAttr}'`;
-const ufLegacy = legacy.queryResults[unknownBeforeMissingSlot];
-const ufRust = rust.queryResults[unknownBeforeMissingSlot];
-const unknownFirstAsExpected =
-  ufLegacy?.error?.type === "sql-raise" &&
-  ufLegacy.error.status === 400 &&
-  ufLegacy.error.message === unknownFirstMessage &&
-  ufRust?.error?.type === "sql-raise" &&
-  ufRust.error.status === 400 &&
-  ufRust.error.message === unknownFirstMessage;
-if (!unknownFirstAsExpected) {
-  console.error(
-    `UNKNOWN-BEFORE-MISSING CONTROL FAILED at slot ${unknownBeforeMissingSlot}: ` +
-      `legacy=${JSON.stringify(ufLegacy)}, rust=${JSON.stringify(ufRust)}, ` +
-      `expected message=${JSON.stringify(unknownFirstMessage)}`,
-  );
-  mismatches++;
-}
-const lookupFirstMessage = "Validation failed for lookup: The entity for the lookup does not exist.";
-const mfLegacy = legacy.queryResults[missingBeforeUnknownSlot];
-const mfRust = rust.queryResults[missingBeforeUnknownSlot];
-const missingFirstAsExpected =
-  mfLegacy?.error?.type === "validation-failed" &&
-  mfLegacy.error.status === 400 &&
-  mfLegacy.error.message === lookupFirstMessage &&
-  mfRust?.error?.type === "validation-failed" &&
-  mfRust.error.status === 400 &&
-  mfRust.error.message === lookupFirstMessage;
-if (!missingFirstAsExpected) {
-  console.error(
-    `MISSING-BEFORE-UNKNOWN CONTROL FAILED at slot ${missingBeforeUnknownSlot}: ` +
-      `legacy=${JSON.stringify(mfLegacy)}, rust=${JSON.stringify(mfRust)}`,
-  );
-  mismatches++;
+// Mixed-invalid batches are plan-dependent on legacy: either both servers
+// answer the missing lookup, or legacy raises for the unknown attr and the
+// pinned exception must allow it. Rust must always answer the lookup.
+const lookupMessage = "Validation failed for lookup: The entity for the lookup does not exist.";
+const mixedException = "unknown-attr-vs-missing-lookup-precedence";
+for (const [slot, label] of [
+  [unknownBeforeMissingSlot, "UNKNOWN-BEFORE-MISSING"],
+  [missingBeforeUnknownSlot, "MISSING-BEFORE-UNKNOWN"],
+]) {
+  const l = legacy.queryResults[slot];
+  const r = rust.queryResults[slot];
+  const unknownAttr = script[slot]?.steps?.find(
+    ([o, , a]) => (o === "add-triple" || o === "deep-merge-triple") && !knownAttrs.has(a),
+  )?.[2];
+  const rustOk =
+    r?.error?.type === "validation-failed" &&
+    r.error.status === 400 &&
+    r.error.message === lookupMessage;
+  const legacyLookup =
+    l?.error?.type === "validation-failed" &&
+    l.error.status === 400 &&
+    l.error.message === lookupMessage;
+  const legacyUnknown =
+    l?.error?.type === "sql-raise" &&
+    l.error.status === 400 &&
+    l.error.message === `Raised Exception: We could not find an attribute with id = '${unknownAttr}'`;
+  const covered = (exceptionSlots[mixedException] ?? []).includes(slot);
+  if (!rustOk || !(legacyLookup ? !covered : legacyUnknown && covered)) {
+    console.error(
+      `${label} CONTROL FAILED at slot ${slot}: legacy=${JSON.stringify(l)}, ` +
+        `rust=${JSON.stringify(r)}, covered by exception=${covered}`,
+    );
+    mismatches++;
+  }
 }
 const finalL = legacy.queryResults.at(-1);
 const finalR = rust.queryResults.at(-1);

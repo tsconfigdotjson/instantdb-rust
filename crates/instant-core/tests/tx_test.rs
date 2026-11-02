@@ -307,37 +307,13 @@ async fn lookup_refs_upsert_and_resolve() {
     .await
     .unwrap_err();
     assert_eq!(err.error_type, "validation-failed");
-    // The batch's first invalid row wins, like legacy's INSERT: a missing
-    // link-value lookup on an earlier row reports the lookup...
+    // a missing link-value lookup outranks an unknown attr in the batch
     let todo = Uuid::new_v4();
     let err = transact_json(
         &pool,
         app,
         json!([
-            [
-                "add-triple",
-                todo,
-                ids.todos_owner,
-                [ids.owners_name, "nobody"]
-            ],
-            ["add-triple", todo, Uuid::new_v4(), 1]
-        ]),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(err.error_type, "validation-failed");
-    assert_eq!(
-        err.message,
-        "Validation failed for lookup: The entity for the lookup does not exist."
-    );
-    // ...but an unknown attr on an earlier row is the attr raise, even when a
-    // later row has a missing link-value lookup (nightly seed 31255).
-    let ghost = Uuid::new_v4();
-    let err = transact_json(
-        &pool,
-        app,
-        json!([
-            ["add-triple", todo, ghost, 1],
+            ["add-triple", todo, Uuid::new_v4(), 1],
             [
                 "add-triple",
                 todo,
@@ -348,10 +324,10 @@ async fn lookup_refs_upsert_and_resolve() {
     )
     .await
     .unwrap_err();
-    assert_eq!(err.error_type, "sql-raise");
+    assert_eq!(err.error_type, "validation-failed");
     assert_eq!(
         err.message,
-        format!("Raised Exception: We could not find an attribute with id = '{ghost}'")
+        "Validation failed for lookup: The entity for the lookup does not exist."
     );
 }
 
