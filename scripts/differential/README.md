@@ -211,8 +211,11 @@ everything and checks coverage itself, as before.
   the exception fires; it also appends a truly missing link-value lookup
   (without a same-tx create/delete) as a negative control, which must stay
   a strict two-sided validation error and must not be covered by the
-  exception. Error messages ride along non-enumerable: mismatch reports
-  print them, comparisons ignore them.
+  exception. Two more fixed mixed-invalid batches pin legacy's first-bad-row
+  precedence (nightly seed 31255): unknown attr before a missing lookup is
+  the attr `sql-raise` on both servers, and missing lookup before an unknown
+  attr is the lookup error on both. Error messages ride along
+  non-enumerable: mismatch reports print them, comparisons ignore them.
   **Result exceptions** (`RESULT_EXCEPTIONS` in fuzz.mjs) keep one documented
   legacy defect from failing a page walk without loosening the comparison.
   Each matches one op shape, allows only named sub-paths, and requires every

@@ -546,6 +546,28 @@ function buildScript() {
       ["add-triple", entities[0], attrs.profile, [attrs.profileHandle, "lookup-regression-missing"]],
     ],
   });
+  // The first invalid row in a batch wins (nightly seed 31255): an unknown
+  // attr before a later missing link-value lookup is the attr `sql-raise`,
+  // while the same lookup before the unknown attr is the lookup error. Both
+  // orders are fixed here so PR runs pin the precedence.
+  const unknownBeforeMissingAttr = mk();
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [
+      ["add-triple", entities[0], unknownBeforeMissingAttr, "lookup-regression-unknown-first"],
+      ["add-triple", entities[0], attrs.profile, [attrs.profileHandle, "lookup-regression-mixed-missing"]],
+    ],
+  });
+  const missingBeforeUnknownAttr = mk();
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [
+      ["add-triple", entities[0], attrs.profile, [attrs.profileHandle, "lookup-regression-mixed-missing"]],
+      ["add-triple", entities[0], missingBeforeUnknownAttr, "lookup-regression-unknown-second"],
+    ],
+  });
   // A final hop seed and read: random churn can delete or unlink every entity
   // a generated multi-hop where clause would match, which used to leave the
   // `hops` floor with ten queries and no data (seed 31255). Re-create one
@@ -837,6 +859,12 @@ const missingLookupSlot = script.findIndex(
     op.kind === "tx" &&
     op.steps.some(([, , , v]) => Array.isArray(v) && v[1] === "lookup-regression-missing"),
 );
+const unknownBeforeMissingSlot = script.findIndex(
+  (op) => op.kind === "tx" && op.steps.some(([, , , v]) => v === "lookup-regression-unknown-first"),
+);
+const missingBeforeUnknownSlot = script.findIndex(
+  (op) => op.kind === "tx" && op.steps.some(([, , , v]) => v === "lookup-regression-unknown-second"),
+);
 console.log(`fuzz: seed=${seed} rounds=${rounds} ops=${script.length}`);
 console.log("running against legacy…");
 const legacy = await runOn("legacy", script);
@@ -1125,6 +1153,43 @@ if (!missingLookupAsExpected || missingLookupCoveredByException) {
     `MISSING LOOKUP CONTROL FAILED at slot ${missingLookupSlot}: ` +
       `legacy=${JSON.stringify(mlLegacy)}, rust=${JSON.stringify(mlRust)}, ` +
       `covered by exception=${missingLookupCoveredByException}`,
+  );
+  mismatches++;
+}
+// Mixed-invalid batches follow step order: the first bad row's error wins.
+const unknownFirstAttr = script[unknownBeforeMissingSlot]?.steps?.[0]?.[2];
+const unknownFirstMessage = `Raised Exception: We could not find an attribute with id = '${unknownFirstAttr}'`;
+const ufLegacy = legacy.queryResults[unknownBeforeMissingSlot];
+const ufRust = rust.queryResults[unknownBeforeMissingSlot];
+const unknownFirstAsExpected =
+  ufLegacy?.error?.type === "sql-raise" &&
+  ufLegacy.error.status === 400 &&
+  ufLegacy.error.message === unknownFirstMessage &&
+  ufRust?.error?.type === "sql-raise" &&
+  ufRust.error.status === 400 &&
+  ufRust.error.message === unknownFirstMessage;
+if (!unknownFirstAsExpected) {
+  console.error(
+    `UNKNOWN-BEFORE-MISSING CONTROL FAILED at slot ${unknownBeforeMissingSlot}: ` +
+      `legacy=${JSON.stringify(ufLegacy)}, rust=${JSON.stringify(ufRust)}, ` +
+      `expected message=${JSON.stringify(unknownFirstMessage)}`,
+  );
+  mismatches++;
+}
+const lookupFirstMessage = "Validation failed for lookup: The entity for the lookup does not exist.";
+const mfLegacy = legacy.queryResults[missingBeforeUnknownSlot];
+const mfRust = rust.queryResults[missingBeforeUnknownSlot];
+const missingFirstAsExpected =
+  mfLegacy?.error?.type === "validation-failed" &&
+  mfLegacy.error.status === 400 &&
+  mfLegacy.error.message === lookupFirstMessage &&
+  mfRust?.error?.type === "validation-failed" &&
+  mfRust.error.status === 400 &&
+  mfRust.error.message === lookupFirstMessage;
+if (!missingFirstAsExpected) {
+  console.error(
+    `MISSING-BEFORE-UNKNOWN CONTROL FAILED at slot ${missingBeforeUnknownSlot}: ` +
+      `legacy=${JSON.stringify(mfLegacy)}, rust=${JSON.stringify(mfRust)}`,
   );
   mismatches++;
 }

@@ -1384,13 +1384,15 @@ async fn resolve_add_batch(
     let mut lookup_refs: Vec<Value> = vec![];
     // (entity, lookup attr) of the entities this batch's lookups create
     let mut created_by_lookup: HashSet<(Uuid, Uuid)> = HashSet::new();
-    // an unknown attr is a raise in that same INSERT, which a missing link
-    // value lookup (resolved in its input rows) beats
-    let mut unknown_attr: Option<InstantError> = None;
     for (eid, attr_id, value, mode) in items {
+        // Legacy's insert evaluates the batch's rows in step order: each row
+        // resolves its attr before its own value lookup, so the first invalid
+        // row wins. In particular an unknown attr before a later missing
+        // link-value lookup is the `sql-raise` for the attr (nightly seed
+        // 31255), while a missing lookup on an earlier row wins over a later
+        // unknown attr.
         let Some(attr) = attrs.get(&attr_id).cloned() else {
-            unknown_attr.get_or_insert_with(|| unknown_attr_raise(attr_id));
-            continue;
+            return Err(unknown_attr_raise(attr_id));
         };
         let lookup = match &eid {
             EidRef::Lookup(la, lv) => {
@@ -1470,9 +1472,6 @@ async fn resolve_add_batch(
             attr,
             value,
         });
-    }
-    if let Some(e) = unknown_attr {
-        return Err(e);
     }
     let hits = |id_attr: bool| {
         out.iter().any(|t| {
