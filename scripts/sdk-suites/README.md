@@ -45,7 +45,10 @@ and `run-suite.sh` refuses any URL other than `http://localhost:<port>` /
   (an upstream legacy race rust must not share); rust failing still fails.
 
 In CI the `sdk-suites` matrix runs one leg per server side by side (the
-legacy leg skips the rust build, the rust leg the legacy stack). Each suite
+legacy leg skips the rust build, the rust leg the legacy stack). It is the
+only CI job that launches a browser, so it is pinned to `ubuntu-24.04`: the
+vendored playwright (1.58.2, frozen lockfile) has no chromium build for
+Ubuntu 26.04, which is what `ubuntu-latest` now resolves to. Each suite
 run is `continue-on-error` so both runs happen, and each leg uploads its
 reports as `sdk-suite-reports-<server>`. `sdk-suites-compare` downloads them,
 runs `compare.mjs`, and uploads the merged set as `sdk-suite-reports`; it runs

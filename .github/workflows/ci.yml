@@ -543,7 +543,14 @@ jobs:
   # the legs' reports.
   sdk-suites:
     name: SDK suites vs ${{ matrix.server }}
-    runs-on: ubuntu-latest
+    # Pinned: the only job that launches a browser, and the vendored
+    # playwright (1.58.2, from the frozen LEGACY/client lockfile) publishes no
+    # chromium build for Ubuntu 26.04. `ubuntu-latest` migrated to 26.04 and
+    # `playwright install chromium` now dies with "Playwright does not support
+    # chromium on ubuntu26.04-x64" (runs 42016546292, 41818938856), which
+    # cascaded into the compare job seeing no reports. 24.04 is a supported
+    # Playwright target; re-evaluate the pin (or this whole job) if it retires.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -715,6 +722,7 @@ jobs:
     name: official SDK suites vs legacy + rust
     needs: sdk-suites
     if: ${{ !cancelled() }}
+    # no browser here; runs the pinned axis' reports through compare.mjs
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
