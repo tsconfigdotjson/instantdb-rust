@@ -820,6 +820,80 @@ function legacyOmitsOnlyRustRows(l, r) {
   return true;
 }
 
+// The same legacy cache defect also leaves a paginated subscription holding a
+// stale page slot: after a link write makes a row pageable, its session can
+// still show the previous row while its own fresh probe has not seen any of
+// the linked rows, so the session and probe disagree with each other as well
+// as with rust. (Fuzz-perms seed 17 op 336: tnum -3 should sort before the
+// tnum 0 tie, and rust's page matched the database; legacy's session kept an
+// older slot, and legacy's probe kept only the row visible through the rule's
+// id disjunct.) Accept only a page of the same size and start / has-next
+// shape where the legacy probe is a strict subset of both the legacy session
+// and rust, rust's session equals its own probe, and both legacy sides agree
+// on at least one row the probe hides. The form's view rule must read a
+// `data.ref` link, so a page difference unrelated to that cache bug still
+// fails; so does a different row count, page boundary, or stale rust session.
+const triplesOf = (v) => v?.triples ?? v?.result?.triples;
+const pageInfoOf = (v) => v?.["page-info"] ?? v?.result?.["page-info"];
+const subsetOf = (lv, rv) => {
+  const lt = triplesOf(lv), rt = triplesOf(rv);
+  if (!Array.isArray(lt) || !Array.isArray(rt)) return false;
+  const keys = new Set(rt.map((t) => canon(t.slice(0, 3))));
+  return lt.every((t) => keys.has(canon(t.slice(0, 3))));
+};
+const entityIds = (v) => new Set((triplesOf(v) ?? []).map((t) => canon(t[0])));
+const viewRuleReadsRef = (q) => {
+  if (!q || typeof q !== "object") return false;
+  return Object.entries(q).some(([k]) => {
+    if (k.startsWith("$$")) return false;
+    const view = plan.rules?.[k]?.allow?.view;
+    return typeof view === "string" && view.includes(".ref(");
+  });
+};
+const samePageStart = (lv, rv) => {
+  const lp = pageInfoOf(lv), rp = pageInfoOf(rv);
+  if (!lp || !rp) return false;
+  const keys = new Set([...Object.keys(lp), ...Object.keys(rp)]);
+  if (!keys.size) return false;
+  for (const k of keys) {
+    if (!lp[k] || !rp[k]) return false;
+    if (canon(lp[k]["start-cursor"]) !== canon(rp[k]["start-cursor"])) return false;
+    if (lp[k]["has-next-page?"] !== rp[k]["has-next-page?"]) return false;
+  }
+  return true;
+};
+const stalePageSwap = (lv, rv, lf, rf, q) => {
+  if (!viewRuleReadsRef(q) || !samePageStart(lv, rv)) return false;
+  if (!same(rf, rv) || !lf || canon(lf) === canon(lv)) return false;
+  if (!subsetOf(lf, lv) || !subsetOf(lf, rv)) return false;
+  const fi = entityIds(lf), li = entityIds(lv), ri = entityIds(rv);
+  if (!fi.size || fi.size >= li.size || fi.size >= ri.size || li.size !== ri.size) return false;
+  let shared = 0;
+  for (const id of li) if (ri.has(id) && !fi.has(id)) shared++;
+  return shared > 0;
+};
+function legacyViewCacheStalePage(l, r) {
+  if (!l || !r || l.i !== r.i) return false;
+  const lf = legacyFresh[l.i], rf = rustFresh[r.i];
+  if (l.kind === "query") {
+    if (canon({ ...l, result: undefined }) !== canon({ ...r, result: undefined })) return false;
+    return stalePageSwap(l.result, r.result, lf, rf, l.q);
+  }
+  if (l.kind !== "checkpoint") return false;
+  for (const s of SESSIONS) {
+    const ls = l.state?.[s], rs = r.state?.[s];
+    if (canon(ls?.refreshErrors) !== canon(rs?.refreshErrors)) return false;
+    for (const key of new Set([...Object.keys(ls?.subs ?? {}), ...Object.keys(rs?.subs ?? {})])) {
+      const lv = ls?.subs?.[key], rv = rs?.subs?.[key];
+      if (canon(lv) === canon(rv)) continue;
+      let q;
+      try { q = JSON.parse(key); } catch { return false; }
+      if (!stalePageSwap(lv, rv, lf?.[s]?.[key], rf?.[s]?.[key], q)) return false;
+    }
+  }
+  return true;
+}
+
 // strict entries (lib.mjs loadAllowlist): this layer owns fuzzperms: paths.
 // Only the explicit empty-nested-link probe has an entry; every other admin
 // query / transact difference must match or be fixed.
@@ -871,6 +945,11 @@ for (let k = 0; k < n; k++) {
   if (legacyOmitsOnlyRustRows(l, r)) {
     staleLegacy++;
     console.log(`legacy omitted rows rust has at op ${l.i} (${l.kind}); legacy's view-rule cache missed the link`);
+    continue;
+  }
+  if (legacyViewCacheStalePage(l, r)) {
+    staleLegacy++;
+    console.log(`legacy served a stale page at op ${l.i} (${l.kind}); its view-rule cache kept an old slot and its fresh probe stayed behind rust`);
     continue;
   }
   mismatches++;

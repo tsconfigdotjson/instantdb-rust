@@ -199,8 +199,28 @@ everything and checks coverage itself, as before.
   the same INSERT holds fails on legacy with whichever row Postgres reaches
   first (the created entity's id is random), `record-not-unique` or the
   `lookup` refusal; this server always refuses the rename first, and its
-  message is pinned. Error messages ride along non-enumerable: mismatch
-  reports print them, comparisons ignore them.
+  message is pinned. `lookup-created-entity-deleted-in-same-tx`: an
+  `id`-attr lookup creates an entity that a later `delete-entity` in the
+  same tx removes; legacy's post-create checks fetch the lookups back after
+  the writes, can no longer resolve it, and refuse the tx with
+  "Could not find the entity for this lookup", while this server commits
+  the create and delete (same final state). That is the post-create lookup
+  bug documented in docs/PARITY.md, so the exception pins legacy's refusal
+  and this server's `tx: ok` instead of copying it. Every seed appends that
+  create-then-delete tx as a fixed regression and makes the run fail unless
+  the exception fires; it also appends a truly missing link-value lookup
+  (without a same-tx create/delete) as a negative control, which must stay
+  a strict two-sided validation error and must not be covered by the
+  exception. Two more fixed mixed-invalid batches cover nightly seed 31255:
+  a batch with an unknown attr and a missing link-value lookup may make
+  legacy raise the attr `sql-raise` instead of the lookup error, depending
+  on its insert plan, while this server always answers the lookup. The
+  named exception `unknown-attr-vs-missing-lookup-precedence` pins only that
+  exact attr raise (naming one of the batch's unknown attrs) against the
+  lookup error; the fixed controls also accept legacy choosing the lookup
+  itself on both servers. A missing lookup without an unknown attr remains
+  the strict negative control above. Error messages ride along
+  non-enumerable: mismatch reports print them, comparisons ignore them.
   **Result exceptions** (`RESULT_EXCEPTIONS` in fuzz.mjs) keep one documented
   legacy defect from failing a page walk without loosening the comparison.
   Each matches one op shape, allows only named sub-paths, and requires every
@@ -217,8 +237,8 @@ everything and checks coverage itself, as before.
   server links it, after which the two states would differ for the rest of
   the seed.
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
-  runs fourteen seeds at 250 rounds (42, 99, the nightly's original 1-10 and
-  the regression seeds 31201 and 31255);
+  runs fifteen seeds at 250 rounds (42, 99, the nightly's original 1-10 and
+  the regression seeds 31201, 31255 and 31299);
   the nightly (`schedule` in ci.yml, or a manual run with the `nightly`
   input) runs them at 400 rounds plus a window of 40 fresh seeds that moves
   every day (`FUZZ_SEED_WINDOW`). `run.sh` runs every seed and lists the
@@ -300,9 +320,14 @@ everything and checks coverage itself, as before.
   - a view-rule refresh legacy's cache misses after a `link`: a session (and
     a probe sharing the cache) keeps omitting a row whose `data.ref` link was
     just added, until another write to that entity. The row is in legacy's
-    database and a later session sees it. Only the shape where legacy's
-    result is a strict subset of rust's, and rust's session equals its fresh
-    probe, is accepted; a stale rust session or any other difference fails.
+    database and a later session sees it. On a paginated query the stale
+    session can also hold an older page slot while its probe still hides all
+    linked rows (seed 17 op 336). Only legacy omitting rows rust has, or a
+    same-size page whose legacy probe is a non-empty strict subset of both
+    the legacy session and rust (same start cursor / has-next, both legacy
+    views sharing at least one hidden row), with rust's session equal to its
+    fresh probe and a `data.ref` view rule, is accepted; a stale rust session,
+    a different page shape or any other difference fails.
   - `add-query-exists` for a query the session removed (legacy's refresh
     re-registers it): the query is removed and asked again.
   - an explicit empty nested link in an impersonated admin query. Legacy's

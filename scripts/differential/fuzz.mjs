@@ -522,6 +522,53 @@ function buildScript() {
       script.push({ kind: "query", q: root });
     }
   }
+  // Fixed regression cases from nightly seed 31299. Its own slot (round 346)
+  // is past PR depth (250 rounds), so keep the shape here to exercise it on
+  // every run: an `id`-attr lookup creates an entity that the same tx then
+  // deletes. Legacy's post-create lookup fetch refuses this tx (documented
+  // bug); Rust commits the create + delete. The named exception below pins
+  // both replies. The second tx is the negative control: a truly missing
+  // link-value lookup with no same-tx create/delete must stay a strict
+  // two-sided validation error, not be swallowed by that exception.
+  const lookupRegressionId = mk();
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [
+      ["add-triple", [attrs.profileId, lookupRegressionId], attrs.profileBio, "lookup-create-then-delete"],
+      ["delete-entity", lookupRegressionId, PROFILE],
+    ],
+  });
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [
+      ["add-triple", entities[0], attrs.profile, [attrs.profileHandle, "lookup-regression-missing"]],
+    ],
+  });
+  // A batch with both an unknown attr and a missing link-value lookup
+  // (nightly seed 31255): legacy's INSERT plan sometimes raises for the attr
+  // (`sql-raise`) and sometimes answers the lookup validation error, while
+  // Rust always answers the lookup. Both row orders are fixed here so PR
+  // runs exercise the shape and the narrowly pinned exception.
+  const unknownBeforeMissingAttr = mk();
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [
+      ["add-triple", entities[0], unknownBeforeMissingAttr, "lookup-regression-unknown-first"],
+      ["add-triple", entities[0], attrs.profile, [attrs.profileHandle, "lookup-regression-mixed-missing"]],
+    ],
+  });
+  const missingBeforeUnknownAttr = mk();
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [
+      ["add-triple", entities[0], attrs.profile, [attrs.profileHandle, "lookup-regression-mixed-missing"]],
+      ["add-triple", entities[0], missingBeforeUnknownAttr, "lookup-regression-unknown-second"],
+    ],
+  });
   // A final hop seed and read: random churn can delete or unlink every entity
   // a generated multi-hop where clause would match, which used to leave the
   // `hops` floor with ten queries and no data (seed 31255). Re-create one
@@ -804,6 +851,21 @@ function pageFeatures(key, dir) {
 }
 
 const script = buildScript();
+const LOOKUP_REGRESSION_EXCEPTION = "lookup-created-entity-deleted-in-same-tx";
+const lookupRegressionSlot = script.findIndex(
+  (op) => op.kind === "tx" && op.steps.some(([, , , v]) => v === "lookup-create-then-delete"),
+);
+const missingLookupSlot = script.findIndex(
+  (op) =>
+    op.kind === "tx" &&
+    op.steps.some(([, , , v]) => Array.isArray(v) && v[1] === "lookup-regression-missing"),
+);
+const unknownBeforeMissingSlot = script.findIndex(
+  (op) => op.kind === "tx" && op.steps.some(([, , , v]) => v === "lookup-regression-unknown-first"),
+);
+const missingBeforeUnknownSlot = script.findIndex(
+  (op) => op.kind === "tx" && op.steps.some(([, , , v]) => v === "lookup-regression-unknown-second"),
+);
 console.log(`fuzz: seed=${seed} rounds=${rounds} ops=${script.length}`);
 console.log("running against legacy…");
 const legacy = await runOn("legacy", script);
@@ -862,10 +924,22 @@ const comparable = (entry) => {
   return { ...entry, result: { ...entry.result, triples: entry.result.triples.filter(([, a]) => !drop.has(a)) } };
 };
 
+const knownAttrs = new Set(
+  script[0].steps.filter(([o]) => o === "add-attr").map(([, a]) => a.id),
+);
+const unknownAddAttrs = (op) => [
+  ...new Set(
+    op.steps
+      .filter(([o, , a]) => (o === "add-triple" || o === "deep-merge-triple") && !knownAttrs.has(a))
+      .map(([, , a]) => a),
+  ),
+];
+
 // Named exceptions: a documented legacy defect this server doesn't copy.
 // Each matches one script op shape and pins both servers' replies whole, so
-// anything else that differs, or either side changing, still fails. Hits
-// are counted and reported.
+// anything else that differs, or either side changing, still fails. A reply
+// may be an error or a committed transact (`{tx: "ok"}`). Hits are counted
+// and reported.
 const whereEntries = (v, out = []) => {
   if (Array.isArray(v)) v.forEach((x) => whereEntries(x, out));
   else if (v && typeof v === "object") {
@@ -914,19 +988,86 @@ const EXCEPTIONS = [
     rustMessage:
       "Validation failed for lookup: Updates with lookups can only update the lookup attribute if an entity with the unique attribute value already exists.",
   },
+  {
+    // An entity an `id`-attr lookup creates in this tx, then deleted by id
+    // before the tx ends. Legacy's post-create checks fetch the tx's
+    // lookups back after the writes (create-lookups-map /
+    // fetch-lookups->eid, permissioned_transaction.clj:727-729), so the
+    // lookup no longer resolves and run-checks! refuses the whole tx
+    // (:619-621) although the create step ran. Rust accepts the create and
+    // the later delete, which leaves the same final database state; the
+    // legacy refusal is a bug (the same post-create lookup bug listed in
+    // docs/PARITY.md for a link target) and is not copied.
+    name: "lookup-created-entity-deleted-in-same-tx",
+    matches: (op) => {
+      if (op?.kind !== "tx") return false;
+      const idAttrs = new Set(
+        script[0].steps
+          .filter(([o, a]) => o === "add-attr" && a["forward-identity"]?.[2] === "id")
+          .map(([, a]) => a.id),
+      );
+      const idsCreatedByLookup = new Set(
+        op.steps
+          .filter(([o, e]) => (o === "add-triple" || o === "deep-merge-triple") && Array.isArray(e) && idAttrs.has(e[0]))
+          .map(([, e]) => e[1])
+          .filter((v) => typeof v === "string"),
+      );
+      return op.steps.some(
+        ([o, e]) => o === "delete-entity" && typeof e === "string" && idsCreatedByLookup.has(e),
+      );
+    },
+    legacy: { type: "validation-failed", status: 400 },
+    rust: { tx: "ok" },
+    legacyMessage: "Validation failed for lookup: Could not find the entity for this lookup",
+  },
+  {
+    // A batch that has both an unknown attr add/deep-merge row and a
+    // link-value lookup. When the lookup also misses, legacy's insert plan
+    // can raise for the unknown attr (`sql-raise`, nightly seed 31255)
+    // instead of the value lookup's validation error. Which row Postgres
+    // reaches first is plan/state-dependent: the same fixed batch asks for
+    // the attr error on some seeds and the lookup error on others. Rust
+    // always answers the lookup. Pin only that exact legacy attr raise (its
+    // message must name one of the batch's unknown attrs) with Rust's
+    // missing-lookup error; a missing lookup without an unknown attr, or
+    // any other lookup validation failure, is still compared strictly.
+    name: "unknown-attr-vs-missing-lookup-precedence",
+    matches: (op) =>
+      op?.kind === "tx" &&
+      unknownAddAttrs(op).length > 0 &&
+      op.steps.some(
+        ([o, , , v]) =>
+          (o === "add-triple" || o === "deep-merge-triple") && Array.isArray(v) && v.length === 2,
+      ),
+    legacy: { type: "sql-raise", status: 400 },
+    rust: { type: "validation-failed", status: 400 },
+    legacyMessage: (op) =>
+      unknownAddAttrs(op).map((id) => `Raised Exception: We could not find an attribute with id = '${id}'`),
+    rustMessage: "Validation failed for lookup: The entity for the lookup does not exist.",
+  },
 ];
 const exceptionHits = {};
+const exceptionSlots = {};
+const matchesReply = (entry, expected) =>
+  expected.tx === "ok" ? entry?.tx === "ok" && !entry.error : canon(entry?.error) === canon(expected);
 const allowedByException = (l, r) => {
   const op = script[l?.i];
   if (l?.i !== r?.i || canon(l?.q) !== canon(r?.q)) return null;
   const ex = EXCEPTIONS.find(
     (x) =>
       x.matches(op) &&
-      canon(l.error) === canon(x.legacy) &&
-      canon(r.error) === canon(x.rust) &&
-      (x.rustMessage === undefined || r.error.message === x.rustMessage),
+      matchesReply(l, x.legacy) &&
+      matchesReply(r, x.rust) &&
+      (x.legacyMessage === undefined ||
+        (typeof x.legacyMessage === "function"
+          ? x.legacyMessage(op).includes(l.error.message)
+          : l.error.message === x.legacyMessage)) &&
+      (x.rustMessage === undefined || r.error?.message === x.rustMessage),
   );
-  if (ex) exceptionHits[ex.name] = (exceptionHits[ex.name] ?? 0) + 1;
+  if (ex) {
+    exceptionHits[ex.name] = (exceptionHits[ex.name] ?? 0) + 1;
+    (exceptionSlots[ex.name] ??= []).push(l.i);
+  }
   return ex;
 };
 
@@ -1021,6 +1162,75 @@ for (let i = 0; i < n; i++) {
     mismatches++;
   }
 }
+// The fixed regression must hit its pinned exception, and the missing
+// link-value lookup control must not be covered by it.
+const lookupRegressionHit = (exceptionSlots[LOOKUP_REGRESSION_EXCEPTION] ?? []).includes(lookupRegressionSlot);
+const lrLegacy = legacy.queryResults[lookupRegressionSlot];
+const lrRust = rust.queryResults[lookupRegressionSlot];
+const lookupRegressionAsExpected =
+  lrLegacy?.error?.type === "validation-failed" &&
+  lrLegacy.error.status === 400 &&
+  lrLegacy.error.message === "Validation failed for lookup: Could not find the entity for this lookup" &&
+  lrRust?.tx === "ok";
+if (!lookupRegressionHit || !lookupRegressionAsExpected) {
+  console.error(
+    `LOOKUP REGRESSION CASE FAILED at slot ${lookupRegressionSlot}: exception hit=${lookupRegressionHit}, ` +
+      `legacy=${JSON.stringify(lrLegacy)}, rust=${JSON.stringify(lrRust)}`,
+  );
+  mismatches++;
+}
+const missingLookupCoveredByException = (exceptionSlots[LOOKUP_REGRESSION_EXCEPTION] ?? []).includes(missingLookupSlot);
+const mlLegacy = legacy.queryResults[missingLookupSlot];
+const mlRust = rust.queryResults[missingLookupSlot];
+const missingLookupAsExpected =
+  mlLegacy?.error?.type === "validation-failed" &&
+  mlLegacy.error.status === 400 &&
+  mlRust?.error?.type === "validation-failed" &&
+  mlRust.error.status === 400 &&
+  mlLegacy.error.message === mlRust.error.message;
+if (!missingLookupAsExpected || missingLookupCoveredByException) {
+  console.error(
+    `MISSING LOOKUP CONTROL FAILED at slot ${missingLookupSlot}: ` +
+      `legacy=${JSON.stringify(mlLegacy)}, rust=${JSON.stringify(mlRust)}, ` +
+      `covered by exception=${missingLookupCoveredByException}`,
+  );
+  mismatches++;
+}
+// Mixed-invalid batches are plan-dependent on legacy: either both servers
+// answer the missing lookup, or legacy raises for the unknown attr and the
+// pinned exception must allow it. Rust must always answer the lookup.
+const lookupMessage = "Validation failed for lookup: The entity for the lookup does not exist.";
+const mixedException = "unknown-attr-vs-missing-lookup-precedence";
+for (const [slot, label] of [
+  [unknownBeforeMissingSlot, "UNKNOWN-BEFORE-MISSING"],
+  [missingBeforeUnknownSlot, "MISSING-BEFORE-UNKNOWN"],
+]) {
+  const l = legacy.queryResults[slot];
+  const r = rust.queryResults[slot];
+  const unknownAttr = script[slot]?.steps?.find(
+    ([o, , a]) => (o === "add-triple" || o === "deep-merge-triple") && !knownAttrs.has(a),
+  )?.[2];
+  const rustOk =
+    r?.error?.type === "validation-failed" &&
+    r.error.status === 400 &&
+    r.error.message === lookupMessage;
+  const legacyLookup =
+    l?.error?.type === "validation-failed" &&
+    l.error.status === 400 &&
+    l.error.message === lookupMessage;
+  const legacyUnknown =
+    l?.error?.type === "sql-raise" &&
+    l.error.status === 400 &&
+    l.error.message === `Raised Exception: We could not find an attribute with id = '${unknownAttr}'`;
+  const covered = (exceptionSlots[mixedException] ?? []).includes(slot);
+  if (!rustOk || !(legacyLookup ? !covered : legacyUnknown && covered)) {
+    console.error(
+      `${label} CONTROL FAILED at slot ${slot}: legacy=${JSON.stringify(l)}, ` +
+        `rust=${JSON.stringify(r)}, covered by exception=${covered}`,
+    );
+    mismatches++;
+  }
+}
 const finalL = legacy.queryResults.at(-1);
 const finalR = rust.queryResults.at(-1);
 const finalMatch = canon(finalL?.result) === canon(finalR?.result);
@@ -1030,7 +1240,7 @@ if (!finalMatch) {
 // success floor: identical failure on both sides is not parity. Most of the
 // script's transacts must have committed and the final full-table read must
 // hold data, or the comparison compared nothing.
-const txTotal = script.filter((op) => op.kind === "tx").length;
+const txTotal = script.filter((op) => op.kind === "tx" && !op.regression).length;
 let floorOk = legacy.txOk > txTotal / 2 && rust.txOk > txTotal / 2 && (finalL?.result?.triples?.length ?? 0) > 0;
 if (!floorOk) {
   console.error(`FUZZ FLOOR NOT MET: transact-ok legacy=${legacy.txOk} rust=${rust.txOk} of ${txTotal}, final triples=${finalL?.result?.triples?.length ?? 0}`);
