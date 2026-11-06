@@ -458,7 +458,7 @@ jobs:
           FUZZ_SEEDS: "42 99 1 2 3 4 5 6 7 8 9 10 31201 31255 31299"
           FUZZ_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '400' || '250' }}
           FUZZ_SEED_WINDOW: ${{ (github.event_name == 'schedule' || inputs.nightly) && '40' || '0' }}
-          FUZZ_PERMS_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22' || '7 8 9' }}
+          FUZZ_PERMS_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22' || '7 8 9 17' }}
           FUZZ_PERMS_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '300' || '120' }}
           FUZZ_PERMS_JOBS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '4' || '1' }}
           FUZZ_PRESENCE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '101 102 103 104 105 106 107 108 109 110 111 112' || '101 102 103' }}
