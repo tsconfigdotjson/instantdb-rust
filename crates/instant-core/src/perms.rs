@@ -559,8 +559,280 @@ async fn resolve_ref_path(
     Ok(json!([]))
 }
 
+/// [`resolve_ref_path`] for many root entities of one etype at once: each hop
+/// is one query over the union of every root's current ids (instead of one
+/// query per root per hop), then fanned back out per root. Per root, the value
+/// holds the same elements with the same multiplicity as the single-root
+/// walk (order within a root can differ; Postgres returns either in no
+/// particular order). Topics are the union of what the per-root walks record,
+/// and the walk visits the same segments, so `catch_all` is set alike.
+async fn resolve_ref_path_batch(
+    conn: &mut PgConnection,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    etype: &str,
+    roots: &[Uuid],
+    path: &str,
+    mut topics: Option<&mut LookupTopics>,
+) -> Result<HashMap<Uuid, Value>> {
+    fn ids_json(ids: &[Uuid]) -> Value {
+        json!(ids.iter().map(|u| u.to_string()).collect::<Vec<_>>())
+    }
+    fn union(per_root: &HashMap<Uuid, Vec<Uuid>>) -> Vec<Uuid> {
+        let mut seen = HashSet::new();
+        per_root
+            .values()
+            .flatten()
+            .copied()
+            .filter(|u| seen.insert(*u))
+            .collect()
+    }
+    /// keep, per root, only the ids that have an `id` triple (order and
+    /// multiplicity kept), like `with_id_triple`
+    async fn with_id_triples(
+        conn: &mut PgConnection,
+        app_id: Uuid,
+        attrs: &AttrMap,
+        etype: &str,
+        per_root: &mut HashMap<Uuid, Vec<Uuid>>,
+        topics: Option<&mut LookupTopics>,
+    ) -> Result<()> {
+        let Some(id_attr) = attrs.id_attr_of(etype) else {
+            if let Some(t) = topics {
+                t.catch_all = true;
+            }
+            per_root.values_mut().for_each(Vec::clear);
+            return Ok(());
+        };
+        let all = union(per_root);
+        if all.is_empty() {
+            return Ok(());
+        }
+        if let Some(t) = topics {
+            t.entities(id_attr.id, all.iter().copied());
+        }
+        let found: HashSet<Uuid> = sqlx::query_scalar(
+            "SELECT entity_id FROM triples
+             WHERE app_id = $1 AND attr_id = $2 AND entity_id = ANY($3)",
+        )
+        .bind(app_id)
+        .bind(id_attr.id)
+        .bind(&all)
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .collect();
+        per_root
+            .values_mut()
+            .for_each(|ids| ids.retain(|i| found.contains(i)));
+        Ok(())
+    }
+
+    let segs: Vec<&str> = path.split('.').collect();
+    let mut current: HashMap<Uuid, Vec<Uuid>> = roots.iter().map(|r| (*r, vec![*r])).collect();
+    with_id_triples(
+        conn,
+        app_id,
+        attrs,
+        etype,
+        &mut current,
+        topics.as_deref_mut(),
+    )
+    .await?;
+    let mut current_etype = etype.to_string();
+    let empty_for_all = |roots: &[Uuid]| -> HashMap<Uuid, Value> {
+        roots.iter().map(|r| (*r, json!([]))).collect()
+    };
+    for (i, seg) in segs.iter().enumerate() {
+        let is_last = i == segs.len() - 1;
+        if is_last {
+            if *seg == "id" {
+                with_id_triples(
+                    conn,
+                    app_id,
+                    attrs,
+                    &current_etype,
+                    &mut current,
+                    topics.as_deref_mut(),
+                )
+                .await?;
+                return Ok(current.iter().map(|(r, ids)| (*r, ids_json(ids))).collect());
+            }
+            if let Some(attr) = attrs.by_fwd_name(&current_etype, seg) {
+                if attr.value_type == ValueType::Blob {
+                    let all = union(&current);
+                    if all.is_empty() {
+                        return Ok(empty_for_all(roots));
+                    }
+                    if let Some(t) = topics.as_deref_mut() {
+                        t.entities(attr.id, all.iter().copied());
+                    }
+                    let rows = sqlx::query(
+                        "SELECT entity_id, value FROM triples
+                         WHERE app_id = $1 AND attr_id = $2 AND entity_id = ANY($3)
+                           AND value != 'null'::jsonb",
+                    )
+                    .bind(app_id)
+                    .bind(attr.id)
+                    .bind(&all)
+                    .fetch_all(&mut *conn)
+                    .await?;
+                    let mut by_e: HashMap<Uuid, Vec<Value>> = HashMap::new();
+                    for r in &rows {
+                        by_e.entry(r.get("entity_id"))
+                            .or_default()
+                            .push(r.get::<Value, _>("value"));
+                    }
+                    return Ok(current
+                        .iter()
+                        .map(|(r, ids)| {
+                            let vals: Vec<Value> = ids
+                                .iter()
+                                .flat_map(|e| by_e.get(e).into_iter().flatten().cloned())
+                                .collect();
+                            (*r, Value::Array(vals))
+                        })
+                        .collect());
+                }
+            }
+        }
+        // link hop: adjacency source -> targets over the union of current ids
+        let all = union(&current);
+        let fwd = attrs.by_fwd_name(&current_etype, seg).cloned();
+        let (adj, next_etype): (HashMap<Uuid, Vec<Uuid>>, String) = match fwd {
+            Some(a) if a.value_type == ValueType::Ref => {
+                let mut adj: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+                if !all.is_empty() {
+                    if let Some(t) = topics.as_deref_mut() {
+                        t.entities(a.id, all.iter().copied());
+                    }
+                    let rows = sqlx::query(
+                        "SELECT entity_id, json_uuid_to_uuid(value) AS t FROM triples
+                         WHERE app_id = $1 AND attr_id = $2 AND entity_id = ANY($3) AND eav",
+                    )
+                    .bind(app_id)
+                    .bind(a.id)
+                    .bind(&all)
+                    .fetch_all(&mut *conn)
+                    .await?;
+                    for r in &rows {
+                        if let Some(t) = r.get::<Option<Uuid>, _>("t") {
+                            adj.entry(r.get("entity_id")).or_default().push(t);
+                        }
+                    }
+                }
+                (adj, a.reverse_etype.clone().unwrap_or_default())
+            }
+            _ => match attrs.by_rev_name(&current_etype, seg).cloned() {
+                Some(a) => {
+                    let mut adj: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+                    if !all.is_empty() {
+                        if let Some(t) = topics.as_deref_mut() {
+                            t.values(a.id, all.iter().copied());
+                        }
+                        let rows = sqlx::query(
+                            "SELECT entity_id, json_uuid_to_uuid(value) AS v FROM triples
+                             WHERE app_id = $1 AND attr_id = $2 AND vae
+                               AND json_uuid_to_uuid(value) = ANY($3)",
+                        )
+                        .bind(app_id)
+                        .bind(a.id)
+                        .bind(&all)
+                        .fetch_all(&mut *conn)
+                        .await?;
+                        for r in &rows {
+                            if let Some(v) = r.get::<Option<Uuid>, _>("v") {
+                                adj.entry(v).or_default().push(r.get("entity_id"));
+                            }
+                        }
+                    }
+                    (adj, a.etype.clone())
+                }
+                None => {
+                    if let Some(t) = topics.as_deref_mut() {
+                        t.catch_all = true;
+                    }
+                    return Ok(empty_for_all(roots));
+                }
+            },
+        };
+        for ids in current.values_mut() {
+            *ids = ids
+                .iter()
+                .flat_map(|e| adj.get(e).into_iter().flatten().copied())
+                .collect();
+        }
+        if is_last {
+            return Ok(current.iter().map(|(r, ids)| (*r, ids_json(ids))).collect());
+        }
+        current_etype = next_etype;
+    }
+    Ok(empty_for_all(roots))
+}
+
+/// Batch-read the full entity maps of `eids` (one etype), like
+/// [`fetch_entity_map`] per entity; an entity with no triples is absent.
+async fn fetch_entity_maps(
+    conn: &mut PgConnection,
+    app_id: Uuid,
+    attrs: &AttrMap,
+    etype: &str,
+    eids: &[Uuid],
+) -> Result<HashMap<Uuid, Map<String, Value>>> {
+    let attr_ids: Vec<Uuid> = attrs.attrs_of_etype(etype).map(|a| a.id).collect();
+    let rows = sqlx::query(
+        "SELECT entity_id, attr_id, value FROM triples
+         WHERE app_id = $1 AND entity_id = ANY($2) AND attr_id = ANY($3)",
+    )
+    .bind(app_id)
+    .bind(eids)
+    .bind(&attr_ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut out: HashMap<Uuid, Map<String, Value>> = HashMap::new();
+    for row in rows {
+        let eid: Uuid = row.get("entity_id");
+        let m = out
+            .entry(eid)
+            .or_insert_with(|| base_entity_map(attrs, etype, eid));
+        let attr_id: Uuid = row.get("attr_id");
+        if let Some(a) = attrs.get(&attr_id) {
+            if a.cardinality == Cardinality::One {
+                m.insert(a.label.clone(), row.get("value"));
+            }
+        }
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // CEL evaluation
+
+/// `cel::Program::compile`, memoized process-wide by source text. Rules are
+/// evaluated once per checked entity, so the same few expressions (and their
+/// binds) were re-parsed thousands of times per query. Only successful
+/// compiles are cached (errors are rare and keep their fresh message); the
+/// cache is dropped whole when it grows past a bound, since rule text only
+/// changes on a rules push.
+fn compile_cached(
+    expr: &str,
+) -> std::result::Result<std::sync::Arc<cel::Program>, cel::ParseErrors> {
+    use std::sync::{Arc, OnceLock, RwLock};
+    static CACHE: OnceLock<RwLock<HashMap<String, Arc<cel::Program>>>> = OnceLock::new();
+    const MAX_ENTRIES: usize = 4096;
+    let cache = CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Some(p) = cache.read().ok().and_then(|c| c.get(expr).cloned()) {
+        return Ok(p);
+    }
+    let p = Arc::new(cel::Program::compile(expr)?);
+    if let Ok(mut c) = cache.write() {
+        if c.len() >= MAX_ENTRIES {
+            c.clear();
+        }
+        c.insert(expr.to_string(), p.clone());
+    }
+    Ok(p)
+}
 
 fn json_to_cel(v: &Value) -> cel::Value {
     match v {
@@ -1081,7 +1353,7 @@ pub fn undeclared_reference(program: &Program) -> Option<InstantError> {
     let action = program.rule.as_ref().map(|(_, a)| a.as_str());
     let declared = declared_vars(action);
     let bind_names: HashSet<&str> = program.binds.iter().map(|(n, _)| n.as_str()).collect();
-    let compiled = cel::Program::compile(&program.expr).ok()?;
+    let compiled = compile_cached(&program.expr).ok()?;
     let mut expr = compiled.expression().clone();
     crate::cel_ext::expand_bind_macros(&mut expr);
     let mut idents: Vec<String> = vec![];
@@ -1099,7 +1371,7 @@ pub fn undeclared_reference(program: &Program) -> Option<InstantError> {
         let Some((_, expr)) = program.binds.iter().find(|(n, _)| *n == name) else {
             continue;
         };
-        let Ok(p) = cel::Program::compile(expr) else {
+        let Ok(p) = compile_cached(expr) else {
             continue;
         };
         let mut bind_expr = p.expression().clone();
@@ -1308,13 +1580,13 @@ pub fn eval_program_pure(
     if program.is_false() && program.binds.is_empty() {
         return Ok((false, vec![]));
     }
-    let compiled = cel::Program::compile(&program.expr).map_err(|e| {
+    let compiled = compile_cached(&program.expr).map_err(|e| {
         InstantError::permission_denied(json!([]), format!("Invalid permission rule: {e}"))
     })?;
-    let compiled_binds: Vec<(String, Option<cel::Program>)> = program
+    let compiled_binds: Vec<(String, Option<std::sync::Arc<cel::Program>>)> = program
         .binds
         .iter()
-        .map(|(name, expr)| (name.clone(), cel::Program::compile(expr).ok()))
+        .map(|(name, expr)| (name.clone(), compile_cached(expr).ok()))
         .collect();
     for p in std::iter::once(&compiled).chain(compiled_binds.iter().filter_map(|(_, p)| p.as_ref()))
     {
@@ -2032,6 +2304,8 @@ impl<'a> PermsFilter<'a> {
         memo: &mut CheckMemo,
         mut topics: Option<&mut LookupTopics>,
     ) -> Result<()> {
+        self.prefetch(conn, app_id, attrs, todo, memo, topics.as_deref_mut())
+            .await?;
         for (etype, eid) in &todo.views {
             let key = (etype.clone(), *eid);
             if memo.view.contains_key(&key) {
@@ -2041,7 +2315,9 @@ impl<'a> PermsFilter<'a> {
             let ok = if program.is_true() {
                 true
             } else {
-                let mut data = memo.data(conn, app_id, attrs, etype, *eid).await?;
+                let mut data = memo
+                    .data_with_refs(conn, app_id, attrs, etype, *eid)
+                    .await?;
                 if etype == "$files"
                     && data.get("path").is_none_or(Value::is_null)
                     && std::env::var_os("INSTANT_TRACE_REFRESH").is_some()
@@ -2077,15 +2353,9 @@ impl<'a> PermsFilter<'a> {
                     topics.as_deref_mut(),
                 )
                 .await?;
-                let auth_val = build_auth_value_tracked(
-                    conn,
-                    app_id,
-                    attrs,
-                    self.auth,
-                    &[&program],
-                    topics.as_deref_mut(),
-                )
-                .await?;
+                let auth_val = self
+                    .auth_value(conn, app_id, attrs, &program, memo, topics.as_deref_mut())
+                    .await?;
                 let env = EvalEnv::new(app_id, self.rules, &self.auth.request);
                 eval_program(
                     &program,
@@ -2107,7 +2377,9 @@ impl<'a> PermsFilter<'a> {
             let Some(program) = self.rules.field_program(etype, label) else {
                 continue;
             };
-            let mut data = memo.data(conn, app_id, attrs, etype, *eid).await?;
+            let mut data = memo
+                .data_with_refs(conn, app_id, attrs, etype, *eid)
+                .await?;
             if let Some(t) = topics.as_deref_mut() {
                 note_entity_map(t, attrs, etype, *eid);
             }
@@ -2126,15 +2398,9 @@ impl<'a> PermsFilter<'a> {
                 topics.as_deref_mut(),
             )
             .await?;
-            let auth_val = build_auth_value_tracked(
-                conn,
-                app_id,
-                attrs,
-                self.auth,
-                &[&program],
-                topics.as_deref_mut(),
-            )
-            .await?;
+            let auth_val = self
+                .auth_value(conn, app_id, attrs, &program, memo, topics.as_deref_mut())
+                .await?;
             let env = EvalEnv::new(app_id, self.rules, &self.auth.request);
             let ok = eval_program(
                 &program,
@@ -2146,6 +2412,135 @@ impl<'a> PermsFilter<'a> {
             )
             .await?;
             memo.field.insert(key, ok);
+        }
+        Ok(())
+    }
+}
+
+impl<'a> PermsFilter<'a> {
+    /// The `auth` binding for `program`, built once per query per set of
+    /// `auth.ref` paths (it reads only the session's user).
+    async fn auth_value(
+        &self,
+        conn: &mut PgConnection,
+        app_id: Uuid,
+        attrs: &AttrMap,
+        program: &Program,
+        memo: &mut CheckMemo,
+        topics: Option<&mut LookupTopics>,
+    ) -> Result<Value> {
+        let key = extract_ref_paths(&program.all_sources(), "auth");
+        if let Some(v) = memo.auth.get(&key) {
+            return Ok(v.clone());
+        }
+        let v =
+            build_auth_value_tracked(conn, app_id, attrs, self.auth, &[program], topics).await?;
+        memo.auth.insert(key, v.clone());
+        Ok(v)
+    }
+
+    /// Load, for every entity whose view or field rule [`Self::evaluate`] will
+    /// run, its entity map and its `data.ref` values in a few batched queries
+    /// per etype and path, instead of several queries per entity. Records the
+    /// same lookup topics the per-entity reads would.
+    async fn prefetch(
+        &self,
+        conn: &mut PgConnection,
+        app_id: Uuid,
+        attrs: &AttrMap,
+        todo: &CheckTodo,
+        memo: &mut CheckMemo,
+        mut topics: Option<&mut LookupTopics>,
+    ) -> Result<()> {
+        // (etype, path) -> entities that need it, in first-seen order
+        let mut wanted: Vec<((String, String), Vec<Uuid>)> = Vec::new();
+        let mut wanted_ix: HashMap<(String, String), usize> = HashMap::new();
+        let mut seen: HashSet<(String, String, Uuid)> = HashSet::new();
+        let mut need_data: Vec<(String, Uuid)> = Vec::new();
+        let mut need_data_seen: HashSet<(String, Uuid)> = HashSet::new();
+        let mut note = |etype: &str, eid: Uuid, paths: Vec<String>| {
+            if need_data_seen.insert((etype.to_string(), eid)) {
+                need_data.push((etype.to_string(), eid));
+            }
+            for p in paths {
+                if !seen.insert((etype.to_string(), p.clone(), eid)) {
+                    continue;
+                }
+                let k = (etype.to_string(), p);
+                let ix = *wanted_ix.entry(k.clone()).or_insert_with(|| {
+                    wanted.push((k, Vec::new()));
+                    wanted.len() - 1
+                });
+                wanted[ix].1.push(eid);
+            }
+        };
+        for (etype, eid) in &todo.views {
+            if memo.view.contains_key(&(etype.clone(), *eid)) {
+                continue;
+            }
+            let program = self.rules.program(etype, "view");
+            if program.is_true() {
+                continue;
+            }
+            note(
+                etype,
+                *eid,
+                extract_ref_paths(&program.all_sources(), "data"),
+            );
+        }
+        for (etype, eid, label) in &todo.fields {
+            if memo
+                .field
+                .contains_key(&(etype.clone(), *eid, label.clone()))
+            {
+                continue;
+            }
+            let Some(program) = self.rules.field_program(etype, label) else {
+                continue;
+            };
+            note(
+                etype,
+                *eid,
+                extract_ref_paths(&program.all_sources(), "data"),
+            );
+        }
+        // entity maps not already taken from the result's own triples
+        let mut by_etype: Vec<(String, Vec<Uuid>)> = Vec::new();
+        for (etype, eid) in need_data {
+            if memo.data.contains_key(&(etype.clone(), eid)) {
+                continue;
+            }
+            match by_etype.iter_mut().find(|(e, _)| *e == etype) {
+                Some((_, ids)) => ids.push(eid),
+                None => by_etype.push((etype, vec![eid])),
+            }
+        }
+        for (etype, eids) in by_etype {
+            let mut maps = fetch_entity_maps(conn, app_id, attrs, &etype, &eids).await?;
+            for eid in eids {
+                let m = maps
+                    .remove(&eid)
+                    .unwrap_or_else(|| base_entity_map(attrs, &etype, eid));
+                memo.data.insert((etype.clone(), eid), m);
+            }
+        }
+        for ((etype, path), eids) in wanted {
+            let vals = resolve_ref_path_batch(
+                conn,
+                app_id,
+                attrs,
+                &etype,
+                &eids,
+                &path,
+                topics.as_deref_mut(),
+            )
+            .await?;
+            for (eid, v) in vals {
+                memo.refs
+                    .entry((etype.clone(), eid))
+                    .or_default()
+                    .insert(path.clone(), v);
+            }
         }
         Ok(())
     }
@@ -2188,9 +2583,32 @@ struct CheckMemo {
     /// the `data` binding per entity: the node's own triples when the
     /// query fetched the whole entity, else re-read in full
     data: HashMap<(String, Uuid), Map<String, Value>>,
+    /// prefetched `data.ref` values per entity (path -> value), resolved for
+    /// the whole result at once by [`PermsFilter::prefetch`]
+    refs: HashMap<(String, Uuid), Map<String, Value>>,
+    /// the `auth` binding per set of `auth.ref` paths: it depends only on the
+    /// session's user, so it's built once per query, not once per entity
+    auth: HashMap<Vec<String>, Value>,
 }
 
 impl CheckMemo {
+    /// `data` with its prefetched refs attached as `_refs` (where
+    /// [`attach_refs`] finds them and resolves only what's missing)
+    async fn data_with_refs(
+        &mut self,
+        conn: &mut PgConnection,
+        app_id: Uuid,
+        attrs: &AttrMap,
+        etype: &str,
+        eid: Uuid,
+    ) -> Result<Map<String, Value>> {
+        let mut d = self.data(conn, app_id, attrs, etype, eid).await?;
+        if let Some(refs) = self.refs.get(&(etype.to_string(), eid)) {
+            d.insert("_refs".to_string(), Value::Object(refs.clone()));
+        }
+        Ok(d)
+    }
+
     async fn data(
         &mut self,
         conn: &mut PgConnection,
