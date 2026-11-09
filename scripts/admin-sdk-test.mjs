@@ -45,6 +45,55 @@ assert(res2.goals.length === 2, "limit works");
 // g2/g3 share a tx timestamp; desc-limit-2 must exclude the older "sdk goal"
 assert(!res2.goals.some((g) => g.title === "sdk goal"), "desc order excludes oldest");
 
+// 3b. link value arrays are always lists of targets (#90): an array of
+// exactly two ids used to be read as one [attr, value] lookup by
+// /admin/transact, so it tried to use the first target id as an attr id.
+const multiGoalTwo = id();
+const multiGoalThree = id();
+const multiTodos = [id(), id(), id(), id(), id()];
+await db.transact([
+  tx.goals[multiGoalTwo].update({ title: "multi-link two" }),
+  tx.goals[multiGoalThree].update({ title: "multi-link three" }),
+  ...multiTodos.map((todoId, i) =>
+    tx.sdktodos[todoId].update({ title: `multi todo ${i}` }),
+  ),
+  tx.goals[multiGoalTwo].link({ sdktodos: [multiTodos[0], multiTodos[1]] }),
+  tx.goals[multiGoalThree].link({
+    sdktodos: [multiTodos[2], multiTodos[3], multiTodos[4]],
+  }),
+]);
+const linkedIds = (res, goalId) =>
+  (res.goals.find((g) => g.id === goalId)?.sdktodos ?? []).map((t) => t.id).sort();
+const twoRes = await db.query({
+  goals: { $: { where: { id: multiGoalTwo } }, sdktodos: {} },
+});
+const threeRes = await db.query({
+  goals: { $: { where: { id: multiGoalThree } }, sdktodos: {} },
+});
+assert(
+  JSON.stringify(linkedIds(twoRes, multiGoalTwo)) ===
+    JSON.stringify([multiTodos[0], multiTodos[1]].sort()),
+  "link with exactly two ids",
+);
+assert(
+  JSON.stringify(linkedIds(threeRes, multiGoalThree)) ===
+    JSON.stringify([multiTodos[2], multiTodos[3], multiTodos[4]].sort()),
+  "link with three ids",
+);
+await db.transact([
+  tx.goals[multiGoalThree].unlink({
+    sdktodos: [multiTodos[2], multiTodos[3]],
+  }),
+]);
+const unlinkRes = await db.query({
+  goals: { $: { where: { id: multiGoalThree } }, sdktodos: {} },
+});
+assert(
+  JSON.stringify(linkedIds(unlinkRes, multiGoalThree)) ===
+    JSON.stringify([multiTodos[4]]),
+  "unlink with exactly two ids",
+);
+
 // 4. lookup refs
 await db.transact([
   tx.profiles[lookup("handle", "sdk-user")].update({ nickname: "sdk" }),

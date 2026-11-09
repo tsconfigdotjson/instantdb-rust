@@ -626,6 +626,51 @@ async function runAgainst(name) {
   raw("24-admin-ref-lookups", r24);
   record("24-admin-ref-lookups", r24);
 
+  // 24b admin link value arrays (issue #90): every array is a list of
+  // targets, including exactly two ids. Rust used to read a two-element
+  // array whose first element was a string as one [attr, value] lookup, so
+  // it tried to use the first target id as an attr id; legacy expand-link
+  // has no bare-pair form (admin/model.clj:105-133).
+  const r24b = {};
+  const ids24b = { doc: mk(), owners: [mk(), mk(), mk()] };
+  const linkArrayView = (res) => {
+    if (res.status !== 200) return errView(res);
+    const doc = (res.body.docs ?? [])[0];
+    return {
+      status: 200,
+      doc: doc
+        ? {
+            title: doc.title,
+            owners: (doc.owner ?? []).map((o) => o.name).sort(),
+          }
+        : null,
+    };
+  };
+  r24b.seedAndLinkTwo = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["update", "docs", ids24b.doc, { title: "multi-link" }],
+    ["update", "owners", ids24b.owners[0], { name: "m1" }],
+    ["update", "owners", ids24b.owners[1], { name: "m2" }],
+    ["update", "owners", ids24b.owners[2], { name: "m3" }],
+    ["link", "docs", ids24b.doc, { owner: [ids24b.owners[0], ids24b.owners[1]] }],
+  ] }));
+  r24b.queryTwo = linkArrayView(await adminCall("POST", "/admin/query", {
+    query: { docs: { $: { where: { id: ids24b.doc } }, owner: {} } },
+  }));
+  r24b.linkThree = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["link", "docs", ids24b.doc, { owner: [ids24b.owners[0], ids24b.owners[1], ids24b.owners[2]] }],
+  ] }));
+  r24b.queryThree = linkArrayView(await adminCall("POST", "/admin/query", {
+    query: { docs: { $: { where: { id: ids24b.doc } }, owner: {} } },
+  }));
+  r24b.unlinkTwo = txView(await adminCall("POST", "/admin/transact", { steps: [
+    ["unlink", "docs", ids24b.doc, { owner: [ids24b.owners[0], ids24b.owners[1]] }],
+  ] }));
+  r24b.queryAfterUnlink = linkArrayView(await adminCall("POST", "/admin/query", {
+    query: { docs: { $: { where: { id: ids24b.doc } }, owner: {} } },
+  }));
+  raw("24b-admin-link-arrays", r24b);
+  record("24b-admin-link-arrays", r24b);
+
   // 25 admin SSE transports (issue #8): the HTTP side of subscribe-query /
   // sse / sse/push — auth and parameter errors before a stream opens, and
   // the push envelope checks (admin/routes.clj:160-210, session.clj:1250-1261).
