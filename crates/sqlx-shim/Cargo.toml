@@ -1,0 +1,10 @@
+[package]
+name = "sqlx-shim"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The Postgres-only part of the sqlx facade, without its optional database drivers"
+
+[dependencies]
+sqlx-core = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "uuid", "chrono", "json", "migrate"] }
+sqlx-postgres = { version = "0.8.6", default-features = false, features = ["uuid", "chrono", "json", "migrate"] }

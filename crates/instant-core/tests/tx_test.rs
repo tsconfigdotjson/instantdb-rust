@@ -331,6 +331,43 @@ async fn lookup_refs_upsert_and_resolve() {
     );
 }
 
+/// Legacy computes its op-group order from the raw steps before it drops a
+/// delete-entity lookup that misses (transaction.clj `tx-steps-order` /
+/// `reorder-tx-steps`). A missed lookup delete as the first step must not move
+/// the later add group ahead of the delete group: the delete runs first, then
+/// the add recreates the entity.
+#[tokio::test]
+async fn missing_delete_lookup_keeps_legacy_op_group_order() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+
+    let eid = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["delete-entity", [ids.owners_name, "absent"], "owners"],
+            ["add-triple", eid, ids.owners_id, eid],
+            ["add-triple", eid, ids.owners_name, "survivor"],
+            ["delete-entity", eid, "owners"]
+        ]),
+    )
+    .await
+    .unwrap();
+
+    let triples = entity_triples(&pool, app, eid).await;
+    assert!(
+        triples.contains(&("owners.id".to_string(), json!(eid))),
+        "{triples:?}"
+    );
+    assert!(
+        triples.contains(&("owners.name".to_string(), json!("survivor"))),
+        "{triples:?}"
+    );
+}
+
 /// Legacy preprocesses delete-entity lookups against the pre-tx state
 /// (transaction.clj:360-378) before any step runs and drops lookups that
 /// miss. Without that, a delete by lookup could name an entity an earlier
