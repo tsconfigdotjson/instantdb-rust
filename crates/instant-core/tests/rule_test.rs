@@ -478,6 +478,40 @@ async fn data_ref_batched_per_entity() {
     .await;
     let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"todos": {}})).await;
     assert_eq!(visible(&res), sorted(vec![t1, t2]));
+
+    // converging path: reverse -> forward -> reverse reaches the same owner
+    // twice. `ANY` still reads each triple once, so the batch fan-out must
+    // not multiply a's two todos.
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.owner.todos.id')) == 2"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
+    assert_eq!(visible(&res), vec![a]);
+
+    // the same convergence into a terminal blob: a's name appears once
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.owner.name')) == 1"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
+    assert_eq!(visible(&res), sorted(vec![a, b]));
+
+    // ...but do not over-dedupe the fan-out: the two distinct links t1->a
+    // and t2->a still produce two terminal ids, as the per-entity `ANY`
+    // walk does.
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.owner.id')) == 2"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
+    assert_eq!(visible(&res), vec![a]);
 }
 
 #[tokio::test]

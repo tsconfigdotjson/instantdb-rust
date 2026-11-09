@@ -587,6 +587,14 @@ async fn resolve_ref_path_batch(
             .filter(|u| seen.insert(*u))
             .collect()
     }
+    /// The single-root walk binds `ANY(current)`, so a repeated id in
+    /// `current` still matches each triple once. Fan-out must use the same
+    /// distinct input ids; the rows stay per triple, so duplicate targets
+    /// produced by distinct links are kept.
+    fn distinct(ids: &[Uuid]) -> Vec<Uuid> {
+        let mut seen = HashSet::new();
+        ids.iter().copied().filter(|u| seen.insert(*u)).collect()
+    }
     /// keep, per root, only the ids that have an `id` triple (order and
     /// multiplicity kept), like `with_id_triple`
     async fn with_id_triples(
@@ -686,7 +694,8 @@ async fn resolve_ref_path_batch(
                     return Ok(current
                         .iter()
                         .map(|(r, ids)| {
-                            let vals: Vec<Value> = ids
+                            let input = distinct(ids);
+                            let vals: Vec<Value> = input
                                 .iter()
                                 .flat_map(|e| by_e.get(e).into_iter().flatten().cloned())
                                 .collect();
@@ -757,7 +766,8 @@ async fn resolve_ref_path_batch(
             },
         };
         for ids in current.values_mut() {
-            *ids = ids
+            let input = distinct(ids);
+            *ids = input
                 .iter()
                 .flat_map(|e| adj.get(e).into_iter().flatten().copied())
                 .collect();
