@@ -370,6 +370,150 @@ async fn data_ref_rule() {
     assert_eq!(res.forms[0].entities[0].eid, t1);
 }
 
+/// The view check resolves `data.ref` for the whole result at once; each
+/// entity must still get exactly its own values: shared targets, an entity
+/// with no link, a target without an `id` triple (invisible to `ref`), a
+/// reverse hop and a two-hop path, with per-entity counts intact.
+#[tokio::test]
+async fn data_ref_batched_per_entity() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+
+    let (a, b, c, ghost) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    let (t1, t2, t3, t4, t5) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", a, ids.owners_id, a],
+            ["add-triple", a, ids.owners_name, "alice"],
+            ["add-triple", b, ids.owners_id, b],
+            ["add-triple", b, ids.owners_name, "bob"],
+            ["add-triple", c, ids.owners_id, c],
+            ["add-triple", c, ids.owners_name, "carol"],
+            // no id triple: a terminal `id` drops it, an attr read through
+            // it still sees it (only the root and a terminal `id` are anchored)
+            ["add-triple", ghost, ids.owners_name, "alicia"],
+            ["add-triple", t1, ids.todos_id, t1],
+            ["add-triple", t1, ids.todos_owner, a],
+            ["add-triple", t2, ids.todos_id, t2],
+            ["add-triple", t2, ids.todos_owner, a],
+            ["add-triple", t3, ids.todos_id, t3],
+            ["add-triple", t3, ids.todos_owner, b],
+            ["add-triple", t4, ids.todos_id, t4],
+            ["add-triple", t5, ids.todos_id, t5],
+            ["add-triple", t5, ids.todos_owner, ghost]
+        ]),
+    )
+    .await
+    .unwrap();
+    let visible = |res: &instant_core::instaql::QueryResult| {
+        let mut v: Vec<Uuid> = res.forms[0].entities.iter().map(|n| n.eid).collect();
+        v.sort();
+        v
+    };
+    let sorted = |mut v: Vec<Uuid>| {
+        v.sort();
+        v
+    };
+
+    // forward hop to a blob, two todos sharing a target, one through the
+    // owner without an id triple
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"view": "'alice' in data.ref('owner.name') || 'alicia' in data.ref('owner.name')"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"todos": {}})).await;
+    assert_eq!(visible(&res), sorted(vec![t1, t2, t5]));
+
+    // terminal `id`: the owner without an id triple counts as no owner
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"view": "size(data.ref('owner.id')) == 1"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"todos": {}})).await;
+    assert_eq!(visible(&res), sorted(vec![t1, t2, t3]));
+
+    // reverse hop, counted per entity
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.id')) == 2"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
+    assert_eq!(visible(&res), vec![a]);
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.id')) == 0"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
+    assert_eq!(visible(&res), vec![c]);
+
+    // two hops: todos whose owner has exactly two todos
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"view": "size(data.ref('owner.todos.id')) == 2"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"todos": {}})).await;
+    assert_eq!(visible(&res), sorted(vec![t1, t2]));
+
+    // converging path: reverse -> forward -> reverse reaches the same owner
+    // twice. `ANY` still reads each triple once, so the batch fan-out must
+    // not multiply a's two todos.
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.owner.todos.id')) == 2"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
+    assert_eq!(visible(&res), vec![a]);
+
+    // the same convergence into a terminal blob: a's name appears once
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.owner.name')) == 1"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
+    assert_eq!(visible(&res), sorted(vec![a, b]));
+
+    // ...but do not over-dedupe the fan-out: the two distinct links t1->a
+    // and t2->a still produce two terminal ids, as the per-entity `ANY`
+    // walk does.
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.owner.id')) == 2"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
+    assert_eq!(visible(&res), vec![a]);
+}
+
 #[tokio::test]
 async fn bind_expansion() {
     let pool = pool().await;
