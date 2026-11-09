@@ -921,11 +921,10 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     let (attr_id, forward) =
                         resolve_link_attr(attrs, etype, label, &mut new_attrs)?;
                     let targets: Vec<Value> = match value {
-                        Value::Array(a)
-                            if !(a.len() == 2 && a[0].is_string() && !a[1].is_array()) =>
-                        {
-                            a.clone()
-                        }
+                        // legacy expand-link (admin/model.clj): every array is a list of
+                        // targets; a lookup target is a `lookup__` string, an object or an
+                        // [attr, value] pair inside the array
+                        Value::Array(a) => a.clone(),
                         other => vec![other.clone()],
                     };
                     // target etype for lookups on the other side
@@ -2445,4 +2444,112 @@ async fn transact_perms_check_impl(
         "committed?": committed,
         "check-results": checks,
     }))
+}
+
+#[cfg(test)]
+mod link_value_tests {
+    use super::*;
+    use instant_core::attr::Attr;
+
+    fn attr(id: Uuid, etype: &str, label: &str, rev: Option<(&str, &str)>, unique: bool) -> Attr {
+        Attr {
+            id,
+            value_type: if rev.is_some() {
+                ValueType::Ref
+            } else {
+                ValueType::Blob
+            },
+            cardinality: if rev.is_some() {
+                Cardinality::Many
+            } else {
+                Cardinality::One
+            },
+            forward_ident: Uuid::new_v4(),
+            etype: etype.into(),
+            label: label.into(),
+            reverse_ident: rev.map(|_| Uuid::new_v4()),
+            reverse_etype: rev.map(|(e, _)| e.into()),
+            reverse_label: rev.map(|(_, l)| l.into()),
+            is_unique: unique,
+            is_indexed: unique,
+            is_required: false,
+            checked_data_type: None,
+            on_delete_cascade: false,
+            on_delete_reverse_cascade: false,
+            is_system: false,
+            indexing: false,
+            checking_data_type: false,
+            setting_unique: false,
+            inferred_types: None,
+            metadata: None,
+        }
+    }
+
+    struct Fx {
+        attrs: AttrMap,
+        tags_link: Uuid,
+        tags_name: Uuid,
+    }
+
+    fn fixture() -> Fx {
+        let (tags_link, tags_name) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut attrs = AttrMap::default();
+        attrs.insert(attr(Uuid::new_v4(), "posts", "id", None, true));
+        attrs.insert(attr(Uuid::new_v4(), "tags", "id", None, true));
+        attrs.insert(attr(tags_name, "tags", "name", None, true));
+        attrs.insert(attr(
+            tags_link,
+            "posts",
+            "tags",
+            Some(("tags", "posts")),
+            false,
+        ));
+        Fx {
+            attrs,
+            tags_link,
+            tags_name,
+        }
+    }
+
+    /// targets of the add-triple steps a `link posts p {tags: value}` expands to
+    fn link_targets(fx: &Fx, p: Uuid, value: Value) -> Vec<Value> {
+        let steps = json!([["link", "posts", p.to_string(), {"tags": value}]]);
+        let out = translate_steps(&fx.attrs, &steps, true).expect("translate");
+        out.as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s[0] == "add-triple" && s[2] == json!(fx.tags_link.to_string()))
+            .map(|s| s[3].clone())
+            .collect()
+    }
+
+    #[test]
+    fn link_array_of_entity_ids_is_a_list_of_targets() {
+        let fx = fixture();
+        let p = Uuid::new_v4();
+        let ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+        for n in 1..=3 {
+            let got = link_targets(&fx, p, json!(ids[..n]));
+            let want: Vec<Value> = ids[..n].iter().map(|s| json!(s)).collect();
+            assert_eq!(got, want, "{n} id(s)");
+        }
+        // a lookup__ string beside an id: two targets
+        let lk = "lookup__name__\"t0\"";
+        let got = link_targets(&fx, p, json!([lk, ids[0]]));
+        assert_eq!(
+            got,
+            vec![json!([fx.tags_name.to_string(), "t0"]), json!(ids[0])]
+        );
+    }
+
+    #[test]
+    fn link_lookup_targets_match_legacy() {
+        let fx = fixture();
+        let p = Uuid::new_v4();
+        let want = vec![json!([fx.tags_name.to_string(), "t0"])];
+        // an object, or a pair inside the array: one lookup target
+        assert_eq!(link_targets(&fx, p, json!({"name": "t0"})), want);
+        assert_eq!(link_targets(&fx, p, json!([["name", "t0"]])), want);
+        assert_eq!(link_targets(&fx, p, json!("lookup__name__\"t0\"")), want);
+    }
 }
