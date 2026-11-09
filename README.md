@@ -140,6 +140,11 @@ the legacy one. CI runs all of them.
 | `web/` | The [instantdbrust.com](https://instantdbrust.com) site |
 | `LEGACY/` | The original Instant codebase (Clojure + TypeScript), kept for reference and for the differential harness |
 
+## License
+
+This project is MIT-licensed; see [LICENSE](LICENSE). The vendored upstream code under
+[`LEGACY/`](LEGACY/) remains under Apache-2.0; see [`LEGACY/LICENSE.md`](LEGACY/LICENSE.md).
+
 ---
 
 <sub>An independent open-source project, not affiliated with or endorsed by
