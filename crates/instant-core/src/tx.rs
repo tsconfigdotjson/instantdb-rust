@@ -552,7 +552,13 @@ async fn resolve_delete_lookups(
     if resolved.is_empty() {
         return Ok(steps);
     }
-    let mut out = Vec::with_capacity(steps.len());
+    // Legacy splits the lookup deletes out, resolves them, and appends the
+    // resolved deletes after the rest of the steps (transaction.clj:360-378).
+    // Its group order still comes from the original steps, so keep both
+    // details: the append order is matched here, and tx group ordering is
+    // captured before this function in `transact`.
+    let mut rest = Vec::with_capacity(steps.len());
+    let mut lookup_deletes = Vec::new();
     for mut step in steps {
         match &mut step {
             TxStep::DeleteEntity { eid, .. } => {
@@ -561,6 +567,9 @@ async fn resolve_delete_lookups(
                         Some(id) => *eid = EidRef::Id(id),
                         None => continue,
                     }
+                    lookup_deletes.push(step);
+                } else {
+                    rest.push(step);
                 }
             }
             TxStep::RuleParams { eid, .. } => {
@@ -569,12 +578,13 @@ async fn resolve_delete_lookups(
                         *eid = EidRef::Id(id);
                     }
                 }
+                rest.push(step);
             }
-            _ => {}
+            _ => rest.push(step),
         }
-        out.push(step);
     }
-    Ok(out)
+    rest.extend(lookup_deletes);
+    Ok(rest)
 }
 
 /// legacy `throw-tx-step-validation-err!` (permissioned_transaction.clj:38-42):
@@ -687,6 +697,20 @@ pub async fn transact(
     // pre-tx state before any step runs
     validate_modes(&mut *conn, app_id, attrs, &steps, opts.admin).await?;
 
+    // Legacy computes `ops-order` from the raw input steps before
+    // preprocessing (transaction.clj:704-708), then reorders the preprocessed
+    // steps by it (tx-steps-order / reorder-tx-steps). A delete-entity lookup
+    // that misses is dropped during preprocessing, so deriving the group order
+    // afterwards would move a later add group ahead of the delete group when
+    // that lookup delete was the first step. Keep the original order.
+    let mut ops_order: Vec<&'static str> = vec![];
+    for step in &steps {
+        let key = step.group_key();
+        if !ops_order.contains(&key) {
+            ops_order.push(key);
+        }
+    }
+
     // legacy resolve-lookups-for-delete-entity (transaction.clj:360-378):
     // delete-entity lookups are resolved before any step runs, and a lookup
     // that misses is dropped. Leaving a miss for the delete group would let
@@ -694,21 +718,16 @@ pub async fn transact(
     // into that value, which legacy never does.
     let steps = resolve_delete_lookups(&mut *conn, app_id, steps).await?;
 
-    // Group steps by op, groups ordered by first appearance.
-    let mut groups: Vec<(&'static str, Vec<TxStep>)> = vec![];
+    // Group steps by op, in the order legacy computed before preprocessing.
+    // Within a group, keep the order the preprocessed steps arrive in.
+    let mut by_op: HashMap<&'static str, Vec<TxStep>> = HashMap::new();
     for step in steps {
-        let key = step.group_key();
-        match groups.last_mut() {
-            Some((k, v)) if *k == key => v.push(step),
-            _ => {
-                if let Some((_, v)) = groups.iter_mut().find(|(k, _)| *k == key) {
-                    v.push(step);
-                } else {
-                    groups.push((key, vec![step]));
-                }
-            }
-        }
+        by_op.entry(step.group_key()).or_default().push(step);
     }
+    let groups: Vec<(&'static str, Vec<TxStep>)> = ops_order
+        .into_iter()
+        .filter_map(|key| by_op.remove(key).map(|steps| (key, steps)))
+        .collect();
 
     let mut resolver = LookupResolver::new();
     resolver.validate_namespaces = !opts.admin;
