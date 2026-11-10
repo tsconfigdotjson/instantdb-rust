@@ -1821,6 +1821,70 @@ async fn unlink_fallback_views_the_target_before_the_steps_run() {
     assert_eq!(err.error_type, "permission-denied");
 }
 
+/// Explicit link / unlink rules on an entity that exists before the tx are
+/// pre-checks too (permissioned_transaction.clj pre-checks, `when entity`):
+/// a denied rule fails the tx with permission-denied even when a step would
+/// error, e.g. unlinking a required link.
+#[tokio::test]
+async fn explicit_link_rules_run_before_the_steps() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let (o, o2, t) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", o, ids.owners_id, o],
+            ["add-triple", o2, ids.owners_id, o2],
+            ["add-triple", t, ids.todos_id, t],
+            ["add-triple", t, ids.todos_owner, o]
+        ]),
+    )
+    .await
+    .unwrap();
+    // `mode: create` on an existing entity fails while the steps run
+    let failing = json!(["add-triple", t, ids.todos_id, t, {"mode": "create"}]);
+    let cases = [
+        (
+            json!({"todos": {"allow": {"unlink": {"owner": "false"}}}}),
+            json!([["retract-triple", t, ids.todos_owner, o], failing.clone()]),
+        ),
+        (
+            json!({"owners": {"allow": {"unlink": {"todos": "false"}}}}),
+            json!([["retract-triple", t, ids.todos_owner, o], failing.clone()]),
+        ),
+        (
+            json!({"todos": {"allow": {"link": {"owner": "false"}}}}),
+            json!([["add-triple", t, ids.todos_owner, o2], failing.clone()]),
+        ),
+    ];
+    for (rules, steps) in cases {
+        set_rules(&pool, app, rules.clone()).await;
+        let err = transact_with_perms(&pool, app, &AuthCtx::default(), steps)
+            .await
+            .unwrap_err();
+        assert_eq!(err.error_type, "permission-denied", "{rules}");
+    }
+    // a passing rule leaves the step's own error
+    set_rules(
+        &pool,
+        app,
+        json!({"todos": {"allow": {"unlink": {"owner": "true"}}}}),
+    )
+    .await;
+    let err = transact_with_perms(
+        &pool,
+        app,
+        &AuthCtx::default(),
+        json!([["retract-triple", t, ids.todos_owner, o], failing]),
+    )
+    .await
+    .unwrap_err();
+    assert_ne!(err.error_type, "permission-denied");
+}
+
 /// Create checks bind legacy's locally approximated post-tx entity
 /// (update-entities-map applies the add / merge / retract steps and ignores
 /// delete-entity), so an entity the tx writes and then deletes still shows
