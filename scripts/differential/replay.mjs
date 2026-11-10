@@ -1796,6 +1796,9 @@ function buildScenario() {
           const r = await env.conns.ADMIN.waitFor((m) => (m.op === "transact-ok" || m.op === "error") && m["client-event-id"] === ceid);
           if (r.op === "error") throw new Error(`38 seed tx failed on ${env.serverName}: ${JSON.stringify(r).slice(0, 500)}`);
         };
+        // attrs and their first triples in one tx: every session's schema
+        // refresh then already carries the inferred types (same reason as
+        // step 37; with two txs legacy can keep a pre-inference snapshot).
         await tx([
           attr(ids.refconvListId, "lists", "id", { unique: true, fwd: ids.refconvListId }),
           attr(ids.refconvListName, "lists", "name", { fwd: ids.refconvListName }),
@@ -1812,8 +1815,6 @@ function buildScenario() {
               isUnsynced: true,
             },
           ],
-        ]);
-        await tx([
           // owner a owns t1 and t2; b and c are both "bob" and own t3 / t4
           ["add-triple", ids.refconvA, ids.ownersId, ids.refconvA], ["add-triple", ids.refconvA, ids.ownersName, "alice"],
           ["add-triple", ids.refconvB, ids.ownersId, ids.refconvB], ["add-triple", ids.refconvB, ids.ownersName, "bob"],
@@ -1828,6 +1829,14 @@ function buildScenario() {
           ["add-triple", ids.refconvL1, ids.refconvListTodos, ids.refconvT1], ["add-triple", ids.refconvL1, ids.refconvListTodos, ids.refconvT2],
           ["add-triple", ids.refconvL2, ids.refconvListTodos, ids.refconvT3], ["add-triple", ids.refconvL2, ids.refconvListTodos, ids.refconvT4],
         ]);
+        await Promise.all(
+          Object.values(env.conns)
+            .filter((c) => c.waitFor && c.frames?.some((f) => f.op === "init-ok"))
+            .map((c) =>
+              c.waitFor((m) => m.op === "refresh-ok" && (m.attrs ?? []).some((a) => a.id === ids.refconvListId), 5000).catch(() => {}),
+            ),
+        );
+        await settle(Object.values(env.conns), 700);
         const guestQuery = async (q) => {
           const ceid = msg(env.conns.A, { op: "add-query", q });
           const r = await env.conns.A.waitFor((m) => (m.op === "add-query-ok" && canon(m.q) === canon(q)) || (m.op === "error" && m["client-event-id"] === ceid));
