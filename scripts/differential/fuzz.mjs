@@ -569,6 +569,26 @@ function buildScript() {
       ["add-triple", entities[0], missingBeforeUnknownAttr, "lookup-regression-unknown-second"],
     ],
   });
+  // Fixed regression case from nightly seed 31642. Its mismatch was at round
+  // 411, past PR depth: a delete-entity lookup as the first step must not move
+  // a later delete group behind the add group. Legacy computes op-group order
+  // from the raw steps before it drops the missed lookup, so the delete group
+  // runs first and the add group re-creates the entity; Rust used to derive
+  // the order after dropping the lookup, run the add group first and leave the
+  // entity deleted. The full read below pins the surviving entity on both
+  // servers (`crates/instant-core/tests/tx_test.rs` has the unit-level case).
+  const recreatedByLaterAdd = mk();
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [
+      ["delete-entity", [attrs.profileHandle, "op-order-regression-missing"], PROFILE],
+      ["add-triple", recreatedByLaterAdd, attrs.id, recreatedByLaterAdd],
+      ["add-triple", recreatedByLaterAdd, attrs.labels.p3, 1],
+      ["delete-entity", recreatedByLaterAdd, NS],
+    ],
+  });
+  script.push({ kind: "query", q: { [NS]: {} } });
   // A final hop seed and read: random churn can delete or unlink every entity
   // a generated multi-hop where clause would match, which used to leave the
   // `hops` floor with ten queries and no data (seed 31255). Re-create one
@@ -1150,6 +1170,54 @@ const allowedResultException = (l, r) => {
   return ex;
 };
 
+// Legacy's delete-entity-multi! can remove a triple a deep-merge step wrote
+// earlier in the SAME transaction, when the transaction also deletes a
+// different entity. Nightly seed 31586 tx73 deep-merges fuzz.p3 on entity 025
+// and deletes profile 036: legacy's database ends up without the p3 triple,
+// while the same deep-merge followed by a separate delete tx keeps it (and
+// deleting a different profile keeps it too). The delete CTE is supposed to
+// remove only the deleted entity's forward triples and reverse refs, so this
+// is a legacy delete bug, not a contract. Accept only the exact shape:
+// a one-shot query where legacy's result is a strict subset of rust's, every
+// missing triple is the target of a deep-merge-triple in the most recent tx
+// before the query, that tx also has delete-entity steps, and none of those
+// deletes names the missing triple's own entity. Extra/different values,
+// errors, pages, or a missing triple from any other write still fail.
+const DEEP_MERGE_DELETE_EXCEPTION = "legacy-same-tx-delete-drops-deep-merge";
+function latestTxBefore(slot) {
+  for (let i = slot - 1; i >= 0; i--) {
+    if (script[i]?.kind === "tx") return script[i];
+  }
+  return null;
+}
+function legacyDropsSameTxDeepMerge(l, r) {
+  const op = script[l?.i];
+  if (l?.i !== r?.i || op?.kind !== "query" || l.error || r.error || !l.result || !r.result) return false;
+  if (canon(l.result.aggregate) !== canon(r.result.aggregate)) return false;
+  const lt = l.result.triples ?? [];
+  const rt = r.result.triples ?? [];
+  const lset = new Set(lt.map((t) => canon(t)));
+  const rset = new Set(rt.map((t) => canon(t)));
+  if (!lt.every((t) => rset.has(canon(t)))) return false;
+  const missing = rt.filter((t) => !lset.has(canon(t)));
+  if (!missing.length) return false;
+  const tx = latestTxBefore(l.i);
+  if (!tx) return false;
+  const deletes = tx.steps.filter(([op]) => op === "delete-entity");
+  if (!deletes.length) return false;
+  const merges = tx.steps
+    .filter(([op]) => op === "deep-merge-triple")
+    .map(([, e, a]) => [canon(e), canon(a)]);
+  if (!merges.length) return false;
+  for (const [e, a] of missing) {
+    if (!merges.some(([me, ma]) => me === canon(e) && ma === canon(a))) return false;
+    if (deletes.some(([, de]) => canon(de) === canon(e))) return false;
+  }
+  exceptionHits[DEEP_MERGE_DELETE_EXCEPTION] = (exceptionHits[DEEP_MERGE_DELETE_EXCEPTION] ?? 0) + 1;
+  console.log(`legacy dropped same-tx deep-merge triples at slot ${l.i}; its delete-entity removed them, rust kept them`);
+  return true;
+}
+
 let mismatches = 0;
 const n = Math.max(legacy.queryResults.length, rust.queryResults.length);
 for (let i = 0; i < n; i++) {
@@ -1157,6 +1225,7 @@ for (let i = 0; i < n; i++) {
   if (canon(comparable(l)) !== canon(comparable(r))) {
     if (allowedResultException(l, r)) continue;
     if (allowedByException(l, r)) continue;
+    if (legacyDropsSameTxDeepMerge(l, r)) continue;
     const msgs = l?.error || r?.error ? `\n  messages: legacy ${JSON.stringify(l?.error?.message)} / rust ${JSON.stringify(r?.error?.message)}` : "";
     console.error(`query mismatch at slot ${i}:\n  legacy: ${JSON.stringify(l)}\n  rust:   ${JSON.stringify(r)}${msgs}`);
     mismatches++;
