@@ -90,6 +90,9 @@ function buildScenario() {
     wqId: mk(), wqNum: mk(), wqStr: mk(), wqPlain: mk(), wqOwner: mk(), wqoId: mk(), wqoName: mk(),
     w1: mk(), w2: mk(), w3: mk(), w4: mk(), wo1: mk(), wo2: mk(),
     rlId: mk(), rlTitle: mk(), rlfId: mk(), rlfTitle: mk(), rl1: mk(), rlf1: mk(),
+    // issue #97: converging data.ref paths keep one value per path
+    refconvListId: mk(), refconvListName: mk(), refconvListTodos: mk(),
+    refconvA: mk(), refconvB: mk(), refconvC: mk(), refconvT1: mk(), refconvT2: mk(), refconvT3: mk(), refconvT4: mk(), refconvL1: mk(), refconvL2: mk(),
     // stream ids must be v4-shaped uuids on both servers
     stream2Token: "00000000-0000-4000-8000-00000000a5ee",
   };
@@ -1774,6 +1777,88 @@ function buildScenario() {
         await RL1.waitFor((m) => m.op === "refresh-ok" && (m.computations ?? []).some((c) => sameQ(c["instaql-query"], freeQ)));
         await settle([RL1, RL2], 900);
         env.conns.HTTP?.record?.({ name: "rl2RefreshesAfterUnsubscribe", count: refreshes(RL2) - before });
+      },
+    },
+    {
+      // issue #97: legacy's get-ref-many runs a data.ref path as one datalog
+      // join and returns one value per join row. A converging path therefore
+      // keeps repeated owners (and repeated terminal blob values) per path;
+      // `ANY(current)` in the per-hop SQL must collapse only the query input,
+      // not the result fan-out.
+      name: "38-ref-path-multiplicity",
+      run: async (env) => {
+        const setRules = async (r) => {
+          psql(env.db, `UPDATE rules SET code = code || $rules$${JSON.stringify(r)}$rules$::jsonb WHERE app_id = '${env.appId}'`);
+          await sleep(RULES_SETTLE_MS);
+        };
+        const tx = async (steps) => {
+          const ceid = msg(env.conns.ADMIN, { op: "transact", "tx-steps": steps });
+          const r = await env.conns.ADMIN.waitFor((m) => (m.op === "transact-ok" || m.op === "error") && m["client-event-id"] === ceid);
+          if (r.op === "error") throw new Error(`38 seed tx failed on ${env.serverName}: ${JSON.stringify(r).slice(0, 500)}`);
+        };
+        // attrs and their first triples in one tx: every session's schema
+        // refresh then already carries the inferred types (same reason as
+        // step 37; with two txs legacy can keep a pre-inference snapshot).
+        await tx([
+          attr(ids.refconvListId, "lists", "id", { unique: true, fwd: ids.refconvListId }),
+          attr(ids.refconvListName, "lists", "name", { fwd: ids.refconvListName }),
+          [
+            "add-attr",
+            {
+              id: ids.refconvListTodos,
+              "forward-identity": [ids.refconvListTodos, "lists", "todos"],
+              "reverse-identity": [mk(), "todos", "lists"],
+              "value-type": "ref",
+              cardinality: "many",
+              "unique?": false,
+              "index?": false,
+              isUnsynced: true,
+            },
+          ],
+          // owner a owns t1 and t2; b and c are both "bob" and own t3 / t4
+          ["add-triple", ids.refconvA, ids.ownersId, ids.refconvA], ["add-triple", ids.refconvA, ids.ownersName, "alice"],
+          ["add-triple", ids.refconvB, ids.ownersId, ids.refconvB], ["add-triple", ids.refconvB, ids.ownersName, "bob"],
+          ["add-triple", ids.refconvC, ids.ownersId, ids.refconvC], ["add-triple", ids.refconvC, ids.ownersName, "bob"],
+          ["add-triple", ids.refconvT1, ids.todosId, ids.refconvT1], ["add-triple", ids.refconvT1, ids.ownerRef, ids.refconvA],
+          ["add-triple", ids.refconvT2, ids.todosId, ids.refconvT2], ["add-triple", ids.refconvT2, ids.ownerRef, ids.refconvA],
+          ["add-triple", ids.refconvT3, ids.todosId, ids.refconvT3], ["add-triple", ids.refconvT3, ids.ownerRef, ids.refconvB],
+          ["add-triple", ids.refconvT4, ids.todosId, ids.refconvT4], ["add-triple", ids.refconvT4, ids.ownerRef, ids.refconvC],
+          // L1 holds t1 and t2; L2 holds t3 and t4
+          ["add-triple", ids.refconvL1, ids.refconvListId, ids.refconvL1], ["add-triple", ids.refconvL1, ids.refconvListName, "L1"],
+          ["add-triple", ids.refconvL2, ids.refconvListId, ids.refconvL2], ["add-triple", ids.refconvL2, ids.refconvListName, "L2"],
+          ["add-triple", ids.refconvL1, ids.refconvListTodos, ids.refconvT1], ["add-triple", ids.refconvL1, ids.refconvListTodos, ids.refconvT2],
+          ["add-triple", ids.refconvL2, ids.refconvListTodos, ids.refconvT3], ["add-triple", ids.refconvL2, ids.refconvListTodos, ids.refconvT4],
+        ]);
+        await Promise.all(
+          Object.values(env.conns)
+            .filter((c) => c.waitFor && c.frames?.some((f) => f.op === "init-ok"))
+            .map((c) =>
+              c.waitFor((m) => m.op === "refresh-ok" && (m.attrs ?? []).some((a) => a.id === ids.refconvListId), 5000).catch(() => {}),
+            ),
+        );
+        await settle(Object.values(env.conns), 700);
+        const guestQuery = async (q) => {
+          const ceid = msg(env.conns.A, { op: "add-query", q });
+          const r = await env.conns.A.waitFor((m) => (m.op === "add-query-ok" && canon(m.q) === canon(q)) || (m.op === "error" && m["client-event-id"] === ceid));
+          if (r.op === "add-query-ok") {
+            msg(env.conns.A, { op: "remove-query", q });
+            await env.conns.A.waitFor((m) => m.op === "remove-query-ok" && canon(m.q) === canon(q));
+          }
+        };
+        // a -> its two todos -> a -> a's two todos -> id: four join rows,
+        // where the pre-#97 answer was two
+        await setRules({ owners: { allow: { view: "size(data.ref('todos.owner.todos.id')) == 4" } } });
+        await guestQuery({ owners: { $: { where: { id: ids.refconvA } } } });
+        // L1 -> two todos -> the same owner twice: a terminal blob keeps both
+        await setRules({ lists: { allow: { view: "size(data.ref('todos.owner.name')) == 2" } } });
+        await guestQuery({ lists: { $: { where: { id: ids.refconvL1 } } } });
+        // L2 -> two todos -> two owners both named "bob": still two values
+        await guestQuery({ lists: { $: { where: { id: ids.refconvL2 } } } });
+        // terminal ids stay path-preserving on both shapes
+        await setRules({ lists: { allow: { view: "size(data.ref('todos.owner.id')) == 2" } } });
+        await guestQuery({ lists: { $: { where: { id: ids.refconvL1 } } } });
+        await setRules({ todos: { allow: { view: "size(data.ref('owner.todos.owner.id')) == 2" } } });
+        await guestQuery({ todos: { $: { where: { id: ids.refconvT1 } } } });
       },
     },
   ];

@@ -480,18 +480,26 @@ async fn data_ref_batched_per_entity() {
     assert_eq!(visible(&res), sorted(vec![t1, t2]));
 
     // converging path: reverse -> forward -> reverse reaches the same owner
-    // twice. `ANY` still reads each triple once, so the batch fan-out must
-    // not multiply a's two todos.
+    // twice per todo, so a's two todos produce four join rows (issue #97).
     set_rules(
         &pool,
         app,
-        json!({"owners": {"allow": {"view": "size(data.ref('todos.owner.todos.id')) == 2"}}}),
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.owner.todos.id')) == 4"}}}),
     )
     .await;
     let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
     assert_eq!(visible(&res), vec![a]);
 
-    // the same convergence into a terminal blob: a's name appears once
+    // the same convergence into a terminal blob keeps both path values: a's
+    // name appears twice, while b (one todo) still sees it once.
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.owner.name')) == 2"}}}),
+    )
+    .await;
+    let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
+    assert_eq!(visible(&res), vec![a]);
     set_rules(
         &pool,
         app,
@@ -499,11 +507,9 @@ async fn data_ref_batched_per_entity() {
     )
     .await;
     let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
-    assert_eq!(visible(&res), sorted(vec![a, b]));
+    assert_eq!(visible(&res), vec![b]);
 
-    // ...but do not over-dedupe the fan-out: the two distinct links t1->a
-    // and t2->a still produce two terminal ids, as the per-entity `ANY`
-    // walk does.
+    // two distinct links t1->a and t2->a still produce two terminal ids
     set_rules(
         &pool,
         app,
@@ -512,6 +518,186 @@ async fn data_ref_batched_per_entity() {
     .await;
     let res = run_filtered(&pool, app, &AuthCtx::default(), json!({"owners": {}})).await;
     assert_eq!(visible(&res), vec![a]);
+}
+
+/// Issue #97 fixture, verified against the legacy server: repeated ids on a
+/// traversed path keep one value per path, for terminal blobs as well as
+/// terminal ids.
+///
+/// - owner a ("alice") owns t1 and t2
+/// - owners b and c are both "bob"; b owns t3, c owns t4
+/// - list L1 holds t1 and t2; list L2 holds t3 and t4
+#[tokio::test]
+async fn data_ref_converging_path_counts_issue_97() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    // unlike todo_schema_steps, owners.name is not unique: two different
+    // owners in the fixture are both named "bob".
+    let todos_id = Uuid::new_v4();
+    let todos_owner = Uuid::new_v4();
+    let owners_id = Uuid::new_v4();
+    let owners_name = Uuid::new_v4();
+    let lists_id = Uuid::new_v4();
+    let lists_name = Uuid::new_v4();
+    let lists_todos = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-attr", {"id": todos_id, "forward-identity": [Uuid::new_v4(), "todos", "id"],
+              "value-type": "blob", "cardinality": "one", "unique?": true, "index?": false}],
+            ["add-attr", {"id": owners_id, "forward-identity": [Uuid::new_v4(), "owners", "id"],
+              "value-type": "blob", "cardinality": "one", "unique?": true, "index?": false}],
+            ["add-attr", {"id": owners_name, "forward-identity": [Uuid::new_v4(), "owners", "name"],
+              "value-type": "blob", "cardinality": "one", "unique?": false, "index?": false}],
+            ["add-attr", {"id": todos_owner, "forward-identity": [Uuid::new_v4(), "todos", "owner"],
+              "reverse-identity": [Uuid::new_v4(), "owners", "todos"],
+              "value-type": "ref", "cardinality": "one", "unique?": false, "index?": false}],
+            ["add-attr", {"id": lists_id, "forward-identity": [Uuid::new_v4(), "lists", "id"],
+              "value-type": "blob", "cardinality": "one", "unique?": true, "index?": false}],
+            ["add-attr", {"id": lists_name, "forward-identity": [Uuid::new_v4(), "lists", "name"],
+              "value-type": "blob", "cardinality": "one", "unique?": false, "index?": false}],
+            ["add-attr", {"id": lists_todos, "forward-identity": [Uuid::new_v4(), "lists", "todos"],
+              "reverse-identity": [Uuid::new_v4(), "todos", "lists"],
+              "value-type": "ref", "cardinality": "many", "unique?": false, "index?": false}]
+        ]),
+    )
+    .await
+    .unwrap();
+
+    let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (t1, t2, t3, t4) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    let (l1, l2) = (Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", a, owners_id, a],
+            ["add-triple", a, owners_name, "alice"],
+            ["add-triple", b, owners_id, b],
+            ["add-triple", b, owners_name, "bob"],
+            ["add-triple", c, owners_id, c],
+            ["add-triple", c, owners_name, "bob"],
+            ["add-triple", t1, todos_id, t1],
+            ["add-triple", t1, todos_owner, a],
+            ["add-triple", t2, todos_id, t2],
+            ["add-triple", t2, todos_owner, a],
+            ["add-triple", t3, todos_id, t3],
+            ["add-triple", t3, todos_owner, b],
+            ["add-triple", t4, todos_id, t4],
+            ["add-triple", t4, todos_owner, c],
+            ["add-triple", l1, lists_id, l1],
+            ["add-triple", l1, lists_name, "L1"],
+            ["add-triple", l2, lists_id, l2],
+            ["add-triple", l2, lists_name, "L2"],
+            ["add-triple", l1, lists_todos, t1],
+            ["add-triple", l1, lists_todos, t2],
+            ["add-triple", l2, lists_todos, t3],
+            ["add-triple", l2, lists_todos, t4]
+        ]),
+    )
+    .await
+    .unwrap();
+
+    let only = |etype: &str, id: Uuid| json!({etype: {"$": {"where": {"id": id}}}});
+    let check = |rule: Value, etype: &'static str, id: Uuid, expected: bool| {
+        let pool = pool.clone();
+        async move {
+            set_rules(&pool, app, rule).await;
+            let res = run_filtered(&pool, app, &AuthCtx::default(), only(etype, id)).await;
+            assert_eq!(!res.forms[0].entities.is_empty(), expected, "{etype} {id}");
+        }
+    };
+
+    // a's todos -> a -> a's todos -> id: two todos x two owners = four paths
+    check(
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.owner.todos.id')) == 4"}}}),
+        "owners",
+        a,
+        true,
+    )
+    .await;
+    // the pre-#97 answer (two) must not pass the same rule
+    check(
+        json!({"owners": {"allow": {"view": "size(data.ref('todos.owner.todos.id')) == 2"}}}),
+        "owners",
+        a,
+        false,
+    )
+    .await;
+
+    // L1's two todos reach the same owner twice: one terminal value per path
+    check(
+        json!({"lists": {"allow": {"view": "size(data.ref('todos.owner.name')) == 2"}}}),
+        "lists",
+        l1,
+        true,
+    )
+    .await;
+    check(
+        json!({"lists": {"allow": {"view": "size(data.ref('todos.owner.name')) == 1"}}}),
+        "lists",
+        l1,
+        false,
+    )
+    .await;
+
+    // L2 has two owners with the same name; both paths count
+    check(
+        json!({"lists": {"allow": {"view": "size(data.ref('todos.owner.name')) == 2"}}}),
+        "lists",
+        l2,
+        true,
+    )
+    .await;
+
+    // terminal ids were already path-preserving
+    check(
+        json!({"lists": {"allow": {"view": "size(data.ref('todos.owner.id')) == 2"}}}),
+        "lists",
+        l1,
+        true,
+    )
+    .await;
+    check(
+        json!({"todos": {"allow": {"view": "size(data.ref('owner.todos.owner.id')) == 2"}}}),
+        "todos",
+        t1,
+        true,
+    )
+    .await;
+
+    // Update rules resolve data.ref from one root (no query prefetch), and
+    // keep the same path multiplicity. Applying an update also exercises
+    // that path, not just the batched view walk.
+    let update_name = json!([["add-triple", a, owners_name, "alice2"]]);
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"update": "size(data.ref('todos.owner.todos.id')) == 2"}}}),
+    )
+    .await;
+    assert!(
+        transact_with_perms(&pool, app, &AuthCtx::default(), update_name.clone())
+            .await
+            .is_err()
+    );
+    set_rules(
+        &pool,
+        app,
+        json!({"owners": {"allow": {"update": "size(data.ref('todos.owner.todos.id')) == 4"}}}),
+    )
+    .await;
+    assert!(
+        transact_with_perms(&pool, app, &AuthCtx::default(), update_name)
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]

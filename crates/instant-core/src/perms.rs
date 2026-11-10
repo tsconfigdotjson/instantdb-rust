@@ -392,11 +392,13 @@ fn extract_ref_paths(sources: &[&str], receiver: &str) -> Vec<String> {
 }
 
 /// Resolve a data.ref path from an entity: walk link segments, collect the
-/// terminal attr's values as a list. With `topics`, each lookup's topic is
-/// recorded there, substituted with the ids the previous hop found (legacy
-/// refines a ref query's topics with its symbol values the same way,
-/// datalog.clj named-pattern->topics): a write that could change what any
-/// hop reads matches one of them.
+/// terminal attr's values as a list. Like legacy's `get-ref-many` datalog
+/// join, the result keeps one value per path (join row), including repeated
+/// intermediate entities and repeated terminal values. With `topics`, each
+/// lookup's topic is recorded there, substituted with the ids the previous
+/// hop found (legacy refines a ref query's topics with its symbol values the
+/// same way, datalog.clj named-pattern->topics): a write that could change
+/// what any hop reads matches one of them.
 async fn resolve_ref_path(
     conn: &mut PgConnection,
     app_id: Uuid,
@@ -471,7 +473,7 @@ async fn resolve_ref_path(
                         t.entities(attr.id, current.iter().copied());
                     }
                     let rows = sqlx::query(
-                        "SELECT value FROM triples
+                        "SELECT entity_id, value FROM triples
                          WHERE app_id = $1 AND attr_id = $2 AND entity_id = ANY($3)
                            AND value != 'null'::jsonb",
                     )
@@ -480,24 +482,34 @@ async fn resolve_ref_path(
                     .bind(&current)
                     .fetch_all(&mut *conn)
                     .await?;
+                    let mut by_e: HashMap<Uuid, Vec<Value>> = HashMap::new();
+                    for r in &rows {
+                        by_e.entry(r.get("entity_id"))
+                            .or_default()
+                            .push(r.get::<Value, _>("value"));
+                    }
+                    // One value per path: a repeated entity in `current`
+                    // is a repeated join row in legacy's datalog query.
                     return Ok(Value::Array(
-                        rows.iter().map(|r| r.get::<Value, _>("value")).collect(),
+                        current
+                            .iter()
+                            .flat_map(|e| by_e.get(e).into_iter().flatten().cloned())
+                            .collect(),
                     ));
                 }
             }
         }
         // link hop (also allowed as terminal -> ids)
         let fwd = attrs.by_fwd_name(&current_etype, seg).cloned();
-        let (next, next_etype): (Vec<Uuid>, String) = match fwd {
+        let (adj, next_etype): (HashMap<Uuid, Vec<Uuid>>, String) = match fwd {
             Some(a) if a.value_type == ValueType::Ref => {
-                if current.is_empty() {
-                    (vec![], a.reverse_etype.clone().unwrap_or_default())
-                } else {
+                let mut adj: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+                if !current.is_empty() {
                     if let Some(t) = topics.as_deref_mut() {
                         t.entities(a.id, current.iter().copied());
                     }
                     let rows = sqlx::query(
-                        "SELECT json_uuid_to_uuid(value) AS t FROM triples
+                        "SELECT entity_id, json_uuid_to_uuid(value) AS t FROM triples
                          WHERE app_id = $1 AND attr_id = $2 AND entity_id = ANY($3) AND eav",
                     )
                     .bind(app_id)
@@ -505,24 +517,23 @@ async fn resolve_ref_path(
                     .bind(&current)
                     .fetch_all(&mut *conn)
                     .await?;
-                    (
-                        rows.iter()
-                            .filter_map(|r| r.get::<Option<Uuid>, _>("t"))
-                            .collect(),
-                        a.reverse_etype.clone().unwrap_or_default(),
-                    )
+                    for r in &rows {
+                        if let Some(t) = r.get::<Option<Uuid>, _>("t") {
+                            adj.entry(r.get("entity_id")).or_default().push(t);
+                        }
+                    }
                 }
+                (adj, a.reverse_etype.clone().unwrap_or_default())
             }
             _ => match attrs.by_rev_name(&current_etype, seg).cloned() {
                 Some(a) => {
-                    if current.is_empty() {
-                        (vec![], a.etype.clone())
-                    } else {
+                    let mut adj: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+                    if !current.is_empty() {
                         if let Some(t) = topics.as_deref_mut() {
                             t.values(a.id, current.iter().copied());
                         }
                         let rows = sqlx::query(
-                            "SELECT entity_id FROM triples
+                            "SELECT entity_id, json_uuid_to_uuid(value) AS v FROM triples
                              WHERE app_id = $1 AND attr_id = $2 AND vae
                                AND json_uuid_to_uuid(value) = ANY($3)",
                         )
@@ -531,11 +542,13 @@ async fn resolve_ref_path(
                         .bind(&current)
                         .fetch_all(&mut *conn)
                         .await?;
-                        (
-                            rows.iter().map(|r| r.get::<Uuid, _>("entity_id")).collect(),
-                            a.etype.clone(),
-                        )
+                        for r in &rows {
+                            if let Some(v) = r.get::<Option<Uuid>, _>("v") {
+                                adj.entry(v).or_default().push(r.get("entity_id"));
+                            }
+                        }
                     }
+                    (adj, a.etype.clone())
                 }
                 None => {
                     // an attr this walk can't resolve: a later attr change
@@ -547,6 +560,12 @@ async fn resolve_ref_path(
                 }
             },
         };
+        // Expand once per occurrence in `current` (not once per distinct id):
+        // a converging path keeps one value per join row.
+        let next: Vec<Uuid> = current
+            .iter()
+            .flat_map(|e| adj.get(e).into_iter().flatten().copied())
+            .collect();
         if is_last {
             return Ok(json!(next
                 .iter()
@@ -586,14 +605,6 @@ async fn resolve_ref_path_batch(
             .copied()
             .filter(|u| seen.insert(*u))
             .collect()
-    }
-    /// The single-root walk binds `ANY(current)`, so a repeated id in
-    /// `current` still matches each triple once. Fan-out must use the same
-    /// distinct input ids; the rows stay per triple, so duplicate targets
-    /// produced by distinct links are kept.
-    fn distinct(ids: &[Uuid]) -> Vec<Uuid> {
-        let mut seen = HashSet::new();
-        ids.iter().copied().filter(|u| seen.insert(*u)).collect()
     }
     /// keep, per root, only the ids that have an `id` triple (order and
     /// multiplicity kept), like `with_id_triple`
@@ -694,8 +705,7 @@ async fn resolve_ref_path_batch(
                     return Ok(current
                         .iter()
                         .map(|(r, ids)| {
-                            let input = distinct(ids);
-                            let vals: Vec<Value> = input
+                            let vals: Vec<Value> = ids
                                 .iter()
                                 .flat_map(|e| by_e.get(e).into_iter().flatten().cloned())
                                 .collect();
@@ -766,8 +776,7 @@ async fn resolve_ref_path_batch(
             },
         };
         for ids in current.values_mut() {
-            let input = distinct(ids);
-            *ids = input
+            *ids = ids
                 .iter()
                 .flat_map(|e| adj.get(e).into_iter().flatten().copied())
                 .collect();
