@@ -144,6 +144,9 @@ the legacy one. CI runs all of them.
 
 This project is MIT-licensed; see [LICENSE](LICENSE). The vendored upstream code under
 [`LEGACY/`](LEGACY/) remains under Apache-2.0; see [`LEGACY/LICENSE.md`](LEGACY/LICENSE.md).
+The server is a reimplementation of the InstantDB server, which is Apache-2.0; [NOTICE](NOTICE)
+gives the attribution. The Docker image ships the upstream migrations unmodified and
+includes both licence texts under `/usr/share/licenses/instantdb-rust/`.
 
 ---
 
