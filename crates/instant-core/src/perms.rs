@@ -3350,14 +3350,26 @@ pub async fn permissioned_transact_checked(
         .collect();
     // the system-catalog guards come first in legacy too
     tx::validate_system_steps(attrs, &steps, &TxOptions::default())?;
-    if !pre_checks.is_empty() {
+    // legacy pre-checks also run the explicit link / unlink rules of every
+    // ref step whose entity exists before the tx (:396-430, `when entity`,
+    // `when rev-entity`); a link that creates its entity is a post check
+    let link_pre_checks: Vec<&LinkSpec> = if fail_fast {
+        link_specs
+            .iter()
+            .filter(|s| matches!(old_maps.get(&(s.eid, s.etype.clone())), Some(Some(_))))
+            .collect()
+    } else {
+        vec![]
+    };
+    let replay = !pre_checks.is_empty() || !link_pre_checks.is_empty();
+    if replay {
         sqlx::query("SAVEPOINT instant_pre_checks")
             .execute(&mut *conn)
             .await?;
     }
     let report = match tx::transact(conn, app_id, attrs, steps, &TxOptions::default()).await {
         Ok(report) => report,
-        Err(e) if pre_checks.is_empty() => return Err(e),
+        Err(e) if !replay => return Err(e),
         Err(e) => {
             sqlx::query("ROLLBACK TO SAVEPOINT instant_pre_checks")
                 .execute(&mut *conn)
@@ -3390,6 +3402,54 @@ pub async fn permissioned_transact_checked(
                 .await?;
                 if !ok {
                     return Err(object_denied(etype));
+                }
+            }
+            for spec in &link_pre_checks {
+                let key = (spec.eid, spec.etype.clone());
+                let Some(Some(old)) = old_maps.get(&key) else {
+                    continue;
+                };
+                let lkey = (spec.linked_eid, spec.linked_etype.clone());
+                let linked_old = old_maps.get(&lkey).cloned().flatten();
+                let new = Value::Object(apply_local_steps(old, &local_steps, &key));
+                let linked = Value::Object(linked_old.clone().unwrap_or_else(|| {
+                    base_entity_map(attrs, &spec.linked_etype, spec.linked_eid)
+                }));
+                // legacy merges the linked side's rule-params under the
+                // entity's own (:360, :372)
+                let mut rp = match global_rule_params {
+                    Value::Object(m) => m.clone(),
+                    _ => Map::new(),
+                };
+                for k in [&lkey, &key] {
+                    if let Some(Value::Object(step_rp)) = step_rule_params.get(k) {
+                        rp.extend(step_rp.clone());
+                    }
+                }
+                let actions = (spec.action == "link").then(|| {
+                    json!({
+                        "data": "update",
+                        "linkedData": if linked_old.is_some() { "update" } else { "create" },
+                    })
+                });
+                let auth_val = match &pre_auth {
+                    Some(v) => v.clone(),
+                    None => build_auth_value(conn, app_id, attrs, auth, &[&spec.program]).await?,
+                };
+                let env = EvalEnv::new(app_id, rules, &auth.request);
+                let ok = eval_program_full(
+                    &spec.program,
+                    &Value::Object(old.clone()),
+                    Some(&new),
+                    &auth_val,
+                    &Value::Object(rp),
+                    Some(&linked),
+                    actions.as_ref(),
+                    &env,
+                )
+                .await?;
+                if !ok {
+                    return Err(object_denied(&spec.etype));
                 }
             }
             return Err(e);

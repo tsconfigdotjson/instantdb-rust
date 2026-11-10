@@ -47,6 +47,13 @@ const FIXED = {
   modeEntity: mk(),
   // the one entity the 70k-value `$in` probe must find
   needle: mk(),
+  // the `required` link the unlink pre-check probes retract
+  reqLinkId: mk(),
+  reqLinkCreator: mk(),
+  reqLinkReverse: mk(),
+  reqOwnerId: mk(),
+  reqEntity: mk(),
+  reqOwner: mk(),
 };
 const isFixed = (s) => typeof s === "string" && s.includes("-0000-4000-8000-");
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
@@ -108,11 +115,11 @@ async function call(base, method, p, { token = adminToken, body, headers = {} } 
 
 const admin = (ctx, p, body, headers) => call(ctx.url, "POST", p, { body, headers: { "app-id": appId, ...headers } });
 
-async function session(ctx, { init = true, token } = {}) {
+async function session(ctx, { init = true, token, admin: asAdmin = false } = {}) {
   const conn = connect(ctx.url, appId, `${ctx.name}:errors`);
   await conn.open;
   if (init) {
-    conn.send({ "client-event-id": uuid(), op: "init", "app-id": appId, versions: { "@instantdb/core": "v0.21.0" }, ...(token ? { "refresh-token": token } : {}) });
+    conn.send({ "client-event-id": uuid(), op: "init", "app-id": appId, versions: { "@instantdb/core": "v0.21.0" }, ...(token ? { "refresh-token": token } : {}), ...(asAdmin ? { "__admin-token": adminToken } : {}) });
     await conn.waitFor((m) => m.op === "init-ok");
     conn.takeNewFrames();
   }
@@ -517,6 +524,36 @@ probe("ws/operation-timed-out/transact-blocked", async (ctx) =>
 probe("http/timeout/transact-blocked", async (ctx) =>
   withTriplesLocked(ctx, 34, async () => httpView(await admin(ctx, "/admin/transact", { steps: [["update", "probe", mk(), { name: "slow" }]] }))));
 
+// forbidden unlink of a `required` link: legacy runs the explicit unlink rule
+// as a pre-check, before any step does (permissioned_transaction.clj:396-430
+// `when entity`), so the required-attribute validation the retract would trip
+// (transaction.clj:617-623) never runs and the tx is permission-denied. This
+// server runs the steps first and replays the pre-checks when they fail; the
+// control probe pins that a passing rule leaves the required error
+// (differential error probes for the unlink pre-check replay)
+async function requiredLinkRules(ctx, allow) {
+  const res = await call(ctx.url, "POST", `/dash/apps/${appId}/rules`, {
+    token: userToken,
+    body: { code: { reqlink: { allow: { unlink: { creator: allow } } } } },
+  });
+  if (res.status !== 200) throw new Error(`[${ctx.name}] rules push failed: ${JSON.stringify(res.body)}`);
+}
+const unlinkRequiredLink = (conn) => wsError(conn, { op: "transact", "tx-steps": [["retract-triple", FIXED.reqEntity, FIXED.reqLinkCreator, FIXED.reqOwner]] });
+probe("ws/permission-denied/required-link-unlink", async (ctx) => {
+  await requiredLinkRules(ctx, "false");
+  const c = await session(ctx);
+  const v = wsView(await unlinkRequiredLink(c));
+  c.close();
+  return v;
+});
+probe("ws/validation-failed/required-link-unlink-allowed", async (ctx) => {
+  await requiredLinkRules(ctx, "true");
+  const c = await session(ctx);
+  const v = wsView(await unlinkRequiredLink(c));
+  c.close();
+  return v;
+});
+
 // ---------------------------------------------------------------------------
 
 async function setup(ctx) {
@@ -527,9 +564,30 @@ async function setup(ctx) {
       ["add-attr", { id: FIXED.probeName, "forward-identity": [FIXED.probeName, "probe", "name"], "value-type": "blob", cardinality: "one", "unique?": false, "index?": false }],
       ["add-attr", { id: FIXED.probe2Id, "forward-identity": [FIXED.probe2Id, "probe2", "id"], "value-type": "blob", cardinality: "one", "unique?": true, "index?": true }],
       ["add-attr", { id: FIXED.probe2S, "forward-identity": [FIXED.probe2S, "probe2", "s"], "value-type": "blob", cardinality: "one", "unique?": false, "index?": false }],
+      // a `required` link, for the unlink pre-check probes below. The attr is
+      // added before any entity of its namespace exists, so the required
+      // guard on add-attr (attr.clj:334-350) is satisfied
+      ["add-attr", { id: FIXED.reqLinkId, "forward-identity": [FIXED.reqLinkId, "reqlink", "id"], "value-type": "blob", cardinality: "one", "unique?": true, "index?": true }],
+      ["add-attr", { id: FIXED.reqOwnerId, "forward-identity": [FIXED.reqOwnerId, "reqowner", "id"], "value-type": "blob", cardinality: "one", "unique?": true, "index?": true }],
+      ["add-attr", { id: FIXED.reqLinkCreator, "forward-identity": [FIXED.reqLinkCreator, "reqlink", "creator"], "reverse-identity": [FIXED.reqLinkReverse, "reqowner", "reqlinks"], "value-type": "ref", cardinality: "one", "unique?": false, "index?": false, "required?": true }],
     ],
   });
   if (res.status !== 200) throw new Error(`[${ctx.name}] setup transact failed: ${JSON.stringify(res.body)}`);
+  // the entity and its required link, in a second tx: the attr inserts above
+  // must not run after triples of their own namespace. The HTTP admin route
+  // takes the admin SDK's op grammar (create / update / link / ...), not raw
+  // tx-steps, so the seed goes over an admin session like the replay's
+  const adminConn = await session(ctx, { admin: true });
+  const seed = await wsOk(adminConn, {
+    op: "transact",
+    "tx-steps": [
+      ["add-triple", FIXED.reqEntity, FIXED.reqLinkId, FIXED.reqEntity],
+      ["add-triple", FIXED.reqOwner, FIXED.reqOwnerId, FIXED.reqOwner],
+      ["add-triple", FIXED.reqEntity, FIXED.reqLinkCreator, FIXED.reqOwner],
+    ],
+  });
+  adminConn.close();
+  if (seed.op !== "transact-ok") throw new Error(`[${ctx.name}] setup seed failed: ${JSON.stringify(seed)}`);
 }
 
 // strict entries keyed by probe name (lib.mjs loadAllowlist); an entry that
