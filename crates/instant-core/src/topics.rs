@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::attr::{Attr, AttrMap, Cardinality, CheckedDataType, ValueType};
+use crate::attr::{Attr, AttrMap, CheckedDataType, ValueType};
 use crate::instaql::{EntityNode, Form, QueryResult, WhereCond, WhereOp};
 
 /// One part of a topic: wildcard, or a set of concrete values. An empty set
@@ -43,10 +43,13 @@ impl<T: Eq + std::hash::Hash> Part<T> {
 
 /// `[e-part, attr-set, v-part]`. The v-part uses [`value_key`] strings so
 /// json values from the query and from the change log compare the same way.
+/// The attr part can be wildcard too: legacy's entity-fetch topic is
+/// `[#{:ea} #{eid} _ _]`, so a write to any attr (including one added after
+/// the query registered) on a result entity invalidates it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Topic {
     pub e: Part<Uuid>,
-    pub a: HashSet<Uuid>,
+    pub a: Part<Uuid>,
     pub v: Part<String>,
 }
 
@@ -70,9 +73,13 @@ impl QueryTopics {
     fn push(&mut self, e: Part<Uuid>, a: impl IntoIterator<Item = Uuid>, v: Part<String>) {
         self.topics.push(Topic {
             e,
-            a: a.into_iter().collect(),
+            a: Part::Set(a.into_iter().collect()),
             v,
         });
+    }
+
+    fn push_any_attr(&mut self, e: Part<Uuid>, v: Part<String>) {
+        self.topics.push(Topic { e, a: Part::Any, v });
     }
 
     /// Adds the topics of the lookups a permission check ran.
@@ -186,19 +193,48 @@ impl TxTopics {
             return true;
         }
         for t in &q.topics {
-            for a in &t.a {
-                if self.attr_wildcards.contains(a) {
-                    return true;
+            match &t.a {
+                // `[#{:ea} #{eid} _ _]`: any changed attr on a result entity.
+                // An attrs-row change is itself `[_ #{attr} _]`, so it matches
+                // a wildcard attr part regardless of e/v.
+                Part::Any => {
+                    if !self.attr_wildcards.is_empty() && entity_part_can_match(&t.e) {
+                        return true;
+                    }
+                    if self
+                        .by_attr
+                        .values()
+                        .flatten()
+                        .any(|(e, v)| t.e.contains(e) && t.v.contains(v))
+                    {
+                        return true;
+                    }
                 }
-                let Some(rows) = self.by_attr.get(a) else {
-                    continue;
-                };
-                if rows.iter().any(|(e, v)| t.e.contains(e) && t.v.contains(v)) {
-                    return true;
+                Part::Set(attrs) => {
+                    for a in attrs {
+                        if self.attr_wildcards.contains(a) && entity_part_can_match(&t.e) {
+                            return true;
+                        }
+                        let Some(rows) = self.by_attr.get(a) else {
+                            continue;
+                        };
+                        if rows.iter().any(|(e, v)| t.e.contains(e) && t.v.contains(v)) {
+                            return true;
+                        }
+                    }
                 }
             }
         }
         false
+    }
+}
+
+/// An attrs-row change topic has a wildcard e (`[_ #{attr} _]`), so it can
+/// only match a query topic whose e-part can name at least one entity.
+fn entity_part_can_match(e: &Part<Uuid>) -> bool {
+    match e {
+        Part::Any => true,
+        Part::Set(es) => !es.is_empty(),
     }
 }
 
@@ -267,15 +303,14 @@ fn form_topics(
         // counts only depend on membership + where attrs (coarse topics)
         return;
     }
-    // entity fetch: result entities × cardinality-one attrs of the etype
-    // (a superset when `fields` narrows the projection — harmless)
+    // entity fetch: legacy `rows->topics` emits `[#{:ea} #{eid} _ _]` for
+    // every result entity (datalog.clj:1716-1740), i.e. a wildcard attr, not
+    // just the attrs that existed when the query registered. Enumerating the
+    // current card-one attrs here missed writes to an attr added later
+    // (fuzz-schema seed 31: dynIdx written right after its add-attr), leaving
+    // the session's attrs stuck at the pre-add inferred-types value.
     let eids: HashSet<Uuid> = entities.iter().map(|e| e.eid).collect();
-    let ea_attrs: Vec<Uuid> = attrs
-        .attrs_of_etype(etype)
-        .filter(|a| a.cardinality == Cardinality::One)
-        .map(|a| a.id)
-        .collect();
-    out.push(Part::Set(eids.clone()), ea_attrs, Part::Any);
+    out.push_any_attr(Part::Set(eids.clone()), Part::Any);
 
     for child in &form.children {
         let (link, forward, child_etype) = match attrs.by_fwd_name(etype, &child.k) {
@@ -389,6 +424,7 @@ fn literal_key(attr: &Attr, v: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attr::Cardinality;
     use crate::instaql::{parse_query, ChildResult, FormOut};
     use serde_json::json;
 
@@ -503,15 +539,24 @@ mod tests {
         assert!(!tx(&[(e2, fx.todos_title, json!("x"))]).matches(&qt));
         // writes to another etype never match
         assert!(!tx(&[(e2, fx.users_name, json!("bob"))]).matches(&qt));
+        // an attr added after the query registered still matches on a result
+        // entity (legacy's `[#{:ea} #{eid} _ _]` entity topic), but not on a
+        // non-result entity
+        let new_attr = Uuid::new_v4();
+        assert!(tx(&[(e1, new_attr, json!("number"))]).matches(&qt));
+        assert!(!tx(&[(e2, new_attr, json!("number"))]).matches(&qt));
         // empty tx never matches; catch-all tx always does
         assert!(!tx(&[]).matches(&qt));
         assert!(TxTopics::catch_all().matches(&qt));
     }
 
     #[test]
-    fn changed_attr_row_matches_any_query_mentioning_the_attr() {
+    fn changed_attr_row_matches_entity_and_where_topics() {
         // legacy topics-for-attr-upsert: an attrs-row change (flag flip,
-        // inferred types) is a `[_ #{attr} _]` topic
+        // inferred types) is a `[_ #{attr} _]` topic. A query with a result
+        // entity has an entity-fetch topic `[#{:ea} #{eid} _ _]`, whose
+        // wildcard attr matches any attr row update — even one from another
+        // etype, exactly like legacy's coarse topics.
         let fx = fixture();
         let e1 = Uuid::new_v4();
         let e2 = Uuid::new_v4();
@@ -521,18 +566,21 @@ mod tests {
             &forms,
             &result(vec![("todos", vec![node(e1, "todos")])]),
         );
-        // the triple alone misses (wrong value), the attr wildcard hits
+        // the triple alone misses (wrong value), the where attr wildcard hits
         assert!(!tx(&[(e2, fx.todos_title, json!("b"))]).matches(&qt));
         assert!(tx(&[(e2, fx.todos_title, json!("b"))])
             .with_attr_wildcards([fx.todos_title])
             .matches(&qt));
-        // an attr the query never mentions does not
         let only_attr = TxTopics::default().with_attr_wildcards([fx.users_name]);
         assert!(!only_attr.is_empty());
-        assert!(!only_attr.matches(&qt));
+        assert!(only_attr.matches(&qt));
         assert!(TxTopics::default()
             .with_attr_wildcards([fx.todos_id])
             .matches(&qt));
+        // with no result entities only the where/membership topics remain,
+        // so an unrelated attr row change does not match
+        let empty = query_topics(&fx.attrs, &forms, &result(vec![("todos", vec![])]));
+        assert!(!only_attr.matches(&empty));
     }
 
     #[test]
