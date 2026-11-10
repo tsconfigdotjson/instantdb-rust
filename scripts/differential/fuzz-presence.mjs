@@ -19,11 +19,12 @@
 // that a new client got at least one patch, then folds both frame shapes the
 // way the client does.
 //
-// A session's first join into a room waits for the full refresh-presence
-// snapshot before the next op is sent. Legacy's receive queue can combine that
-// snapshot with a following patch and deliver only the patch, which leaves a
-// modern client without the peers that did not change in between; that is a
-// legacy lost-snapshot defect, not a contract (see docs/PARITY.md).
+// Every join into a room (including a re-join after leaving) waits for a full
+// refresh-presence snapshot that arrived *after* the join request before the
+// next op is sent. Legacy's receive queue can combine that snapshot with a
+// following patch and deliver only the patch, which leaves a modern client
+// without the peers that did not change in between; that is a legacy
+// lost-snapshot defect, not a contract (see docs/PARITY.md).
 //
 // Only genuinely nondeterministic values are normalized: session ids are
 // mapped back to their role, instance ids and timestamps are placeholders.
@@ -597,12 +598,13 @@ async function runOn(serverName, plan) {
           // that did not change between the two events. Rust always sends the
           // joiner a full snapshot; waiting here keeps the fuzz from making
           // legacy's lost-snapshot defect the baseline (docs/PARITY.md).
+          // Wait from the join frame mark, not the connection cursor: on a
+          // re-join after leaving, an old full snapshot for the room must not
+          // satisfy the wait (presence seed 110).
           const c = conns[op.session];
           const isFullSnapshot = (m) =>
             m.op === "refresh-presence" && m["room-id"] === joinRoom;
-          if (!c.frames.slice(joinFrameMark).some(isFullSnapshot)) {
-            await c.waitFor(isFullSnapshot);
-          }
+          await c.waitFor(isFullSnapshot, 15000, joinFrameMark);
           fold(op.session);
         }
         states[op.session].joining.delete(joinRoom);

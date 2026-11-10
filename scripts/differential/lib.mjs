@@ -58,6 +58,17 @@ export function psql(url, sql) {
 // ---------------------------------------------------------------------------
 // capture client
 
+// First frame at or after `from` that matches `pred`. Waiting from a frame
+// mark (rather than from the connection's cursor) is what lets a caller wait
+// for a *new* frame: a room-presence refresh from before a leave/re-join must
+// not satisfy the wait for that join's snapshot.
+export function firstFrameAfter(frames, from, pred) {
+  for (let i = Math.max(0, from); i < frames.length; i++) {
+    if (pred(frames[i])) return frames[i];
+  }
+  return undefined;
+}
+
 // `headers` (Origin, X-Forwarded-For) ride on the upgrade request like a
 // browser's would; both servers read them into request.origin / request.ip
 // for rule evaluation (node's WebSocket accepts them as an undici option).
@@ -91,9 +102,9 @@ export function connect(serverUrl, appId, name, headers) {
     ws.send(JSON.stringify(msg));
     return msg["client-event-id"];
   };
-  const waitFor = (pred, timeout = 15000) =>
+  const waitFor = (pred, timeout = 15000, from = cursorMark) =>
     new Promise((resolve, reject) => {
-      const existing = frames.slice(cursorMark).find(pred);
+      const existing = firstFrameAfter(frames, from, pred);
       if (existing) return resolve(existing);
       const t = setTimeout(
         () => reject(new Error(`timeout waiting on ${name}`)),
@@ -215,9 +226,9 @@ export function connectSse(serverUrl, appId, name, { path, pushPath, headers = {
     });
     return msg["client-event-id"];
   };
-  const waitFor = (pred, timeout = 15000) =>
+  const waitFor = (pred, timeout = 15000, from = cursorMark) =>
     new Promise((resolve, reject) => {
-      const existing = frames.slice(cursorMark).find(pred);
+      const existing = firstFrameAfter(frames, from, pred);
       if (existing) return resolve(existing);
       const t = setTimeout(() => reject(new Error(`timeout waiting on ${name}`)), timeout);
       waiters.push([pred, (m) => { clearTimeout(t); resolve(m); }]);

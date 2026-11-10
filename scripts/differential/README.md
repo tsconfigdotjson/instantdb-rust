@@ -362,10 +362,14 @@ everything and checks coverage itself, as before.
   coalesced room events can leave a concurrent joiner without its first
   snapshot until a later event, a legacy defect this server does not
   reproduce, so the fuzz does not make the missing snapshot the baseline. A
-  new join also waits for its full `refresh-presence` before the next op:
+  new join (including a re-join after leaving) waits for a full
+  `refresh-presence` that arrived after the join request before the next op:
   legacy's receive queue can combine that snapshot with a following patch and
   deliver only the patch, leaving the new client without the peers that did
-  not change in between (presence seed 103's `periodic-64`). The
+  not change in between (presence seed 103's `periodic-64`). Waiting from the
+  join frame mark rather than the connection cursor matters on a re-join: an
+  older snapshot from before the leave must not satisfy the wait (seed 110's
+  `edge` checkpoint on the empty room). The
   client versions use legacy's own feature gate: an old
   client must never receive `patch-presence` (only full
   `refresh-presence`), while a modern client must receive at least one patch
@@ -380,7 +384,7 @@ everything and checks coverage itself, as before.
   data are compared. Only session ids (mapped back to their role), instance
   ids and timestamps are normalized; user ids are seeded deterministically
   on both servers and stay raw. `node fuzz-presence.mjs <app> <app> <token>
-  [seed] [rounds]`; seeds 101-103 at 100 rounds per PR
+  [seed] [rounds]`; seeds 101-103 and 110 at 250 rounds per PR
   (`FUZZ_PRESENCE_SEEDS` / `FUZZ_PRESENCE_ROUNDS`), 12 seeds at 250 nightly.
 - `fuzz-storage.mjs` — seeded storage / `$files` sequences: admin and client
   uploads, the deprecated signed-upload-url + consume flow, overwrites of the
