@@ -56,7 +56,7 @@ everything and checks coverage itself, as before.
   `ghcr.io/instantdb`.
 - `provision.sh` — creates the same app id + admin token in both servers'
   databases (both run the same legacy schema).
-- `replay.mjs` — 37-step scenario across init, schemaless transacts, queries
+- `replay.mjs` — 38-step scenario across init, schemaless transacts, queries
   (nested/paginated/cursor round-trip/aggregate), typed-attr query breadth
   ($gt/$lt/$like/$ilike/$in/$not/$isNull/or/and, typed ordering, offset,
   last, fields projection, dot-paths), authed sessions + permissions (real
@@ -84,7 +84,9 @@ everything and checks coverage itself, as before.
   `POST /runtime/signout`; step 36 the triples a where clause matched under
   `fields` projections, link paths, `or` / `and` / `$not` / `$isNull` and
   view / field rules, step 37 a refresh whose view rule's
-  `rateLimit` runs dry (the session's error frame, the unsubscribed query).
+  `rateLimit` runs dry (the session's error frame, the unsubscribed query),
+  step 38 `data.ref` path multiplicity on converging paths under `size()`
+  view rules (repeated owners and terminal blob values, issue #97).
   `inferred-types` on
   attrs is compared for real (it used to be normalized away). Frames are folded into the
   **client-visible projection** (exactly what `Reactor.js`/`SyncTable.ts`/
