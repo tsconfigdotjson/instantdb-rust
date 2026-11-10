@@ -48,6 +48,12 @@ pub struct Topic {
     pub e: Part<Uuid>,
     pub a: HashSet<Uuid>,
     pub v: Part<String>,
+    /// Set on the entity-fetch topic: the etype whose cardinality-one attrs
+    /// feed `a`. A schema change extends `a` with attrs added later, so a
+    /// write to one of them on a result entity invalidates the query (legacy
+    /// `rows->topics` uses `[#{:ea} #{eid} _ _]`, which covers them
+    /// implicitly).
+    pub entity_fetch_etype: Option<String>,
 }
 
 /// Topics for one registered query.
@@ -72,7 +78,44 @@ impl QueryTopics {
             e,
             a: a.into_iter().collect(),
             v,
+            entity_fetch_etype: None,
         });
+    }
+
+    fn push_entity_fetch(
+        &mut self,
+        e: Part<Uuid>,
+        a: impl IntoIterator<Item = Uuid>,
+        etype: &str,
+        v: Part<String>,
+    ) {
+        self.topics.push(Topic {
+            e,
+            a: a.into_iter().collect(),
+            v,
+            entity_fetch_etype: Some(etype.to_string()),
+        });
+    }
+
+    /// After an attr insert, legacy's entity-fetch topic `[#{:ea} #{eid} _ _]`
+    /// covers the new attr automatically. Here the attr set is explicit, so
+    /// extend every entity-fetch topic with the etype's current card-one attrs
+    /// (the caller runs this for a schema-change refresh). Without it, a value
+    /// written right after its add-attr never stales a subscription registered
+    /// before the attr existed (fuzz-schema seed 31's `sch.dynIdx`, seed 38's
+    /// `sch.dynLink`).
+    pub fn extend_entity_fetch_attrs(&mut self, attrs: &AttrMap) {
+        for t in &mut self.topics {
+            let Some(etype) = t.entity_fetch_etype.as_deref() else {
+                continue;
+            };
+            let current: Vec<Uuid> = attrs
+                .attrs_of_etype(etype)
+                .filter(|a| a.cardinality == Cardinality::One)
+                .map(|a| a.id)
+                .collect();
+            t.a.extend(current);
+        }
     }
 
     /// Adds the topics of the lookups a permission check ran.
@@ -268,14 +311,16 @@ fn form_topics(
         return;
     }
     // entity fetch: result entities × cardinality-one attrs of the etype
-    // (a superset when `fields` narrows the projection — harmless)
+    // (a superset when `fields` narrows the projection — harmless). Keep the
+    // etype so a later schema change can extend the set with attrs added
+    // after this query registered.
     let eids: HashSet<Uuid> = entities.iter().map(|e| e.eid).collect();
     let ea_attrs: Vec<Uuid> = attrs
         .attrs_of_etype(etype)
         .filter(|a| a.cardinality == Cardinality::One)
         .map(|a| a.id)
         .collect();
-    out.push(Part::Set(eids.clone()), ea_attrs, Part::Any);
+    out.push_entity_fetch(Part::Set(eids.clone()), ea_attrs, etype, Part::Any);
 
     for child in &form.children {
         let (link, forward, child_etype) = match attrs.by_fwd_name(etype, &child.k) {
@@ -506,6 +551,29 @@ mod tests {
         // empty tx never matches; catch-all tx always does
         assert!(!tx(&[]).matches(&qt));
         assert!(TxTopics::catch_all().matches(&qt));
+    }
+
+    #[test]
+    fn schema_change_extends_entity_fetch_topics_for_new_attrs() {
+        let mut fx = fixture();
+        let e1 = Uuid::new_v4();
+        let e2 = Uuid::new_v4();
+        let forms = parse_query(&json!({"todos": {}})).unwrap();
+        let mut qt = query_topics(
+            &fx.attrs,
+            &forms,
+            &result(vec![("todos", vec![node(e1, "todos")])]),
+        );
+        let late = attr("todos", "late", ValueType::Blob, None);
+        let late_id = late.id;
+        fx.attrs.insert(late);
+        // registered before the attr existed: a write to it does not match
+        assert!(!tx(&[(e1, late_id, json!("number"))]).matches(&qt));
+        // the add-attr schema refresh extends the entity-fetch topic; now a
+        // write on a result entity matches, but not on a non-result entity
+        qt.extend_entity_fetch_attrs(&fx.attrs);
+        assert!(tx(&[(e1, late_id, json!("number"))]).matches(&qt));
+        assert!(!tx(&[(e2, late_id, json!("number"))]).matches(&qt));
     }
 
     #[test]
