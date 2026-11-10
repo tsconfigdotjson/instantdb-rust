@@ -560,9 +560,24 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
     let mut plans: Vec<SessionPlan> = Vec::with_capacity(sessions.len());
     let mut stale_queries: Vec<StaleQuery> = vec![];
     for session in sessions {
-        let st = session.state.lock().await;
+        let mut st = session.state.lock().await;
         if st.app_id != Some(app_id) {
             continue;
+        }
+        if schema_changed {
+            // Legacy's entity-fetch topic `[#{:ea} #{eid} _ _]` wildcards the
+            // attr, so an attr added by this schema change is already covered
+            // for queries registered before it existed. Our topic carries an
+            // explicit attr set: extend it now, before matching this batch, so
+            // the first values written after add-attr stale the query.
+            for entry in st.queries.values_mut() {
+                let Some(topics) = &entry.topics else {
+                    continue;
+                };
+                let mut updated = (**topics).clone();
+                updated.extend_entity_fetch_attrs(&attrs);
+                entry.topics = Some(Arc::new(updated));
+            }
         }
         if !st.sync_subs.is_empty() {
             // sync tables: independent per session, fire and forget (only
