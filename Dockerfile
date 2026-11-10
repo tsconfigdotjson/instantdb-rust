@@ -22,6 +22,10 @@ RUN apt-get update && apt-get install -y ca-certificates postgresql-client && rm
 COPY --from=builder /app/target/release/instant-server /usr/local/bin/instant-server
 COPY LEGACY/server/resources/migrations /migrations
 COPY scripts/apply-migrations.sh /apply-migrations.sh
+# licence texts for what the image ships: the MIT server and the Apache-2.0 migrations
+COPY LICENSE NOTICE /usr/share/licenses/instantdb-rust/
+COPY LEGACY/LICENSE.md /usr/share/licenses/instantdb-rust/LICENSE-APACHE-2.0.md
+LABEL org.opencontainers.image.licenses="MIT AND Apache-2.0"
 ENV PORT=8888
 EXPOSE 8888
 CMD ["instant-server"]

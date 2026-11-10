@@ -1,0 +1,15 @@
+instantdb-rust
+Copyright (c) 2026 Lee Rosen
+Licensed under the MIT License; see LICENSE.
+
+This project is a reimplementation of the InstantDB server
+(https://github.com/instantdb/instant). Much of the Rust code under crates/
+follows the behaviour and structure of the original Clojure server, and its
+comments cite the original source files. The original InstantDB code is
+licensed under the Apache License, Version 2.0, a copy of which is in
+LEGACY/LICENSE.md. Changes: the server was rewritten in Rust; see the git
+history for details.
+
+The Docker image also contains the InstantDB database migrations
+(LEGACY/server/resources/migrations, installed at /migrations), which are
+distributed unmodified under the Apache License, Version 2.0.
