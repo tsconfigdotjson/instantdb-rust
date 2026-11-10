@@ -1184,9 +1184,30 @@ const allowedResultException = (l, r) => {
 // deletes names the missing triple's own entity. Extra/different values,
 // errors, pages, or a missing triple from any other write still fail.
 const DEEP_MERGE_DELETE_EXCEPTION = "legacy-same-tx-delete-drops-deep-merge";
-function latestTxBefore(slot) {
+function lastTripleWriteTx(slot, e, a) {
   for (let i = slot - 1; i >= 0; i--) {
-    if (script[i]?.kind === "tx") return script[i];
+    const op = script[i];
+    if (op?.kind !== "tx") continue;
+    const touchesAttr = op.steps.some(
+      ([kind, arg]) =>
+        (kind === "delete-attr" || kind === "restore-attr") &&
+        canon(arg) === canon(a),
+    ) || op.steps.some(
+      ([kind, arg]) =>
+        kind === "update-attr" &&
+        canon(arg?.id) === canon(a),
+    );
+    if (touchesAttr) return op;
+    const touchesTriple = op.steps.some(([kind, se, sa]) => {
+      if (!["add-triple", "deep-merge-triple", "retract-triple"].includes(kind)) return false;
+      if (canon(sa) !== canon(a)) return false;
+      // an unresolved lookup may name the entity; stay conservative
+      return Array.isArray(se) || canon(se) === canon(e);
+    });
+    const deletesEntity = op.steps.some(
+      ([kind, se]) => kind === "delete-entity" && (Array.isArray(se) || canon(se) === canon(e)),
+    );
+    if (touchesTriple || deletesEntity) return op;
   }
   return null;
 }
@@ -1201,16 +1222,16 @@ function legacyDropsSameTxDeepMerge(l, r) {
   if (!lt.every((t) => rset.has(canon(t)))) return false;
   const missing = rt.filter((t) => !lset.has(canon(t)));
   if (!missing.length) return false;
-  const tx = latestTxBefore(l.i);
-  if (!tx) return false;
-  const deletes = tx.steps.filter(([op]) => op === "delete-entity");
-  if (!deletes.length) return false;
-  const merges = tx.steps
-    .filter(([op]) => op === "deep-merge-triple")
-    .map(([, e, a]) => [canon(e), canon(a)]);
-  if (!merges.length) return false;
   for (const [e, a] of missing) {
-    if (!merges.some(([me, ma]) => me === canon(e) && ma === canon(a))) return false;
+    const tx = lastTripleWriteTx(l.i, e, a);
+    if (!tx) return false;
+    const merged = tx.steps.some(
+      ([kind, me, ma]) => kind === "deep-merge-triple" && canon(me) === canon(e) && canon(ma) === canon(a),
+    );
+    if (!merged) return false;
+    const deletes = tx.steps.filter(([kind]) => kind === "delete-entity");
+    // direct ids only: an unresolved lookup could name the same entity
+    if (!deletes.length || deletes.some(([, de]) => Array.isArray(de))) return false;
     if (deletes.some(([, de]) => canon(de) === canon(e))) return false;
   }
   exceptionHits[DEEP_MERGE_DELETE_EXCEPTION] = (exceptionHits[DEEP_MERGE_DELETE_EXCEPTION] ?? 0) + 1;
