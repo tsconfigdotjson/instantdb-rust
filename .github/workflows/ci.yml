@@ -461,8 +461,11 @@ jobs:
           FUZZ_PERMS_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22' || '7 8 9 17' }}
           FUZZ_PERMS_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '300' || '120' }}
           FUZZ_PERMS_JOBS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '4' || '1' }}
-          FUZZ_PRESENCE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '101 102 103 104 105 106 107 108 109 110 111 112' || '101 102 103' }}
-          FUZZ_PRESENCE_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '250' || '100' }}
+          # 110 is the re-join-after-leave lost-snapshot seed from the
+          # 2026-11-08 scheduled run; run presence at the same depth in PRs so
+          # the harness's fresh-snapshot wait is exercised.
+          FUZZ_PRESENCE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '101 102 103 104 105 106 107 108 109 110 111 112' || '101 102 103 110' }}
+          FUZZ_PRESENCE_ROUNDS: "250"
           # schema evolution: 7 seeds per PR, 12 nightly (rounds is the total
           # op target; the mandatory schema scenarios are ~170 ops).
           # 31 caught inferred-types lag when a newly added indexed attr was
