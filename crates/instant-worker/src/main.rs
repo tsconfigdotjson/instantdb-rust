@@ -84,6 +84,8 @@ async fn boot(env: &Env) -> Result<Server> {
     // Hyperdrive carries no LISTEN/NOTIFY; this object is the only node.
     std::env::set_var("INSTANT_BUS", "local");
 
+    instant_server::set_jwt_verifier(verify_id_token);
+
     let cfg = Config::from_env();
     let pool = PgPoolOptions::new()
         .max_connections(cfg.pg_pool_max)
@@ -168,4 +170,58 @@ fn open_session(state: Arc<AppState>, headers: &axum::http::HeaderMap) -> Result
     ));
 
     Response::from_websocket(pair.client)
+}
+
+/// The server's id_token check (routes/oauth.rs `verify_jwt`), with the same
+/// rules and messages, on this crate's JWT library.
+fn verify_id_token(
+    disc: &serde_json::Value,
+    jwks: &serde_json::Value,
+    jwt: &str,
+) -> std::result::Result<serde_json::Value, &'static str> {
+    use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+    let header = decode_header(jwt).map_err(|_| "Error validating JWT. Malformed token.")?;
+    let keys = jwks
+        .get("keys")
+        .and_then(|k| k.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let jwk = keys
+        .iter()
+        .find(|k| {
+            header
+                .kid
+                .as_deref()
+                .map(|kid| k.get("kid").and_then(|v| v.as_str()) == Some(kid))
+                .unwrap_or(true)
+        })
+        .ok_or("Error validating JWT. No matching key.")?;
+    let part = |name: &str| jwk.get(name).and_then(|v| v.as_str()).unwrap_or_default();
+    let key = match jwk.get("kty").and_then(|v| v.as_str()) {
+        Some("RSA") => DecodingKey::from_rsa_components(part("n"), part("e"))
+            .map_err(|_| "Error validating JWT. Bad RSA key.")?,
+        Some("EC") => DecodingKey::from_ec_components(part("x"), part("y"))
+            .map_err(|_| "Error validating JWT. Bad EC key.")?,
+        _ => return Err("Error validating JWT. Unsupported key type."),
+    };
+    let alg = match header.alg {
+        Algorithm::RS256 => Algorithm::RS256,
+        Algorithm::ES256 => Algorithm::ES256,
+        _ => return Err("The id_token used an unsupported algorithm."),
+    };
+    if let Some(supported) = disc
+        .get("id_token_signing_alg_values_supported")
+        .and_then(|v| v.as_array())
+    {
+        let name = format!("{alg:?}");
+        if !supported.iter().any(|v| v.as_str() == Some(name.as_str())) {
+            return Err("The id_token used an unsupported algorithm.");
+        }
+    }
+    let mut validation = Validation::new(alg);
+    validation.validate_aud = false;
+    validation.validate_exp = true;
+    decode::<serde_json::Value>(jwt, &key, &validation)
+        .map(|data| data.claims)
+        .map_err(|_| "Error validating JWT. Signature is invalid.")
 }

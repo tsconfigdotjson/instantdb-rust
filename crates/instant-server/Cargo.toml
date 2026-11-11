@@ -40,12 +40,11 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "process", "signal", "parking_lot"] }
 # SMTP email: its TLS stack has no random source on the Workers target.
 lettre.workspace = true
+# id_token verification. It builds on ring, which has no random source on the
+# Workers target; there the host supplies the verifier (routes/oauth.rs).
 jsonwebtoken.workspace = true
 
-# The same JWT API on a pure-Rust backend: jsonwebtoken 9 signs through ring,
-# whose random source is missing on the Workers target.
 [target.'cfg(target_os = "emscripten")'.dependencies]
-jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
 # Outbound HTTP through the runtime's fetch (src/http.rs).
 js-sys = "0.3"
 wasm-bindgen = "0.2"

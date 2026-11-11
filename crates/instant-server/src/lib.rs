@@ -33,6 +33,9 @@ use tower_http::cors::CorsLayer;
 
 pub use state::{AppState, Config};
 
+#[cfg(target_os = "emscripten")]
+pub use routes::oauth::{set_jwt_verifier, JwtVerifier};
+
 /// Prometheus text exposition of the node's counters/histograms/gauges.
 async fn metrics_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>,
@@ -56,15 +59,25 @@ const STORAGE_BODY_LIMIT: usize = 100 * 1024 * 1024;
 /// Start the background loops with [`spawn_background`] afterwards.
 pub async fn bootstrap(mut cfg: Config, pool: sqlx::PgPool) -> anyhow::Result<Arc<AppState>> {
     state::remember_runtime();
-    // Serialize bootstrap DDL across concurrently-starting nodes. The lock is
-    // transaction-level, held by a transaction that stays open while the
-    // bootstrap runs on other connections: a session-level lock can outlive
-    // its client behind a transaction-mode pooler (Hyperdrive, PgBouncer).
+    // Serialize bootstrap DDL across concurrently-starting nodes: a
+    // session-level advisory lock on its own connection. With the local bus
+    // the node may be behind a transaction-mode pooler (Hyperdrive,
+    // PgBouncer), where a session lock can outlive its client; there the lock
+    // is transaction-level, held by a transaction that stays open meanwhile.
     {
-        let mut boot_tx = pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(772677321)")
-            .execute(&mut *boot_tx)
-            .await?;
+        use sqlx::Executor;
+        let mut boot_conn = None;
+        let mut boot_tx = None;
+        if cfg.bus_local {
+            let mut tx = pool.begin().await?;
+            tx.execute("SELECT pg_advisory_xact_lock(772677321)")
+                .await?;
+            boot_tx = Some(tx);
+        } else {
+            let mut conn = pool.acquire().await?;
+            conn.execute("SELECT pg_advisory_lock(772677321)").await?;
+            boot_conn = Some(conn);
+        }
         let result: anyhow::Result<()> = async {
             instant_core::system_catalog::ensure_system_catalog(&pool)
                 .await
@@ -86,7 +99,14 @@ pub async fn bootstrap(mut cfg: Config, pool: sqlx::PgPool) -> anyhow::Result<Ar
             Ok(())
         }
         .await;
-        boot_tx.commit().await.ok();
+        if let Some(tx) = boot_tx {
+            tx.commit().await.ok();
+        }
+        if let Some(mut conn) = boot_conn {
+            conn.execute("SELECT pg_advisory_unlock(772677321)")
+                .await
+                .ok();
+        }
         result?;
     }
 

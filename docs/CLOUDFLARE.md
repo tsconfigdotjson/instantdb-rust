@@ -43,7 +43,7 @@ The server used both:
 |---|---|
 | nodes coordinate over `LISTEN/NOTIFY` | `INSTANT_BUS=local` delivers the same messages in-process, for a single node. The default is unchanged |
 | `rules`, `apps.status` and `webhooks` changes announced by row triggers | with the local bus, the routes that write those rows publish the message themselves. An edit made directly in SQL is not pushed to live sessions; the server picks it up when its caches expire |
-| boot and hard-delete sweeps took session-level advisory locks | transaction-level locks, held by a transaction kept open for the duration (all modes) |
+| boot and hard-delete sweeps take session-level advisory locks | with the local bus, transaction-level locks, held by a transaction kept open for the duration. The default is unchanged |
 
 Two more changes make the server embeddable: `instant-server` is a library
 (`bootstrap`, `spawn_background`, `router`) with a thin `main.rs`, and the
@@ -59,7 +59,7 @@ differences, all selected by target, none by a feature you set:
 |---|---|---|
 | outbound HTTP (webhooks, OAuth, S3, email APIs) | reqwest | the runtime's `fetch`, through `src/http.rs`. No client timeout, no address pinning; redirects are never followed |
 | TLS to Postgres | rustls | none; Hyperdrive's connection is plain |
-| JWT verification | jsonwebtoken 9 (ring) | jsonwebtoken 10 on its pure-Rust backend |
+| JWT verification | jsonwebtoken 9 (ring) | supplied by `instant-worker`: jsonwebtoken 10 on its pure-Rust backend, in that crate's own lockfile |
 | SMTP email | yes | no; use `EMAIL_PROVIDER=cloudflare` or `postmark` |
 | S3 credentials from instance or task roles | yes | no; static keys only |
 | Tokio | multi-threaded | single-threaded, driven by the Workers event loop |
