@@ -1,0 +1,150 @@
+create-app.sh "smoke": app_id=e8b55494-48c3-43fe-bf07-28d01dcb3e50 admin_token=<REDACTED> 
+===== smoke-ws =====
+$ node /tmp/iw-scripts/smoke-ws.mjs e8b55494-48c3-43fe-bf07-28d01dcb3e50
+[A] -> init
+[A] <- init-ok
+[A] -> transact
+[A] <- transact-ok
+[B] -> init
+[B] <- init-ok
+[B] -> add-query
+[B] <- add-query-ok
+Assertion failed: query returned todo
+[A] -> transact
+[A] <- error
+file:///private/tmp/iw-scripts/smoke-ws.mjs:52
+      const t = setTimeout(() => reject(new Error(`timeout waiting (${name})`)), timeout);
+                                        ^
+
+Error: timeout waiting (B)
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/smoke-ws.mjs:52:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [8s]
+
+create-app.sh "sse": app_id=db65acea-3f5b-4736-a12c-2df8ca469d9e admin_token=<REDACTED> 
+===== sse-test =====
+$ node /tmp/iw-scripts/sse-test.mjs db65acea-3f5b-4736-a12c-2df8ca469d9e
+ok: sse stream opens
+<- sse-init
+ok: sse-init has token + session
+<- init-ok
+ok: init over sse
+<- add-query-ok
+ok: add-query over sse
+<- transact-ok
+<- refresh-ok
+file:///private/tmp/iw-scripts/sse-test.mjs:100
+const triples = refresh.computations[0]["instaql-result"][0].data["datalog-result"]["join-rows"][0];
+                                       ^
+
+TypeError: Cannot read properties of undefined (reading 'instaql-result')
+    at file:///private/tmp/iw-scripts/sse-test.mjs:100:40
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+
+Node.js v24.22.1
+[exit 1] [3s]
+
+create-app.sh "synctable": app_id=90a3f1c0-fe5c-416d-b996-cdaf694f20b0 admin_token=<REDACTED> 
+===== synctable-test =====
+$ node /tmp/iw-scripts/synctable-test.mjs 90a3f1c0-fe5c-416d-b996-cdaf694f20b0 <REDACTED>
+[A] <- init-ok
+[A] <- transact-ok
+[A] <- error
+[A] <- refresh-ok
+file:///private/tmp/iw-scripts/synctable-test.mjs:37
+      const t = setTimeout(() => reject(new Error(`timeout (${name})`)), timeout);
+                                        ^
+
+Error: timeout (A)
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/synctable-test.mjs:37:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [11s]
+
+create-app.sh "conformance2": app_id=069fe206-a30f-44ab-8374-2da69a7b674d admin_token=<REDACTED> 
+===== conformance-test =====
+$ env API_URL=https://instant-worker.leerosen686.workers.dev node scripts/conformance-test.mjs 069fe206-a30f-44ab-8374-2da69a7b674d <REDACTED>
+
+== init-ok / attrs ==
+
+== transact-ok ==
+
+== add-query-ok / add-query-exists / remove-query-ok ==
+file:///Users/lrosen/Workspace/instantdb-rust/scripts/conformance-test.mjs:25
+  if (!c) throw new Error("ASSERT FAILED: " + m);
+                ^
+
+Error: ASSERT FAILED: entity id triple present ([eid, id-attr, eid, t])
+    at assert (file:///Users/lrosen/Workspace/instantdb-rust/scripts/conformance-test.mjs:25:17)
+    at file:///Users/lrosen/Workspace/instantdb-rust/scripts/conformance-test.mjs:443:1
+
+Node.js v24.22.1
+[exit 1] [2s]
+
+===== local-bus-test =====
+$ env SERVER_URL=https://instant-worker.leerosen686.workers.dev node scripts/local-bus-test.mjs
+FAIL refresh-ok after another session's transaction
+ok   app-status-changed pushed on a status change
+ok   no push when the status did not change
+FAIL app-status-changed pushed on the way back
+2 failed
+[exit 1] [16s]
+
+create-app.sh "streams": app_id=666fa178-c144-4f45-ad9f-b1057b8d4c91 admin_token=<REDACTED> 
+===== streams-test-as-instructed =====
+$ node /tmp/iw-scripts/streams-test.mjs 666fa178-c144-4f45-ad9f-b1057b8d4c91
+    Buffer(319) [Uint8Array] [
+      112, 115, 113, 108,  58,  32, 101, 114, 114, 111, 114,  58,
+       32,  99, 111, 110, 110, 101,  99, 116, 105, 111, 110,  32,
+      116, 111,  32, 115, 101, 114, 118, 101, 114,  32,  97, 116,
+       32,  34, 108, 111,  99,  97, 108, 104, 111, 115, 116,  34,
+       32,  40,  58,  58,  49,  41,  44,  32, 112, 111, 114, 116,
+       32,  53,  52,  51,  50,  32, 102,  97, 105, 108, 101, 100,
+       58,  32,  67, 111, 110, 110, 101,  99, 116, 105, 111, 110,
+       32, 114, 101, 102, 117, 115, 101, 100,  10,   9,  73, 115,
+       32, 116, 104, 101,
+      ... 219 more items
+    ]
+  ],
+  pid: 12843,
+  stdout: Buffer(0) [Uint8Array] [],
+  stderr: Buffer(319) [Uint8Array] [
+    112, 115, 113, 108,  58,  32, 101, 114, 114, 111, 114,  58,
+     32,  99, 111, 110, 110, 101,  99, 116, 105, 111, 110,  32,
+    116, 111,  32, 115, 101, 114, 118, 101, 114,  32,  97, 116,
+     32,  34, 108, 111,  99,  97, 108, 104, 111, 115, 116,  34,
+     32,  40,  58,  58,  49,  41,  44,  32, 112, 111, 114, 116,
+     32,  53,  52,  51,  50,  32, 102,  97, 105, 108, 101, 100,
+     58,  32,  67, 111, 110, 110, 101,  99, 116, 105, 111, 110,
+     32, 114, 101, 102, 117, 115, 101, 100,  10,   9,  73, 115,
+     32, 116, 104, 101,
+    ... 219 more items
+  ]
+}
+
+Node.js v24.22.1
+[exit 1] [0s]
+
+create-app.sh "streams2": app_id=e00f71fa-f46e-4caa-b8b7-787fc2f440e0 admin_token=<REDACTED> 
+===== streams-test-neon-db =====
+$ node /tmp/iw-scripts/streams-test-neon.mjs e00f71fa-f46e-4caa-b8b7-787fc2f440e0
+[R] <- init-ok
+[W] <- init-ok
+[W] <- error
+file:///private/tmp/iw-scripts/streams-test-neon.mjs:38
+      const t = setTimeout(() => reject(new Error(`timeout (${name})`)), timeout);
+                                        ^
+
+Error: timeout (W)
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/streams-test-neon.mjs:38:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [10s]
+

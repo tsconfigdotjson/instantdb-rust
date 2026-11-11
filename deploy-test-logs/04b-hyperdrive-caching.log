@@ -1,0 +1,48 @@
+$ npx wrangler hyperdrive get 373fc0afe8a7431b88970c9f530f6435
+
+ ⛅️ wrangler 4.160.1
+────────────────────
+{
+  "id": "373fc0afe8a7431b88970c9f530f6435",
+  "name": "instant",
+  "origin": {
+    "host": "ep-spring-rain-bdj4i0q3.c-8.us-east-2.aws.neon.tech",
+    "port": 5432,
+    "database": "neondb",
+    "scheme": "postgresql",
+    "user": "neondb_owner"
+  },
+  "origin_connection_limit": 60,
+  "caching": {
+    "disabled": false
+  },
+  "mtls": {},
+  "created_on": "2026-11-11T18:17:47.112993Z",
+  "modified_on": "2026-11-11T18:17:47.112993Z"
+}
+[exit 0]
+$ npx wrangler hyperdrive update 373fc0afe8a7431b88970c9f530f6435 --caching-disabled
+
+ ⛅️ wrangler 4.160.1
+────────────────────
+🚧 Updating '373fc0afe8a7431b88970c9f530f6435'
+✅ Updated 373fc0afe8a7431b88970c9f530f6435 Hyperdrive config
+ {
+  "id": "373fc0afe8a7431b88970c9f530f6435",
+  "name": "instant",
+  "origin": {
+    "host": "ep-spring-rain-bdj4i0q3.c-8.us-east-2.aws.neon.tech",
+    "port": 5432,
+    "database": "neondb",
+    "scheme": "postgresql",
+    "user": "neondb_owner"
+  },
+  "origin_connection_limit": 60,
+  "caching": {
+    "disabled": true
+  },
+  "mtls": {},
+  "created_on": "2026-11-11T18:17:47.112993Z",
+  "modified_on": "2026-11-11T18:57:39.599167Z"
+}
+[exit 0]

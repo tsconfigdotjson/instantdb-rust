@@ -1,0 +1,8 @@
+$ DATABASE_URL=<REDACTED> ./scripts/create-app.sh "deploy test"
+app_id=68fead75-7673-4fe5-94c9-8e4b5ec760c9
+admin_token=<REDACTED>
+[exit 0]
+$ DATABASE_URL=<REDACTED> ./scripts/create-app.sh "conformance"
+app_id=669c9595-6179-42c1-9085-ad88ae568c55
+admin_token=<REDACTED>
+[exit 0]
