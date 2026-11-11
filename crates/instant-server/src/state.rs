@@ -99,6 +99,13 @@ pub struct Config {
     /// addresses (`INSTANT_OAUTH_ALLOW_PRIVATE`): test providers on
     /// localhost only, never in production.
     pub oauth_allow_private: bool,
+    /// How nodes hear about each other's writes (`INSTANT_BUS`). `false`, the
+    /// default (`postgres`): Postgres `LISTEN/NOTIFY`, any number of nodes.
+    /// `true` (`local`): messages stay inside this process, for a deployment
+    /// that is exactly one node behind a pooler without `LISTEN/NOTIFY`
+    /// (Cloudflare Hyperdrive, PgBouncer in transaction mode). A second node
+    /// on the same database would not see this one's writes.
+    pub bus_local: bool,
 }
 
 fn env_num<T: std::str::FromStr>(name: &str, default: T) -> T {
@@ -177,6 +184,14 @@ impl Config {
             oauth_allow_private: matches!(
                 std::env::var("INSTANT_OAUTH_ALLOW_PRIVATE").as_deref(),
                 Ok("1") | Ok("true") | Ok("on")
+            ),
+            bus_local: matches!(
+                std::env::var("INSTANT_BUS")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase()
+                    .as_str(),
+                "local"
             ),
         }
     }
@@ -394,6 +409,11 @@ pub struct AppState {
     pub email: crate::email::EmailConfig,
     pub pool: PgPool,
     pub node_id: Uuid,
+    /// `INSTANT_BUS=local`: where publishers put (channel, payload) and the
+    /// receiving end until invalidator::run takes it. Both None with the
+    /// default Postgres bus.
+    pub bus_tx: Option<mpsc::UnboundedSender<(String, Value)>>,
+    pub bus_rx: std::sync::Mutex<Option<mpsc::UnboundedReceiver<(String, Value)>>>,
     pub sessions: DashMap<Uuid, Arc<Session>>,
     /// app id -> session ids on this node
     pub app_sessions: DashMap<Uuid, HashSet<Uuid>>,
@@ -452,11 +472,19 @@ impl AppState {
     }
 
     pub fn new(cfg: Config, pool: PgPool) -> Arc<Self> {
+        let (bus_tx, bus_rx) = if cfg.bus_local {
+            let (tx, rx) = mpsc::unbounded_channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         Arc::new(AppState {
             cfg,
             email: crate::email::EmailConfig::from_env(),
             pool,
             node_id: Uuid::new_v4(),
+            bus_tx,
+            bus_rx: std::sync::Mutex::new(bus_rx),
             sessions: DashMap::new(),
             app_sessions: DashMap::new(),
             room_sessions: DashMap::new(),
@@ -475,6 +503,26 @@ impl AppState {
             webhook_cache: DashMap::new(),
             over_size_limit: dashmap::DashSet::new(),
         })
+    }
+
+    /// Publish on the local bus; false when this node uses the Postgres bus
+    /// and the caller must NOTIFY instead.
+    pub fn publish_local(&self, channel: &str, payload: Value) -> bool {
+        match &self.bus_tx {
+            Some(tx) => {
+                let _ = tx.send((channel.to_string(), payload));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Stand-in for the row triggers that NOTIFY `instant_rules`,
+    /// `instant_app_status` and `instant_webhooks`: with the local bus nobody
+    /// listens to those, so the routes that write the rows publish the same
+    /// message here. A no-op with the Postgres bus, where the trigger does it.
+    pub fn publish_row_change(&self, channel: &str, payload: Value) {
+        self.publish_local(channel, payload);
     }
 
     pub fn new_session(&self, id: Uuid, tx: mpsc::UnboundedSender<Outgoing>) -> Arc<Session> {

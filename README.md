@@ -115,6 +115,8 @@ reasons, in [docs/PARITY.md](docs/PARITY.md).
   server and how it's verified.
 - **[Performance](docs/PERF.md)**: load-test method, results, and how to
   reproduce them.
+- **[Cloudflare Workers](docs/CLOUDFLARE.md)**: experimental; what it takes
+  to run the server in a Durable Object, and how far that is.
 - **[Migrating from Instant Cloud](docs/MIGRATION.md)**: coming soon.
 
 ## Development
@@ -136,6 +138,7 @@ the legacy one. CI runs all of them.
 |---|---|
 | `crates/instant-core` | Attributes, triples, InstaML, InstaQL, CEL permissions, system catalog |
 | `crates/instant-server` | axum HTTP/websocket server: sessions, invalidation, presence, auth, admin and dashboard APIs, storage |
+| `crates/instant-worker` | Experimental Cloudflare Workers host, outside the workspace ([docs/CLOUDFLARE.md](docs/CLOUDFLARE.md)) |
 | `crates/instant-loadtest` | The load generator behind [docs/PERF.md](docs/PERF.md) |
 | `web/` | The [instantdbrust.com](https://instantdbrust.com) site |
 | `LEGACY/` | The original Instant codebase (Clojure + TypeScript), kept for reference and for the differential harness |

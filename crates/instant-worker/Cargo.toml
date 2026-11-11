@@ -1,0 +1,32 @@
+[package]
+name = "instant-worker"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Experimental: the Instant sync server hosted in a Cloudflare Durable Object"
+
+# Standalone on purpose: the Emscripten target, the beta toolchain and the
+# Tokio patches below stay out of the main workspace and its lockfile.
+[workspace]
+
+[dependencies]
+instant-server = { path = "../instant-server", default-features = false }
+worker = { git = "https://github.com/cloudflare/workers-rs", rev = "f6c8d1da189cdb91d8bd9576e19cd1dcfd917460", features = ["http", "axum", "experimental_tokio"] }
+axum = { version = "0.8", default-features = false }
+tower-service = "0.3"
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "sync", "time", "net"] }
+futures = "0.3"
+sqlx = { package = "sqlx-shim", path = "../sqlx-shim" }
+
+[profile.release]
+opt-level = "s"
+
+# Required by workers-rs' Emscripten/Tokio preview until these land upstream
+# (see workers-rs examples/emscripten-sqlx).
+[patch.crates-io]
+# Pending https://github.com/tokio-rs/tokio/pull/8484
+tokio = { git = "https://github.com/guybedford/tokio", tag = "1.53.1-cf.emscripten" }
+tokio-macros = { git = "https://github.com/guybedford/tokio", tag = "1.53.1-cf.emscripten" }
+# Pending release of https://github.com/tokio-rs/mio/pull/1969
+mio = { git = "https://github.com/tokio-rs/mio" }

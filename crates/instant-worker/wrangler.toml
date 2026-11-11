@@ -1,0 +1,30 @@
+name = "instant-worker"
+main = "build/index.js"
+compatibility_date = "2026-09-02"
+# new_module_registry gives the Emscripten glue `import.meta.url`.
+compatibility_flags = ["new_module_registry"]
+
+[build]
+command = "cargo install -q worker-build && worker-build --emscripten --release"
+
+# The one Durable Object that is the server node (see README.md).
+[durable_objects]
+bindings = [{ name = "NODE", class_name = "Node" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Node"]
+
+# Your Postgres, with the Instant migrations applied (scripts/apply-migrations.sh).
+# `wrangler hyperdrive create instant --connection-string=postgres://...` prints the id.
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "your-hyperdrive-id-here"
+localConnectionString = "postgresql://instant:instant@127.0.0.1:5432/instant?sslmode=disable"
+
+# Every string binding is handed to the server as an environment variable
+# (docs/CONFIGURATION.md). Put secrets in `wrangler secret put`, not here.
+[vars]
+BASE_URL = "http://localhost:8787"
+PG_POOL_MAX = "5"
+PG_POOL_MIN = "0"

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/instant-core", "crates/instant-server", "crates/instant-loadtest", "crates/sqlx-shim"]
+# Cloudflare Workers host: its own workspace (Emscripten target, beta toolchain).
+exclude = ["crates/instant-worker"]
 
 [workspace.package]
 edition = "2021"

@@ -724,12 +724,7 @@ pub async fn ephemeral_status_post(
             Some("disabled") => "disabled",
             _ => return Err(param_malformed(&["body", "status"], raw.clone())),
         };
-        sqlx::query("UPDATE apps SET status = $1 WHERE id = $2")
-            .bind(status)
-            .bind(app_id)
-            .execute(&state.pool)
-            .await?;
-        service::set_app_status(&state, app_id, status.to_string());
+        service::write_app_status(&state, app_id, status).await?;
         Ok(json!({"status": status}))
     }
     .await;

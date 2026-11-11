@@ -169,6 +169,15 @@ jobs:
       - name: "e2e: multinode storage"
         run: node scripts/multinode-storage-test.mjs "$APP_ID" "$ADMIN_TOKEN"
 
+      # INSTANT_BUS=local: one node that never issues LISTEN or NOTIFY (what a
+      # transaction-mode pooler such as Cloudflare Hyperdrive allows).
+      - name: "e2e: local bus (single node, no LISTEN/NOTIFY)"
+        run: |
+          INSTANT_BUS=local PORT=8885 BASE_URL=http://localhost:8885 ./target/debug/instant-server > /tmp/server-local.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://localhost:8885/health >/dev/null && break; sleep 1; done
+          SERVER_URL=http://localhost:8885 node scripts/local-bus-test.mjs
+          kill %1 || true
+
       # Public-deployment limits on their own node, booted last: its 0-hour
       # hard-delete grace would purge apps the other e2e steps mark deleted.
       - name: "e2e: demo limits (size cap, app cap, hard delete, oauth ssrf)"

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
 use futures::{SinkExt, StreamExt};
@@ -32,7 +32,63 @@ pub async fn handler(
     // frame is flushed as it is sent, so neither buffer needs to be large.
     ws.read_buffer_size(8 * 1024)
         .write_buffer_size(0)
-        .on_upgrade(move |socket| session_loop(socket, state, request))
+        .on_upgrade(move |socket| {
+            let (ws_tx, ws_rx) = socket.split();
+            let ws_rx = ws_rx.map(|msg| match msg {
+                Ok(Message::Text(text)) => Incoming::Text(text),
+                Ok(Message::Close(_)) | Err(_) => Incoming::Close,
+                Ok(_) => Incoming::Other,
+            });
+            let ws_tx = ws_tx.with(|frame: Outbound| {
+                futures::future::ready(Ok::<_, axum::Error>(match frame {
+                    Outbound::Text(text) => Message::Text(text.into()),
+                    Outbound::Ping => Message::Ping(vec![].into()),
+                    Outbound::Close => Message::Close(None),
+                }))
+            });
+            session_loop(ws_rx, ws_tx, state, request)
+        })
+}
+
+/// A frame from the client, whatever carries the session: the axum websocket
+/// here, or a host that owns the socket itself (a Cloudflare Durable Object
+/// hands frames over through [`serve_channels`]).
+pub enum Incoming<T> {
+    Text(T),
+    /// the peer closed, or the transport failed
+    Close,
+    /// binary / ping / pong: nothing for the protocol to do
+    Other,
+}
+
+/// A frame for the client.
+pub enum Outbound {
+    Text(String),
+    /// keepalive; a transport without protocol pings drops it
+    Ping,
+    Close,
+}
+
+/// Run one sync session over a pair of channels, for a host whose socket
+/// cannot be driven from this task. The session ends when `incoming` yields
+/// [`Incoming::Close`] or closes, or when `outgoing` is dropped.
+pub async fn serve_channels(
+    state: Arc<AppState>,
+    request: instant_core::perms::RequestCtx,
+    incoming: mpsc::UnboundedReceiver<Incoming<String>>,
+    outgoing: mpsc::UnboundedSender<Outbound>,
+) {
+    let rx = Box::pin(futures::stream::unfold(incoming, |mut rx| async move {
+        rx.recv().await.map(|msg| (msg, rx))
+    }));
+    let tx = Box::pin(futures::sink::unfold(
+        outgoing,
+        |tx, frame: Outbound| async move {
+            tx.send(frame).map_err(|_| ())?;
+            Ok::<_, ()>(tx)
+        },
+    ));
+    session_loop(rx, tx, state, request).await
 }
 
 /// `request.ip` / `request.origin` for rules, from the Origin and
@@ -46,11 +102,16 @@ pub fn request_ctx_from_headers(
     )
 }
 
-async fn session_loop(
-    socket: WebSocket,
+async fn session_loop<R, W, T>(
+    mut ws_rx: R,
+    mut ws_tx: W,
     state: Arc<AppState>,
     request: instant_core::perms::RequestCtx,
-) {
+) where
+    R: futures::Stream<Item = Incoming<T>> + Unpin,
+    W: futures::Sink<Outbound> + Unpin + Send + 'static,
+    T: std::ops::Deref<Target = str>,
+{
     let session_id = Uuid::new_v4();
     let (tx, mut rx) = mpsc::unbounded_channel::<Outgoing>();
     let session = state.new_session(session_id, tx);
@@ -59,8 +120,6 @@ async fn session_loop(
         st.ip = request.ip;
         st.origin = request.origin;
     }
-
-    let (mut ws_tx, mut ws_rx) = socket.split();
 
     // writer task: outgoing queue -> socket, plus keepalive pings. For clients
     // that accept JSON-array frames (core > 0.22.75, Reactor.js:1798-1804),
@@ -94,7 +153,7 @@ async fn session_loop(
                         // slow consumer: the queue cap was hit and messages
                         // were dropped, so the client's view is no longer
                         // consistent — close and let it reconnect
-                        let _ = ws_tx.send(Message::Close(None)).await;
+                        let _ = ws_tx.send(Outbound::Close).await;
                         break;
                     }
                     let frame = if pending.len() == 1 {
@@ -116,12 +175,12 @@ async fn session_loop(
                         frame.push(']');
                         frame
                     };
-                    if ws_tx.send(Message::Text(frame.into())).await.is_err() {
+                    if ws_tx.send(Outbound::Text(frame)).await.is_err() {
                         break;
                     }
                 }
                 _ = ping.tick() => {
-                    if ws_tx.send(Message::Ping(vec![].into())).await.is_err() {
+                    if ws_tx.send(Outbound::Ping).await.is_err() {
                         break;
                     }
                 }
@@ -129,9 +188,9 @@ async fn session_loop(
         }
     });
 
-    while let Some(Ok(msg)) = ws_rx.next().await {
+    while let Some(msg) = ws_rx.next().await {
         match msg {
-            Message::Text(text) => {
+            Incoming::Text(text) => {
                 let parsed: Value = match serde_json::from_str(&text) {
                     Ok(v) => v,
                     Err(_) => continue,
@@ -139,8 +198,8 @@ async fn session_loop(
                 crate::metrics::METRICS.ws_messages_received_total.inc();
                 crate::scheduler::dispatch(&state, &session, parsed).await;
             }
-            Message::Close(_) => break,
-            _ => {}
+            Incoming::Close => break,
+            Incoming::Other => {}
         }
     }
 

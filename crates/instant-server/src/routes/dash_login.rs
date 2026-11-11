@@ -606,6 +606,7 @@ pub async fn get_a_db_post(
             .bind(code)
             .execute(&state.pool)
             .await?;
+        crate::service::rules_written(&state, app_id);
         }
         if let Some(schema) = schema {
             let plan_body = json!({
