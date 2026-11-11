@@ -342,7 +342,7 @@ Other notes:
 11. **`create-app.sh` prints the admin token to stdout,** so it lands in any log of the run. The tokens were redacted from these logs afterwards.
 12. **Rust tooling was not on `PATH`** in the non-interactive shell, and psql was missing. I used a Docker-based psql shim.
 
-### The fixes, as code (all uncommitted)
+### The fixes, as code
 
 - **`crates/instant-worker/vendor/sqlx-postgres`:** a copy of sqlx-postgres 0.8.6, wired in through the worker crate's own `[patch.crates-io]`. The patch against crates.io is in `sqlx-postgres-patch.diff`, 173 lines over four files:
   - `executor.rs`: no `Close(Portal)` after execute; no `Close(Statement)` on cache eviction; persistent statements are named from a process-wide counter seeded from the clock.
@@ -369,8 +369,12 @@ Still on Cloudflare:
 
 Elsewhere:
 - **Neon database:** throwaway; the user will delete it. It holds the test apps created by `create-app.sh`.
-- **Local edits** (not committed): `crates/instant-worker/{wrangler.toml,Cargo.toml,Cargo.lock,src/main.rs,vendor/}`. `wrangler.toml` holds the connection string, so it must not be committed. The code changes are captured as `sqlx-postgres-patch.diff` and `worker-src.diff` in this directory.
-- **Committed:** only this directory, minus the raw `tail-json.log` (see section 10).
+- **Committed:**
+  - the code fixes: `vendor/sqlx-postgres` with `VENDORED.md`, `src/main.rs`, `Cargo.toml`, `Cargo.lock`;
+  - `wrangler.toml` with only the new `INSTANT_HANDLE_RECEIVE_TIMEOUT_MS` var and a commented `NODE_NAME`;
+  - updated docs (`docs/CLOUDFLARE.md`, the crate README);
+  - this directory, minus the raw `tail-json.log` (see section 10).
+- **Kept local, not committed:** the deployment's `wrangler.toml`, which holds the Neon connection string, the Hyperdrive id, the workers.dev `BASE_URL` and `NODE_NAME = "node-6"`.
 
 To remove the Cloudflare resources:
 ```

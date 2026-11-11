@@ -30,3 +30,9 @@ localConnectionString = "postgresql://instant:instant@127.0.0.1:5432/instant?ssl
 BASE_URL = "http://localhost:8787"
 PG_POOL_MAX = "5"
 PG_POOL_MIN = "0"
+# Over Hyperdrive every statement is a network round trip; the native 5 s
+# limit cancels longer transactions midway.
+INSTANT_HANDLE_RECEIVE_TIMEOUT_MS = "30000"
+# A redeploy keeps a running Durable Object (and its in-memory state); a new
+# NODE_NAME starts a fresh node. Default "node".
+# NODE_NAME = "node"

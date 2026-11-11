@@ -1,10 +1,14 @@
 # Cloudflare Workers (experimental)
 
-Status: **runs locally, not yet deployed.** `crates/instant-worker` builds
-for Workers and, under `wrangler dev` against a local Postgres, passes the
-same e2e suites as the native server. Nobody has deployed it to Cloudflare
-yet, and it depends on a workers-rs preview toolchain. The native server is
-unchanged by default; this is a second way to run the same code.
+Status: **deployed once, experimental.** `crates/instant-worker` builds for
+Workers and, under `wrangler dev` against a local Postgres, passes the same
+e2e suites as the native server. It has been deployed to Cloudflare once,
+with Hyperdrive in front of a Neon Postgres, and the protocol suites passed
+there after the fixes described under
+[Hyperdrive and sqlx](#hyperdrive-and-sqlx). The report is
+[deploy-test-logs/REPORT.md](../deploy-test-logs/REPORT.md). It depends on a
+workers-rs preview toolchain. The native server is unchanged by default; this
+is a second way to run the same code.
 
 ## The shape
 
@@ -45,6 +49,28 @@ The server used both:
 | `rules`, `apps.status` and `webhooks` changes announced by row triggers | with the local bus, the routes that write those rows publish the message themselves. An edit made directly in SQL is not pushed to live sessions; the server picks it up when its caches expire |
 | boot and hard-delete sweeps take session-level advisory locks | with the local bus, transaction-level locks, held by a transaction kept open for the duration. The default is unchanged |
 
+### Hyperdrive and sqlx
+
+`wrangler dev` connects straight to Postgres, so it does not exercise
+Hyperdrive's pooler. The first real deployment failed every request until
+these were fixed:
+
+- **sqlx-postgres 0.8.6 is patched for the Worker only**
+  (`crates/instant-worker/vendor/sqlx-postgres`, via that crate's
+  `[patch.crates-io]`):
+  - It sends no `Close` messages, which Hyperdrive rejects.
+  - It accepts Hyperdrive's quoted error severity (`"FATAL"`).
+  - Prepared statements are named from a process-wide counter, because
+    Hyperdrive mixes up names that repeat across connections.
+  - `ping()` on release sends no bare `Sync`, which Hyperdrive leaves
+    unanswered after a rolled-back transaction. Each one leaked a pooled
+    connection.
+- **Turn Hyperdrive's query caching off**
+  (`wrangler hyperdrive update <id> --caching-disabled`). With caching on, a
+  read straight after a write returns the old result.
+- **`INSTANT_HANDLE_RECEIVE_TIMEOUT_MS = "30000"`.** Every statement crosses
+  Hyperdrive, and the native 5 s limit cancelled transactions midway.
+
 Two more changes make the server embeddable: `instant-server` is a library
 (`bootstrap`, `spawn_background`, `router`) with a thin `main.rs`, and the
 websocket session runs over any frame source and sink (`ws::serve_channels`),
@@ -79,12 +105,21 @@ this target.
   SSE, sync tables, streams, the local-bus test, OAuth, security, webhooks
   and dashboard login all pass, with no panics in the runtime log. The
   release build is a 12.5 MB wasm module (the limit is 64 MiB).
+- **One deployment to Cloudflare** (workers.dev, Hyperdrive, Neon in AWS
+  us-east-2; [report](../deploy-test-logs/REPORT.md)):
+  - **Startup:** Cloudflare accepted the Emscripten build. Startup time was
+    60–161 ms.
+  - **Passed:** ws smoke, wire conformance (222 assertions), SSE, sync
+    tables, the local-bus test and streams all pass. The tail shows no
+    errors.
+  - **Cold start:** about 8 s for a fresh Durable Object.
+  - **Latency:** a new `add-query` takes about 370 ms median from Toronto.
 
 ## Not verified
 
-- **A real deployment.** Whether Cloudflare accepts the Emscripten preview
-  in production, whether a module this size starts within the 1 second
-  startup limit, real Hyperdrive, and how many sessions fit in 128 MB.
+- **On a deployment:** OAuth, webhooks, dashboard login and the security
+  suite (their e2e scripts need local mock servers). Also not measured: how
+  many sessions fit in 128 MB.
 - **Webhook and OAuth address vetting.** The e2e runs allow private
   addresses, which skips the DNS lookup; that lookup has not run on Workers.
 - **`STORAGE_BACKEND=s3` on Workers.** It compiles; the S3 suites were not
@@ -140,7 +175,14 @@ in `wrangler.toml` `[vars]` (and `wrangler secret put`); every string binding
 reaches the server as the environment variable of the same name
 ([CONFIGURATION.md](CONFIGURATION.md)).
 
-To deploy: create a Hyperdrive config for your database
-(`npx wrangler hyperdrive create instant --connection-string=postgres://...`),
-put its id in `wrangler.toml`, set `BASE_URL` to the Worker's public URL, and
-run `npx wrangler deploy`. This step is untested.
+To deploy:
+1. Create a Hyperdrive config for your database with caching off:
+   `npx wrangler hyperdrive create instant --connection-string=postgres://... --caching-disabled`.
+2. Put its id in `wrangler.toml`.
+3. Set `BASE_URL` to the Worker's public URL.
+4. Run `npx wrangler deploy`.
+
+A redeploy does not restart a running Durable Object: its timers and
+websockets keep the old instance resident. Set `NODE_NAME` (a var) to a new
+value to start a fresh node. Server logs reach `wrangler tail --format json`,
+filtered by `RUST_LOG`.

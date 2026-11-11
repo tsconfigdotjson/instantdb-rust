@@ -27,8 +27,11 @@ fn main() {}
 /// The Worker: hand every request to the node.
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
+    // NODE_NAME picks the object; changing it starts a fresh node (the old
+    // one stays resident while its timers run, across deploys).
+    let name = env.var("NODE_NAME").map(|v| v.to_string()).unwrap_or_else(|_| "node".into());
     env.durable_object("NODE")?
-        .get_by_name("node")?
+        .get_by_name(&name)?
         .fetch_with_request(req)
         .await
 }
@@ -85,11 +88,15 @@ async fn boot(env: &Env) -> Result<Server> {
     std::env::set_var("INSTANT_BUS", "local");
 
     instant_server::set_jwt_verifier(verify_id_token);
+    init_tracing();
 
     let cfg = Config::from_env();
     let pool = PgPoolOptions::new()
         .max_connections(cfg.pg_pool_max)
         .min_connections(0)
+        // A connection wedged by a Hyperdrive protocol error must surface as
+        // an error, not hang the request.
+        .acquire_timeout(std::time::Duration::from_secs(10))
         .connect(&cfg.database_url)
         .await
         .map_err(|e| Error::RustError(format!("postgres: {e}")))?;
@@ -99,6 +106,40 @@ async fn boot(env: &Env) -> Result<Server> {
     instant_server::spawn_background(&state);
     let router = instant_server::router(state.clone());
     Ok(Server { state, router })
+}
+
+/// Send the server's `tracing` output to the Worker console, where
+/// `wrangler tail` shows it. Filter from `RUST_LOG` (a var), default
+/// `info,sqlx=warn` as on the native server.
+fn init_tracing() {
+    struct ConsoleWriter(Vec<u8>);
+    impl std::io::Write for ConsoleWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Drop for ConsoleWriter {
+        fn drop(&mut self) {
+            let line = String::from_utf8_lossy(&self.0);
+            let line = line.trim_end();
+            if !line.is_empty() {
+                console_log!("{line}");
+            }
+        }
+    }
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,sqlx=warn".into()),
+        )
+        .with_ansi(false)
+        .without_time()
+        .with_writer(|| ConsoleWriter(Vec::new()))
+        .try_init();
 }
 
 /// The server reads its settings from the process environment

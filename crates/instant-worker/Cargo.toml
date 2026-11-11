@@ -19,6 +19,7 @@ tokio = { version = "1", default-features = false, features = ["rt", "macros", "
 futures = "0.3"
 sqlx = { package = "sqlx-shim", path = "../sqlx-shim" }
 serde_json = "1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "std"] }
 # id_token verification for the server (instant_server::set_jwt_verifier), on
 # the pure-Rust backend: the ring-based one has no random source here.
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto"] }
@@ -34,3 +35,6 @@ tokio = { git = "https://github.com/guybedford/tokio", tag = "1.53.1-cf.emscript
 tokio-macros = { git = "https://github.com/guybedford/tokio", tag = "1.53.1-cf.emscripten" }
 # Pending release of https://github.com/tokio-rs/mio/pull/1969
 mio = { git = "https://github.com/tokio-rs/mio" }
+# sqlx-postgres 0.8.6 without its Close messages, which Hyperdrive rejects
+# ("Protocol Error: Unexpected protocol code: C"). See vendor/sqlx-postgres.
+sqlx-postgres = { path = "vendor/sqlx-postgres" }
