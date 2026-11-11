@@ -132,7 +132,7 @@ impl Drop for RxGuard {
         let state = self.state.clone();
         let session = self.session.clone();
         let session_id = session.id;
-        tokio::spawn(async move {
+        crate::state::spawn_from_drop(async move {
             session.scheduler.shutdown().await;
             state.drop_session(session_id);
             crate::presence::leave_all(&state, session_id).await;

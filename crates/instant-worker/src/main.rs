@@ -1,13 +1,14 @@
 //! The Instant sync server inside a Cloudflare Durable Object.
 //!
-//! EXPERIMENTAL and not yet built in CI: it targets workers-rs' Emscripten +
-//! Tokio preview (`worker-build --emscripten`), see README.md.
+//! EXPERIMENTAL: it targets workers-rs' Emscripten + Tokio preview
+//! (`worker-build --emscripten`) and is not built in CI. See README.md.
 //!
 //! One Durable Object is one server node. It holds what a native node holds
 //! in memory (sessions, subscriptions, caches) and runs the same axum router
 //! and background loops; Postgres is reached through Hyperdrive. Hyperdrive
 //! has no `LISTEN/NOTIFY`, so the node runs with `INSTANT_BUS=local`.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -40,14 +41,15 @@ struct Server {
 #[durable_object]
 pub struct Node {
     env: Env,
-    server: OnceCell<Server>,
+    // the durable_object macro requires the struct to be unwind-safe
+    server: AssertUnwindSafe<OnceCell<Server>>,
 }
 
 impl DurableObject for Node {
     fn new(_state: State, env: Env) -> Self {
         Self {
             env,
-            server: OnceCell::new(),
+            server: AssertUnwindSafe(OnceCell::new()),
         }
     }
 
@@ -69,12 +71,7 @@ impl DurableObject for Node {
             return open_session(server.state.clone(), req.headers());
         }
 
-        let res = server
-            .router
-            .clone()
-            .call(req)
-            .await
-            .map_err(|e| Error::RustError(e.to_string()))?;
+        let Ok(res) = server.router.clone().call(req).await;
         Response::try_from(res)
     }
 }

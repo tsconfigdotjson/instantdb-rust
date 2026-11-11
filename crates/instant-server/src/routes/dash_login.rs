@@ -238,22 +238,18 @@ struct GoogleTokenResponse {
 /// and `:coerce :always` (error bodies are JSON too).
 async fn exchange_google_code(state: &AppState, code: &str) -> Result<GoogleTokenResponse> {
     let (client_id, client_secret) = google_client(state)?;
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+    let http = crate::http::builder(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| InstantError::internal(format!("http client: {e}")))?;
-    let resp = http
-        .post(&state.cfg.google_oauth_token_url)
-        .form(&[
-            ("client_id", client_id.as_str()),
-            ("client_secret", client_secret.as_str()),
-            ("code", code),
-            ("grant_type", "authorization_code"),
-            ("redirect_uri", &callback_url(state)),
-        ])
-        .send()
-        .await
-        .map_err(|e| InstantError::internal(format!("Google token request failed: {e}")))?;
+    let resp = crate::http::send(http.post(&state.cfg.google_oauth_token_url).form(&[
+        ("client_id", client_id.as_str()),
+        ("client_secret", client_secret.as_str()),
+        ("code", code),
+        ("grant_type", "authorization_code"),
+        ("redirect_uri", &callback_url(state)),
+    ]))
+    .await
+    .map_err(|e| InstantError::internal(format!("Google token request failed: {e}")))?;
     let success = resp.status().is_success();
     let text = resp
         .text()

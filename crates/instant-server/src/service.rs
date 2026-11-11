@@ -554,7 +554,7 @@ impl Drop for CancelOnDrop {
             return;
         };
         let pool = self.pool.clone();
-        tokio::spawn(async move {
+        crate::state::spawn_from_drop(async move {
             let _ = sqlx::query(
                 "SELECT pg_cancel_backend(pid) FROM pg_stat_activity
                  WHERE pid = $1 AND backend_xid::text::bigint = $2 % 4294967296",

@@ -1,9 +1,10 @@
 # Cloudflare Workers (experimental)
 
-Status: **not yet running on Workers.** The server-side changes it needs are
-in and tested natively. The Worker host in `crates/instant-worker` is written
-but has not been compiled or run; it depends on a workers-rs preview toolchain.
-This page records what was checked, what was not, and what is left.
+Status: **runs locally, not yet deployed.** `crates/instant-worker` builds
+for Workers and, under `wrangler dev` against a local Postgres, passes the
+same e2e suites as the native server. Nobody has deployed it to Cloudflare
+yet, and it depends on a workers-rs preview toolchain. The native server is
+unchanged by default; this is a second way to run the same code.
 
 ## The shape
 
@@ -44,37 +45,53 @@ The server used both:
 | `rules`, `apps.status` and `webhooks` changes announced by row triggers | with the local bus, the routes that write those rows publish the message themselves. An edit made directly in SQL is not pushed to live sessions; the server picks it up when its caches expire |
 | boot and hard-delete sweeps took session-level advisory locks | transaction-level locks, held by a transaction kept open for the duration (all modes) |
 
-Verified natively: with `INSTANT_BUS=local` and the server connected through
-PgBouncer 1.22 in `pool_mode = transaction` (the closest local stand-in for
-Hyperdrive), the single-node e2e suites pass: ws smoke, wire conformance, SSE,
-sync tables, streams, OAuth, security, webhooks and dashboard login.
-`scripts/local-bus-test.mjs` covers the local bus in CI.
+Two more changes make the server embeddable: `instant-server` is a library
+(`bootstrap`, `spawn_background`, `router`) with a thin `main.rs`, and the
+websocket session runs over any frame source and sink (`ws::serve_channels`),
+not only an axum socket.
 
-Two more changes make the server embeddable: `instant-server` is now a
-library (`bootstrap`, `spawn_background`, `router`) with a thin `main.rs`,
-and the websocket session runs over any frame source and sink
-(`ws::serve_channels`), not only an axum socket.
+## What differs in the Workers build
+
+The same crates compile for `wasm32-unknown-emscripten` with these
+differences, all selected by target, none by a feature you set:
+
+| | native | Workers |
+|---|---|---|
+| outbound HTTP (webhooks, OAuth, S3, email APIs) | reqwest | the runtime's `fetch`, through `src/http.rs`. No client timeout, no address pinning; redirects are never followed |
+| TLS to Postgres | rustls | none; Hyperdrive's connection is plain |
+| JWT verification | jsonwebtoken 9 (ring) | jsonwebtoken 10 on its pure-Rust backend |
+| SMTP email | yes | no; use `EMAIL_PROVIDER=cloudflare` or `postmark` |
+| S3 credentials from instance or task roles | yes | no; static keys only |
+| Tokio | multi-threaded | single-threaded, driven by the Workers event loop |
+
+rustls and jsonwebtoken 9 are out because `ring` has no random source on
+this target.
+
+## What has been verified
+
+- **Native, default bus:** the unit and integration tests and the
+  single-node e2e suites.
+- **Native, `INSTANT_BUS=local` behind PgBouncer 1.22 in
+  `pool_mode = transaction`** (the closest local stand-in for Hyperdrive):
+  the same e2e suites.
+- **The Worker under `wrangler dev`**, with local Postgres through the
+  Hyperdrive binding's local connection string: ws smoke, wire conformance,
+  SSE, sync tables, streams, the local-bus test, OAuth, security, webhooks
+  and dashboard login all pass, with no panics in the runtime log. The
+  release build is a 12.5 MB wasm module (the limit is 64 MiB).
 
 ## Not verified
 
-`crates/instant-worker` has never been compiled. Expect to fix things in
-this order:
-
-1. **Outbound HTTP.** On any `wasm32` target `reqwest` switches to its
-   `fetch` backend, whose futures are not `Send`; axum handlers and
-   `tokio::spawn` require `Send`. The 11 call sites (webhook delivery, OAuth
-   token exchange, S3, email APIs, the SSRF-guarded client) need a wrapper
-   that reads the whole response inside a `Send` shim, and `ssrf.rs` uses
-   client options the `fetch` backend lacks.
-2. **C dependencies.** `ring` (via rustls, jsonwebtoken) must build with
-   emcc. Hyperdrive's connection string needs no TLS, so sqlx's TLS feature
-   can be dropped from the worker build if it gets in the way.
-3. **`STORAGE_BACKEND=disk` and SMTP email** have no place on Workers; use
-   `postgres` or `s3` (R2 works) and `EMAIL_PROVIDER=cloudflare` or
-   `postmark`.
-4. **axum's `ws` feature** pulls in hyper's server upgrade path. The worker
-   never uses that route (it accepts the socket itself), but it still has to
-   compile.
+- **A real deployment.** Whether Cloudflare accepts the Emscripten preview
+  in production, whether a module this size starts within the 1 second
+  startup limit, real Hyperdrive, and how many sessions fit in 128 MB.
+- **Webhook and OAuth address vetting.** The e2e runs allow private
+  addresses, which skips the DNS lookup; that lookup has not run on Workers.
+- **`STORAGE_BACKEND=s3` on Workers.** It compiles; the S3 suites were not
+  run against the Worker. `disk` has no place there; `postgres` is the
+  default and was the one tested.
+- **The multinode, admin SDK and differential suites** against the Worker.
+- **CI.** Nothing builds the Worker in CI yet, so it can break unnoticed.
 
 ## Limits of this shape
 
@@ -108,16 +125,22 @@ sits next to the sessions.
 
 ## Trying it
 
-Needs a Cloudflare account for deployment; `wrangler dev` runs locally
-against a local Postgres.
+`wrangler dev` runs locally against a local Postgres. The first build
+installs Rust beta, `worker-build` and the Emscripten SDK (about 1 GB), and
+takes several minutes.
 
 ```bash
 ./scripts/apply-migrations.sh           # schema, against your Postgres
 cd crates/instant-worker
-npx wrangler dev                        # installs worker-build + Emscripten, builds, serves :8787
+npx wrangler dev                        # builds, serves :8787
 ```
 
 Then point a client at `http://localhost:8787` as in the README. Settings go
 in `wrangler.toml` `[vars]` (and `wrangler secret put`); every string binding
 reaches the server as the environment variable of the same name
 ([CONFIGURATION.md](CONFIGURATION.md)).
+
+To deploy: create a Hyperdrive config for your database
+(`npx wrangler hyperdrive create instant --connection-string=postgres://...`),
+put its id in `wrangler.toml`, set `BASE_URL` to the Worker's public URL, and
+run `npx wrangler deploy`. This step is untested.

@@ -576,6 +576,33 @@ impl AppState {
     }
 }
 
+static RUNTIME: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
+
+/// Remember the runtime the server runs on (call once, from inside it).
+pub fn remember_runtime() {
+    let _ = RUNTIME.set(tokio::runtime::Handle::current());
+}
+
+/// `tokio::spawn` for `Drop` impls. A value can be dropped outside the
+/// runtime: in a Cloudflare Worker the JavaScript side drops a response
+/// stream when the client goes away, and a plain `tokio::spawn` there panics
+/// (which aborts the whole wasm instance).
+pub fn spawn_from_drop<F>(fut: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(fut);
+        }
+        Err(_) => {
+            if let Some(handle) = RUNTIME.get() {
+                handle.spawn(fut);
+            }
+        }
+    }
+}
+
 /// Stable hash for refresh spam suppression.
 pub fn value_hash(v: &Value) -> u64 {
     use std::hash::{Hash, Hasher};

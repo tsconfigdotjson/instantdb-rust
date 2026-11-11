@@ -5,6 +5,7 @@
 mod auth;
 mod email;
 mod hard_delete;
+mod http;
 mod indexing_jobs;
 mod invalidator;
 mod metrics;
@@ -54,6 +55,7 @@ const STORAGE_BODY_LIMIT: usize = 100 * 1024 * 1024;
 /// under the boot lock, the signing secret and key, the storage backend.
 /// Start the background loops with [`spawn_background`] afterwards.
 pub async fn bootstrap(mut cfg: Config, pool: sqlx::PgPool) -> anyhow::Result<Arc<AppState>> {
+    state::remember_runtime();
     // Serialize bootstrap DDL across concurrently-starting nodes. The lock is
     // transaction-level, held by a transaction that stays open while the
     // bootstrap runs on other connections: a session-level lock can outlive

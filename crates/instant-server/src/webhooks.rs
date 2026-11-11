@@ -1415,24 +1415,19 @@ fn retry_after(previous_attempts: i64) -> chrono::Duration {
 const MAX_RESPONSE_BYTES: usize = 4096;
 
 fn http_client(target: &ValidatedUrl) -> Option<reqwest::Client> {
-    let mut b = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(20))
-        .user_agent("InstantDB Webhook Sender");
-    if !target.addrs.is_empty() {
-        b = b.resolve_to_addrs(&target.host, &target.addrs);
-    }
-    b.build().ok()
+    crate::http::guarded(
+        crate::http::builder(Duration::from_secs(20)),
+        &target.host,
+        &target.addrs,
+    )
+    .build()
+    .ok()
 }
 
-async fn read_capped(resp: &mut reqwest::Response) -> String {
-    let mut buf: Vec<u8> = vec![];
-    while let Ok(Some(chunk)) = resp.chunk().await {
-        buf.extend_from_slice(&chunk);
-        if buf.len() >= MAX_RESPONSE_BYTES {
-            break;
-        }
-    }
+async fn read_capped(resp: &mut crate::http::Response) -> String {
+    let mut buf = crate::http::read_capped(resp, MAX_RESPONSE_BYTES)
+        .await
+        .unwrap_or_default();
     buf.truncate(MAX_RESPONSE_BYTES);
     String::from_utf8_lossy(&buf).chars().take(256).collect()
 }
@@ -1464,14 +1459,16 @@ async fn send_webhook(
     let Some(client) = http_client(&target) else {
         return fail("unknown", "Unknown error.");
     };
-    let res = client
-        .post(url)
-        .header("Content-Type", "application/json; charset=utf-8")
-        .header("Instant-Signature", format!("t={t},kid={kid},v1={sig}"))
-        .header("Idempotency-Key", idempotency_key.to_string())
-        .body(body)
-        .send()
-        .await;
+    let res = crate::http::send(
+        client
+            .post(url)
+            .header("User-Agent", "InstantDB Webhook Sender")
+            .header("Content-Type", "application/json; charset=utf-8")
+            .header("Instant-Signature", format!("t={t},kid={kid},v1={sig}"))
+            .header("Idempotency-Key", idempotency_key.to_string())
+            .body(body),
+    )
+    .await;
     match res {
         Ok(mut resp) => {
             let status = resp.status().as_u16() as i32;
@@ -1490,7 +1487,7 @@ async fn send_webhook(
         Err(e) => {
             let (error_type, message) = if e.is_timeout() {
                 ("timeout", "Request timed out.")
-            } else if e.is_connect() {
+            } else if crate::http::is_connect(&e) {
                 ("connect", "Could not connect.")
             } else if e.is_redirect() {
                 ("redirect", "Unexpected redirect.")

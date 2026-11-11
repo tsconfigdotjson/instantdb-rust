@@ -22,5 +22,9 @@ async-trait.workspace = true
 futures.workspace = true
 tokio.workspace = true
 
+# Threads, signals and child processes don't exist on the Workers target.
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "process", "signal", "parking_lot"] }
+
 [dev-dependencies]
 anyhow.workspace = true

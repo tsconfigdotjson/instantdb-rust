@@ -5,7 +5,9 @@ compatibility_date = "2026-09-02"
 compatibility_flags = ["new_module_registry"]
 
 [build]
-command = "cargo install -q worker-build && worker-build --emscripten --release"
+# worker-build from the same workers-rs revision as the `worker` dependency:
+# the Emscripten mode is a preview and has to match it.
+command = "cargo install -q --locked --git https://github.com/cloudflare/workers-rs --rev f6c8d1da189cdb91d8bd9576e19cd1dcfd917460 worker-build && worker-build --emscripten --release"
 
 # The one Durable Object that is the server node (see README.md).
 [durable_objects]
