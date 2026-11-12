@@ -194,14 +194,30 @@ this target.
     refresh) and no client was updated again, while writes kept succeeding.
     Fixed after this round, on every bus: a refresh that fails with an
     internal error is retried up to three times before the query is
-    unsubscribed. The fix is verified against a local reproduction, not yet
-    on Cloudflare.
+    unsubscribed.
+- **A fifth round, confirming two fixes**
+  ([report](../deploy-test-logs/round5/ROUND-5.md)):
+  - **Dropped connections:** with the server's Postgres connections killed
+    under load (once, once again, then 12 times in a row), every
+    transaction sent after the first kill reached all 5 sessions: 123 of
+    123, 124 of 124 and 178 of 178, against 0 of 99 in round 4. One to
+    three operations in flight at each kill failed with `Connection to the
+    origin database was lost`. A rerun with debug logging showed 4 refresh
+    queries failing and being retried, none giving up.
+  - **Deleted webhooks:** the webhook suite passed with its new check, the
+    repeating `Record not found: webhook` warning did not appear, and an
+    event left stuck by round 3 was marked failed on the new node's first
+    boot.
+  - **Regression:** the six protocol suites passed.
 
 ## Not verified
 
 - **On a deployment:** the limit on sessions per object (2000 idle ones
-  held; active load at that scale is untested), anything longer than a
-  3 hour soak, and the refresh retry above.
+  held; active load at that scale is untested) and anything longer than a
+  3 hour soak.
+- **A request in flight when a connection drops still fails.** The retry
+  covers refreshes. A query or transaction caught by the drop returns an
+  error to the client, which has to send it again.
 - **`STORAGE_BACKEND=s3` on Workers.** It compiles; the S3 suites were not
   run against the Worker. `disk` has no place there; `postgres` is the
   default and was the one tested.
