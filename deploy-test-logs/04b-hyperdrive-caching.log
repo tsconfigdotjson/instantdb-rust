@@ -6,7 +6,7 @@ $ npx wrangler hyperdrive get 373fc0afe8a7431b88970c9f530f6435
   "id": "373fc0afe8a7431b88970c9f530f6435",
   "name": "instant",
   "origin": {
-    "host": "ep-spring-rain-bdj4i0q3.c-8.us-east-2.aws.neon.tech",
+    "host": "<REDACTED-neon-host>",
     "port": 5432,
     "database": "neondb",
     "scheme": "postgresql",
@@ -31,7 +31,7 @@ $ npx wrangler hyperdrive update 373fc0afe8a7431b88970c9f530f6435 --caching-disa
   "id": "373fc0afe8a7431b88970c9f530f6435",
   "name": "instant",
   "origin": {
-    "host": "ep-spring-rain-bdj4i0q3.c-8.us-east-2.aws.neon.tech",
+    "host": "<REDACTED-neon-host>",
     "port": 5432,
     "database": "neondb",
     "scheme": "postgresql",

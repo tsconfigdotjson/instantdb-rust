@@ -269,4 +269,36 @@ These did not run inside the A6 window.
 
 ## Teardown
 
-Pending: waiting for the go-ahead.
+Done 2026-11-12 ~00:54 UTC.
+
+### Removed from Cloudflare
+
+| What | Command | Result |
+|---|---|---|
+| Worker `instant-worker`, with its Durable Objects (`node`, `node-2` … `node-7`) | `npx wrangler delete --force` | `Successfully deleted instant-worker`, exit 0 |
+| Hyperdrive config `instant` (`373fc0afe8a7431b88970c9f530f6435`) | `npx wrangler hyperdrive delete 373fc0afe8a7431b88970c9f530f6435` | `✅ Deleted`, exit 0 |
+
+- `npx wrangler hyperdrive list` now lists no configs.
+- `curl -i https://instant-worker.leerosen686.workers.dev/health` now returns `HTTP/2 404`, body `error code: 1042`.
+
+### Removed locally
+
+- **`crates/instant-worker/wrangler.toml`:** restored to the committed version. The local copy held the connection string, the Hyperdrive id, the workers.dev `BASE_URL` and the debug vars.
+- **Unsanitized tails:** `deploy-test-logs/tail-json.log` and the raw tail of this test, which was outside the repo.
+- **Temporary files:** every `/tmp/iw-*` script and working file, and the raw A5 timings.
+- **Neon hostname:** the committed `deploy-test-logs/04b-hyperdrive-caching.log` (`hyperdrive get`/`update` output) still showed it, without the password. It is redacted in this commit but remains in the history of commit `e61700a`.
+- **Final scan:** `/usr/bin/grep -rIl` over the working tree, including gitignored files, finds no Neon host and no `npg_` password. The only `postgres://user:pass@` matches are the repo's local-dev defaults and examples.
+
+### Still existing
+
+- **The Neon project.** It holds the Instant schema and the test apps. **Delete it yourself in the Neon console.**
+- **`~/.iw-database-url`:** a file holding the connection string (mode 600), created for these tests. Delete it with `rm ~/.iw-database-url`.
+- **`wrangler` OAuth login.** It was already logged in before the test; no API tokens were created. Run `npx wrangler logout` if you want it gone.
+- **Docker image `postgres:17`** (667 MB), pulled for the `psql` shim: `docker rmi postgres:17`.
+- **Build toolchain:**
+  - The Rust `beta-aarch64-apple-darwin` toolchain, installed by `rust-toolchain.toml`: `rustup toolchain uninstall beta`.
+  - `worker-build` and `worker-codegen` in `~/.cargo/bin`.
+  - The Emscripten SDK cache `~/Library/Caches/worker-build` (1.8 GB).
+- **Build output:** `crates/instant-worker/target` (613 MB) and `build` (12 MB), both gitignored.
+- **Per-step files cited in this document.** The `A1`–`A6` and `B1`–`B4` logs and analysis files exist only on the test machine, as agreed; they are not in the repo.
+- **The `psql` shim** in the session scratchpad, which is temporary.
