@@ -59,7 +59,6 @@ about a minute). So with the local bus, and only then:
 | boot | runs the bootstrap (about 96 statements) | skips it when `rust_server_config` holds this build's marker: one statement |
 | a query's rules and watermark (tx id, ISN) | three statements | one |
 | a query's snapshot transaction | `BEGIN`, then `SET TRANSACTION` | one `BEGIN ISOLATION LEVEL ...` |
-| a refresh that fails with an internal error | the query is unsubscribed and the client gets an error frame | retried up to three times first |
 
 Counted locally from the server's statement log (excluding `BEGIN`, which
 sqlx does not log): a new query went from 8 statements to 5, a transaction
@@ -193,9 +192,10 @@ this target.
     server's Postgres connections killed mid-refresh, the failing refresh
     unsubscribed the query (as the original server does on any failed
     refresh) and no client was updated again, while writes kept succeeding.
-    Fixed after this round: a node on the local bus now retries a refresh
-    that fails with an internal error. The fix is verified against a local
-    reproduction, not yet on Cloudflare.
+    Fixed after this round, on every bus: a refresh that fails with an
+    internal error is retried up to three times before the query is
+    unsubscribed. The fix is verified against a local reproduction, not yet
+    on Cloudflare.
 
 ## Not verified
 
@@ -206,7 +206,10 @@ this target.
   run against the Worker. `disk` has no place there; `postgres` is the
   default and was the one tested.
 - **The multinode, admin SDK and differential suites** against the Worker.
-- **CI.** Nothing builds the Worker in CI yet, so it can break unnoticed.
+- **CI coverage is a smoke test.** The `worker` job builds the Worker and
+  runs the ws smoke and local-bus tests against it under `wrangler dev`. It
+  is allowed to fail, because the preview toolchain can break it without a
+  change here, and `wrangler dev` does not exercise Hyperdrive.
 
 ## Limits of this shape
 

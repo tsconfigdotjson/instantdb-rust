@@ -676,7 +676,7 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
 
     // 2. rules once per batch (non-admin sessions only)
     let rules = if stale_queries.iter().any(|q| !q.perms.admin) {
-        let mut delays = transient_retry_delays(state).iter();
+        let mut delays = TRANSIENT_RETRY_DELAYS_MS.iter();
         loop {
             let loaded = match state.pool.acquire().await {
                 Ok(mut conn) => Rules::load(&mut conn, app_id).await,
@@ -746,11 +746,10 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
                 let started = Instant::now();
                 // A failed recomputation unsubscribes the query (see
                 // refresh_failed), and the official client does not
-                // resubscribe. Behind a pooler that drops connections
-                // (Hyperdrive), one lost connection mid-refresh would end
-                // live updates for the query, so an internal error is retried
+                // resubscribe, so one lost connection mid-refresh would end
+                // live updates for the query. An internal error is retried
                 // first; rule and validation errors are not.
-                let mut delays = transient_retry_delays(&state).iter();
+                let mut delays = TRANSIENT_RETRY_DELAYS_MS.iter();
                 let out = loop {
                     let out = service::run_refresh_query_full(
                         &state, app_id, &attrs, &job.perms, &job.q, rules,
@@ -925,16 +924,10 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
 }
 
 /// Pauses (ms) before each retry of a refresh step that failed with an
-/// internal error. Only a node on the local bus retries: it may be behind a
-/// pooler that drops connections, where such failures are routine. Elsewhere
-/// the list is empty and a failure is handled at once, as it always was.
-fn transient_retry_delays(state: &AppState) -> &'static [u64] {
-    if state.cfg.bus_local {
-        &[100, 400, 1500]
-    } else {
-        &[]
-    }
-}
+/// internal error: a dropped connection, a pooler recycling its backends, a
+/// Postgres restart or failover. Without the retry one such failure ends
+/// live updates for the query (see refresh_failed).
+const TRANSIENT_RETRY_DELAYS_MS: [u64; 3] = [100, 400, 1500];
 
 /// A session whose refresh hit a failing recomputation, the way legacy's
 /// handle-refresh! fails: its recomputations run in one `pmap`, so one

@@ -1585,18 +1585,28 @@ async fn record_attempt(state: &AppState, ev: &ClaimedEvent, a: Attempt) -> Resu
 }
 
 async fn handle_event(state: &Arc<AppState>, ev: ClaimedEvent) -> Result<()> {
-    let webhook = get_by_id(state, ev.app_id, ev.webhook_id).await?;
+    // An event can outlive its webhook. Without a recorded attempt it would
+    // stay `processing`, be freed by free_stuck and claimed again every few
+    // minutes for good, so a deleted webhook ends the event like a disabled
+    // one does.
+    let ended = |message: &str| Attempt {
+        at: chrono::Utc::now(),
+        duration_ms: 0,
+        success: false,
+        status_code: None,
+        response_text: None,
+        error_type: Some("disabled".into()),
+        error_message: Some(message.into()),
+    };
+    let webhook = match get_by_id(state, ev.app_id, ev.webhook_id).await {
+        Ok(webhook) => webhook,
+        Err(e) if e.error_type == "record-not-found" => {
+            return record_attempt(state, &ev, ended("Webhook was deleted.")).await;
+        }
+        Err(e) => return Err(e),
+    };
     if webhook.status != "active" {
-        let a = Attempt {
-            at: chrono::Utc::now(),
-            duration_ms: 0,
-            success: false,
-            status_code: None,
-            response_text: None,
-            error_type: Some("disabled".into()),
-            error_message: Some("Webhook is disabled.".into()),
-        };
-        return record_attempt(state, &ev, a).await;
+        return record_attempt(state, &ev, ended("Webhook is disabled.")).await;
     }
     let idempotency_key = payload_idempotency_key(ev.webhook_id, ev.isn);
     let payload_url = format!(
