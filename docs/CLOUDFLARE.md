@@ -63,7 +63,7 @@ about a minute). So with the local bus, and only then:
 Counted locally from the server's statement log (excluding `BEGIN`, which
 sqlx does not log): a new query went from 8 statements to 5, a transaction
 from 11 to 10, and a transaction through to another session's refresh from
-17 to 15. The effect on latency has not been measured on a deployment.
+17 to 15. A second deployment confirmed the counts and the effect (below).
 
 Nothing is cached to get there: every operation still reads the current
 rules. (A first attempt cached rules for 5 s; the conformance suite, which
@@ -140,8 +140,20 @@ this target.
     refresh 482 ms. Nearly all of it is statement round trips at about
     25 ms each.
 
-  Those timings predate the boot fast path and the round-trip savings
-  above, which have not been deployed.
+- **A second deployment, with the boot fast path and the statement
+  savings** (same setup, `NODE_LOCATION_HINT=enam`;
+  [report](../deploy-test-logs/latency2/LATENCY-2.md)):
+  - **Passed:** the same six suites; conformance took 15 s against 51 s.
+  - **Latency:** from Toronto, a new `add-query` took 122 ms median (5
+    statements), a transaction 221 ms (10), and a transaction through to
+    another session's refresh 339 ms (15). A statement took 18 ms median,
+    down from 25; the cause was not isolated.
+  - **Boot:** a repeat boot ran 1 statement and answered in 0.44 s and
+    1.01 s (two samples), most of it between the Worker and the Durable
+    Object starting. The first boot of a build still runs the bootstrap
+    (4.5 s).
+  - **Idle:** with no clients, the background loops ran 22 statements a
+    minute until the object was evicted after about 65 s.
 
 ## Not verified
 
@@ -173,7 +185,9 @@ this target.
   to Postgres, and an operation runs several in sequence. Cloudflare creates
   a Durable Object near the first client that reaches it, which may be far
   from the database: set `NODE_LOCATION_HINT` to the database's region (with
-  a new `NODE_NAME`, since the hint applies only at creation). Untested.
+  a new `NODE_NAME`, since the hint applies only at creation). It was set
+  on the second deployment, but nothing reports where the object runs, so
+  its effect is unconfirmed.
 - **Prepared statements are never closed** in the Worker's patched sqlx,
   because Hyperdrive rejects `Close`. Whether they pile up on Postgres
   backends over a long uptime has not been measured.
