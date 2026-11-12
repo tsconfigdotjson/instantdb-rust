@@ -57,14 +57,17 @@ about a minute). So with the local bus, and only then:
 | | default | local bus |
 |---|---|---|
 | boot | runs the bootstrap (about 96 statements) | skips it when `rust_server_config` holds this build's marker: one statement |
-| permission rules | read for every query, transaction and refresh | cached per app for 5 s, and evicted at once when a route writes them |
-| a query's watermark (tx id, ISN) | two statements | one |
+| a query's rules and watermark (tx id, ISN) | three statements | one |
 | a query's snapshot transaction | `BEGIN`, then `SET TRANSACTION` | one `BEGIN ISOLATION LEVEL ...` |
 
 Counted locally from the server's statement log (excluding `BEGIN`, which
 sqlx does not log): a new query went from 8 statements to 5, a transaction
-from 11 to 9, and a transaction through to another session's refresh from
-17 to 13. The effect on latency has not been measured on a deployment.
+from 11 to 10, and a transaction through to another session's refresh from
+17 to 15. The effect on latency has not been measured on a deployment.
+
+Nothing is cached to get there: every operation still reads the current
+rules. (A first attempt cached rules for 5 s; the conformance suite, which
+edits rules directly in SQL, caught the staleness.)
 
 ### Hyperdrive and sqlx
 

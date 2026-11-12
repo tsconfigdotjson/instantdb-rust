@@ -597,12 +597,11 @@ async fn handle_add_query(
         st.inference
     };
     let started = std::time::Instant::now();
-    let rules = if perms.admin {
-        None
-    } else {
-        let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
-        Some(service::load_rules(state, &mut conn, app_id).await?)
-    };
+    // Rules and watermark. The watermark is read before the query runs, so
+    // a result (cached or fresh) is never older than the tx id the client is
+    // told it reflects.
+    let (rules, processed_tx_id, processed_isn) =
+        service::query_preamble(state, app_id, !perms.admin).await?;
     // the shared cache holds join-rows frames; tree subscribers are few. A
     // rule that calls rateLimit charges its bucket on every evaluation
     // (legacy has no result cache), so those results are never shared.
@@ -620,9 +619,6 @@ async fn handle_add_query(
         perms.origin.clone(),
         rules.as_ref().map(|r| value_hash(&r.code)).unwrap_or(0),
     );
-    // Watermark first, so a result (cached or fresh) is never older than
-    // the tx id the client is told it reflects.
-    let (processed_tx_id, processed_isn) = service::watermark(state, app_id).await?;
     let attr_gen = service::attr_generation(state, app_id);
     let cached = if cacheable {
         state.query_cache.get(&cache_key).and_then(|e| {

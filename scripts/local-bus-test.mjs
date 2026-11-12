@@ -1,6 +1,5 @@
 // INSTANT_BUS=local: one node, no LISTEN/NOTIFY. A transaction must still
-// refresh other sessions' queries, a rules change must reach the node's rules
-// cache at once, and a dashboard status change must still
+// refresh other sessions' queries, and a dashboard status change must still
 // reach live sessions as `app-status-changed` (there is no row trigger to
 // announce it; the route publishes it), only when the status really changed.
 // Run against a node started with INSTANT_BUS=local.
@@ -91,18 +90,6 @@ const refreshed = await b
   .waitFor((m) => m.op === "refresh-ok" && JSON.stringify(m.computations).includes("changed"))
   .then(() => true, () => false);
 check(refreshed, "refresh-ok after another session's transaction");
-
-// --- rules are cached on the local bus: a change must apply to the next query
-const rows = (m) => m.result[0].data["datalog-result"]["join-rows"].flat();
-const q1 = a.send({ op: "add-query", q: { todos: { $: { where: { title: "changed" } } } } });
-const visible = await a.waitFor((m) => m.op === "add-query-ok" && m["client-event-id"] === q1);
-check(rows(visible).length > 0, "todo visible under the default rules");
-await dash(`/dash/apps/${appId}/rules`, { code: { todos: { allow: { view: "false" } } } });
-const c = await session();
-const q2 = c.send({ op: "add-query", q: { todos: { $: { where: { title: "changed" } } } } });
-const hidden = await c.waitFor((m) => m.op === "add-query-ok" && m["client-event-id"] === q2);
-check(rows(hidden).length === 0, "a rules change applies to the next query");
-c.ws.close();
 
 // --- status: a dashboard flip is pushed to live sessions
 await dash(`/dash/apps/${appId}/status`, { status: "read-only" });
