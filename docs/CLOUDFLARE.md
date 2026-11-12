@@ -59,6 +59,7 @@ about a minute). So with the local bus, and only then:
 | boot | runs the bootstrap (about 96 statements) | skips it when `rust_server_config` holds this build's marker: one statement |
 | a query's rules and watermark (tx id, ISN) | three statements | one |
 | a query's snapshot transaction | `BEGIN`, then `SET TRANSACTION` | one `BEGIN ISOLATION LEVEL ...` |
+| a refresh that fails with an internal error | the query is unsubscribed and the client gets an error frame | retried up to three times first |
 
 Counted locally from the server's statement log (excluding `BEGIN`, which
 sqlx does not log): a new query went from 8 statements to 5, a transaction
@@ -172,10 +173,35 @@ this target.
     `database error: ... shutting down` as its connections closed; the
     database had not restarted, and a rerun 30 s later passed.
 
+- **A fourth round, diagnostic**
+  ([report](../deploy-test-logs/round4/ROUND-4.md)):
+  - **Subscribers share one recomputation.** One transaction ran one
+    subscription query whether 1, 5 or 20 sessions were subscribed.
+  - **Capacity:** 2000 idle subscribed sessions held on one object, with no
+    drops and refreshes still arriving in about a second. The tail recorded
+    few of the object's events during that test, so a limit warning could
+    have gone unseen.
+  - **Soak, 3 hours:** 5 sessions, no failed operations, every one of 1079
+    refreshes on time, no restarts, no latency drift.
+  - **Speed varies by node, not by load.** Of five fresh objects, two were
+    about twice as slow as the rest for every operation, including ones
+    that run no SQL (a statement took 49 ms against 23 ms). Session count
+    and pool size did not predict which. The likely cause is where
+    Cloudflare placed each object, which nothing reports. Round 3's slower
+    figures match the slow group.
+  - **A dropped database connection could end live updates.** With the
+    server's Postgres connections killed mid-refresh, the failing refresh
+    unsubscribed the query (as the original server does on any failed
+    refresh) and no client was updated again, while writes kept succeeding.
+    Fixed after this round: a node on the local bus now retries a refresh
+    that fails with an internal error. The fix is verified against a local
+    reproduction, not yet on Cloudflare.
+
 ## Not verified
 
-- **On a deployment:** how many sessions fit in 128 MB, and anything
-  longer than a 48 minute soak.
+- **On a deployment:** the limit on sessions per object (2000 idle ones
+  held; active load at that scale is untested), anything longer than a
+  3 hour soak, and the refresh retry above.
 - **`STORAGE_BACKEND=s3` on Workers.** It compiles; the S3 suites were not
   run against the Worker. `disk` has no place there; `postgres` is the
   default and was the one tested.
