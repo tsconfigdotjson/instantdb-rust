@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use futures::StreamExt;
-use instant_core::perms::Rules;
 use instant_core::topics::{QueryTopics, TxChange, TxTopics};
 use serde::Serialize;
 use serde_json::value::RawValue;
@@ -215,6 +214,7 @@ async fn dispatch(state: &Arc<AppState>, channel: &str, payload: Value) {
                 return;
             };
             state.query_cache.retain(|k, _| k.0 != app_id);
+            state.rules_cache.remove(&app_id);
         }
         "instant_webhooks" => {
             if let Some(app_id) = payload
@@ -677,7 +677,7 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
     // 2. rules once per batch (non-admin sessions only)
     let rules = if stale_queries.iter().any(|q| !q.perms.admin) {
         match state.pool.acquire().await {
-            Ok(mut conn) => match Rules::load(&mut conn, app_id).await {
+            Ok(mut conn) => match service::load_rules(state, &mut conn, app_id).await {
                 Ok(r) => Some(r),
                 Err(e) => {
                     tracing::warn!("refresh: failed to load rules: {e}");

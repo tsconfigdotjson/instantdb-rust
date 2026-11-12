@@ -601,7 +601,7 @@ async fn handle_add_query(
         None
     } else {
         let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
-        Some(instant_core::perms::Rules::load(&mut conn, app_id).await?)
+        Some(service::load_rules(state, &mut conn, app_id).await?)
     };
     // the shared cache holds join-rows frames; tree subscribers are few. A
     // rule that calls rateLimit charges its bucket on every evaluation
@@ -622,8 +622,7 @@ async fn handle_add_query(
     );
     // Watermark first, so a result (cached or fresh) is never older than
     // the tx id the client is told it reflects.
-    let processed_tx_id = service::max_tx_id(state, app_id).await?;
-    let processed_isn = service::current_isn(state).await;
+    let (processed_tx_id, processed_isn) = service::watermark(state, app_id).await?;
     let attr_gen = service::attr_generation(state, app_id);
     let cached = if cacheable {
         state.query_cache.get(&cache_key).and_then(|e| {

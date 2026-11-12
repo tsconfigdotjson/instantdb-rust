@@ -176,9 +176,17 @@ pub async fn load_or_generate_key(pool: &sqlx::PgPool) -> Result<WebhookKey> {
             _ => {}
         }
     }
+    key_from_stored(&seed_hex, kid)
+}
+
+/// The signing key as stored in `rust_server_config` (hex seed + key id).
+pub fn key_from_stored(seed_hex: &str, kid: String) -> Result<WebhookKey> {
+    if !seed_hex.is_ascii() {
+        return Err(InstantError::internal("corrupt webhook signing key"));
+    }
     let bytes: Vec<u8> = (0..seed_hex.len())
         .step_by(2)
-        .filter_map(|i| u8::from_str_radix(&seed_hex[i..i + 2], 16).ok())
+        .filter_map(|i| u8::from_str_radix(seed_hex.get(i..i + 2)?, 16).ok())
         .collect();
     let seed: [u8; 32] = bytes
         .try_into()

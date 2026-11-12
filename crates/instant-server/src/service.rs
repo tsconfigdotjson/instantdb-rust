@@ -152,6 +152,75 @@ pub fn invalidate_attrs(state: &AppState, app_id: Uuid) {
     state.attr_cache.remove(&app_id);
 }
 
+/// How long a node on the local bus trusts its cached rules. A route that
+/// writes rules evicts them at once (the `instant_rules` message); the TTL
+/// covers a row changed directly in SQL, which nothing announces there.
+const RULES_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The app's permission rules. A node on the local bus may be far from its
+/// database (every statement a network round trip), and the rules are read
+/// on every query, transaction and refresh, so there they are cached.
+/// Otherwise this is a plain read on `conn`, as it always was.
+pub async fn load_rules(
+    state: &AppState,
+    conn: &mut sqlx::PgConnection,
+    app_id: Uuid,
+) -> Result<Rules> {
+    if !state.cfg.bus_local {
+        return Rules::load(conn, app_id).await;
+    }
+    if let Some(entry) = state.rules_cache.get(&app_id) {
+        if entry.1.elapsed() < RULES_CACHE_TTL {
+            return Ok(entry.0.clone());
+        }
+    }
+    let rules = Rules::load(conn, app_id).await?;
+    state
+        .rules_cache
+        .insert(app_id, (rules.clone(), std::time::Instant::now()));
+    Ok(rules)
+}
+
+/// The watermark a query result is tagged with: the app's newest tx id and
+/// the current ISN. On the local bus they are read in one statement.
+pub async fn watermark(state: &AppState, app_id: Uuid) -> Result<(i64, Value)> {
+    if state.cfg.bus_local {
+        let row = sqlx::query(
+            "SELECT coalesce(max(id), 0) AS n, '0/' || pg_current_wal_lsn()::text AS isn
+               FROM transactions WHERE app_id = $1",
+        )
+        .bind(app_id)
+        .fetch_one(&state.pool)
+        .await;
+        // pg_current_wal_lsn can be refused (a standby, a restricted role);
+        // the separate reads below tolerate that
+        if let Ok(row) = row {
+            return Ok((row.get("n"), Value::String(row.get("isn"))));
+        }
+    }
+    let tx_id = max_tx_id(state, app_id).await?;
+    Ok((tx_id, current_isn(state).await))
+}
+
+/// A repeatable-read, read-only transaction: one snapshot for a query and
+/// the permission checks that follow it. On the local bus the isolation
+/// level rides on the BEGIN, saving a round trip.
+pub async fn begin_snapshot(state: &AppState) -> Result<sqlx::PgTransaction<'static>> {
+    if state.cfg.bus_local {
+        return state
+            .pool
+            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .await
+            .map_err(InstantError::from);
+    }
+    let mut tx = state.pool.begin().await.map_err(InstantError::from)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(InstantError::from)?;
+    Ok(tx)
+}
+
 pub async fn max_tx_id(state: &AppState, app_id: Uuid) -> Result<i64> {
     let row = sqlx::query("SELECT coalesce(max(id), 0) AS n FROM transactions WHERE app_id = $1")
         .bind(app_id)
@@ -307,11 +376,7 @@ async fn run_query_full_with_options(
     // the view rule would then evaluate against a null path and fail the whole
     // refresh. A refresh racing a `$files` delete could remove the
     // subscription this way (fuzz-storage seed 202).
-    let mut tx = state.pool.begin().await.map_err(InstantError::from)?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await
-        .map_err(InstantError::from)?;
+    let mut tx = begin_snapshot(state).await?;
     let mut result = instaql::query_with_options(&mut tx, &ctx, q, opts).await?;
     // Topics come from the pre-permissions result: an entity hidden by a
     // view rule is still tracked, so a write that makes it visible refreshes.
@@ -510,7 +575,7 @@ async fn transact_once(
             )
             .await?
         } else {
-            let rules = instant_core::perms::Rules::load(&mut dbtx, app_id).await?;
+            let rules = load_rules(state, &mut dbtx, app_id).await?;
             let auth = perms.auth_ctx(state);
             instant_core::perms::permissioned_transact(
                 &mut dbtx,

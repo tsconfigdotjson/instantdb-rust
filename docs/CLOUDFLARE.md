@@ -49,6 +49,23 @@ The server used both:
 | `rules`, `apps.status` and `webhooks` changes announced by row triggers | with the local bus, the routes that write those rows publish the message themselves. An edit made directly in SQL is not pushed to live sessions; the server picks it up when its caches expire |
 | boot and hard-delete sweeps take session-level advisory locks | with the local bus, transaction-level locks, held by a transaction kept open for the duration. The default is unchanged |
 
+A node on the local bus may also be far from its database, where every
+statement is a network round trip (about 25 ms each in the deployment
+below), and it may start often (an idle Durable Object is evicted after
+about a minute). So with the local bus, and only then:
+
+| | default | local bus |
+|---|---|---|
+| boot | runs the bootstrap (about 96 statements) | skips it when `rust_server_config` holds this build's marker: one statement |
+| permission rules | read for every query, transaction and refresh | cached per app for 5 s, and evicted at once when a route writes them |
+| a query's watermark (tx id, ISN) | two statements | one |
+| a query's snapshot transaction | `BEGIN`, then `SET TRANSACTION` | one `BEGIN ISOLATION LEVEL ...` |
+
+Counted locally from the server's statement log (excluding `BEGIN`, which
+sqlx does not log): a new query went from 8 statements to 5, a transaction
+from 11 to 9, and a transaction through to another session's refresh from
+17 to 13. The effect on latency has not been measured on a deployment.
+
 ### Hyperdrive and sqlx
 
 `wrangler dev` connects straight to Postgres, so it does not exercise
@@ -112,8 +129,16 @@ this target.
   - **Passed:** ws smoke, wire conformance (222 assertions), SSE, sync
     tables, the local-bus test and streams all pass. The tail shows no
     errors.
-  - **Cold start:** about 8 s for a fresh Durable Object.
-  - **Latency:** a new `add-query` takes about 370 ms median from Toronto.
+  - **Cold start:** 4.6 s median, of which 3.7 s was the bootstrap's 96
+    statements ([latency report](../deploy-test-logs/latency/LATENCY.md)).
+    An object with no requests was evicted after 69 to 105 s.
+  - **Latency:** from Toronto, a new `add-query` took 243 ms median, a
+    transaction 295 ms, and a transaction through to another session's
+    refresh 482 ms. Nearly all of it is statement round trips at about
+    25 ms each.
+
+  Those timings predate the boot fast path and the round-trip savings
+  above, which have not been deployed.
 
 ## Not verified
 
@@ -138,10 +163,17 @@ this target.
   routes need forwarding.
 - **No scale to zero while clients are connected.** Sessions and their
   subscriptions live in memory, so the object uses standard websockets, not
-  the Hibernation API, and the background loops' timers keep it resident.
+  the Hibernation API. With no clients it is evicted after about a minute,
+  and the next request pays a cold start.
   Hibernating would mean persisting session state to the object's storage.
-- **Database round trips.** The object runs in one location and Hyperdrive
-  connects from near it; put Postgres in a nearby region.
+- **Database round trips.** Every statement is a round trip from the object
+  to Postgres, and an operation runs several in sequence. Cloudflare creates
+  a Durable Object near the first client that reaches it, which may be far
+  from the database: set `NODE_LOCATION_HINT` to the database's region (with
+  a new `NODE_NAME`, since the hint applies only at creation). Untested.
+- **Prepared statements are never closed** in the Worker's patched sqlx,
+  because Hyperdrive rejects `Close`. Whether they pile up on Postgres
+  backends over a long uptime has not been measured.
 - **Preview toolchain.** Rust beta, patched Tokio and mio, and a patched
   Emscripten, all pinned by workers-rs and expected to change.
 

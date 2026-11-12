@@ -44,7 +44,7 @@ async fn prepare(
     // ("bind message supplies 1 parameters, but prepared statement
     // \"sqlx_s_5\" requires 0") or drops the ParseComplete ("expected
     // ParseComplete, got ParameterDescription"). Number statements from one
-    // process-wide counter, seeded from the clock, so no name is reused.
+    // process-wide counter with a random start, so no name is reused.
     let id = if persistent {
         StatementId::from_number(next_global_statement_number())
     } else {
@@ -107,20 +107,15 @@ async fn prepare(
     Ok((id, metadata))
 }
 
-/// Process-wide statement numbers (instant-worker patch). The seed is the
-/// clock in milliseconds, so a restarted process starts far from where the
-/// previous one stopped, and backends Hyperdrive kept do not see old names.
+/// Process-wide statement numbers (instant-worker patch). The first number
+/// is random, so a restarted process, or a second one sharing the same
+/// Hyperdrive backends, starts far from the names already in use. (A clock
+/// seed put two processes started close together in overlapping ranges.)
 fn next_global_statement_number() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::OnceLock;
     static NEXT: OnceLock<AtomicU32> = OnceLock::new();
-    let next = NEXT.get_or_init(|| {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u32)
-            .unwrap_or(1);
-        AtomicU32::new(seed)
-    });
+    let next = NEXT.get_or_init(|| AtomicU32::new(rand::random::<u32>()));
     next.fetch_add(1, Ordering::Relaxed)
 }
 

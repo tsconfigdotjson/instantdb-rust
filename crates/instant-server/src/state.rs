@@ -457,6 +457,9 @@ pub struct AppState {
     pub webhook_cache: DashMap<Uuid, (std::time::Instant, Arc<Vec<crate::webhooks::Webhook>>)>,
     /// apps over `app_size_limit_bytes` as of the last size check (usage.rs)
     pub over_size_limit: dashmap::DashSet<Uuid>,
+    /// per-app permission rules, used only with the local bus
+    /// (service::load_rules); evicted by the `instant_rules` message and a TTL
+    pub rules_cache: DashMap<Uuid, (instant_core::perms::Rules, std::time::Instant)>,
 }
 
 impl AppState {
@@ -502,6 +505,7 @@ impl AppState {
             webhook_notify: tokio::sync::Notify::new(),
             webhook_cache: DashMap::new(),
             over_size_limit: dashmap::DashSet::new(),
+            rules_cache: DashMap::new(),
         })
     }
 

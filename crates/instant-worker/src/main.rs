@@ -29,11 +29,23 @@ fn main() {}
 async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // NODE_NAME picks the object; changing it starts a fresh node (the old
     // one stays resident while its timers run, across deploys).
-    let name = env.var("NODE_NAME").map(|v| v.to_string()).unwrap_or_else(|_| "node".into());
-    env.durable_object("NODE")?
-        .get_by_name(&name)?
-        .fetch_with_request(req)
-        .await
+    let name = env
+        .var("NODE_NAME")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "node".into());
+    // NODE_LOCATION_HINT (wnam, enam, weur, apac, ...) asks Cloudflare to
+    // create the object in that region instead of near whoever calls first.
+    // Every SQL statement is a round trip from the object to Postgres, so
+    // the object belongs near the database. It only applies when the object
+    // is created: set it together with a new NODE_NAME.
+    let namespace = env.durable_object("NODE")?;
+    let stub = match env.var("NODE_LOCATION_HINT").map(|v| v.to_string()) {
+        Ok(hint) if !hint.trim().is_empty() => {
+            namespace.get_by_name_with_location_hint(&name, hint.trim())?
+        }
+        _ => namespace.get_by_name(&name)?,
+    };
+    stub.fetch_with_request(req).await
 }
 
 struct Server {

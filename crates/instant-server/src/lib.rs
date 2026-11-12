@@ -59,6 +59,21 @@ const STORAGE_BODY_LIMIT: usize = 100 * 1024 * 1024;
 /// Start the background loops with [`spawn_background`] afterwards.
 pub async fn bootstrap(mut cfg: Config, pool: sqlx::PgPool) -> anyhow::Result<Arc<AppState>> {
     state::remember_runtime();
+    // A node that starts often and far from its database (a Cloudflare
+    // Durable Object is evicted after about a minute idle, and every
+    // statement is a network round trip) skips the bootstrap when an earlier
+    // boot of this same build already ran it.
+    if cfg.bus_local {
+        if let Some((secret, webhook_key)) = boot_record(&pool, cfg.secret.is_empty()).await {
+            if let Some(secret) = secret {
+                cfg.secret = secret;
+            }
+            storage::init_from_env().map_err(|e| anyhow::anyhow!("storage backend: {e}"))?;
+            let state = AppState::new(cfg, pool);
+            let _ = state.webhook_key.set(webhook_key);
+            return Ok(state);
+        }
+    }
     // Serialize bootstrap DDL across concurrently-starting nodes: a
     // session-level advisory lock on its own connection. With the local bus
     // the node may be behind a transaction-mode pooler (Hyperdrive,
@@ -125,7 +140,73 @@ pub async fn bootstrap(mut cfg: Config, pool: sqlx::PgPool) -> anyhow::Result<Ar
         .await
         .map_err(|e| anyhow::anyhow!("webhook signing key: {e}"))?;
     let _ = state.webhook_key.set(webhook_key);
+    if state.cfg.bus_local {
+        sqlx::query(
+            "INSERT INTO rust_server_config (key, value) VALUES ('bootstrap_marker', $1)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(bootstrap_marker())
+        .execute(&state.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!("bootstrap marker: {e}"))?;
+    }
     Ok(state)
+}
+
+/// Identifies what the bootstrap would create: the system catalog and the
+/// source of every module that issues bootstrap DDL. Any change to either
+/// gives a new marker, so the next boot runs the bootstrap in full.
+fn bootstrap_marker() -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(format!("{:?}", instant_core::system_catalog::all_attrs()));
+    for src in [
+        include_str!("lib.rs"),
+        include_str!("service.rs"),
+        include_str!("storage.rs"),
+        include_str!("webhooks.rs"),
+    ] {
+        h.update(src);
+    }
+    h.finalize()
+        .iter()
+        .take(12)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// What an earlier bootstrap of this build left in `rust_server_config`: the
+/// generated server secret (when the caller needs it) and the webhook signing
+/// key. None when the bootstrap has to run: no marker, another build's
+/// marker, a missing table, or a missing value.
+async fn boot_record(
+    pool: &sqlx::PgPool,
+    need_secret: bool,
+) -> Option<(Option<String>, webhooks::WebhookKey)> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT key, value FROM rust_server_config
+          WHERE key IN ('bootstrap_marker', 'server_secret', 'webhook_signing_key', 'webhook_kid')",
+    )
+    .fetch_all(pool)
+    .await
+    .ok()?;
+    let value = |key: &str| {
+        rows.iter()
+            .find(|r| r.get::<String, _>("key") == key)
+            .map(|r| r.get::<String, _>("value"))
+    };
+    if value("bootstrap_marker")? != bootstrap_marker() {
+        return None;
+    }
+    let secret = if need_secret {
+        Some(value("server_secret").filter(|s| !s.is_empty())?)
+    } else {
+        None
+    };
+    let key =
+        webhooks::key_from_stored(&value("webhook_signing_key")?, value("webhook_kid")?).ok()?;
+    Some((secret, key))
 }
 
 /// The node's background loops: the bus consumer (refresh fan-out), webhook

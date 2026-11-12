@@ -13,7 +13,7 @@ Postgres at `postgres://instant:instant@localhost:5432/instant`.
 | `BASE_URL` | `http://localhost:$PORT` | the public URL; OAuth redirects and file URLs are built from it |
 | `SERVER_SECRET` | generated & persisted | signs storage download URLs. When unset, a random secret is generated on first boot and stored in Postgres, so every node shares it. Set it explicitly to control rotation |
 | `PG_POOL_MAX` / `PG_POOL_MIN` | `20` / `2` | Postgres connection pool per node |
-| `INSTANT_BUS` | `postgres` | how nodes hear about each other's writes. `postgres` uses `LISTEN/NOTIFY` and supports any number of nodes. `local` keeps the messages inside the process and never issues `LISTEN` or `NOTIFY`: use it for a single node behind a transaction-mode pooler (Cloudflare Hyperdrive, PgBouncer). With `local`, a second node on the same database does not see the first one's writes |
+| `INSTANT_BUS` | `postgres` | how nodes hear about each other's writes. `postgres` uses `LISTEN/NOTIFY` and supports any number of nodes. `local` keeps the messages inside the process and never issues `LISTEN` or `NOTIFY`: use it for a single node behind a transaction-mode pooler (Cloudflare Hyperdrive, PgBouncer). With `local`, a second node on the same database does not see the first one's writes. `local` also assumes the database may be far away: it skips the boot-time bootstrap once this build has run it, and caches each app's permission rules for up to 5 s (a change made through the API applies at once; one made directly in SQL within 5 s) |
 
 ## Storage
 

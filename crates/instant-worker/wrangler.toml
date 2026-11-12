@@ -36,3 +36,9 @@ INSTANT_HANDLE_RECEIVE_TIMEOUT_MS = "30000"
 # A redeploy keeps a running Durable Object (and its in-memory state); a new
 # NODE_NAME starts a fresh node. Default "node".
 # NODE_NAME = "node"
+# Where Cloudflare creates the Durable Object (wnam, enam, sam, weur, eeur,
+# apac, oc, afr, me). Pick the region of your database: each SQL statement is
+# a round trip from the object. Without it the object is created near the
+# first client. It applies only when the object is created, so set it with a
+# new NODE_NAME.
+# NODE_LOCATION_HINT = "enam"
