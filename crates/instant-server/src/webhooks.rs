@@ -1422,17 +1422,35 @@ fn retry_after(previous_attempts: i64) -> chrono::Duration {
 /// hostile endpoint can't make the sender buffer an unbounded body.
 const MAX_RESPONSE_BYTES: usize = 4096;
 
+const USER_AGENT: &str = "InstantDB Webhook Sender";
+
 fn http_client(target: &ValidatedUrl) -> Option<reqwest::Client> {
-    crate::http::guarded(
+    let b = crate::http::guarded(
         crate::http::builder(Duration::from_secs(20)),
         &target.host,
         &target.addrs,
-    )
-    .build()
-    .ok()
+    );
+    // fetch has no client-wide user agent; there it is set per request
+    #[cfg(not(target_arch = "wasm32"))]
+    let b = b.user_agent(USER_AGENT);
+    b.build().ok()
 }
 
 async fn read_capped(resp: &mut crate::http::Response) -> String {
+    // natively the body is read chunk by chunk, and whatever arrived before a
+    // read error is kept
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut buf = {
+        let mut buf: Vec<u8> = vec![];
+        while let Ok(Some(chunk)) = resp.chunk().await {
+            buf.extend_from_slice(&chunk);
+            if buf.len() >= MAX_RESPONSE_BYTES {
+                break;
+            }
+        }
+        buf
+    };
+    #[cfg(target_arch = "wasm32")]
     let mut buf = crate::http::read_capped(resp, MAX_RESPONSE_BYTES)
         .await
         .unwrap_or_default();
@@ -1467,11 +1485,11 @@ async fn send_webhook(
     let Some(client) = http_client(&target) else {
         return fail("unknown", "Unknown error.");
     };
+    let req = client.post(url);
+    #[cfg(target_arch = "wasm32")]
+    let req = req.header("User-Agent", USER_AGENT);
     let res = crate::http::send(
-        client
-            .post(url)
-            .header("User-Agent", "InstantDB Webhook Sender")
-            .header("Content-Type", "application/json; charset=utf-8")
+        req.header("Content-Type", "application/json; charset=utf-8")
             .header("Instant-Signature", format!("t={t},kid={kid},v1={sig}"))
             .header("Idempotency-Key", idempotency_key.to_string())
             .body(body),
