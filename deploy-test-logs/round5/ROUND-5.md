@@ -1,6 +1,6 @@
 # instant-worker on Cloudflare, round 5: confirming two fixes
 
-Date: 2026-11-12, 19:08–20:05 UTC. Branch head `549cb17c55519333046ea5b5e397fbe8a1e31446`, which includes:
+Date: 2026-11-12, 19:08–19:58 UTC. Branch head `549cb17c55519333046ea5b5e397fbe8a1e31446`, which includes:
 - `c48c484` and `549cb17`: a refresh that fails with an internal error is retried;
 - `549cb17`: an event of a deleted webhook ends as failed.
 
@@ -327,4 +327,49 @@ Each suite ran on a fresh app on `node-20` (`05c51f00`), from `/tmp/iw-r5/` copi
 
 ## Teardown
 
-TEARDOWN_SECTION
+Done after the report was pushed (`3375749`), 19:57:37Z–19:58:04Z. Every command and its exit code is in `T-teardown.log` (not committed).
+
+**Removed:**
+- **Processes:**
+  - touched the tail loop's stop file;
+  - `pkill -f 'wrangler tail --format json'`: exit 0 (the loop exited 144);
+  - `pkill -f 'cloudflared tunnel'`: exit 0;
+  - `pkill -f 'iw-r5/load.mjs'`: exit 1, nothing was running.
+
+  `pgrep -fl 'wrangler tail|load.mjs|cloudflared|runA.sh|runB.sh|runC.sh'` then returned nothing (exit 1).
+- **Worker:** `npx wrangler delete --force` → `Successfully deleted instant-worker` (exit 0). This removes the Worker, its Durable Objects (`node-20`, `node-21`) and its secrets.
+- **Hyperdrive:** `npx wrangler hyperdrive delete abe731625aa24a20a467dcf698410b2a` → `✅ Deleted` (exit 0).
+- **Verification:**
+  - `npx wrangler hyperdrive list` shows only the header `📋 Listing Hyperdrive configs`, with no configs.
+  - `curl $URL/health` → `error code: 1042`, HTTP 404.
+- **Local files:**
+  - `git checkout -- crates/instant-worker/wrangler.toml`; `git status` shows it clean.
+  - Deleted from the session scratchpad:
+    - the raw tail (6.0 MB);
+    - the raw per-operation logs and kill records;
+    - the analysis scripts and helper library;
+    - the psql shim;
+    - the `cloudflared` binary, its tarball and the tunnel log;
+    - the uncompressed sanitized tail.
+  - Deleted `/tmp/iw-r5` (load script and suite copies, including the webhooks-test copy with the tunnel URL).
+  - The scratchpad is empty and `/tmp/iw-r5` does not exist.
+- **Secret scan:**
+  - The database host and password were read from `~/.iw-database-url` into a temporary pattern file, never printed; the file was deleted afterwards. The scan also searched for `npg_[A-Za-z0-9]{4}` and the two revoked admin tokens.
+  - Working tree, gitignored files included (`/usr/bin/grep -rIl`, excluding `.git`, `target`, `build`, `node_modules`): **0 files**.
+  - `target/` and `build/`: **0 files**.
+  - `git grep` on HEAD: **0 files**.
+  - `git log --all -S`:
+    - **host:** `19238da` and `e61700a`, the round 1 commits reported in round 4. This round added nothing.
+    - **password:** none.
+
+**Still exists:**
+- **The Neon database**, with this round's 11 apps (10 from `create-app.sh`, 1 created by `local-bus-test`). The two revoked admin tokens no longer exist. The user deletes the database.
+- **`~/.iw-database-url`**, which holds the connection string.
+- **The database host name** in the branch history (`e61700a`), as in round 4.
+- **Other local state:**
+  - the wrangler OAuth login;
+  - the `postgres:17` Docker image;
+  - the Rust toolchains;
+  - `~/Library/Caches/worker-build`;
+  - `crates/instant-worker/target` and `build`.
+- **Uncommitted per-step logs** in `deploy-test-logs/round5/` (gitignored). They contain no connection string or token, per the scan above.
