@@ -298,4 +298,33 @@ select pg_terminate_backend(pid) from pg_stat_activity where datname = current_d
 
 ## Teardown
 
-TEARDOWN_SECTION
+Done after the report was pushed (`c130775`), 08:14:59–08:15:37Z. Every command and its exit code is in `T-teardown.log` (not committed).
+
+**Removed:**
+- **T3, processes:** touched the tail loop's stop file, then ran `pkill -f 'wrangler tail --format json'` (exit 0; the loop exited 144). `pkill -f 'load.mjs|dstage.mjs'` exited 1 because none were running; the C load had already exited 0. `pgrep -fl 'wrangler tail|load.mjs|dstage.mjs|cloudflared|run[ABCD2]*.sh'` returned nothing (exit 1). No tunnels were used this round.
+- **T1, Worker:** `npx wrangler delete --force` printed `Successfully deleted instant-worker` (exit 0). This removes the Worker, its Durable Objects (node-11 to node-19) and its secrets.
+- **T2, Hyperdrive:** `npx wrangler hyperdrive delete 6697852637ab43e388b37d1dcdc0993b` printed `✅ Deleted` (exit 0).
+- **T4, verification:**
+  - `npx wrangler hyperdrive list` printed only the header `📋 Listing Hyperdrive configs`, with no configs (exit 0).
+  - `curl -i https://instant-worker.leerosen686.workers.dev/health` returned `HTTP/2 404` with body `error code: 1042`. The Worker is no longer reached.
+- **T5, local files:**
+  - `git checkout -- crates/instant-worker/wrangler.toml`; it now matches the committed version (placeholder Hyperdrive id).
+  - Deleted the raw tail (`tail.json`, 56.8 MB), the raw per-operation logs (`*-ops.jsonl`, kill timestamps), the analysis scripts, the psql shim and `/tmp/iw-r4` (`load.mjs`, `dstage.mjs`). Confirmed: the scratchpad is empty and `/tmp/iw-r4` does not exist.
+- **T6, secret scan:**
+  - The database host and password were read from `~/.iw-database-url` into a temporary pattern file, never printed; the file was deleted after the scan. `npg_[A-Za-z0-9]{4}` was searched too.
+  - Working tree, gitignored files included (`/usr/bin/grep -rIl`, excluding `.git`, `target`, `build`, `node_modules`): **0 files**.
+  - `target/`, `build/` separately: **0 files**.
+  - `git grep` on HEAD: **0 files**.
+  - **Branch history (extra check):** `git log --all -S <host>` finds the database **host name** in two commits, both pushed to the PR branch. `e61700a` (round 1) added it in `deploy-test-logs/04b-hyperdrive-caching.log` (two `"host":` lines). `19238da` (round 1 teardown) redacted it. **The host name is still in the branch history.** The password is in no commit (`-S <password>`: none). Removing the host name from history would need a rewrite and force push of the PR branch; I did not do that.
+
+**Still exists:**
+- **The Neon database** (project, data from rounds 1–4: 77 apps before this round plus 13 created in it). The user deletes it.
+- **`~/.iw-database-url`** holds the connection string.
+- **The database host name** in the branch history (above).
+- **Other local state:**
+  - wrangler's OAuth login (`npx wrangler whoami`: logged in);
+  - the `postgres:17` Docker image (667 MB);
+  - Rust toolchains `beta-aarch64-apple-darwin` and `stable-aarch64-apple-darwin`;
+  - the Emscripten/worker-build cache `~/Library/Caches/worker-build` (1.8 GB);
+  - `crates/instant-worker/target` (614 MB) and `crates/instant-worker/build` (12 MB).
+- **Uncommitted per-step logs** in `deploy-test-logs/round4/` (A1–A5, B, C, D, P0, P1, S1, S2, T: gitignored), and the earlier untracked files in `deploy-test-logs/latency/` and `latency2/`. They contain no connection string, by the scan above.
