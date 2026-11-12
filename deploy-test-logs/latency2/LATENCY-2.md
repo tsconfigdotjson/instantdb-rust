@@ -192,4 +192,31 @@ The unlogged gaps of 19 ms before b #2 and e #12 are where read transactions sta
 
 ## Teardown
 
-Pending: waiting for the go-ahead.
+Done 2026-11-12, about 02:00 UTC.
+
+### Removed from Cloudflare
+
+| What | Command | Result |
+|---|---|---|
+| Worker `instant-worker`, with its Durable Object `node-8` | `npx wrangler delete --force` | `Successfully deleted instant-worker`, exit 0 |
+| Hyperdrive config `instant` (`d2210fa0f5ca4bdbbc6b5ea414101df1`) | `npx wrangler hyperdrive delete d2210fa0f5ca4bdbbc6b5ea414101df1` | `✅ Deleted`, exit 0 |
+
+- `npx wrangler hyperdrive list` now lists no configs.
+- `curl -i https://instant-worker.leerosen686.workers.dev/health` now returns `HTTP/2 404`, body `error code: 1042`.
+
+### Removed locally
+
+- **`crates/instant-worker/wrangler.toml`:** restored to the committed version. This run's local copy held the Hyperdrive id and the test vars, not the connection string.
+- **Scratchpad data:** the raw tail, the raw A5 timings, the test app id, the copies of the test scripts and the analysis scripts.
+- **Final scan:** `/usr/bin/grep -rIl` over the working tree, including gitignored files, and `git grep` on `HEAD` find no Neon host and no `npg_` password.
+
+### Still existing
+
+These are the same items listed under Teardown in LATENCY.md:
+- **The Neon project.** It now also holds this run's test apps. Delete it in the Neon console.
+- **`~/.iw-database-url`:** a file holding the connection string (`rm ~/.iw-database-url`).
+- **`wrangler` OAuth login.** It was already logged in before the test (`npx wrangler logout`).
+- **Docker image `postgres:17`**, pulled for the `psql` shim.
+- **Build toolchain:** the Rust beta toolchain, `worker-build`, and the Emscripten SDK cache.
+- **Build output:** `crates/instant-worker/target` and `build`.
+- **Per-step logs** for this run (`R*`, `T1` in `deploy-test-logs/latency2/`) exist only on the test machine, as agreed.
