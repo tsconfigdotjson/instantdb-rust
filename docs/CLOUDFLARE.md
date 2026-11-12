@@ -155,13 +155,27 @@ this target.
   - **Idle:** with no clients, the background loops ran 22 statements a
     minute until the object was evicted after about 65 s.
 
+- **A third round on Cloudflare**
+  ([report](../deploy-test-logs/round3/ROUND-3.md)), with the local mock
+  servers reached through public tunnels:
+  - **Passed:** the security suite; webhooks (37 checks) and OAuth (111
+    checks, including signed id_tokens) without the private-address flags,
+    so URL vetting and its DNS lookup work on Workers; magic-code sign-in;
+    dashboard login except two checks that assume an `http://localhost`
+    server.
+  - **Soak, 48 minutes:** 5 sessions, 1148 operations, 287 distinct query
+    shapes; no failures, no dropped sessions, no reboots, flat latency.
+    Under that load a transaction took about 430 ms median and a refresh on
+    another session about 700 ms, roughly twice the single-client figures
+    above; where the extra time goes was not measured.
+  - **One unexplained failure:** the first webhook run failed with
+    `database error: ... shutting down` as its connections closed; the
+    database had not restarted, and a rerun 30 s later passed.
+
 ## Not verified
 
-- **On a deployment:** OAuth, webhooks, dashboard login and the security
-  suite (their e2e scripts need local mock servers). Also not measured: how
-  many sessions fit in 128 MB.
-- **Webhook and OAuth address vetting.** The e2e runs allow private
-  addresses, which skips the DNS lookup; that lookup has not run on Workers.
+- **On a deployment:** how many sessions fit in 128 MB, and anything
+  longer than a 48 minute soak.
 - **`STORAGE_BACKEND=s3` on Workers.** It compiles; the S3 suites were not
   run against the Worker. `disk` has no place there; `postgres` is the
   default and was the one tested.
