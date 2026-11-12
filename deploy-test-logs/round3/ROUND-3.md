@@ -271,11 +271,40 @@ The `active` row includes the checkpoint's own `psql` query. The Neon console's 
 
 ## Teardown
 
-Pending: waiting for the go-ahead.
+Done 2026-11-12, about 03:19 UTC.
 
-Still running:
-- Worker `instant-worker` (versions up to `f09d1394`, objects `node-9` and `node-10`);
-- Hyperdrive config `101dc1c6db37417f80eead618c01e005`;
-- the Worker secret `INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET`;
-- three quick tunnels (ports 9911, 9377, 9378);
-- the tail.
+### Removed from Cloudflare
+
+| What | Command | Result |
+|---|---|---|
+| Worker `instant-worker`, with its Durable Objects `node-9` and `node-10` and the secret `INSTANT_DASHBOARD_GOOGLE_OAUTH_CLIENT_SECRET` | `npx wrangler delete --force` | `Successfully deleted instant-worker`, exit 0 |
+| Hyperdrive config `instant` (`101dc1c6db37417f80eead618c01e005`) | `npx wrangler hyperdrive delete 101dc1c6db37417f80eead618c01e005` | `✅ Deleted`, exit 0 |
+
+Checks afterwards:
+- `npx wrangler hyperdrive list` lists no configs.
+- `npx wrangler secret list` exits 1, because the Worker no longer exists.
+- `curl -i https://instant-worker.leerosen686.workers.dev/health` returns `HTTP/2 404`, body `error code: 1042`.
+
+### Stopped
+
+- The `wrangler tail` restart loop.
+- The three quick tunnels (`cloudflared`, ports 9911, 9377 and 9378). `pgrep` finds no `cloudflared`, `wrangler tail` or soak process.
+
+### Removed locally
+
+- **`crates/instant-worker/wrangler.toml`:** restored to the committed version. The local copy held the Hyperdrive id, the test vars and the tunnel URLs, but not the connection string.
+- **Raw data:** the raw tail and its restart markers, and the soak's per-operation log.
+- **Tools:** the round's helper scripts, the `cloudflared` binary and its tunnel logs.
+- **Script copies:** all of `/tmp/iw-r3` (the four script copies and their diffs).
+- **Final scan:** `/usr/bin/grep -rIl` over the working tree, including gitignored files, and `git grep` on `HEAD` find no Neon host and no `npg_` password.
+
+### Still existing
+
+These are the same items as after rounds 1 and 2:
+- **The Neon project**, which now also holds this round's test apps. Delete it in the Neon console.
+- **`~/.iw-database-url`**, which holds the connection string (`rm ~/.iw-database-url`).
+- **The `wrangler` OAuth login.**
+- **The `postgres:17` Docker image.**
+- **The Rust beta toolchain and the Emscripten cache.**
+- **The worker's `target/` and `build/` directories.**
+- **This round's per-step logs**, in `deploy-test-logs/round3/*.log` on the test machine only.
