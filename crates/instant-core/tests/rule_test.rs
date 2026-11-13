@@ -2231,3 +2231,76 @@ async fn data_ref_in_field_rule() {
     // the field rule's hop is tracked too
     assert!(tx_of(&[(owner_b, ids.owners_name, json!("alice"))]).matches(&qt));
 }
+
+/// A lookup upsert that races a concurrent creator of the same entity: B's
+/// pre-pass sees no entity, then its write reuses the one A committed
+/// meanwhile. Legacy decides create vs update from that pre-tx snapshot, so
+/// B is checked as a create. B must not slip past both the create and the
+/// update rule.
+#[tokio::test]
+async fn racing_lookup_upsert_is_checked_as_a_create() {
+    for (create_rule, allowed) in [("false", false), ("true", true)] {
+        let pool = pool().await;
+        let app = mk_app(&pool).await;
+        let (schema, ids) = todo_schema_steps();
+        transact_json(&pool, app, schema).await.unwrap();
+        set_rules(
+            &pool,
+            app,
+            json!({"owners": {"allow": {"create": create_rule, "update": "false"}}}),
+        )
+        .await;
+        let lookup = json!([ids.owners_name, "erin"]);
+        let steps = json!([["add-triple", lookup, ids.owners_id, lookup]]);
+
+        // A (admin): creates erin through the lookup, transaction kept open
+        let mut attrs_a = attrs_of(&pool, app).await;
+        let mut a = pool.begin().await.unwrap();
+        tx::transact(
+            &mut a,
+            app,
+            &mut attrs_a,
+            tx::parse_tx_steps(&steps).unwrap(),
+            &tx::TxOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        // B (guest): the same upsert, blocked on A's row until A commits
+        let pool_b = pool.clone();
+        let steps_b = tx::parse_tx_steps(&steps).unwrap();
+        let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+        let b = tokio::spawn(async move {
+            let mut attrs = attrs_of(&pool_b, app).await;
+            let mut tx_b = pool_b.begin().await.unwrap();
+            let (pid,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()")
+                .fetch_one(&mut *tx_b)
+                .await
+                .unwrap();
+            let rules = Rules::load(&mut tx_b, app).await.unwrap();
+            pid_tx.send(pid).unwrap();
+            let r = perms::permissioned_transact(
+                &mut tx_b,
+                app,
+                &mut attrs,
+                steps_b,
+                &rules,
+                &AuthCtx::default(),
+                &json!({}),
+            )
+            .await;
+            if r.is_ok() {
+                tx_b.commit().await.unwrap();
+            }
+            r.map(|_| ())
+        });
+        wait_until_blocked(&pool, pid_rx.await.unwrap()).await;
+        a.commit().await.unwrap();
+        let r = b.await.unwrap();
+        if allowed {
+            r.expect("create rule true: B is allowed as a create");
+        } else {
+            assert_eq!(r.unwrap_err().error_type, "permission-denied");
+        }
+    }
+}

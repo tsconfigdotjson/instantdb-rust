@@ -189,16 +189,23 @@ async fn concurrent_lookup_upserts_share_the_entity() {
     // B: same lookup; its insert waits on A's uncommitted row
     let pool_b = pool.clone();
     let steps_b = steps();
+    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
     let b = tokio::spawn(async move {
         let mut attrs = attrs_of(&pool_b, app).await;
         let mut tx_b = pool_b.begin().await.unwrap();
+        let (pid,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx_b)
+            .await
+            .unwrap();
+        pid_tx.send(pid).unwrap();
         let r = tx::transact(&mut tx_b, app, &mut attrs, steps_b, &TxOptions::default()).await;
         if r.is_ok() {
             tx_b.commit().await.unwrap();
         }
         r.map(|_| ())
     });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // commit A only once Postgres reports B's insert waiting on A's row
+    wait_until_blocked(&pool, pid_rx.await.unwrap()).await;
     a.commit().await.unwrap();
     b.await
         .unwrap()
