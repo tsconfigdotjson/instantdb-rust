@@ -169,11 +169,19 @@ impl LookupResolver {
             Uuid::new_v4()
         };
         let flags = attr.flags();
-        sqlx::query(
+        // Concurrent upserts of the same lookup race between the SELECT above
+        // and this INSERT. Like legacy's lookup-ref-inserts CTE
+        // (triple.clj:312-319), the insert is ON CONFLICT DO NOTHING on the
+        // av unique index: the loser waits for the winner to commit, inserts
+        // nothing, and re-reads the winner's entity below (a new statement,
+        // so read committed sees the committed row).
+        let inserted = sqlx::query(
             "INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
                                   ea, eav, av, ave, vae, checked_data_type)
              VALUES ($1, $2, $3, $4::jsonb, md5(($4::jsonb)::text),
-                     $5, $6, $7, $8, $9, $10::checked_data_type)",
+                     $5, $6, $7, $8, $9, $10::checked_data_type)
+             ON CONFLICT (app_id, attr_id, json_null_to_null(value)) WHERE av
+             DO NOTHING",
         )
         .bind(app_id)
         .bind(eid)
@@ -188,6 +196,22 @@ impl LookupResolver {
         .execute(&mut *conn)
         .await
         .map_err(|e| translate_unique_violation(e, attrs))?;
+        if inserted.rows_affected() == 0 {
+            // lost the race: another transaction created the entity first
+            let row = sqlx::query(
+                "SELECT entity_id FROM triples
+                 WHERE app_id = $1 AND attr_id = $2 AND av
+                   AND json_null_to_null(value) IS NOT DISTINCT FROM json_null_to_null($3::jsonb)",
+            )
+            .bind(app_id)
+            .bind(attr_id)
+            .bind(&value.0)
+            .fetch_one(&mut *conn)
+            .await?;
+            let eid: Uuid = row.get("entity_id");
+            self.resolved.insert(key, eid);
+            return Ok(Some(eid));
+        }
         self.resolved.insert(key, eid);
         self.created.insert(eid);
         Ok(Some(eid))

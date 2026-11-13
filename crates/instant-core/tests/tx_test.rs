@@ -163,6 +163,65 @@ async fn unique_violation_errors() {
     assert_eq!(err.error_type, "record-not-unique");
 }
 
+/// Two transactions upsert the same new lookup value. B's lookup misses
+/// while A has created the entity but not yet committed, so B's insert of the
+/// lookup triple conflicts with A's. Legacy's lookup-ref-inserts CTE
+/// (triple.clj:312-319) inserts ON CONFLICT DO NOTHING and uses A's entity;
+/// B must not fail with record-not-unique.
+#[tokio::test]
+async fn concurrent_lookup_upserts_share_the_entity() {
+    use instant_core::tx::{self, TxOptions};
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let lookup = json!([ids.owners_name, "dana"]);
+    let steps =
+        || tx::parse_tx_steps(&json!([["add-triple", lookup, ids.owners_id, lookup]])).unwrap();
+
+    // A: create through the lookup, keep the transaction open
+    let mut attrs_a = attrs_of(&pool, app).await;
+    let mut a = pool.begin().await.unwrap();
+    tx::transact(&mut a, app, &mut attrs_a, steps(), &TxOptions::default())
+        .await
+        .unwrap();
+
+    // B: same lookup; its insert waits on A's uncommitted row
+    let pool_b = pool.clone();
+    let steps_b = steps();
+    let (pid_tx, pid_rx) = tokio::sync::oneshot::channel();
+    let b = tokio::spawn(async move {
+        let mut attrs = attrs_of(&pool_b, app).await;
+        let mut tx_b = pool_b.begin().await.unwrap();
+        let (pid,): (i32,) = sqlx::query_as("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx_b)
+            .await
+            .unwrap();
+        pid_tx.send(pid).unwrap();
+        let r = tx::transact(&mut tx_b, app, &mut attrs, steps_b, &TxOptions::default()).await;
+        if r.is_ok() {
+            tx_b.commit().await.unwrap();
+        }
+        r.map(|_| ())
+    });
+    // commit A only once Postgres reports B's insert waiting on A's row
+    wait_until_blocked(&pool, pid_rx.await.unwrap()).await;
+    a.commit().await.unwrap();
+    b.await
+        .unwrap()
+        .expect("the second upsert reuses the first one's entity");
+
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT entity_id FROM triples WHERE app_id = $1 AND attr_id = $2 AND value = '\"dana\"'::jsonb",
+    )
+    .bind(app)
+    .bind(ids.owners_name)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
 #[tokio::test]
 async fn lookup_refs_upsert_and_resolve() {
     let pool = pool().await;
