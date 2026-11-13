@@ -838,7 +838,7 @@ jobs:
         working-directory: crates/instant-worker
         run: |
           npm install --no-save wrangler@4
-          npx wrangler dev --port 8888 --var BASE_URL:http://localhost:8888 > /tmp/wrangler.log 2>&1 &
+          npx wrangler dev --port 8888 --var BASE_URL:http://localhost:8888 --var INSTANT_WEBHOOK_ALLOW_INSECURE:1 > /tmp/wrangler.log 2>&1 &
           for i in $(seq 1 120); do
             if curl -sf http://localhost:8888/health >/dev/null; then echo "worker healthy"; exit 0; fi
             sleep 2
@@ -850,6 +850,12 @@ jobs:
           node scripts/smoke-ws.mjs "$(grep '^app_id=' /tmp/worker-app.txt | cut -d= -f2)"
       - name: "smoke: local bus"
         run: SERVER_URL=http://localhost:8888 node scripts/local-bus-test.mjs
+      - name: "webhooks (with the local-bus handling of deleted webhooks)"
+        run: |
+          ./scripts/create-app.sh "worker webhooks" | tee /tmp/worker-wh-app.txt
+          LOCAL_BUS=1 node scripts/webhooks-test.mjs \
+            "$(grep '^app_id=' /tmp/worker-wh-app.txt | cut -d= -f2)" \
+            "$(grep '^admin_token=' /tmp/worker-wh-app.txt | cut -d= -f2)"
       - name: No panics in the runtime log
         if: always()
         run: |

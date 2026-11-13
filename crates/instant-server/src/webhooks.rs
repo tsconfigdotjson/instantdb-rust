@@ -1603,10 +1603,12 @@ async fn record_attempt(state: &AppState, ev: &ClaimedEvent, a: Attempt) -> Resu
 }
 
 async fn handle_event(state: &Arc<AppState>, ev: ClaimedEvent) -> Result<()> {
-    // An event can outlive its webhook. Without a recorded attempt it would
-    // stay `processing`, be freed by free_stuck and claimed again every few
-    // minutes for good, so a deleted webhook ends the event like a disabled
-    // one does.
+    // An event can outlive its webhook. Without a recorded attempt it stays
+    // `processing`, is freed by free_stuck and claimed again every few
+    // minutes for good, as on the original server. A node on the local bus
+    // (where each of those claims is a round trip to a distant database)
+    // ends the event instead, like a disabled webhook does. The default bus
+    // keeps the original behaviour.
     let ended = |message: &str| Attempt {
         at: chrono::Utc::now(),
         duration_ms: 0,
@@ -1618,7 +1620,7 @@ async fn handle_event(state: &Arc<AppState>, ev: ClaimedEvent) -> Result<()> {
     };
     let webhook = match get_by_id(state, ev.app_id, ev.webhook_id).await {
         Ok(webhook) => webhook,
-        Err(e) if e.error_type == "record-not-found" => {
+        Err(e) if e.error_type == "record-not-found" && state.cfg.bus_local => {
             return record_attempt(state, &ev, ended("Webhook was deleted.")).await;
         }
         Err(e) => return Err(e),

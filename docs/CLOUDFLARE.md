@@ -59,6 +59,7 @@ about a minute). So with the local bus, and only then:
 | boot | runs the bootstrap (about 96 statements) | skips it when `rust_server_config` holds this build's marker: one statement |
 | a query's rules and watermark (tx id, ISN) | three statements | one |
 | a query's snapshot transaction | `BEGIN`, then `SET TRANSACTION` | one `BEGIN ISOLATION LEVEL ...` |
+| an event whose webhook was deleted | stays claimed and is retried indefinitely, as on the original server | ends as failed with a recorded attempt |
 
 Counted locally from the server's statement log (excluding `BEGIN`, which
 sqlx does not log): a new query went from 8 statements to 5, a transaction
