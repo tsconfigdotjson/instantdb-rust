@@ -360,8 +360,7 @@ impl S3Client {
         };
         S3Client {
             cfg,
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(300))
+            http: crate::http::builder(std::time::Duration::from_secs(300))
                 .build()
                 .expect("reqwest client"),
             static_creds,
@@ -470,7 +469,7 @@ impl S3Client {
         key: &str,
         body: Option<Vec<u8>>,
         extra_headers: &[(&str, &str)],
-    ) -> Result<reqwest::Response> {
+    ) -> Result<crate::http::Response> {
         let creds = self.credentials().await?;
         let (scheme, host, prefix) = self.api_base();
         let path = self.object_path(&prefix, key);
@@ -521,12 +520,12 @@ impl S3Client {
         if let Some(b) = body {
             req = req.body(b);
         }
-        req.send()
+        crate::http::send(req)
             .await
             .map_err(|e| InstantError::internal(format!("s3 request failed: {e}")))
     }
 
-    async fn fail(op: &str, resp: reqwest::Response) -> InstantError {
+    async fn fail(op: &str, resp: crate::http::Response) -> InstantError {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         InstantError::internal(format!(
@@ -629,6 +628,7 @@ impl S3Client {
 // ---------------------------------------------------------------------------
 // role-based credentials: ECS/EKS container endpoint, then EC2 IMDSv2
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct MetadataCreds {
@@ -638,6 +638,7 @@ struct MetadataCreds {
     expiration: Option<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl MetadataCreds {
     fn into_credentials(self) -> Credentials {
         Credentials {
@@ -653,6 +654,15 @@ impl MetadataCreds {
     }
 }
 
+/// A Worker has no instance or task role to ask: it needs static keys.
+#[cfg(target_arch = "wasm32")]
+async fn fetch_dynamic_credentials(_http: &reqwest::Client) -> Result<Credentials> {
+    Err(InstantError::internal(
+        "no S3 credentials: set AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY",
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 async fn fetch_dynamic_credentials(http: &reqwest::Client) -> Result<Credentials> {
     let env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
     let short = std::time::Duration::from_secs(3);

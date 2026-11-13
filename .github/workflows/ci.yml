@@ -169,6 +169,15 @@ jobs:
       - name: "e2e: multinode storage"
         run: node scripts/multinode-storage-test.mjs "$APP_ID" "$ADMIN_TOKEN"
 
+      # INSTANT_BUS=local: one node that never issues LISTEN or NOTIFY (what a
+      # transaction-mode pooler such as Cloudflare Hyperdrive allows).
+      - name: "e2e: local bus (single node, no LISTEN/NOTIFY)"
+        run: |
+          INSTANT_BUS=local PORT=8885 BASE_URL=http://localhost:8885 ./target/debug/instant-server > /tmp/server-local.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://localhost:8885/health >/dev/null && break; sleep 1; done
+          SERVER_URL=http://localhost:8885 node scripts/local-bus-test.mjs
+          kill %1 || true
+
       # Public-deployment limits on their own node, booted last: its 0-hour
       # hard-delete grace would purge apps the other e2e steps mark deleted.
       - name: "e2e: demo limits (size cap, app cap, hard delete, oauth ssrf)"
@@ -767,3 +776,88 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # The Cloudflare Workers host (crates/instant-worker) is outside the
+  # workspace and builds with a preview toolchain (Rust beta, Emscripten,
+  # patched Tokio), so nothing above compiles it. Build it and run the sync
+  # protocol against it under `wrangler dev`. Not required to pass: a change
+  # in the preview toolchain can break it without any change here.
+  worker:
+    name: cloudflare worker (build + smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: instant
+          POSTGRES_PASSWORD: instant
+          POSTGRES_DB: instant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U instant"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://instant:instant@localhost:5432/instant
+      # must match `worker` in crates/instant-worker/Cargo.toml and the build
+      # command in its wrangler.toml
+      WORKERS_RS_REV: f6c8d1da189cdb91d8bd9576e19cd1dcfd917460
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # rust-toolchain.toml in the crate selects beta + the emscripten target
+      - name: Install the crate's Rust toolchain
+        working-directory: crates/instant-worker
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/instant-worker
+          cache-on-failure: true
+      # worker-build keeps the Emscripten SDK and its other tools here
+      - name: Cache worker-build tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/worker-build
+          key: worker-build-tools-${{ runner.os }}-${{ env.WORKERS_RS_REV }}
+      - name: Install worker-build
+        run: cargo install -q --locked --git https://github.com/cloudflare/workers-rs --rev "$WORKERS_RS_REV" worker-build
+      - name: Build the Worker
+        working-directory: crates/instant-worker
+        run: |
+          worker-build --emscripten --release
+          ls -l build/index_bg.wasm
+      - name: Apply migrations
+        run: ./scripts/apply-migrations.sh
+      - name: Run under wrangler dev
+        working-directory: crates/instant-worker
+        run: |
+          npm install --no-save wrangler@4
+          npx wrangler dev --port 8888 --var BASE_URL:http://localhost:8888 --var INSTANT_WEBHOOK_ALLOW_INSECURE:1 > /tmp/wrangler.log 2>&1 &
+          for i in $(seq 1 120); do
+            if curl -sf http://localhost:8888/health >/dev/null; then echo "worker healthy"; exit 0; fi
+            sleep 2
+          done
+          echo "worker failed to boot"; cat /tmp/wrangler.log; exit 1
+      - name: "smoke: sync protocol"
+        run: |
+          ./scripts/create-app.sh "worker ci" | tee /tmp/worker-app.txt
+          node scripts/smoke-ws.mjs "$(grep '^app_id=' /tmp/worker-app.txt | cut -d= -f2)"
+      - name: "smoke: local bus"
+        run: SERVER_URL=http://localhost:8888 node scripts/local-bus-test.mjs
+      - name: "webhooks (with the local-bus handling of deleted webhooks)"
+        run: |
+          ./scripts/create-app.sh "worker webhooks" | tee /tmp/worker-wh-app.txt
+          LOCAL_BUS=1 node scripts/webhooks-test.mjs \
+            "$(grep '^app_id=' /tmp/worker-wh-app.txt | cut -d= -f2)" \
+            "$(grep '^admin_token=' /tmp/worker-wh-app.txt | cut -d= -f2)"
+      - name: No panics in the runtime log
+        if: always()
+        run: |
+          if grep -E 'panicked|Critical Error|RuntimeError' /tmp/wrangler.log; then exit 1; fi
+          tail -n 20 /tmp/wrangler.log || true

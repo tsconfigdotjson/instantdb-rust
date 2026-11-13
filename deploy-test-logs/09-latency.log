@@ -1,0 +1,55 @@
+$ curl -s https://instant-worker.leerosen686.workers.dev/cdn-cgi/trace (client edge)
+colo=YYZ
+loc=CA
+neon host region: us-east-2 (aws)
+
+$ node /tmp/iw-latency.mjs wss://instant-worker.leerosen686.workers.dev 65b51169-eddf-42a4-a07e-589dee651caf   (run 1)
+init-ok after 236.5 ms
+#1: 637.1 ms
+#2: 363.5 ms
+#3: 372.8 ms
+#4: 374.0 ms
+#5: 381.4 ms
+#6: 371.6 ms
+#7: 378.2 ms
+#8: 393.3 ms
+#9: 397.4 ms
+#10: 383.1 ms
+#11: 394.7 ms
+#12: 382.6 ms
+#13: 385.8 ms
+#14: 366.1 ms
+#15: 372.9 ms
+#16: 387.7 ms
+#17: 392.1 ms
+#18: 376.6 ms
+#19: 382.3 ms
+#20: 384.5 ms
+min 363.5 ms, median 382.5 ms, max 637.1 ms
+[exit 0]
+
+$ node /tmp/iw-latency.mjs wss://instant-worker.leerosen686.workers.dev 65b51169-eddf-42a4-a07e-589dee651caf   (run 2)
+init-ok after 107.6 ms
+#1: 614.1 ms
+#2: 352.7 ms
+#3: 364.8 ms
+#4: 516.4 ms
+#5: 400.3 ms
+#6: 397.6 ms
+#7: 374.7 ms
+#8: 363.8 ms
+#9: 387.8 ms
+#10: 360.6 ms
+#11: 356.8 ms
+#12: 367.6 ms
+#13: 382.6 ms
+#14: 373.8 ms
+#15: 361.0 ms
+#16: 352.3 ms
+#17: 353.3 ms
+#18: 352.6 ms
+#19: 347.9 ms
+#20: 360.9 ms
+min 347.9 ms, median 364.3 ms, max 614.1 ms
+[exit 0]
+

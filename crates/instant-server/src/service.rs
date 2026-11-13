@@ -61,6 +61,42 @@ pub fn set_app_status(state: &AppState, app_id: Uuid, status: String) {
         .insert(app_id, (status, std::time::Instant::now()));
 }
 
+/// Write `apps.status` and tell the app's sessions. With the Postgres bus the
+/// `rust_app_status_trigger` row trigger announces a real change; with the
+/// local bus (`INSTANT_BUS=local`) this publishes the same message, and like
+/// the trigger only when the status actually changed.
+pub async fn write_app_status(state: &AppState, app_id: Uuid, status: &str) -> Result<()> {
+    let before: Option<String> = if state.cfg.bus_local {
+        sqlx::query("SELECT status::text AS status FROM apps WHERE id = $1")
+            .bind(app_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .map(|r| r.get("status"))
+    } else {
+        None
+    };
+    sqlx::query("UPDATE apps SET status = $1 WHERE id = $2")
+        .bind(status)
+        .bind(app_id)
+        .execute(&state.pool)
+        .await?;
+    set_app_status(state, app_id, status.to_string());
+    if before.as_deref().is_some_and(|b| b != status) {
+        state.publish_row_change(
+            "instant_app_status",
+            json!({"app_id": app_id, "status": status}),
+        );
+    }
+    Ok(())
+}
+
+/// A route wrote the app's `rules` row. With the Postgres bus the
+/// `rust_rules_trigger` row trigger tells every node; with the local bus this
+/// publishes the same message (see AppState::publish_row_change).
+pub fn rules_written(state: &AppState, app_id: Uuid) {
+    state.publish_row_change("instant_rules", json!({"app_id": app_id}));
+}
+
 /// Legacy `assert-read-allowed!` (instaql.clj:1817): queries against a
 /// disabled app fail with `app-disabled`.
 pub async fn assert_read_allowed(state: &AppState, app_id: Uuid) -> Result<()> {
@@ -114,6 +150,65 @@ pub fn attr_generation(state: &AppState, app_id: Uuid) -> u64 {
 pub fn invalidate_attrs(state: &AppState, app_id: Uuid) {
     *state.attr_gen.entry(app_id).or_insert(0) += 1;
     state.attr_cache.remove(&app_id);
+}
+
+/// What an add-query reads before it runs: the app's permission rules (when
+/// the session is not admin) and the watermark the result is tagged with,
+/// the app's newest tx id and the current ISN. A node on the local bus may
+/// be far from its database, every statement a network round trip, so there
+/// all three come from one statement; otherwise they are the three reads
+/// they always were, in the same order.
+pub async fn query_preamble(
+    state: &AppState,
+    app_id: Uuid,
+    need_rules: bool,
+) -> Result<(Option<Rules>, i64, Value)> {
+    if state.cfg.bus_local {
+        let row = sqlx::query(
+            "SELECT coalesce(max(id), 0) AS n,
+                    '0/' || pg_current_wal_lsn()::text AS isn,
+                    (SELECT code FROM rules WHERE app_id = $1) AS code
+               FROM transactions WHERE app_id = $1",
+        )
+        .bind(app_id)
+        .fetch_one(&state.pool)
+        .await;
+        // pg_current_wal_lsn can be refused (a standby, a restricted role);
+        // the separate reads below tolerate that
+        if let Ok(row) = row {
+            let rules = need_rules.then(|| Rules {
+                code: row.get::<Option<Value>, _>("code").unwrap_or(Value::Null),
+            });
+            return Ok((rules, row.get("n"), Value::String(row.get("isn"))));
+        }
+    }
+    let rules = if need_rules {
+        let mut conn = state.pool.acquire().await.map_err(InstantError::from)?;
+        Some(Rules::load(&mut conn, app_id).await?)
+    } else {
+        None
+    };
+    let tx_id = max_tx_id(state, app_id).await?;
+    Ok((rules, tx_id, current_isn(state).await))
+}
+
+/// A repeatable-read, read-only transaction: one snapshot for a query and
+/// the permission checks that follow it. On the local bus the isolation
+/// level rides on the BEGIN, saving a round trip.
+pub async fn begin_snapshot(state: &AppState) -> Result<sqlx::PgTransaction<'static>> {
+    if state.cfg.bus_local {
+        return state
+            .pool
+            .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .await
+            .map_err(InstantError::from);
+    }
+    let mut tx = state.pool.begin().await.map_err(InstantError::from)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await
+        .map_err(InstantError::from)?;
+    Ok(tx)
 }
 
 pub async fn max_tx_id(state: &AppState, app_id: Uuid) -> Result<i64> {
@@ -271,11 +366,7 @@ async fn run_query_full_with_options(
     // the view rule would then evaluate against a null path and fail the whole
     // refresh. A refresh racing a `$files` delete could remove the
     // subscription this way (fuzz-storage seed 202).
-    let mut tx = state.pool.begin().await.map_err(InstantError::from)?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .execute(&mut *tx)
-        .await
-        .map_err(InstantError::from)?;
+    let mut tx = begin_snapshot(state).await?;
     let mut result = instaql::query_with_options(&mut tx, &ctx, q, opts).await?;
     // Topics come from the pre-permissions result: an entity hidden by a
     // view rule is still tracked, so a write that makes it visible refreshes.
@@ -518,7 +609,7 @@ impl Drop for CancelOnDrop {
             return;
         };
         let pool = self.pool.clone();
-        tokio::spawn(async move {
+        crate::state::spawn_from_drop(async move {
             let _ = sqlx::query(
                 "SELECT pg_cancel_backend(pid) FROM pg_stat_activity
                  WHERE pid = $1 AND backend_xid::text::bigint = $2 % 4294967296",
@@ -636,8 +727,7 @@ pub async fn notify_tx(state: &AppState, app_id: Uuid, notice: &TxNotice) {
         "changed_attrs": changed_attrs,
         "files_changed": files_changed,
         "ts": chrono::Utc::now().timestamp_millis(),
-    })
-    .to_string();
+    });
     if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
         tracing::info!(
             target: "refresh_trace",
@@ -646,14 +736,21 @@ pub async fn notify_tx(state: &AppState, app_id: Uuid, notice: &TxNotice) {
             "tx notify"
         );
     }
+    if state.publish_local("instant_tx", payload.clone()) {
+        return;
+    }
     let _ = sqlx::query("SELECT pg_notify('instant_tx', $1)")
-        .bind(payload)
+        .bind(payload.to_string())
         .execute(&state.pool)
         .await;
 }
 
 /// Publish to a channel, spilling large payloads into a table.
 pub async fn notify_json(state: &AppState, channel: &str, payload: Value) {
+    if state.bus_tx.is_some() {
+        state.publish_local(channel, payload);
+        return;
+    }
     let text = payload.to_string();
     let text = if text.len() > 7000 {
         let id = Uuid::new_v4();

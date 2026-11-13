@@ -432,6 +432,7 @@ async fn put_rules(state: &AppState, app_id: Uuid, code: &Value) -> Result<()> {
     .bind(code)
     .execute(&state.pool)
     .await?;
+    crate::service::rules_written(state, app_id);
     Ok(())
 }
 

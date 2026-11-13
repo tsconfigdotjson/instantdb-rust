@@ -1,0 +1,106 @@
+create-app.sh "conformance5": app_id=2a4dfd42-b5e5-4384-9bea-661872f9056e admin_token=<REDACTED> 
+===== conformance-test =====
+$ env API_URL=https://instant-worker.leerosen686.workers.dev node scripts/conformance-test.mjs 2a4dfd42-b5e5-4384-9bea-661872f9056e <REDACTED>
+
+== init-ok / attrs ==
+
+== transact-ok ==
+
+== add-query-ok / add-query-exists / remove-query-ok ==
+
+== refresh-ok + computations + skip-attrs gating ==
+
+== page-info / aggregate / serverCreatedAt cursor round-trip ==
+
+== rooms / presence golden shapes + patch-presence edit matrix ==
+
+== sync tables ==
+file:///Users/lrosen/Workspace/instantdb-rust/scripts/conformance-test.mjs:359
+        () => reject(new Error(`timeout waiting in ${name}`)),
+                     ^
+
+Error: timeout waiting in A
+    at Timeout._onTimeout (file:///Users/lrosen/Workspace/instantdb-rust/scripts/conformance-test.mjs:359:22)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [23s]
+
+===== local-bus-test =====
+$ env SERVER_URL=https://instant-worker.leerosen686.workers.dev node scripts/local-bus-test.mjs
+ok   refresh-ok after another session's transaction
+ok   app-status-changed pushed on a status change
+ok   no push when the status did not change
+ok   app-status-changed pushed on the way back
+local bus ok
+[exit 0] [9s]
+
+create-app.sh "streams6": app_id=a2e82a16-f560-4a3b-bde1-37d81f54320e admin_token=<REDACTED> 
+===== streams-test-as-instructed =====
+$ node /tmp/iw-scripts/streams-test.mjs a2e82a16-f560-4a3b-bde1-37d81f54320e
+    Buffer(319) [Uint8Array] [
+      112, 115, 113, 108,  58,  32, 101, 114, 114, 111, 114,  58,
+       32,  99, 111, 110, 110, 101,  99, 116, 105, 111, 110,  32,
+      116, 111,  32, 115, 101, 114, 118, 101, 114,  32,  97, 116,
+       32,  34, 108, 111,  99,  97, 108, 104, 111, 115, 116,  34,
+       32,  40,  58,  58,  49,  41,  44,  32, 112, 111, 114, 116,
+       32,  53,  52,  51,  50,  32, 102,  97, 105, 108, 101, 100,
+       58,  32,  67, 111, 110, 110, 101,  99, 116, 105, 111, 110,
+       32, 114, 101, 102, 117, 115, 101, 100,  10,   9,  73, 115,
+       32, 116, 104, 101,
+      ... 219 more items
+    ]
+  ],
+  pid: 18103,
+  stdout: Buffer(0) [Uint8Array] [],
+  stderr: Buffer(319) [Uint8Array] [
+    112, 115, 113, 108,  58,  32, 101, 114, 114, 111, 114,  58,
+     32,  99, 111, 110, 110, 101,  99, 116, 105, 111, 110,  32,
+    116, 111,  32, 115, 101, 114, 118, 101, 114,  32,  97, 116,
+     32,  34, 108, 111,  99,  97, 108, 104, 111, 115, 116,  34,
+     32,  40,  58,  58,  49,  41,  44,  32, 112, 111, 114, 116,
+     32,  53,  52,  51,  50,  32, 102,  97, 105, 108, 101, 100,
+     58,  32,  67, 111, 110, 110, 101,  99, 116, 105, 111, 110,
+     32, 114, 101, 102, 117, 115, 101, 100,  10,   9,  73, 115,
+     32, 116, 104, 101,
+    ... 219 more items
+  ]
+}
+
+Node.js v24.22.1
+[exit 1] [0s]
+
+create-app.sh "streams7": app_id=933edc89-7402-43b2-82c1-904cfc7cd64d admin_token=<REDACTED> 
+===== streams-test-neon-db =====
+$ node /tmp/iw-scripts/streams-test-neon.mjs 933edc89-7402-43b2-82c1-904cfc7cd64d
+[R] <- init-ok
+[W] <- init-ok
+[W] <- start-stream-ok
+ok: new stream starts at 0
+[W] <- stream-flushed
+ok: flushed offset counts bytes
+[R] <- stream-append
+ok: append correlated to subscribe event
+ok: catch-up content
+[W] <- stream-flushed
+[R] <- stream-append
+ok: live append carries its offset
+[W] <- start-stream-ok
+ok: resume returns the same stream
+ok: start-stream-ok echoes client-id
+[W] <- error
+ok: bad reconnect token rejected
+[W] <- error
+file:///private/tmp/iw-scripts/streams-test-neon.mjs:38
+      const t = setTimeout(() => reject(new Error(`timeout (${name})`)), timeout);
+                                        ^
+
+Error: timeout (W)
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/streams-test-neon.mjs:38:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [14s]
+

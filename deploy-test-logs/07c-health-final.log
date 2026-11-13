@@ -1,0 +1,32 @@
+$ curl https://instant-worker.leerosen686.workers.dev/health  [health 1] 23:47:00Z
+status 200  total 0.114923s  ttfb 0.114570s
+exit 0  body: ok
+
+$ curl https://instant-worker.leerosen686.workers.dev/health  [health 2] 23:47:00Z
+status 200  total 0.097751s  ttfb 0.097466s
+exit 0  body: ok
+
+$ curl https://instant-worker.leerosen686.workers.dev/health  [health 3] 23:47:00Z
+status 200  total 0.109798s  ttfb 0.109379s
+exit 0  body: ok
+
+$ curl https://instant-worker.leerosen686.workers.dev/health  [health 4] 23:47:00Z
+status 200  total 0.073582s  ttfb 0.073223s
+exit 0  body: ok
+
+$ curl https://instant-worker.leerosen686.workers.dev/health  [health 5] 23:47:00Z
+status 200  total 0.094678s  ttfb 0.094111s
+exit 0  body: ok
+
+$ curl https://instant-worker.leerosen686.workers.dev/  [root] 23:47:01Z
+status 200  total 0.080723s  ttfb 0.080415s
+exit 0  body: instant-server
+
+$ curl https://instant-worker.leerosen686.workers.dev/no-such-route  [unknown route] 23:47:01Z
+status 404  total 0.124784s  ttfb 0.124318s
+exit 0  body: {"message":"Oops! We couldn't match this route."}
+
+$ curl https://instant-worker.leerosen686.workers.dev/health  [after 5 min idle] 23:52:01Z
+status 200  total 6.125603s  ttfb 6.124354s
+exit 0  body: ok
+

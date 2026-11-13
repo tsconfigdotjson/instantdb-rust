@@ -1,0 +1,117 @@
+create-app.sh "smoke": app_id=63d5a335-ea1d-4f5f-be46-6716522eec95 admin_token=<REDACTED> 
+===== smoke-ws =====
+$ node /tmp/iw-scripts/smoke-ws.mjs 63d5a335-ea1d-4f5f-be46-6716522eec95
+[A] -> init
+file:///private/tmp/iw-scripts/smoke-ws.mjs:52
+      const t = setTimeout(() => reject(new Error(`timeout waiting (${name})`)), timeout);
+                                        ^
+
+Error: timeout waiting (A)
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/smoke-ws.mjs:52:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [5s]
+
+create-app.sh "sse": app_id=854af559-e47f-4a64-b1a3-7c9a0c670228 admin_token=<REDACTED> 
+===== sse-test =====
+$ node /tmp/iw-scripts/sse-test.mjs 854af559-e47f-4a64-b1a3-7c9a0c670228
+ok: sse stream opens
+<- sse-init
+ok: sse-init has token + session
+<- error
+file:///private/tmp/iw-scripts/sse-test.mjs:29
+    const t = setTimeout(() => reject(new Error("timeout")), timeout);
+                                      ^
+
+Error: timeout
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/sse-test.mjs:29:39)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [9s]
+
+create-app.sh "synctable": app_id=2eaacb36-5f86-4391-ba68-fa46c84684e8 admin_token=<REDACTED> 
+===== synctable-test =====
+$ node /tmp/iw-scripts/synctable-test.mjs 2eaacb36-5f86-4391-ba68-fa46c84684e8 <REDACTED>
+[A] <- error
+file:///private/tmp/iw-scripts/synctable-test.mjs:37
+      const t = setTimeout(() => reject(new Error(`timeout (${name})`)), timeout);
+                                        ^
+
+Error: timeout (A)
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/synctable-test.mjs:37:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [8s]
+
+create-app.sh "conformance3": app_id=76595603-c8fd-4b3f-92bd-2c415e70f550 admin_token=<REDACTED> 
+===== conformance-test =====
+$ env API_URL=https://instant-worker.leerosen686.workers.dev node scripts/conformance-test.mjs 76595603-c8fd-4b3f-92bd-2c415e70f550 <REDACTED>
+
+== init-ok / attrs ==
+file:///Users/lrosen/Workspace/instantdb-rust/scripts/conformance-test.mjs:63
+    throw new Error(
+          ^
+
+Error: SHAPE FAILED [init-ok]: extra keys [hint,message,original-event,status,type] missing keys [session-id,attrs,auth,app-status]
+{
+  "op": "error",
+  "status": 500,
+  "type": "operation-timed-out",
+  "message": "Operation timed out: handle-receive",
+  "hint": {
+    "timeout-ms": 5000
+  },
+  "original-event": {
+    "client-event-id": "d75aa741-ed0c-446b-a9f6-8ff7225c58a8",
+    "op": "init",
+    "app-id": "76595603-c8fd-4b3f-92bd-2c415e70f550",
+    "versions": {
+      "@instantdb/core": "v0.21.0"
+    }
+  },
+  "client-event-id": "d75aa741-ed0c-446b-a9f6-8ff7225c58a8",
+  "trace-id": "8feff387297a4a3db1f14abbaacd7cb8"
+}
+    at assertShape (file:///Users/lrosen/Workspace/instantdb-rust/scripts/conformance-test.mjs:63:11)
+    at file:///Users/lrosen/Workspace/instantdb-rust/scripts/conformance-test.mjs:392:1
+
+Node.js v24.22.1
+[exit 1] [6s]
+
+===== local-bus-test =====
+$ env SERVER_URL=https://instant-worker.leerosen686.workers.dev node scripts/local-bus-test.mjs
+file:///Users/lrosen/Workspace/instantdb-rust/scripts/local-bus-test.mjs:57
+      const t = setTimeout(() => reject(new Error("timeout")), timeout);
+                                        ^
+
+Error: timeout
+    at Timeout._onTimeout (file:///Users/lrosen/Workspace/instantdb-rust/scripts/local-bus-test.mjs:57:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [6s]
+
+create-app.sh "streams3": app_id=c9cd8816-2b26-4722-b836-982e019cf3df admin_token=<REDACTED> 
+===== streams-test-neon-db =====
+$ node /tmp/iw-scripts/streams-test-neon.mjs c9cd8816-2b26-4722-b836-982e019cf3df
+[W] <- error
+[R] <- error
+file:///private/tmp/iw-scripts/streams-test-neon.mjs:38
+      const t = setTimeout(() => reject(new Error(`timeout (${name})`)), timeout);
+                                        ^
+
+Error: timeout (W)
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/streams-test-neon.mjs:38:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [9s]
+

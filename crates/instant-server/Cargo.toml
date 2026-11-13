@@ -23,19 +23,32 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rand.workspace = true
 reqwest.workspace = true
-jsonwebtoken.workspace = true
 base64.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 url.workspace = true
 urlencoding.workspace = true
-lettre.workspace = true
 futures.workspace = true
 dashmap.workspace = true
 # Faster allocator for the fan-out hot paths (issue #11); opt out with
 # `--no-default-features` on platforms without a C toolchain.
 mimalloc = { version = "0.1", optional = true }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+# Threads, signals and child processes don't exist on the Workers target.
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "process", "signal", "parking_lot"] }
+# SMTP email: its TLS stack has no random source on the Workers target.
+lettre.workspace = true
+# id_token verification. It builds on ring, which has no random source on the
+# Workers target; there the host supplies the verifier (routes/oauth.rs).
+jsonwebtoken.workspace = true
+
+[target.'cfg(target_os = "emscripten")'.dependencies]
+# Outbound HTTP through the runtime's fetch (src/http.rs).
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
 
 [features]
 default = ["mimalloc"]

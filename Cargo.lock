@@ -1063,6 +1063,7 @@ dependencies = [
  "futures",
  "hmac",
  "instant-core",
+ "js-sys",
  "jsonwebtoken",
  "lettre",
  "libc",
@@ -1082,6 +1083,8 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

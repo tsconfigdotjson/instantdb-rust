@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/instant-core", "crates/instant-server", "crates/instant-loadtest", "crates/sqlx-shim"]
+# Cloudflare Workers host: its own workspace (Emscripten target, beta toolchain).
+exclude = ["crates/instant-worker"]
 
 [workspace.package]
 edition = "2021"
@@ -22,7 +24,9 @@ opt-level = 3
 debug = false
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
+# The portable feature set (it also builds for wasm32-unknown-emscripten, see
+# crates/instant-worker); native crates add the rest in their own manifests.
+tokio = { version = "1", features = ["macros", "rt", "io-util", "io-std", "net", "time", "sync", "fs"] }
 axum = { version = "0.8", features = ["ws", "macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 sqlx = { package = "sqlx-shim", path = "crates/sqlx-shim" }

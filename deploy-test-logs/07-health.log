@@ -1,0 +1,81 @@
+$ curl -i -s -w '
+time_total=%{time_total}s
+' https://instant-worker.leerosen686.workers.dev/health   (run 1, 18:18:26Z)
+HTTP/2 500 
+date: Wed, 11 Nov 2026 18:18:28 GMT
+content-length: 21
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=sE2eB4uHB%2BNb6ZLiwahuJxDbKn6NrnuFsPzkOQlOXuMkzLAK%2FPNkMtYOH1zeBOOEySqzBEYfUQ4D%2BT3BK6sUKCNMT7AiLlAe7aMyGSMRtdKVCQW4CDlm%2Bl7WmxmOz%2FpZHN5PVfGTrfEYlJvTYCIMxX%2FaICFRGlcYCA%3D%3D"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+server: cloudflare
+cf-ray: a58f4cb2089e61e9-YYZ
+alt-svc: h3=":443"; ma=86400
+
+INTERNAL SERVER ERROR
+time_total=1.099801s
+[exit 0]
+
+$ curl -i -s -w '
+time_total=%{time_total}s
+' https://instant-worker.leerosen686.workers.dev/health   (run 2, 18:18:31Z)
+HTTP/2 500 
+date: Wed, 11 Nov 2026 18:18:33 GMT
+content-length: 21
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=bCu8ic4qooHv9Uhm0VojL%2Fd694SKBEsU654iISpCB4Y1Q3F0%2BbxMPJhlR1vvbU8B4oI7GV5US88dNdRjeMvL%2BuUmulnVmHfcR2vbnsC4oOZ8THZD1CO9JK53l6vqPQ292xCHVKoIO8drZhK%2BYOl3IS2QT8xxLjnFNA%3D%3D"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+server: cloudflare
+cf-ray: a58f4cd20f64de74-YYZ
+alt-svc: h3=":443"; ma=86400
+
+INTERNAL SERVER ERROR
+time_total=0.778446s
+[exit 0]
+
+$ curl -i -s -w '
+time_total=%{time_total}s
+' https://instant-worker.leerosen686.workers.dev/health   (run 3, 18:18:36Z)
+HTTP/2 500 
+date: Wed, 11 Nov 2026 18:18:37 GMT
+content-length: 21
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=khnKQp3O%2Fd3aZtjXkuX3TOpY1VPa0D7wvo87iJwSNht3%2FqaDPWlS5ZBB07ObOXLZbzNK7ZWjjd%2BeEs%2BOSnxKQhkNdeAIC2e8wj7OOKozkvGtlbMftjODipQqF7Da%2BsCVWo%2BK1tmIzcqpkDiw5uvJccBVvzjWS8DkyQ%3D%3D"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+server: cloudflare
+cf-ray: a58f4cf008bc8631-YYZ
+alt-svc: h3=":443"; ma=86400
+
+INTERNAL SERVER ERROR
+time_total=0.496722s
+[exit 0]
+
+$ curl -i -s -w '
+time_total=%{time_total}s
+' https://instant-worker.leerosen686.workers.dev/health   (run 4, 18:18:41Z)
+HTTP/2 500 
+date: Wed, 11 Nov 2026 18:18:42 GMT
+content-length: 21
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=MI%2Fm7Y8JydapmhlXbsW%2Fi6SB%2FLFxK%2F1rCYJmuhk57CP5oO%2FglCiEPpz%2BGPqUHreMPTcheu26nM2xI9MMVFahb5wVySZIdsp8kshEHJpkUotRg52HUAhXxNPAJC9JXKTRY7ZBTdzTKj2boyiCK1ErUsW5mo3erZy2bA%3D%3D"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+server: cloudflare
+cf-ray: a58f4d0c6b40de44-YYZ
+alt-svc: h3=":443"; ma=86400
+
+INTERNAL SERVER ERROR
+time_total=0.560722s
+[exit 0]
+
+$ curl -i -s -w '
+time_total=%{time_total}s
+' https://instant-worker.leerosen686.workers.dev/health   (run 5, 18:18:45Z)
+HTTP/2 500 
+date: Wed, 11 Nov 2026 18:18:47 GMT
+content-length: 21
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=CSXd85xboC7nc6alj3pacJpNq%2BH5t%2FgELkhypAi0tm0Mjo9nh4x1DDIldVc%2Bt0P0aE2koAOGeurjJgK9Iu2xWY5gjMjGC6SLqQIxyQ%2FI7aHeZAhZOH%2FJNt1XFDZcO0XCdmgChzEPwlIECbMD927XoWrRD5UE8jBVIw%3D%3D"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+server: cloudflare
+cf-ray: a58f4d292a25ac39-YYZ
+alt-svc: h3=":443"; ma=86400
+
+INTERNAL SERVER ERROR
+time_total=0.611574s
+[exit 0]
+
+quiet wait started 18:19:08Z

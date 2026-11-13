@@ -1,0 +1,58 @@
+===== smoke-ws =====
+$ node /tmp/iw-scripts/smoke-ws.mjs 68fead75-7673-4fe5-94c9-8e4b5ec760c9
+[A] -> init
+[A] <- init-ok
+[A] -> transact
+[A] <- error
+file:///private/tmp/iw-scripts/smoke-ws.mjs:52
+      const t = setTimeout(() => reject(new Error(`timeout waiting (${name})`)), timeout);
+                                        ^
+
+Error: timeout waiting (A)
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/smoke-ws.mjs:52:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [5s]
+
+===== sse-test =====
+$ node /tmp/iw-scripts/sse-test.mjs 68fead75-7673-4fe5-94c9-8e4b5ec760c9
+ok: sse stream opens
+<- sse-init
+ok: sse-init has token + session
+<- init-ok
+ok: init over sse
+<- add-query-ok
+ok: add-query over sse
+<- transact-ok
+<- refresh-ok
+file:///private/tmp/iw-scripts/sse-test.mjs:100
+const triples = refresh.computations[0]["instaql-result"][0].data["datalog-result"]["join-rows"][0];
+                                       ^
+
+TypeError: Cannot read properties of undefined (reading 'instaql-result')
+    at file:///private/tmp/iw-scripts/sse-test.mjs:100:40
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+
+Node.js v24.22.1
+[exit 1] [3s]
+
+===== synctable-test =====
+$ node /tmp/iw-scripts/synctable-test.mjs 68fead75-7673-4fe5-94c9-8e4b5ec760c9 <REDACTED>
+[A] <- init-ok
+[A] <- transact-ok
+[A] <- error
+[A] <- refresh-ok
+file:///private/tmp/iw-scripts/synctable-test.mjs:37
+      const t = setTimeout(() => reject(new Error(`timeout (${name})`)), timeout);
+                                        ^
+
+Error: timeout (A)
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/synctable-test.mjs:37:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [10s]
+
