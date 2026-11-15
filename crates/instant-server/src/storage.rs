@@ -15,7 +15,8 @@
 //!   streams to S3). Deletes are synchronous, but a periodic sweeper still
 //!   drains `app_files_to_sweep` (migration 52's trigger queue) after the
 //!   legacy 32-day backup grace, covering hard-deleted apps and missed
-//!   deletes.
+//!   deletes. Every written location-id is recorded in `rust_file_backends`
+//!   so each node's sweeper only claims rows for its own backend/bucket.
 //!
 //! `/storage/serve/...` URLs are HMAC-signed with SERVER_SECRET and
 //! day-bucketed like legacy's presigned URLs so browser caches can reuse them.
@@ -41,12 +42,74 @@ pub enum Backend {
     S3,
 }
 
+impl Backend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Backend::Postgres => "postgres",
+            Backend::Disk => "disk",
+            Backend::S3 => "s3",
+        }
+    }
+}
+
 pub fn backend() -> Backend {
     match std::env::var("STORAGE_BACKEND").as_deref() {
         Ok("disk") => Backend::Disk,
         Ok("s3") => Backend::S3,
         _ => Backend::Postgres,
     }
+}
+
+/// The store a new blob belongs to. S3 is scoped by bucket as well as backend,
+/// because one database can be shared by nodes pointing at different buckets
+/// (the same reason every node runs its own sweeper).
+pub(crate) fn current_owner() -> Result<(&'static str, String)> {
+    let backend = backend();
+    let bucket = if backend == Backend::S3 {
+        s3_client()?.cfg.bucket.clone()
+    } else {
+        String::new()
+    };
+    Ok((backend.as_str(), bucket))
+}
+
+/// Remember which store a location-id was written to. `app_files_to_sweep`
+/// rows are created by a database trigger that cannot know the blob backend,
+/// so the sweeper joins this marker before claiming a row. Without it a
+/// non-S3 node sharing the database can delete an S3 row (and its file row)
+/// while the object survives in the bucket.
+pub(crate) async fn record_blob_owner(
+    state: &AppState,
+    app_id: Uuid,
+    location_id: &str,
+    backend: &str,
+    bucket: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO rust_file_backends (app_id, location_id, backend, bucket)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (app_id, location_id)
+         DO UPDATE SET backend = EXCLUDED.backend, bucket = EXCLUDED.bucket",
+    )
+    .bind(app_id)
+    .bind(location_id)
+    .bind(backend)
+    .bind(bucket)
+    .execute(&state.pool)
+    .await
+    .map_err(InstantError::from)?;
+    Ok(())
+}
+
+/// Associate a blob with this node's store before writing it, so a triple
+/// delete racing the upload can never queue a row without an owner.
+pub(crate) async fn remember_blob_owner(
+    state: &AppState,
+    app_id: Uuid,
+    location_id: &str,
+) -> Result<()> {
+    let (backend, bucket) = current_owner()?;
+    record_blob_owner(state, app_id, location_id, backend, &bucket).await
 }
 
 /// Legacy S3 object metadata defaults (`instant.util.s3`): every stored blob
@@ -146,6 +209,18 @@ pub async fn ensure_blob_table(pool: &sqlx::PgPool) -> Result<()> {
            app_id uuid NOT NULL,
            location_id text NOT NULL,
            data bytea NOT NULL,
+           created_at timestamptz NOT NULL DEFAULT now(),
+           PRIMARY KEY (app_id, location_id))",
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rust_file_backends (
+           app_id uuid NOT NULL,
+           location_id text NOT NULL,
+           backend text NOT NULL,
+           bucket text NOT NULL DEFAULT '',
            created_at timestamptz NOT NULL DEFAULT now(),
            PRIMARY KEY (app_id, location_id))",
     )
@@ -270,6 +345,7 @@ pub async fn put_blob(
     meta: &BlobMeta,
 ) -> Result<u64> {
     check_location_id(location_id)?;
+    remember_blob_owner(state, app_id, location_id).await?;
     match backend() {
         Backend::Postgres => pg_put(state, app_id, location_id, bytes).await?,
         Backend::Disk => {
@@ -368,6 +444,7 @@ pub async fn append_blob(
     bytes: &[u8],
 ) -> Result<i64> {
     check_location_id(location_id)?;
+    remember_blob_owner(state, app_id, location_id).await?;
     match backend() {
         // S3 objects are immutable: spool live appends through postgres and
         // move the finished stream over in finalize_blob.
@@ -413,6 +490,7 @@ pub async fn finalize_blob(state: &AppState, app_id: Uuid, location_id: &str) ->
         return Ok(());
     }
     check_location_id(location_id)?;
+    remember_blob_owner(state, app_id, location_id).await?;
     let Some(bytes) = pg_get(state, app_id, location_id).await else {
         return Ok(());
     };
