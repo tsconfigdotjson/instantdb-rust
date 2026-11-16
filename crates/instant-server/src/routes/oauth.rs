@@ -1309,6 +1309,36 @@ async fn id_token_impl(state: &AppState, headers: &HeaderMap, body: &Value) -> R
     Ok(json!({"user": user, "created": created}))
 }
 
+/// Checks an id_token against the provider's discovery document and JWKS and
+/// returns its claims, or the reason it was rejected.
+#[cfg(target_os = "emscripten")]
+pub type JwtVerifier =
+    fn(disc: &Value, jwks: &Value, jwt: &str) -> std::result::Result<Value, &'static str>;
+
+#[cfg(target_os = "emscripten")]
+static JWT_VERIFIER: std::sync::OnceLock<JwtVerifier> = std::sync::OnceLock::new();
+
+/// The Workers build has no JWT library of its own (jsonwebtoken 9 needs
+/// ring's random source, which that target lacks); the host installs one.
+#[cfg(target_os = "emscripten")]
+pub fn set_jwt_verifier(verifier: JwtVerifier) {
+    let _ = JWT_VERIFIER.set(verifier);
+}
+
+#[cfg(target_os = "emscripten")]
+async fn verify_jwt(state: &AppState, disc: &Value, jwt: &str) -> Result<Value> {
+    let jwks_uri = disc
+        .get("jwks_uri")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| oauth_err("Discovery document missing jwks_uri."))?;
+    let jwks = fetch_json_cached(state, &format!("jwks:{jwks_uri}"), jwks_uri).await?;
+    let verifier = JWT_VERIFIER
+        .get()
+        .ok_or_else(|| oauth_err("Error validating JWT. No verifier is installed."))?;
+    verifier(disc, &jwks, jwt).map_err(oauth_err)
+}
+
+#[cfg(not(target_os = "emscripten"))]
 async fn verify_jwt(state: &AppState, disc: &Value, jwt: &str) -> Result<Value> {
     use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
     let jwks_uri = disc

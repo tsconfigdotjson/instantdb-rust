@@ -1,0 +1,742 @@
+
+ ⛅️ wrangler 4.160.1
+────────────────────
+
+Cloudflare collects anonymous telemetry about your usage of Wrangler. Learn more at https://github.com/cloudflare/workers-sdk/tree/main/packages/wrangler/telemetry.md
+[custom build] Running: cargo install -q --locked --git https://github.com/cloudflare/workers-rs --rev f6c8d1da189cdb91d8bd9576e19cd1dcfd917460 worker-build && worker-build --emscripten --release
+[custom build] info: syncing channel updates for beta-aarch64-apple-darwin
+[custom build] 
+[custom build] info: latest update on 2026-11-10 for version 1.101.0-beta.1 (bbcdfd90a 2026-11-10)
+[custom build] 
+[custom build] info: downloading 4 components
+[custom build] 
+[custom build] warn: the missing active toolchain `beta-aarch64-apple-darwin` has been auto-installed
+[custom build] warn: this might cause rustup commands to take longer time to finish than expected
+[custom build] info: you may opt out with `RUSTUP_AUTO_INSTALL=0` or `rustup set auto-install disable`
+[custom build] 
+[custom build] warning: unused workspace dependency `wasm-bindgen-shared`
+[custom build]   --> Cargo.toml:52:1
+[custom build]    |
+[custom build] 52 | wasm-bindgen-shared = { version = "0.2.130" }
+[custom build]    | ^^^^^^^^^^^^^^^^^^^
+[custom build]    |
+[custom build]    = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+[custom build] help: consider removing the workspace dependency `wasm-bindgen-shared`
+[custom build] 
+[custom build] warning: unused dependency `binary-install`
+[custom build]   --> worker-build/Cargo.toml:14:1
+[custom build]    |
+[custom build] 14 | binary-install = "0.4.1"
+[custom build]    | ^^^^^^^^^^^^^^
+[custom build]    |
+[custom build]    = note: `cargo::unused_dependencies` is set to `warn` by default
+[custom build] help: consider removing the dependency on `binary-install`
+[custom build] warning: unused dependency `glob`
+[custom build]   --> worker-build/Cargo.toml:23:1
+[custom build]    |
+[custom build] 23 | glob = "0.3.1"
+[custom build]    | ^^^^
+[custom build]    |
+[custom build] help: consider removing the dependency on `glob`
+[custom build] warning: unused dependency `parking_lot`
+[custom build]   --> worker-build/Cargo.toml:26:1
+[custom build]    |
+[custom build] 26 | parking_lot = "0.12.1"
+[custom build]    | ^^^^^^^^^^^
+[custom build]    |
+[custom build] help: consider removing the dependency on `parking_lot`
+[custom build] 
+[custom build] [INFO]: 🎯  Checking for the Wasm target...
+[custom build] 
+[custom build] [INFO]: ⬇️  Downloading Wasm Bindgen@0.2.130...
+[custom build] 
+[custom build] [INFO]: 🎯  Checking the Emscripten toolchain...
+[custom build] 
+[custom build] [INFO]: ⬇️  Downloading Emscripten SDK 6.0.10...
+[custom build] 
+[custom build] [INFO]: ⬇️  Installing Emscripten 6.0.10 (LLVM, Binaryen, Node)...
+[custom build] 
+[custom build]                                    
+[custom build]                                         0.0%
+[custom build] #                                  
+[custom build]                                         2.6%
+[custom build] ########                       
+[custom build]                                            12.1%
+[custom build] ################            
+[custom build]                                               23.3%
+[custom build] ########################      
+[custom build]                                             34.6%
+[custom build] ###############################      
+[custom build]                                      44.4%
+[custom build] ###############################
+[custom build] ########                                   55.3%
+[custom build] #################################
+[custom build] #############                            65.0%
+[custom build] ##############################
+[custom build] #######################                     74.7%
+[custom build] ################################
+[custom build] ############################              84.5%
+[custom build] ################################
+[custom build] ####################################      95.8%
+[custom build] #################################
+[custom build] ####################################### 100.0%
+[custom build] 
+[custom build]                                                   
+[custom build]                          0.0%
+[custom build]                          
+[custom build]                                                   0.7%
+[custom build] #####                           
+[custom build]                                            7.0%
+[custom build] ############                  
+[custom build]                                             17.6%
+[custom build] #####################        
+[custom build]                                              30.2%
+[custom build] ############################
+[custom build] ###                                           43.3%
+[custom build] ################################
+[custom build] #######                                   54.2%
+[custom build] ##############################
+[custom build] ################                            65.1%
+[custom build] #############################
+[custom build] ##########################                   76.9%
+[custom build] #############################
+[custom build] ##################################           88.4%
+[custom build] ###################
+[custom build] ##################################################### 100.0%
+[custom build] 
+[custom build] #=#=#                                                                          
+[custom build]                                   
+[custom build]                                          0.2%
+[custom build] #                             
+[custom build]                                              1.5%
+[custom build] ###                              
+[custom build]                                           4.3%
+[custom build] ####                     
+[custom build]                                                   6.8%
+[custom build] ######          
+[custom build]                                                            9.1%
+[custom build] ########                  
+[custom build]                                                 11.9%
+[custom build] ##########                      
+[custom build]                                           14.5%
+[custom build] ############                   
+[custom build]                                            17.0%
+[custom build] #############                 
+[custom build]                                             19.2%
+[custom build] ###############                       
+[custom build]                                     21.7%
+[custom build] #################               
+[custom build]                                           23.8%
+[custom build] ###################           
+[custom build]                                             26.6%
+[custom build] #####################              
+[custom build]                                        29.6%
+[custom build] #######################                          
+[custom build]                          32.3%
+[custom build] ########################        
+[custom build]                                           34.7%
+[custom build] ####################
+[custom build] ######                                                36.8%
+[custom build] ###########################    
+[custom build]                                            38.9%
+[custom build] #############################  
+[custom build]                                            41.1%
+[custom build] ############################### 
+[custom build]                                           43.4%
+[custom build] ################################                                          45.5%
+[custom build] ##############################
+[custom build] ###                                         46.5%
+[custom build] ###################################  
+[custom build]                                      48.8%
+[custom build] #############################
+[custom build] #######                                      50.1%
+[custom build] #####################################                         
+[custom build]             51.8%
+[custom build] #############
+[custom build] #########################                                    53.5%
+[custom build] ########################
+[custom build] ###############                                   55.2%
+[custom build] ########################################                                  56.2%
+[custom build] ###
+[custom build] ######################################                                 57.8%
+[custom build] #############################
+[custom build] ##############                               60.2%
+[custom build] ##########################
+[custom build] ###################                             62.6%
+[custom build] #################################
+[custom build] #############                            64.3%
+[custom build] ################################
+[custom build] ###############                           66.2%
+[custom build] ###
+[custom build] #############################################                          67.8%
+[custom build] #################
+[custom build] #################################                        69.6%
+[custom build] ######################
+[custom build] #############################                       72.2%
+[custom build] ###################
+[custom build] ##################################                     74.7%
+[custom build] #######################
+[custom build] ################################                   77.1%
+[custom build] #######################
+[custom build] ##################################                 79.2%
+[custom build] ##########################
+[custom build] ################################                81.9%
+[custom build] #####################
+[custom build] #######################################              84.0%
+[custom build] ###########
+[custom build] ##################################################             86.0%
+[custom build] ##########################
+[custom build] #####################################           88.2%
+[custom build] ############################
+[custom build] #####################################         90.8%
+[custom build] ############################
+[custom build] #######################################       93.4%
+[custom build] #############################
+[custom build] ########################################     95.9%
+[custom build] ##############################
+[custom build] ########################################    98.6%
+[custom build] ############################################
+[custom build] ############################ 100.0%
+[custom build] 
+[custom build] Resolving SDK version '6.0.10' to 'sdk-releases-666337b525e673e769121856d175f6f52b8ead64-64bit'
+[custom build] Installing SDK 'sdk-releases-666337b525e673e769121856d175f6f52b8ead64-64bit'..
+[custom build] Installing tool 'node-24.19.0-64bit'..
+[custom build] Downloading: /Users/lrosen/Library/Caches/worker-build/emsdk-6.0.10/downloads/node-v24.19.0-darwin-arm64.tar.gz from https://storage.googleapis.com/webassembly/emscripten-releases-builds/deps/node-v24.19.0-darwin-arm64.tar.gz
+[custom build] Unpacking '/Users/lrosen/Library/Caches/worker-build/emsdk-6.0.10/downloads/node-v24.19.0-darwin-arm64.tar.gz' to '/Users/lrosen/Library/Caches/worker-build/emsdk-6.0.10/node/24.19.0_64bit'
+[custom build] Done installing tool 'node-24.19.0-64bit'.
+[custom build] Installing tool 'python-3.13.3-64bit'..
+[custom build] Downloading: /Users/lrosen/Library/Caches/worker-build/emsdk-6.0.10/downloads/python-3.13.3-0-macos-arm64.tar.gz from https://storage.googleapis.com/webassembly/emscripten-releases-builds/deps/python-3.13.3-0-macos-arm64.tar.gz
+[custom build] Unpacking '/Users/lrosen/Library/Caches/worker-build/emsdk-6.0.10/downloads/python-3.13.3-0-macos-arm64.tar.gz' to '/Users/lrosen/Library/Caches/worker-build/emsdk-6.0.10/python/3.13.3_64bit'
+[custom build] Done installing tool 'python-3.13.3-64bit'.
+[custom build] Installing tool 'releases-666337b525e673e769121856d175f6f52b8ead64-64bit'..
+[custom build] Downloading: /Users/lrosen/Library/Caches/worker-build/emsdk-6.0.10/downloads/666337b525e673e769121856d175f6f52b8ead64-wasm-binaries-arm64.tar.xz from https://storage.googleapis.com/webassembly/emscripten-releases-builds/mac/666337b525e673e769121856d175f6f52b8ead64/wasm-binaries-arm64.tar.xz
+[custom build] Unpacking '/Users/lrosen/Library/Caches/worker-build/emsdk-6.0.10/downloads/666337b525e673e769121856d175f6f52b8ead64-wasm-binaries-arm64.tar.xz' to '/Users/lrosen/Library/Caches/worker-build/emsdk-6.0.10/upstream'
+[custom build] Done installing tool 'releases-666337b525e673e769121856d175f6f52b8ead64-64bit'.
+[custom build] Done installing SDK 'sdk-releases-666337b525e673e769121856d175f6f52b8ead64-64bit'.
+[custom build] 
+[custom build] [INFO]: ⚙️. Applying epoll-listeners.patch
+[custom build] 
+[custom build] [INFO]: ⚙️. Applying noderawsockets-dns.patch
+[custom build] 
+[custom build] [INFO]: ⚙️. Applying sourcemap-line-zero.patch
+[custom build] 
+[custom build] [INFO]: 🌀  Compiling to Wasm (emscripten)...
+[custom build] 
+[custom build]    Compiling unicode-ident v1.0.27
+[custom build] 
+[custom build]    Compiling proc-macro2 v1.0.107
+[custom build]    Compiling quote v1.0.47
+[custom build]    Compiling cfg-if v1.0.5
+[custom build]    Compiling libc v0.2.191
+[custom build]    Compiling version_check v0.9.5
+[custom build]    Compiling serde_core v1.0.229
+[custom build]    Compiling typenum v1.20.1
+[custom build] 
+[custom build]    Compiling const-oid v0.9.6
+[custom build] 
+[custom build]    Compiling subtle v2.6.1
+[custom build] 
+[custom build]    Compiling pin-project-lite v0.2.17
+[custom build] 
+[custom build]    Compiling generic-array v0.14.7
+[custom build] 
+[custom build]    Compiling serde v1.0.229
+[custom build] 
+[custom build]    Compiling futures-core v0.3.34
+[custom build] 
+[custom build]    Compiling memchr v2.8.3
+[custom build] 
+[custom build]    Compiling wasm-bindgen-shared v0.2.130
+[custom build] 
+[custom build]    Compiling bytes v1.12.1
+[custom build] 
+[custom build]    Compiling itoa v1.0.19
+[custom build] 
+[custom build]    Compiling futures-sink v0.3.34
+[custom build] 
+[custom build]    Compiling rustversion v1.0.23
+[custom build] 
+[custom build]    Compiling futures-channel v0.3.34
+[custom build] 
+[custom build]    Compiling syn v3.0.10
+[custom build] 
+[custom build]    Compiling syn v2.0.119
+[custom build] 
+[custom build]    Compiling futures-task v0.3.34
+[custom build] 
+[custom build]    Compiling slab v0.4.12
+[custom build] 
+[custom build]    Compiling stable_deref_trait v1.2.1
+[custom build] 
+[custom build]    Compiling futures-io v0.3.34
+[custom build] 
+[custom build]    Compiling zerocopy v0.8.63
+[custom build] 
+[custom build]    Compiling bumpalo v3.20.3
+[custom build] 
+[custom build]    Compiling once_cell v1.21.4
+[custom build] 
+[custom build]    Compiling libm v0.2.16
+[custom build] 
+[custom build]    Compiling autocfg v1.5.1
+[custom build] 
+[custom build]    Compiling wasm-bindgen v0.2.130
+[custom build] 
+[custom build]    Compiling num-traits v0.2.19
+[custom build] 
+[custom build]    Compiling base64ct v1.8.3
+[custom build] 
+[custom build]    Compiling pem-rfc7468 v0.7.0
+[custom build] 
+[custom build]    Compiling log v0.4.35
+[custom build] 
+[custom build]    Compiling writeable v0.6.4
+[custom build] 
+[custom build]    Compiling utf_types v1.0.0
+[custom build] 
+[custom build]    Compiling litemap v0.8.3
+[custom build] 
+[custom build]    Compiling utf8_iter v1.1.0
+[custom build] 
+[custom build]    Compiling tracing-core v0.1.36
+[custom build] 
+[custom build]    Compiling icu_properties_data v2.4.0
+[custom build] 
+[custom build]    Compiling equivalent v1.0.3
+[custom build] 
+[custom build]    Compiling icu_normalizer_data v2.4.0
+[custom build] 
+[custom build]    Compiling getrandom v0.2.17
+[custom build] 
+[custom build]    Compiling mio v1.2.4 (https://github.com/tokio-rs/mio#5e2b24a4)
+[custom build] 
+[custom build]    Compiling rand_core v0.6.4
+[custom build] 
+[custom build]    Compiling socket2 v0.6.5
+[custom build] 
+[custom build]    Compiling http v1.5.0
+[custom build] 
+[custom build]    Compiling zmij v1.0.23
+[custom build] 
+[custom build]    Compiling parking_lot_core v0.9.12
+[custom build] 
+[custom build]    Compiling synstructure v0.14.0
+[custom build] 
+[custom build]    Compiling wasm-bindgen-macro-support v0.2.130
+[custom build] 
+[custom build]    Compiling thiserror v2.0.21
+[custom build] 
+[custom build]    Compiling hashbrown v0.17.1
+[custom build] 
+[custom build]    Compiling serde_json v1.0.154
+[custom build] 
+[custom build]    Compiling scopeguard v1.2.0
+[custom build] 
+[custom build]    Compiling percent-encoding v2.3.2
+[custom build] 
+[custom build]    Compiling lock_api v0.4.14
+[custom build] 
+[custom build]    Compiling zeroize_derive v1.5.0
+[custom build] 
+[custom build]    Compiling tracing-attributes v0.1.31
+[custom build] 
+[custom build]    Compiling ppv-lite86 v0.2.21
+[custom build] 
+[custom build]    Compiling form_urlencoded v1.2.2
+[custom build] 
+[custom build]    Compiling indexmap v2.14.2
+[custom build] 
+[custom build]    Compiling serde_derive v1.0.229
+[custom build] 
+[custom build]    Compiling zerofrom-derive v0.1.8
+[custom build] 
+[custom build]    Compiling yoke-derive v0.8.4
+[custom build] 
+[custom build]    Compiling zeroize v1.9.1
+[custom build] 
+[custom build]    Compiling futures-macro v0.3.34
+[custom build] 
+[custom build]    Compiling zerovec-derive v0.11.7
+[custom build] 
+[custom build]    Compiling displaydoc v0.2.7
+[custom build] 
+[custom build]    Compiling tokio-macros v2.7.2 (https://github.com/guybedford/tokio?tag=1.53.1-cf.emscripten#7227f2d7)
+[custom build] 
+[custom build]    Compiling zerofrom v0.1.8
+[custom build] 
+[custom build]    Compiling futures-util v0.3.34
+[custom build] 
+[custom build]    Compiling block-buffer v0.10.4
+[custom build] 
+[custom build]    Compiling crypto-common v0.1.7
+[custom build] 
+[custom build]    Compiling yoke v0.8.4
+[custom build] 
+[custom build]    Compiling digest v0.10.7
+[custom build] 
+[custom build]    Compiling der v0.7.10
+[custom build] 
+[custom build]    Compiling hmac v0.12.1
+[custom build] 
+[custom build]    Compiling tokio v1.53.1 (https://github.com/guybedford/tokio?tag=1.53.1-cf.emscripten#7227f2d7)
+[custom build] 
+[custom build]    Compiling zerovec v0.11.9
+[custom build] 
+[custom build]    Compiling zerotrie v0.2.5
+[custom build] 
+[custom build]    Compiling tracing v0.1.44
+[custom build] 
+[custom build]    Compiling thiserror-impl v2.0.21
+[custom build] 
+[custom build]    Compiling hkdf v0.12.4
+[custom build] 
+[custom build]    Compiling tinystr v0.8.5
+[custom build] 
+[custom build]    Compiling potential_utf v0.1.6
+[custom build] 
+[custom build]    Compiling spki v0.7.3
+[custom build] 
+[custom build]    Compiling icu_locale_core v2.4.0
+[custom build] 
+[custom build]    Compiling pkcs8 v0.10.2
+[custom build] 
+[custom build]    Compiling icu_collections v2.4.0
+[custom build] 
+[custom build]    Compiling smallvec v1.16.5
+[custom build] 
+[custom build]    Compiling icu_provider v2.4.0
+[custom build] 
+[custom build]    Compiling icu_properties v2.4.0
+[custom build] 
+[custom build]    Compiling icu_normalizer v2.4.0
+[custom build] 
+[custom build]    Compiling wasm-bindgen-macro v0.2.130
+[custom build] 
+[custom build]    Compiling getrandom v0.4.3
+[custom build] 
+[custom build]    Compiling spin v0.9.9
+[custom build] 
+[custom build]    Compiling getrandom v0.3.4
+[custom build] 
+[custom build]    Compiling foldhash v0.2.0
+[custom build] 
+[custom build]    Compiling lazy_static v1.5.1
+[custom build] 
+[custom build]    Compiling sha2 v0.10.9
+[custom build] 
+[custom build]    Compiling base64 v0.22.1
+[custom build] 
+[custom build]    Compiling crossbeam-utils v0.8.23
+[custom build] 
+[custom build]    Compiling idna_adapter v1.2.2
+[custom build] 
+[custom build]    Compiling httparse v1.10.1
+[custom build] 
+[custom build]    Compiling idna v1.1.0
+[custom build] 
+[custom build]    Compiling parking_lot v0.12.5
+[custom build] 
+[custom build]    Compiling signature v2.2.0
+[custom build] 
+[custom build]    Compiling js-sys v0.3.107
+[custom build] 
+[custom build]    Compiling rand_chacha v0.3.1
+[custom build] 
+[custom build]    Compiling http-body v1.1.0
+[custom build] 
+[custom build]    Compiling iana-time-zone v0.1.65
+[custom build] 
+[custom build]    Compiling chrono v0.4.45
+[custom build] 
+[custom build]    Compiling rand v0.8.8
+[custom build] 
+[custom build]    Compiling url v2.5.8
+[custom build] 
+[custom build]    Compiling rand_core v0.9.5
+[custom build] 
+[custom build]    Compiling uuid v1.29.2
+[custom build] 
+[custom build]    Compiling ff v0.13.1
+[custom build] 
+[custom build]    Compiling aho-corasick v1.1.5
+[custom build] 
+[custom build]    Compiling foldhash v0.1.5
+[custom build] 
+[custom build]    Compiling semver v1.0.28
+[custom build] 
+[custom build]    Compiling tower-service v0.3.3
+[custom build] 
+[custom build]    Compiling allocator-api2 v0.2.21
+[custom build] 
+[custom build]    Compiling base16ct v0.2.0
+[custom build] 
+[custom build]    Compiling byteorder v1.5.0
+[custom build] 
+[custom build]    Compiling regex-syntax v0.8.11
+[custom build] 
+[custom build]    Compiling hashbrown v0.15.5
+[custom build] 
+[custom build]    Compiling sec1 v0.7.3
+[custom build] 
+[custom build]    Compiling rustc_version v0.4.1
+[custom build] 
+[custom build]    Compiling group v0.13.0
+[custom build] 
+[custom build]    Compiling rand_chacha v0.9.0
+[custom build] 
+[custom build]    Compiling crypto-bigint v0.5.5
+[custom build] 
+[custom build]    Compiling sync_wrapper v1.0.2
+[custom build] 
+[custom build]    Compiling tower-layer v0.3.3
+[custom build] 
+[custom build]    Compiling tinyvec v1.13.3
+[custom build] 
+[custom build]    Compiling crc-catalog v2.5.0
+[custom build] 
+[custom build]    Compiling crc v3.4.0
+[custom build] 
+[custom build]    Compiling unicode-normalization v0.1.26
+[custom build] 
+[custom build]    Compiling regex-automata v0.4.18
+[custom build] 
+[custom build]    Compiling elliptic-curve v0.13.8
+[custom build] 
+[custom build]    Compiling rand v0.9.5
+[custom build] 
+[custom build]    Compiling curve25519-dalek v4.1.3
+[custom build] 
+[custom build]    Compiling hashlink v0.10.0
+[custom build] 
+[custom build]    Compiling crossbeam-queue v0.3.14
+[custom build] 
+[custom build]    Compiling tokio-stream v0.1.19
+[custom build] 
+[custom build]    Compiling futures-intrusive v0.5.0
+[custom build] 
+[custom build]    Compiling sha1 v0.10.7
+[custom build] 
+[custom build]    Compiling event-listener v5.4.2
+[custom build] 
+[custom build]    Compiling bit-vec v0.8.0
+[custom build] 
+[custom build]    Compiling httpdate v1.0.3
+[custom build] 
+[custom build]    Compiling atomic-waker v1.1.2
+[custom build] 
+[custom build]    Compiling either v1.19.0
+[custom build] 
+[custom build]    Compiling unicode-properties v0.1.5
+[custom build] 
+[custom build]    Compiling heck v0.5.0
+[custom build] 
+[custom build]    Compiling unicode-bidi v0.3.18
+[custom build] 
+[custom build]    Compiling data-encoding v2.11.1
+[custom build] 
+[custom build]    Compiling ryu v1.0.23
+[custom build] 
+[custom build]    Compiling bitflags v2.13.2
+[custom build] 
+[custom build]    Compiling stringprep v0.1.5
+[custom build] 
+[custom build]    Compiling tungstenite v0.29.0
+[custom build] 
+[custom build]    Compiling serde_urlencoded v0.7.1
+[custom build] 
+[custom build]    Compiling strum_macros v0.28.0
+[custom build] 
+[custom build]    Compiling web-sys v0.3.107
+[custom build] 
+[custom build]    Compiling wasm-bindgen-futures v0.4.80
+[custom build] 
+[custom build]    Compiling sqlx-core v0.8.6
+[custom build] 
+[custom build]    Compiling hyper v1.12.0
+[custom build] 
+[custom build]    Compiling bit-set v0.8.0
+[custom build] 
+[custom build]    Compiling murmur3 v0.4.1
+[custom build] 
+[custom build]    Compiling http-body-util v0.1.5
+[custom build] 
+[custom build]    Compiling rfc6979 v0.4.0
+[custom build] 
+[custom build]    Compiling md-5 v0.10.6
+[custom build] 
+[custom build]    Compiling async-trait v0.1.92
+[custom build] 
+[custom build]    Compiling num-integer v0.1.47
+[custom build] 
+[custom build]    Compiling atoi v2.0.0
+[custom build] 
+[custom build]    Compiling hex v0.4.3
+[custom build] 
+[custom build]    Compiling typed-arena v2.0.2
+[custom build] 
+[custom build]    Compiling better_any v0.2.1
+[custom build] 
+[custom build]    Compiling num-bigint-dig v0.8.6
+[custom build] 
+[custom build]    Compiling dotenvy v0.15.7
+[custom build] 
+[custom build]    Compiling whoami v1.6.1
+[custom build] 
+[custom build]    Compiling minimal-lexical v0.2.1
+[custom build] 
+[custom build]    Compiling home v0.5.12
+[custom build] 
+[custom build]    Compiling mime v0.3.18
+[custom build] 
+[custom build]    Compiling sqlx-postgres v0.8.6
+[custom build] 
+[custom build]    Compiling nom v7.1.3
+[custom build] 
+[custom build]    Compiling axum-core v0.5.6
+[custom build] 
+[custom build]    Compiling antlr4rust v0.5.2
+[custom build] 
+[custom build]    Compiling num-iter v0.1.46
+[custom build] 
+[custom build]    Compiling ecdsa v0.16.9
+[custom build] 
+[custom build]    Compiling hyper-util v0.1.21
+[custom build] 
+[custom build]    Compiling tokio-tungstenite v0.29.0
+[custom build] 
+[custom build]    Compiling regex v1.13.1
+[custom build] 
+[custom build]    Compiling primeorder v0.13.6
+[custom build] 
+[custom build]    Compiling tower v0.5.3
+[custom build] 
+[custom build]    Compiling ed25519 v2.2.3
+[custom build] 
+[custom build]    Compiling futures-executor v0.3.34
+[custom build] 
+[custom build]    Compiling axum-macros v0.5.1
+[custom build] 
+[custom build]    Compiling serde_path_to_error v0.1.20
+[custom build] 
+[custom build]    Compiling pastey v0.2.3
+[custom build] 
+[custom build]    Compiling anyhow v1.0.104
+[custom build] 
+[custom build]    Compiling matchit v0.8.4
+[custom build] 
+[custom build]    Compiling cel v0.14.5
+[custom build] 
+[custom build]    Compiling axum v0.8.9
+[custom build] 
+[custom build]    Compiling sqlx-shim v0.1.0 (/Users/lrosen/Workspace/instantdb-rust/crates/sqlx-shim)
+[custom build] 
+[custom build]    Compiling futures v0.3.34
+[custom build] 
+[custom build]    Compiling ed25519-dalek v2.2.0
+[custom build] 
+[custom build]    Compiling strum v0.28.0
+[custom build] 
+[custom build]    Compiling matchers v0.2.0
+[custom build] 
+[custom build]    Compiling sharded-slab v0.1.7
+[custom build] 
+[custom build]    Compiling pkcs1 v0.7.5
+[custom build] 
+[custom build]    Compiling pin-project-internal v1.1.13
+[custom build] 
+[custom build]    Compiling worker-sys v0.8.7 (https://github.com/cloudflare/workers-rs?rev=f6c8d1da189cdb91d8bd9576e19cd1dcfd917460#f6c8d1da)
+[custom build] 
+[custom build]    Compiling tracing-log v0.2.0
+[custom build] 
+[custom build]    Compiling thread_local v1.1.10
+[custom build] 
+[custom build]    Compiling nu-ansi-term v0.50.3
+[custom build] 
+[custom build]    Compiling hashbrown v0.14.5
+[custom build] 
+[custom build]    Compiling tracing-subscriber v0.3.23
+[custom build] 
+[custom build]    Compiling dashmap v6.2.1
+[custom build] 
+[custom build]    Compiling worker-macros v0.8.7 (https://github.com/cloudflare/workers-rs?rev=f6c8d1da189cdb91d8bd9576e19cd1dcfd917460#f6c8d1da)
+[custom build] 
+[custom build]    Compiling pin-project v1.1.13
+[custom build] 
+[custom build]    Compiling rsa v0.9.10
+[custom build] 
+[custom build]    Compiling instant-core v0.1.0 (/Users/lrosen/Workspace/instantdb-rust/crates/instant-core)
+[custom build] 
+[custom build]    Compiling p256 v0.13.2
+[custom build] 
+[custom build]    Compiling p384 v0.13.1
+[custom build] 
+[custom build]    Compiling reqwest v0.12.28
+[custom build] 
+[custom build]    Compiling wasm-streams v0.7.1
+[custom build] 
+[custom build]    Compiling serde-wasm-bindgen v0.6.5
+[custom build] 
+[custom build]    Compiling tower-http v0.6.11
+[custom build] 
+[custom build]    Compiling urlencoding v2.1.3
+[custom build] 
+[custom build]    Compiling matchit v0.7.3
+[custom build] 
+[custom build]    Compiling jsonwebtoken v10.4.0
+[custom build] 
+[custom build]    Compiling instant-server v0.1.0 (/Users/lrosen/Workspace/instantdb-rust/crates/instant-server)
+[custom build] 
+[custom build]    Compiling worker v0.8.7 (https://github.com/cloudflare/workers-rs?rev=f6c8d1da189cdb91d8bd9576e19cd1dcfd917460#f6c8d1da)
+[custom build] 
+[custom build]    Compiling instant-worker v0.1.0 (/Users/lrosen/Workspace/instantdb-rust/crates/instant-worker)
+[custom build] 
+[custom build] warning: linker stderr: cache:INFO: generating system headers: sysroot_install.stamp... (this will be cached in "/Users/lrosen/Library/Caches/worker-build/emsdk-6.0.10/upstream/emscripten/cache/sysroot_install.stamp" for subsequent builds)
+[custom build]          cache:INFO:  - ok
+[custom build]          emcc: MODULARIZE=instance is still experimental. Many features may not work or will change. [-Wexperimental]
+[custom build]          emcc: -sSOURCE_PHASE_IMPORTS is experimental and not yet supported in browsers [-Wexperimental]
+[custom build]          emcc: -sWASM_BINDGEN is experimental and subject to change [-Wexperimental]
+[custom build]   |
+[custom build]   = note: `#[warn(linker_messages)]` on by default
+[custom build] 
+[custom build] 
+[custom build] warning: `instant-worker` (bin "instant-worker") generated 1 warning
+[custom build] 
+[custom build]     Finished `release` profile [optimized] target(s) in 13m 27s
+[custom build] 
+[custom build] [INFO]: ✨  Done in 13m 27s
+[custom build] [INFO]: 📦   Your wasm pkg is ready to publish at /Users/lrosen/Workspace/instantdb-rust/crates/instant-worker/build/.tmp.
+[custom build] 
+[custom build] [INFO]: ⬇️  Downloading Esbuild@0.28.2...
+[custom build] 
+[custom build] 
+[custom build]   index.js  88.6kb
+[custom build] 
+[custom build] ⚡ Done in 21ms
+[custom build] 
+Your Worker has access to the following bindings:
+Binding                                        Resource                  Mode
+env.NODE (Node)                                Durable Object            local
+env.HYPERDRIVE (your-hyperdrive-id-here)       Hyperdrive Config         local
+env.BASE_URL ("http://localhost:8787")         Environment Variable      local
+env.PG_POOL_MAX ("5")                          Environment Variable      local
+env.PG_POOL_MIN ("0")                          Environment Variable      local
+
+⎔ Starting local server...
+Wrangler detected this dev session is running in an AI agent.
+The Local Explorer API is available at http://localhost:8787/cdn-cgi/local/explorer/api
+Useful routes:
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings
+  POST http://localhost:8787/cdn-cgi/local/explorer/api/local/scheduled?worker=<name> - invoke a Worker's scheduled handler; cron is required (see the OpenAPI schema for the full request)
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/d1/database - D1 databases
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces
+  GET http://localhost:8787/cdn-cgi/local/explorer/api/workflows - Workflows
+  POST http://localhost:8787/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:
+    curl -X POST http://localhost:8787/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{"sql":"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20"}'
+  POST http://localhost:8787/cdn-cgi/local/explorer/api/local/observability/clear - clear all captured traces and logs
+If the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):
+  GET http://localhost:8787/cdn-cgi/local/explorer/api - OpenAPI schema
+[wrangler:info] Ready on http://localhost:8787
+[wrangler:info] GET /health 200 OK (5774ms)
+[wrangler:info] GET /health 200 OK (19ms)

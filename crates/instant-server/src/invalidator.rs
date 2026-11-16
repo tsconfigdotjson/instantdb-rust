@@ -28,6 +28,20 @@ use crate::service::{self, PermsCtx};
 use crate::state::{value_hash, AppState, Session};
 
 pub async fn run(state: Arc<AppState>) {
+    // INSTANT_BUS=local: this node is the only one, so the publishers hand
+    // their messages straight to this loop and Postgres never sees a
+    // LISTEN or NOTIFY (poolers such as Cloudflare Hyperdrive support neither).
+    let local_rx = state
+        .bus_rx
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(mut rx) = local_rx {
+        while let Some((channel, payload)) = rx.recv().await {
+            dispatch(&state, &channel, payload).await;
+        }
+        return;
+    }
     loop {
         match listen_once(&state).await {
             Ok(()) => {}
@@ -62,169 +76,174 @@ async fn listen_once(state: &Arc<AppState>) -> Result<(), sqlx::Error> {
             Some(p) => p,
             None => continue,
         };
-        match notification.channel() {
-            "instant_tx" => {
-                let (Some(app_id), Some(tx_id)) = (
-                    payload
-                        .get("app_id")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| Uuid::parse_str(s).ok()),
-                    payload.get("tx_id").and_then(|v| v.as_i64()),
-                ) else {
-                    continue;
-                };
-                let attrs_changed = payload
-                    .get("attrs_changed")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                // older nodes (rolling deploy) omit the key: treat every
-                // catalog change as a schema change like they did
-                let schema_changed = payload
-                    .get("schema_changed")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(attrs_changed);
-                // older nodes (rolling deploy) omit the key: they refreshed
-                // every query on any schema change
-                let requery_all = payload
-                    .get("requery_all")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(schema_changed);
-                let files_changed = payload
-                    .get("files_changed")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let changed_attrs: Vec<Uuid> = payload
-                    .get("changed_attrs")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str().and_then(|s| Uuid::parse_str(s).ok()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if let Some(ts) = payload.get("ts").and_then(|v| v.as_i64()) {
-                    let lag_ms = chrono::Utc::now().timestamp_millis() - ts;
-                    METRICS
-                        .notify_lag_seconds
-                        .observe(lag_ms.max(0) as f64 / 1000.0);
-                }
-                if attrs_changed {
-                    service::invalidate_attrs(state, app_id);
-                }
-                if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
-                    tracing::info!(
-                        target: "refresh_trace",
-                        %app_id, tx_id, attrs_changed, schema_changed, requery_all,
-                        files_changed, changed_attrs = ?changed_attrs,
-                        "tx received"
-                    );
-                }
-                enqueue_tx(
-                    state,
-                    app_id,
-                    tx_id,
-                    schema_changed,
-                    requery_all,
-                    files_changed,
-                    changed_attrs,
+        dispatch(state, notification.channel(), payload).await;
+    }
+}
+
+/// Apply one bus message to this node's sessions and caches. Messages are
+/// applied one at a time, in the order they were published.
+async fn dispatch(state: &Arc<AppState>, channel: &str, payload: Value) {
+    match channel {
+        "instant_tx" => {
+            let (Some(app_id), Some(tx_id)) = (
+                payload
+                    .get("app_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok()),
+                payload.get("tx_id").and_then(|v| v.as_i64()),
+            ) else {
+                return;
+            };
+            let attrs_changed = payload
+                .get("attrs_changed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // older nodes (rolling deploy) omit the key: treat every
+            // catalog change as a schema change like they did
+            let schema_changed = payload
+                .get("schema_changed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(attrs_changed);
+            // older nodes (rolling deploy) omit the key: they refreshed
+            // every query on any schema change
+            let requery_all = payload
+                .get("requery_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(schema_changed);
+            let files_changed = payload
+                .get("files_changed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let changed_attrs: Vec<Uuid> = payload
+                .get("changed_attrs")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().and_then(|s| Uuid::parse_str(s).ok()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(ts) = payload.get("ts").and_then(|v| v.as_i64()) {
+                let lag_ms = chrono::Utc::now().timestamp_millis() - ts;
+                METRICS
+                    .notify_lag_seconds
+                    .observe(lag_ms.max(0) as f64 / 1000.0);
+            }
+            if attrs_changed {
+                service::invalidate_attrs(state, app_id);
+            }
+            if std::env::var_os("INSTANT_TRACE_REFRESH").is_some() {
+                tracing::info!(
+                    target: "refresh_trace",
+                    %app_id, tx_id, attrs_changed, schema_changed, requery_all,
+                    files_changed, changed_attrs = ?changed_attrs,
+                    "tx received"
                 );
             }
-            "instant_room" => {
-                let (Some(app_id), Some(room_id)) = (
-                    payload
-                        .get("app_id")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| Uuid::parse_str(s).ok()),
-                    payload
-                        .get("room_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                ) else {
-                    continue;
-                };
-                let delta = payload.get("delta").cloned();
-                // Room notifications are applied in commit order. Processing
-                // them inline keeps a stale full snapshot from an earlier
-                // event from overwriting a newer presence update (concurrent
-                // joins were losing peers when each event was spawned).
-                crate::presence::broadcast_room_refresh(state, app_id, &room_id, delta.as_ref())
-                    .await;
-            }
-            "instant_broadcast" => {
-                let (Some(app_id), Some(room_id)) = (
-                    payload
-                        .get("app_id")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| Uuid::parse_str(s).ok()),
-                    payload
-                        .get("room_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                ) else {
-                    continue;
-                };
-                let peer_id = payload
-                    .get("peer_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| Uuid::parse_str(s).ok());
-                let msg = json!({
-                    "op": "server-broadcast",
-                    "room-id": room_id,
-                    "topic": payload.get("topic").cloned().unwrap_or(Value::Null),
-                    "data": {
-                        "peer-id": peer_id,
-                        "user": payload.get("user").cloned().unwrap_or(Value::Null),
-                        "data": payload.get("data").cloned().unwrap_or(Value::Null),
-                    },
-                });
-                for s in state.sessions_for_room(app_id, &room_id) {
-                    if Some(s.id) != peer_id {
-                        s.send(msg.clone());
-                    }
-                }
-            }
-            "instant_stream" => {
-                crate::streams::deliver_append(state, &payload).await;
-            }
-            "instant_rules" => {
-                let Some(app_id) = payload
+            enqueue_tx(
+                state,
+                app_id,
+                tx_id,
+                schema_changed,
+                requery_all,
+                files_changed,
+                changed_attrs,
+            );
+        }
+        "instant_room" => {
+            let (Some(app_id), Some(room_id)) = (
+                payload
                     .get("app_id")
                     .and_then(|v| v.as_str())
-                    .and_then(|s| Uuid::parse_str(s).ok())
-                else {
-                    continue;
-                };
-                state.query_cache.retain(|k, _| k.0 != app_id);
-            }
-            "instant_webhooks" => {
-                if let Some(app_id) = payload
+                    .and_then(|s| Uuid::parse_str(s).ok()),
+                payload
+                    .get("room_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            ) else {
+                return;
+            };
+            let delta = payload.get("delta").cloned();
+            // Room notifications are applied in commit order. Processing
+            // them inline keeps a stale full snapshot from an earlier
+            // event from overwriting a newer presence update (concurrent
+            // joins were losing peers when each event was spawned).
+            crate::presence::broadcast_room_refresh(state, app_id, &room_id, delta.as_ref()).await;
+        }
+        "instant_broadcast" => {
+            let (Some(app_id), Some(room_id)) = (
+                payload
                     .get("app_id")
                     .and_then(|v| v.as_str())
-                    .and_then(|s| Uuid::parse_str(s).ok())
-                {
-                    crate::webhooks::invalidate_cache(state, app_id);
-                }
-            }
-            "instant_app_status" => {
-                let (Some(app_id), Some(status)) = (
-                    payload
-                        .get("app_id")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| Uuid::parse_str(s).ok()),
-                    payload.get("status").and_then(|v| v.as_str()),
-                ) else {
-                    continue;
-                };
-                service::set_app_status(state, app_id, status.to_string());
-                // legacy frame: {op, status} (+ trace-id), no version gating
-                // (cache_evict.clj:74-83; Reactor.js:899-920)
-                let msg = json!({"op": "app-status-changed", "status": status});
-                for s in state.sessions_for_app(app_id) {
+                    .and_then(|s| Uuid::parse_str(s).ok()),
+                payload
+                    .get("room_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            ) else {
+                return;
+            };
+            let peer_id = payload
+                .get("peer_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok());
+            let msg = json!({
+                "op": "server-broadcast",
+                "room-id": room_id,
+                "topic": payload.get("topic").cloned().unwrap_or(Value::Null),
+                "data": {
+                    "peer-id": peer_id,
+                    "user": payload.get("user").cloned().unwrap_or(Value::Null),
+                    "data": payload.get("data").cloned().unwrap_or(Value::Null),
+                },
+            });
+            for s in state.sessions_for_room(app_id, &room_id) {
+                if Some(s.id) != peer_id {
                     s.send(msg.clone());
                 }
             }
-            _ => {}
         }
+        "instant_stream" => {
+            crate::streams::deliver_append(state, &payload).await;
+        }
+        "instant_rules" => {
+            let Some(app_id) = payload
+                .get("app_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+            else {
+                return;
+            };
+            state.query_cache.retain(|k, _| k.0 != app_id);
+        }
+        "instant_webhooks" => {
+            if let Some(app_id) = payload
+                .get("app_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+            {
+                crate::webhooks::invalidate_cache(state, app_id);
+            }
+        }
+        "instant_app_status" => {
+            let (Some(app_id), Some(status)) = (
+                payload
+                    .get("app_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok()),
+                payload.get("status").and_then(|v| v.as_str()),
+            ) else {
+                return;
+            };
+            service::set_app_status(state, app_id, status.to_string());
+            // legacy frame: {op, status} (+ trace-id), no version gating
+            // (cache_evict.clj:74-83; Reactor.js:899-920)
+            let msg = json!({"op": "app-status-changed", "status": status});
+            for s in state.sessions_for_app(app_id) {
+                s.send(msg.clone());
+            }
+        }
+        _ => {}
     }
 }
 
@@ -657,17 +676,22 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
 
     // 2. rules once per batch (non-admin sessions only)
     let rules = if stale_queries.iter().any(|q| !q.perms.admin) {
-        match state.pool.acquire().await {
-            Ok(mut conn) => match Rules::load(&mut conn, app_id).await {
-                Ok(r) => Some(r),
-                Err(e) => {
+        let mut delays = TRANSIENT_RETRY_DELAYS_MS.iter();
+        loop {
+            let loaded = match state.pool.acquire().await {
+                Ok(mut conn) => Rules::load(&mut conn, app_id).await,
+                Err(e) => Err(e.into()),
+            };
+            match (loaded, delays.next()) {
+                (Ok(r), _) => break Some(r),
+                (Err(e), Some(ms)) => {
+                    tracing::debug!("refresh: failed to load rules, retrying: {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
+                }
+                (Err(e), None) => {
                     tracing::warn!("refresh: failed to load rules: {e}");
                     return;
                 }
-            },
-            Err(e) => {
-                tracing::warn!("refresh: pool exhausted: {e}");
-                return;
             }
         }
     } else {
@@ -720,10 +744,25 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
             async move {
                 METRICS.refresh_queries_computed_total.inc();
                 let started = Instant::now();
-                let out = service::run_refresh_query_full(
-                    &state, app_id, &attrs, &job.perms, &job.q, rules,
-                )
-                .await;
+                // A failed recomputation unsubscribes the query (see
+                // refresh_failed), and the official client does not
+                // resubscribe, so one lost connection mid-refresh would end
+                // live updates for the query. An internal error is retried
+                // first; rule and validation errors are not.
+                let mut delays = TRANSIENT_RETRY_DELAYS_MS.iter();
+                let out = loop {
+                    let out = service::run_refresh_query_full(
+                        &state, app_id, &attrs, &job.perms, &job.q, rules,
+                    )
+                    .await;
+                    match (&out, delays.next()) {
+                        (Err(e), Some(ms)) if e.error_type == "internal-error" => {
+                            tracing::debug!("refresh query failed, retrying: {e}");
+                            tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
+                        }
+                        _ => break out,
+                    }
+                };
                 let result = match out {
                     Ok(out) => {
                         let (wire, result_meta, hash) = crate::ws::format_query_result(
@@ -883,6 +922,12 @@ pub async fn refresh_batch(state: &Arc<AppState>, app_id: Uuid, batch: &Batch) {
         plan.session.send_raw(frame);
     }
 }
+
+/// Pauses (ms) before each retry of a refresh step that failed with an
+/// internal error: a dropped connection, a pooler recycling its backends, a
+/// Postgres restart or failover. Without the retry one such failure ends
+/// live updates for the query (see refresh_failed).
+const TRANSIENT_RETRY_DELAYS_MS: [u64; 3] = [100, 400, 1500];
 
 /// A session whose refresh hit a failing recomputation, the way legacy's
 /// handle-refresh! fails: its recomputations run in one `pmap`, so one

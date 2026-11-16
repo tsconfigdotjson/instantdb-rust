@@ -1,0 +1,28 @@
+== version 0f1a5cf4 (first event 18:58Z) outcomes={'responseStreamDisconnected': 4, 'ok': 1, 'canceled': 1}
+     3  log  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+     3  log  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+     2  log  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+     1  log  WARN instant_server::webhooks: webhook claim failed: database error: pool timed out while waiting for an open connection
+== version 6c6aefa5 (first event 18:59Z) outcomes={'responseStreamDisconnected': 1}
+== version cf14d2b7 (first event 19:00Z) outcomes={'ok': 1, 'responseStreamDisconnected': 2, 'canceled': 1}
+== version f9d82698 (first event 19:08Z) outcomes={'ok': 21, 'canceled': 8, 'responseStreamDisconnected': 30}
+     1  log  WARN sqlx_core::pool::connection: error occurred while testing the connection on-release error=error returned from database: Idle connection closed by Hyperdrive.
+== version 2f04039d (first event 20:28Z) outcomes={'ok': 14, 'responseStreamDisconnected': 20, 'canceled': 6}
+     2  log  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+     2  log  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+     1  log  WARN instant_server::invalidator: refresh: failed to load rules: database error: encountered unexpected or invalid data: Postgres protocol error: expected ParseComplete, got ParameterDescription (sqlx_postgres::message:129)
+     1  log  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+     1  log  WARN instant_server::webhooks: webhook claim failed: database error: pool timed out while waiting for an open connection
+== version f90dcc23 (first event 20:36Z) outcomes={'ok': 18, 'responseStreamDisconnected': 22, 'canceled': 8}
+     4  log  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+     4  log  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+     2  log  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+     2  log  WARN instant_server::webhooks: webhook claim failed: database error: pool timed out while waiting for an open connection
+== version 5973171e (first event 20:44Z) outcomes={'ok': 36, 'canceled': 2}
+     3  log  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+     3  log  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+     1  log  WARN instant_server::hard_delete: hard-delete sweep failed error=database error: pool timed out while waiting for an open connection
+     1  log  WARN instant_server::storage_sweeper: storage sweep failed error=database error: pool timed out while waiting for an open connection
+     1  log  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+     1  log  WARN instant_server::webhooks: webhook claim failed: database error: pool timed out while waiting for an open connection
+== version 1e82065f (first event 21:08Z) outcomes={'ok': 77, 'responseStreamDisconnected': 24, 'canceled': 18}

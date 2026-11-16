@@ -1,0 +1,44 @@
+name = "instant-worker"
+main = "build/index.js"
+compatibility_date = "2026-09-02"
+# new_module_registry gives the Emscripten glue `import.meta.url`.
+compatibility_flags = ["new_module_registry"]
+
+[build]
+# worker-build from the same workers-rs revision as the `worker` dependency:
+# the Emscripten mode is a preview and has to match it.
+command = "cargo install -q --locked --git https://github.com/cloudflare/workers-rs --rev f6c8d1da189cdb91d8bd9576e19cd1dcfd917460 worker-build && worker-build --emscripten --release"
+
+# The one Durable Object that is the server node (see README.md).
+[durable_objects]
+bindings = [{ name = "NODE", class_name = "Node" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Node"]
+
+# Your Postgres, with the Instant migrations applied (scripts/apply-migrations.sh).
+# `wrangler hyperdrive create instant --connection-string=postgres://...` prints the id.
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "your-hyperdrive-id-here"
+localConnectionString = "postgresql://instant:instant@127.0.0.1:5432/instant?sslmode=disable"
+
+# Every string binding is handed to the server as an environment variable
+# (docs/CONFIGURATION.md). Put secrets in `wrangler secret put`, not here.
+[vars]
+BASE_URL = "http://localhost:8787"
+PG_POOL_MAX = "5"
+PG_POOL_MIN = "0"
+# Over Hyperdrive every statement is a network round trip; the native 5 s
+# limit cancels longer transactions midway.
+INSTANT_HANDLE_RECEIVE_TIMEOUT_MS = "30000"
+# A redeploy keeps a running Durable Object (and its in-memory state); a new
+# NODE_NAME starts a fresh node. Default "node".
+# NODE_NAME = "node"
+# Where Cloudflare creates the Durable Object (wnam, enam, sam, weur, eeur,
+# apac, oc, afr, me). Pick the region of your database: each SQL statement is
+# a round trip from the object. Without it the object is created near the
+# first client. It applies only when the object is created, so set it with a
+# new NODE_NAME.
+# NODE_LOCATION_HINT = "enam"

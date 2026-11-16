@@ -7,6 +7,7 @@ const links = [
   { href: "#why", label: "Why" },
   { href: "#compatible", label: "Compatibility" },
   { href: "#speed", label: "Performance" },
+  { href: "#serverless", label: "Serverless" },
   { href: "#parity", label: "Parity" },
 ];
 

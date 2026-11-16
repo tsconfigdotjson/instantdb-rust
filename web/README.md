@@ -16,6 +16,10 @@ The hosted demo is retired: the "Self-host" buttons and the other old demo links
 self-hosting prompt in `src/sunset.ts`). Append `?still` to any URL to render every animation at its end
 state, for screenshots.
 
+The serverless section's figures (`src/sections/Serverless.tsx`) come from the
+Cloudflare test deployments recorded in `docs/CLOUDFLARE.md`; update both
+together.
+
 The parity number is not typed in by hand: `src/sections/Parity.tsx` imports
 `scripts/differential/coverage-baseline.json`, so it tracks the harness. The
 performance figures come from `docs/PERF.md`; update both together.

@@ -1,0 +1,144 @@
+note: psql is a shim running 'docker run postgres:17 psql' (psql 17.11); DATABASE_URL read from a file, redacted here
+
+$ psql "$DATABASE_URL" -tA -c "select version()"
+PostgreSQL 18.6 (ac70818) on aarch64-unknown-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+[exit 0]
+
+$ psql "$DATABASE_URL" -tA -c "\dt" (tables before migrations)
+0
+[exit 0]
+
+$ DATABASE_URL=<REDACTED> ./scripts/apply-migrations.sh
+applying 01_bootstrap.up.sql
+applying 02_add_grabs.up.sql
+applying 03_add_transactions.up.sql
+applying 04_add_rules.up.sql
+applying 05_add_app_admin_tokens.up.sql
+applying 06_fix_ref_constraint_on_triples.up.sql
+applying 07_add_profiles.up.sql
+applying 08_add_createdAt_for_triples.up.sql
+applying 09_add_oauth_login.up.sql
+applying 10_add_app_oauth_login.up.sql
+applying 11_add_created_at_fields.up.sql
+applying 12_add_redirect_to_dev.up.sql
+applying 13_add_discovery_endpoint.up.sql
+applying 14_add_apps_created_at_index.up.sql
+applying 15_pkce.up.sql
+applying 16_add_stripe.up.sql
+applying 17_add_teams.up.sql
+applying 18_add_sent_at_to_invites.up.sql
+applying 19_add_app_email_templates.up.sql
+applying 20_add_name_to_app_email_templates.up.sql
+applying 21_change_sender_ownership_model.up.sql
+applying 22_drop_app_id_from_senders.up.sql
+applying 23_jsonb_dmerge_and_raise.up.sql
+applying 24_deep_merge_null.up.sql
+applying 25_byop_connection_string.up.sql
+applying 26_cli_auth.up.sql
+applying 27_inferred_type.up.sql
+applying 28_config.up.sql
+applying 29_clerk.up.sql
+applying 30_personal_access_tokens.up.sql
+applying 31_attrs_replica_full.up.sql
+applying 32_pgcrypto.up.sql
+applying 33_users_in_triples_flag.up.sql
+applying 34_hardcoded_objects.up.sql
+applying 35_cascade_delete.up.sql
+applying 36_checked_data_type.up.sql
+applying 37_remove_users_in_triples_flag.up.sql
+applying 38_uniqueing.up.sql
+applying 39_fix_extract_boolean.up.sql
+applying 40_checked_indexes.up.sql
+applying 41_primary_keys.up.sql
+applying 42_add_transactions_app_id_idx.up.sql
+applying 43_specify_public.up.sql
+applying 44_add_daily_app_transactions.up.sql
+applying 45_remove_entity_id_from_indexes.up.sql
+applying 46_add_created_at_index_to_transactions.up.sql
+applying 47_add_replica_id_to_daily_metrics.up.sql
+applying 48_add_dap_primary_key.up.sql
+applying 49_add_user_flags.up.sql
+applying 50_add_app_upload_urls.up.sql
+applying 51_add_triples_created_at_index.up.sql
+applying 52_add_app_files_to_sweep.up.sql
+applying 53_change_indexing_of_triple_nulls.up.sql
+applying 54_on_delete_reverse.up.sql
+applying 55_add_storage_sweeper.up.sql
+applying 56_nulls_first_indexes.up.sql
+applying 57_apps_deletion.up.sql
+applying 58_instant_oauth_provider.up.sql
+applying 59_is_required.up.sql
+applying 60_statistics.up.sql
+applying 61_seed_test_user.up.sql
+applying 62_seed_ephemeral_app_creator.up.sql
+applying 63_seed_homepage_app.up.sql
+applying 64_better_uuid_constraint.up.sql
+applying 65_drop_old_constraint.up.sql
+applying 66_indexing_jobs_error_data.up.sql
+applying 67_personal_access_token_lookup.up.sql
+applying 68_attrs_etype_label_schema.up.sql
+applying 69_attrs_etype_label_data.up.sql
+applying 70_improve_file_system_attrs.up.sql
+applying 71_add_required_file_size.up.sql
+applying 72_drop_not_null_from_required.up.sql
+applying 73_vae_uuids.up.sql
+applying 74_drop_old_vae_eav_indexes.up.sql
+applying 75_attr_soft_deletes.up.sql
+applying 76_attr_metadata.up.sql
+applying 77_add_sketch.up.sql
+applying 78_add_reverse_bins_to_sketch.up.sql
+applying 79_add_orgs.up.sql
+applying 80_org-invites.up.sql
+applying 81_denormalize_subscription.up.sql
+applying 82_org_subscriptions.up.sql
+applying 83_triples_pg_size.up.sql
+applying 84_index_pg_size_for_migration.up.sql
+applying 85_triples_size_trigger.up.sql
+applying 86_at_least_one_owner_on_org.up.sql
+applying 87_cleanup_pg_size_migration.up.sql
+applying 88_force_index_lookup_on_triple.up.sql
+applying 89_creator_or_org_on_app.up.sql
+applying 90_add_e_to_ave_index.up.sql
+applying 91_drop_ave_index.up.sql
+applying 92_editable_attrs.up.sql
+applying 93_sync_table.up.sql
+applying 94_drop_old_transactions_index.up.sql
+applying 95_log_entities_to_wal.up.sql
+applying 96_add_join_room_logs.up.sql
+applying 97_wal_logs_table.up.sql
+applying 98_clone_app_helpers.up.sql
+applying 99_indexing_jobs_context.up.sql
+applying 100_shorten-magic-code-lifetime.up.sql
+applying 101_editscript.up.sql
+applying 102_rule_versions.up.sql
+applying 103_static_auth.up.sql
+applying 104_rate_limit_keys.up.sql
+applying 105_seed_get_a_db_app_creator.up.sql
+applying 106_add_history.up.sql
+applying 107_add_email_verifications.up.sql
+applying 108_backfill_email_verifications.up.sql
+applying 109_add_webhooks.up.sql
+applying 110_triples_triggers_include_system_catalog.up.sql
+applying 111_add_app_email_verification_codes.up.sql
+applying 112_allow_null_sender_user_id.up.sql
+applying 113_drop_user_id_email_senders.up.sql
+applying 114_triples_size_updates_table.up.sql
+applying 115_add_app_status.up.sql
+applying 116_apps_replica_identity_full.up.sql
+applying 117_make_stripe_sub_data_nullable.up.sql
+applying 118_backups.up.sql
+applying 119_replica_identity.up.sql
+applying 120_app_files_to_copy.up.sql
+applying 121_app_backup_jobs.up.sql
+applying 122_app_backups_deletion.up.sql
+applying 123_app_restore_jobs.up.sql
+applying 124_add_custodian.up.sql
+applying 125_drop_triples_app_id_index.up.sql
+applying 126_indexing_jobs_available_index.up.sql
+done
+[exit 0] [277s]
+
+$ post-check
+126
+110
+[exit 0]

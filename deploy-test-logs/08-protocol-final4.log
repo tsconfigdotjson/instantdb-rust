@@ -1,0 +1,166 @@
+create-app.sh "smoke": app_id=65b51169-eddf-42a4-a07e-589dee651caf admin_token=<REDACTED> 
+===== smoke-ws =====
+$ node /tmp/iw-scripts/smoke-ws.mjs 65b51169-eddf-42a4-a07e-589dee651caf
+[A] <- init-ok
+[A] -> transact
+[A] <- transact-ok
+[A] <- refresh-ok
+[B] -> init
+[B] <- init-ok
+[B] -> add-query
+[B] <- add-query-ok
+[A] -> transact
+[A] <- transact-ok
+[B] <- refresh-ok
+[A] -> join-room
+[A] <- join-room-ok
+[B] -> join-room
+[A] <- refresh-presence
+[B] <- join-room-ok
+[A] <- patch-presence
+both peers in presence
+[B] -> set-presence
+[B] <- refresh-presence
+[A] <- patch-presence
+presence patch applied
+[B] -> client-broadcast
+[B] <- set-presence-ok
+[B] <- refresh-presence
+[A] <- server-broadcast
+[A] -> transact
+[B] <- client-broadcast-ok
+[A] <- error
+SMOKE TEST PASSED
+[exit 0] [7s]
+
+create-app.sh "sse": app_id=2e06c843-e33e-484d-95f7-fd2e292dc10e admin_token=<REDACTED> 
+===== sse-test =====
+$ node /tmp/iw-scripts/sse-test.mjs 2e06c843-e33e-484d-95f7-fd2e292dc10e
+ok: sse stream opens
+<- sse-init
+ok: sse-init has token + session
+<- init-ok
+ok: init over sse
+<- add-query-ok
+ok: add-query over sse
+<- transact-ok
+<- refresh-ok
+ok: refresh-ok over sse
+ok: bad sse token rejected
+SSE TEST PASSED
+[exit 0] [3s]
+
+create-app.sh "synctable": app_id=30a6d90b-78e4-4183-9cc2-d09ab2b56d8d admin_token=<REDACTED> 
+===== synctable-test =====
+$ node /tmp/iw-scripts/synctable-test.mjs 30a6d90b-78e4-4183-9cc2-d09ab2b56d8d <REDACTED>
+[A] <- transact-ok
+[A] <- refresh-ok
+[A] <- start-sync-ok
+ok: start-sync-ok has sub + token
+[A] <- sync-load-batch
+ok: load batch has both entities
+ok: each entity carries its id triple
+[A] <- sync-init-finish
+ok: init-finish tx watermark
+[A] <- transact-ok
+[A] <- sync-update-triples
+ok: update targets the sub
+ok: added change captured
+[A] <- transact-ok
+[A] <- sync-update-triples
+ok: old value removed
+ok: new value added
+[A] <- transact-ok
+[A] <- sync-update-triples
+ok: delete produces removed changes
+[B] <- init-ok
+[B] <- sync-update-triples
+ok: resync replays the backlog
+ok: replay starts after watermark
+[B] <- error
+ok: resync error echoes sub id
+[A] <- transact-ok
+[B] <- sync-update-triples
+ok: no sync updates after remove-sync
+SYNC TABLE TEST PASSED
+[exit 0] [7s]
+
+create-app.sh "conformance8": app_id=60ed4184-8a1f-417e-8e49-3050026e287b admin_token=<REDACTED> 
+===== conformance-test =====
+$ env API_URL=https://instant-worker.leerosen686.workers.dev node scripts/conformance-test.mjs 60ed4184-8a1f-417e-8e49-3050026e287b <REDACTED>
+
+== init-ok / attrs ==
+
+== transact-ok ==
+
+== add-query-ok / add-query-exists / remove-query-ok ==
+
+== refresh-ok + computations + skip-attrs gating ==
+
+== page-info / aggregate / serverCreatedAt cursor round-trip ==
+
+== rooms / presence golden shapes + patch-presence edit matrix ==
+
+== sync tables ==
+
+== streams ==
+
+== sse-init handshake ==
+
+== error matrix: original-event.op routes × error types ==
+
+== reconnect replay (re-init → re-add-query → unconfirmed transact resend) ==
+
+== frame batching (core > 0.22.75) ==
+ok: no array frame observed this run (batching is opportunistic)
+
+CONFORMANCE SUITE PASSED (222 assertions)
+[exit 0] [51s]
+
+===== local-bus-test =====
+$ env SERVER_URL=https://instant-worker.leerosen686.workers.dev node scripts/local-bus-test.mjs
+ok   refresh-ok after another session's transaction
+ok   app-status-changed pushed on a status change
+ok   no push when the status did not change
+ok   app-status-changed pushed on the way back
+local bus ok
+[exit 0] [8s]
+
+create-app.sh "streams12": app_id=0350531a-d12d-4223-80a5-c457d76df653 admin_token=<REDACTED> 
+===== streams-test-as-instructed =====
+$ node /tmp/iw-scripts/streams-test.mjs 0350531a-d12d-4223-80a5-c457d76df653
+    Buffer(319) [Uint8Array] [
+      112, 115, 113, 108,  58,  32, 101, 114, 114, 111, 114,  58,
+       32,  99, 111, 110, 110, 101,  99, 116, 105, 111, 110,  32,
+      116, 111,  32, 115, 101, 114, 118, 101, 114,  32,  97, 116,
+       32,  34, 108, 111,  99,  97, 108, 104, 111, 115, 116,  34,
+       32,  40,  58,  58,  49,  41,  44,  32, 112, 111, 114, 116,
+       32,  53,  52,  51,  50,  32, 102,  97, 105, 108, 101, 100,
+       58,  32,  67, 111, 110, 110, 101,  99, 116, 105, 111, 110,
+       32, 114, 101, 102, 117, 115, 101, 100,  10,   9,  73, 115,
+       32, 116, 104, 101,
+      ... 219 more items
+    ]
+  ],
+  pid: 22611,
+  stdout: Buffer(0) [Uint8Array] [],
+  stderr: Buffer(319) [Uint8Array] [
+    112, 115, 113, 108,  58,  32, 101, 114, 114, 111, 114,  58,
+     32,  99, 111, 110, 110, 101,  99, 116, 105, 111, 110,  32,
+    116, 111,  32, 115, 101, 114, 118, 101, 114,  32,  97, 116,
+     32,  34, 108, 111,  99,  97, 108, 104, 111, 115, 116,  34,
+     32,  40,  58,  58,  49,  41,  44,  32, 112, 111, 114, 116,
+     32,  53,  52,  51,  50,  32, 102,  97, 105, 108, 101, 100,
+     58,  32,  67, 111, 110, 110, 101,  99, 116, 105, 111, 110,
+     32, 114, 101, 102, 117, 115, 101, 100,  10,   9,  73, 115,
+     32, 116, 104, 101,
+    ... 219 more items
+  ]
+}
+
+Node.js v24.22.1
+[exit 1] [1s]
+
+create-app.sh "streams13": app_id=51c6e575-7a48-4ff8-a2c6-5bf3b6df9c85 admin_token=<REDACTED> 
+===== streams-test-neon-db =====
+$ node /tmp/iw-scripts/streams-test-neon.mjs 51c6e575-7a48-4ff8-a2c6-5bf3b6df9c85

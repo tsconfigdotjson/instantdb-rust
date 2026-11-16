@@ -6,5 +6,10 @@ license = "MIT"
 description = "The Postgres-only part of the sqlx facade, without its optional database drivers"
 
 [dependencies]
-sqlx-core = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "_tls-rustls-ring-webpki", "uuid", "chrono", "json", "migrate"] }
+sqlx-core = { version = "0.8.6", default-features = false, features = ["_rt-tokio", "uuid", "chrono", "json", "migrate"] }
 sqlx-postgres = { version = "0.8.6", default-features = false, features = ["uuid", "chrono", "json", "migrate"] }
+
+# TLS to Postgres. Left out of the Cloudflare Workers build: rustls' ring
+# backend has no random source there, and Hyperdrive's connection is plain.
+[target.'cfg(not(target_os = "emscripten"))'.dependencies]
+sqlx-core = { version = "0.8.6", default-features = false, features = ["_tls-rustls-ring-webpki"] }

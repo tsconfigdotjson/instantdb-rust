@@ -5,6 +5,7 @@ import { Timeline } from "./sections/Timeline";
 import { Compatible } from "./sections/Compatible";
 import { Features } from "./sections/Features";
 import { Performance } from "./sections/Performance";
+import { Serverless } from "./sections/Serverless";
 import { Parity } from "./sections/Parity";
 import { Demo } from "./sections/Demo";
 import { Footer } from "./sections/Footer";
@@ -20,6 +21,7 @@ export function App() {
           <Compatible />
           <Features />
           <Performance />
+          <Serverless />
           <Parity />
           <Demo />
         </main>

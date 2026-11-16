@@ -1,0 +1,698 @@
+
+ ⛅️ wrangler 4.160.1
+────────────────────
+Successfully created tail, expires at 2026-11-12T00:18:24Z
+Connected to instant-worker, waiting for logs...
+GET https://instant-worker.leerosen686.workers.dev/health - Exception Thrown @ 2026-11-11, 1:18:28 p.m.
+[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mError: bootstrap: system catalog bootstrap failed: database error: error returned from database: Protocol Error: Unexpected protocol code: C[0m
+
+      at si (build/index.js:2:4073)
+      at wasm://wasm/02fb338e:wasm-function[4233]:0x2840b5
+      at wasm://wasm/02fb338e:wasm-function[11293]:0x9259b2
+      at wasm://wasm/02fb338e:wasm-function[11712]:0xa27787
+      at wasm://wasm/02fb338e:wasm-function[7236]:0x571788
+      at wasm://wasm/02fb338e:wasm-function[8412]:0x6bf37a
+      at wasm://wasm/02fb338e:wasm-function[11735]:0xa2fda2
+      at build/index.js:2:12271
+
+
+GET https://instant-worker.leerosen686.workers.dev/health - Exception Thrown @ 2026-11-11, 1:18:32 p.m.
+[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mError: bootstrap: system catalog bootstrap failed: database error: error returned from database: Protocol Error: Unexpected protocol code: C[0m
+
+      at si (build/index.js:2:4073)
+      at wasm://wasm/02fb338e:wasm-function[4233]:0x2840b5
+      at wasm://wasm/02fb338e:wasm-function[11293]:0x92593a
+      at wasm://wasm/02fb338e:wasm-function[11712]:0xa27787
+      at wasm://wasm/02fb338e:wasm-function[7236]:0x571788
+      at wasm://wasm/02fb338e:wasm-function[8412]:0x6bf37a
+      at wasm://wasm/02fb338e:wasm-function[11735]:0xa2fda2
+      at build/index.js:2:12271
+
+
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:18:32 p.m.
+  (error) Error: bootstrap: system catalog bootstrap failed: database error: error returned from database: Protocol Error: Unexpected protocol code: C
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:18:37 p.m.
+  (error) Error: bootstrap: system catalog bootstrap failed: database error: error returned from database: Protocol Error: Unexpected protocol code: C
+GET https://instant-worker.leerosen686.workers.dev/health - Exception Thrown @ 2026-11-11, 1:18:37 p.m.
+[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mError: bootstrap: system catalog bootstrap failed: database error: error returned from database: Protocol Error: Unexpected protocol code: C[0m
+
+      at si (build/index.js:2:4073)
+      at wasm://wasm/02fb338e:wasm-function[4233]:0x2840b5
+      at wasm://wasm/02fb338e:wasm-function[11293]:0x92593a
+      at wasm://wasm/02fb338e:wasm-function[11712]:0xa27787
+      at wasm://wasm/02fb338e:wasm-function[7236]:0x571788
+      at wasm://wasm/02fb338e:wasm-function[8412]:0x6bf37a
+      at wasm://wasm/02fb338e:wasm-function[11735]:0xa2fda2
+      at build/index.js:2:12271
+
+
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:18:42 p.m.
+  (error) Error: bootstrap: system catalog bootstrap failed: database error: encountered unexpected or invalid data: Postgres protocol error: expected ParseComplete, got ParameterDescription (sqlx_postgres::message:129)
+GET https://instant-worker.leerosen686.workers.dev/health - Exception Thrown @ 2026-11-11, 1:18:42 p.m.
+[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mError: bootstrap: system catalog bootstrap failed: database error: encountered unexpected or invalid data: Postgres protocol error: expected ParseComplete, got ParameterDescription (sqlx_postgres::message:129)[0m
+
+      at si (build/index.js:2:4073)
+      at wasm://wasm/02fb338e:wasm-function[4233]:0x2840b5
+      at wasm://wasm/02fb338e:wasm-function[11293]:0x92593a
+      at wasm://wasm/02fb338e:wasm-function[11712]:0xa27787
+      at wasm://wasm/02fb338e:wasm-function[7236]:0x571788
+      at wasm://wasm/02fb338e:wasm-function[8412]:0x6bf37a
+      at wasm://wasm/02fb338e:wasm-function[11735]:0xa2fda2
+      at build/index.js:2:12271
+
+
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:18:46 p.m.
+  (error) Error: bootstrap: system catalog bootstrap failed: database error: error returned from database: Protocol Error: Unexpected protocol code: C
+GET https://instant-worker.leerosen686.workers.dev/health - Exception Thrown @ 2026-11-11, 1:18:46 p.m.
+[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mError: bootstrap: system catalog bootstrap failed: database error: error returned from database: Protocol Error: Unexpected protocol code: C[0m
+
+      at si (build/index.js:2:4073)
+      at wasm://wasm/02fb338e:wasm-function[4233]:0x2840b5
+      at wasm://wasm/02fb338e:wasm-function[11293]:0x92593a
+      at wasm://wasm/02fb338e:wasm-function[11712]:0xa27787
+      at wasm://wasm/02fb338e:wasm-function[7236]:0x571788
+      at wasm://wasm/02fb338e:wasm-function[8412]:0x6bf37a
+      at wasm://wasm/02fb338e:wasm-function[11735]:0xa2fda2
+      at build/index.js:2:12271
+
+
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost. Reconnecting (attempt 1 of 5) in 1s...[0m
+
+
+Reconnected to instant-worker.
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost. Reconnecting (attempt 1 of 5) in 1s...[0m
+
+
+Reconnected to instant-worker.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:32:57 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:32:58 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:33:10 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:33:10 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:33:14 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:33:14 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:33:19 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:33:19 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:33:23 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:33:23 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:33:40 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:33:40 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:33:46 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:33:46 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:33:46 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:33:46 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:33:47 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 1:33:46 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 1:33:46 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:33:47 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:33:49 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:33:49 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:34:22 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:34:22 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:43:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:43:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:43:52 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:43:49 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:43:50 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:43:52 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:44:04 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:44:04 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:44:09 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:44:09 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:44:09 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:44:09 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:44:10 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 1:44:09 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 1:44:09 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:44:10 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:44:20 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:44:20 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:44:29 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:44:29 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:44:39 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:44:39 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:44:52 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:44:52 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:44:58 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:44:58 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:45:03 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:45:04 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:45:09 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:45:09 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:45:18 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:45:19 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:45:24 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:45:24 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:45:29 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:45:29 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:45:39 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:45:39 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:53:50 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:53:51 p.m.
+  (log)  INFO instant_server: SERVER_SECRET not set; using a generated secret persisted in Postgres
+  (log)  INFO instant_server::storage_sweeper: storage sweeper started every_secs=3600 grace_hours=768
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:53:58 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:53:59 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:54:04 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:54:04 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:54:29 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:54:27 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:54:27 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:54:29 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:54:36 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:54:36 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:54:37 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:54:37 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:54:37 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 1:54:36 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 1:54:36 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:54:37 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:54:40 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:54:40 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:54:51 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:54:51 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 1:55:01 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 1:55:01 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 1:55:03 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 1:55:03 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 1:55:04 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:54:54 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:54:56 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:54:56 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:54:54 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 1:55:04 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:55:12 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:55:12 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:55:12 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:55:12 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:55:43 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:55:43 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:55:55 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:55:56 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:56:02 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:56:02 p.m.
+  (log)  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:56:08 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:56:08 p.m.
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::webhooks: webhook claim failed: database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:56:25 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:56:25 p.m.
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:57:25 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:57:25 p.m.
+POST https://instant-worker.leerosen686.workers.dev/admin/query - Ok @ 2026-11-11, 1:57:25 p.m.
+POST https://instant-worker.leerosen686.workers.dev/admin/query - Ok @ 2026-11-11, 1:57:25 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:58:03 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 1:58:03 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:58:04 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:58:04 p.m.
+  (log)  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:58:11 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 1:58:10 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 1:58:10 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 1:58:11 p.m.
+  (log)  WARN instant_server::webhooks: webhook claim failed: database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:58:20 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:58:20 p.m.
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:58:30 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:58:30 p.m.
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:58:36 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:58:36 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:58:42 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:58:43 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 1:58:42 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:58:43 p.m.
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:59:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 1:59:45 p.m.
+  (log)  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::webhooks: webhook claim failed: database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 2:00:38 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 2:00:38 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:00:39 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:00:40 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 2:00:46 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 2:00:46 p.m.
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:00:52 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:00:53 p.m.
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 2:08:17 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 2:08:18 p.m.
+  (log)  INFO sqlx::postgres::notice: relation "rust_presence" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_nodes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_spill" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes_app_tx_idx" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_rate_limit_buckets" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: trigger "rust_capture_trigger" for relation "triples" does not exist, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_blobs" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_server_config" already exists, skipping
+  (log)  INFO instant_server: SERVER_SECRET not set; using a generated secret persisted in Postgres
+  (log)  INFO sqlx::postgres::notice: relation "rust_webhook_history" already exists, skipping
+  (log)  INFO instant_server::storage_sweeper: storage sweeper started every_secs=3600 grace_hours=768
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 2:08:31 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 2:08:28 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 2:08:28 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 2:08:31 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:08:49 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:08:51 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:08:49 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:08:51 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 2:08:55 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 2:08:55 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 2:08:55 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 2:08:55 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 2:08:56 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 2:08:56 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 2:08:57 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 2:08:55 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 2:08:55 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 2:08:58 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:08:58 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:09:03 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:08:59 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:09:03 p.m.
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost: the Worker did not respond to a keep-alive ping within 10000ms.[0m
+
+
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost. Reconnecting (attempt 1 of 5) in 1s...[0m
+
+
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost. Reconnecting (attempt 2 of 5) in 2s...[0m
+
+
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost. Reconnecting (attempt 3 of 5) in 4s...[0m
+
+
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost. Reconnecting (attempt 4 of 5) in 8s...[0m
+
+
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost. Reconnecting (attempt 5 of 5) in 16s...[0m
+
+
+
+[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mUnable to reconnect to the tail for instant-worker after 5 attempts. Please re-run `wrangler tail` to start a new session.[0m
+
+
+🪵  Logs were written to "/Users/lrosen/Library/Preferences/.wrangler/logs/wrangler-2026-11-11_18-18-23_704.log"
+
+ ⛅️ wrangler 4.160.1
+────────────────────
+Successfully created tail, expires at 2026-11-12T00:32:40Z
+Connected to instant-worker, waiting for logs...
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 3:20:05 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:20:30 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:20:30 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:20:37 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:20:33 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:20:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:20:37 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:20:33 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:20:43 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:20:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:20:44 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 3:20:58 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 3:20:58 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 3:20:59 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 3:20:59 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 3:21:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:20:54 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:20:56 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:20:54 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:20:56 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 3:21:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:21:03 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 3:21:03 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:21:04 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 3:21:04 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:21:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:21:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:21:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:21:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:09:10 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:09:07 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:09:13 p.m.
+  (log)  WARN sqlx_core::pool::connection: error occurred while testing the connection on-release error=error returned from database: Idle connection closed by Hyperdrive.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:09:09 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:09:07 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 2:09:13 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 3:28:38 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 3:28:38 p.m.
+  (log)  INFO sqlx::postgres::notice: relation "rust_presence" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_nodes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_spill" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes_app_tx_idx" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_rate_limit_buckets" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: trigger "rust_capture_trigger" for relation "triples" does not exist, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_blobs" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_server_config" already exists, skipping
+  (log)  INFO instant_server: SERVER_SECRET not set; using a generated secret persisted in Postgres
+  (log)  INFO sqlx::postgres::notice: relation "rust_webhook_history" already exists, skipping
+  (log)  INFO instant_server::storage_sweeper: storage sweeper started every_secs=3600 grace_hours=768
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:28:47 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:28:47 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:28:49 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:28:49 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:28:53 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:28:53 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:28:54 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:28:53 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:28:54 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 3:28:53 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 3:28:53 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:28:54 p.m.
+  (log)  WARN instant_server::invalidator: refresh: failed to load rules: database error: encountered unexpected or invalid data: Postgres protocol error: expected ParseComplete, got ParameterDescription (sqlx_postgres::message:129)
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 3:29:04 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 3:29:04 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 3:29:33 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 3:29:33 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:29:34 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:29:34 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:29:34 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:29:34 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:29:35 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:17 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:26 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:20 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:24 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:14 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:26 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:24 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:20 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:14 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:17 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:29:35 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:46 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:47 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:54 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:54 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:54 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:29:54 p.m.
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::webhooks: webhook claim failed: database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 3:36:58 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 3:36:59 p.m.
+  (log)  INFO sqlx::postgres::notice: relation "rust_presence" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_nodes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_spill" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes_app_tx_idx" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_rate_limit_buckets" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: trigger "rust_capture_trigger" for relation "triples" does not exist, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_blobs" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_server_config" already exists, skipping
+  (log)  INFO instant_server: SERVER_SECRET not set; using a generated secret persisted in Postgres
+  (log)  INFO sqlx::postgres::notice: relation "rust_webhook_history" already exists, skipping
+  (log)  INFO instant_server::storage_sweeper: storage sweeper started every_secs=3600 grace_hours=768
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:37:11 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:37:13 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:37:11 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:37:14 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:37:41 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:37:41 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:37:42 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:37:42 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:37:42 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:37:42 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:37:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 3:37:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 3:37:41 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 3:37:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 3:38:27 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 3:38:27 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 3:38:32 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 3:38:32 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 3:39:21 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 3:39:21 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:39:22 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:39:22 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:39:22 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:39:23 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:39:23 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:38:53 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:39:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:38:51 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:38:53 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:39:02 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:38:56 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:38:56 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:39:02 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:38:50 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:39:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:39:23 p.m.
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:40:24 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:40:24 p.m.
+  (log)  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:41:19 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:41:19 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:41:19 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:41:19 p.m.
+  (log)  WARN instant_server::webhooks: webhook claim failed: database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 3:42:30 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 3:42:30 p.m.
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:43:18 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 3:44:23 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 3:44:24 p.m.
+  (log)  INFO sqlx::postgres::notice: relation "rust_presence" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_nodes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_spill" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes_app_tx_idx" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_rate_limit_buckets" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: trigger "rust_capture_trigger" for relation "triples" does not exist, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_blobs" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_server_config" already exists, skipping
+  (log)  INFO instant_server: SERVER_SECRET not set; using a generated secret persisted in Postgres
+  (log)  INFO sqlx::postgres::notice: relation "rust_webhook_history" already exists, skipping
+  (log)  INFO instant_server::storage_sweeper: storage sweeper started every_secs=3600 grace_hours=768
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:42 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:42 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:42 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:42 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:43 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:43 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:43 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:43 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:45 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:45 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:45 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:45 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:46 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:46 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:46 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:47 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 3:43:18 p.m.
+  (log)  WARN instant_server::webhooks: webhook claim failed: database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:47 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:48 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:49 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:44:49 p.m.
+  (log)  WARN instant_server::hard_delete: hard-delete sweep failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::storage_sweeper: storage sweep failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:45:16 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:45:16 p.m.
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:46:26 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 3:44:40 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 3:44:39 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 3:46:27 p.m.
+  (log)  WARN instant_server::webhooks: webhook free-stuck failed: database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::webhooks: webhook claim failed: database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/ - Ok @ 2026-11-11, 3:47:17 p.m.
+GET https://instant-worker.leerosen686.workers.dev/ - Ok @ 2026-11-11, 3:47:17 p.m.
+GET https://instant-worker.leerosen686.workers.dev/favicon.ico - Ok @ 2026-11-11, 3:47:18 p.m.
+GET https://instant-worker.leerosen686.workers.dev/favicon.ico - Ok @ 2026-11-11, 3:47:18 p.m.
+  (log)  WARN instant_server::usage: triple size collection failed error=database error: pool timed out while waiting for an open connection
+  (log)  WARN instant_server::indexing_jobs: indexing job sweep failed error=database error: pool timed out while waiting for an open connection
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 4:08:27 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 4:08:28 p.m.
+  (log)  INFO sqlx::postgres::notice: relation "rust_presence" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_nodes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_spill" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes_app_tx_idx" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_rate_limit_buckets" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: trigger "rust_capture_trigger" for relation "triples" does not exist, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_blobs" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_server_config" already exists, skipping
+  (log)  INFO instant_server: SERVER_SECRET not set; using a generated secret persisted in Postgres
+  (log)  INFO sqlx::postgres::notice: relation "rust_webhook_history" already exists, skipping
+  (log)  INFO instant_server::storage_sweeper: storage sweeper started every_secs=3600 grace_hours=768
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:37 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:38 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:38 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:38 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:38 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:39 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:39 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:39 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:40 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:40 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:40 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:41 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:42 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:42 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:42 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:42 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:42 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:43 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:43 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:45 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:45 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:46 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:46 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:47 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:47 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:54 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:08:54 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:08:36 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 4:08:57 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:08:36 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 4:08:58 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:09:59 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:09:59 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 4:10:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 4:10:00 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 4:10:59 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 4:10:59 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 4:11:00 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 4:11:00 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 4:11:00 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 4:11:00 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 4:11:01 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 4:10:59 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 4:10:59 p.m.
+POST https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Ok @ 2026-11-11, 4:11:01 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:19 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:16 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:16 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:19 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 4:12:02 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/sse?app_id=REDACTED - Canceled @ 2026-11-11, 4:12:02 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:02 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:02 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:02 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:03 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:03 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:03 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:14 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:14 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:15 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:15 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:12:16 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:34 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:32 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:29 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:39 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:39 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:34 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:31 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 4:11:37 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 4:11:38 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:11:29 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:12:16 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 4:12:22 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 4:12:22 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 4:12:23 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 4:12:23 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 4:12:24 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:20 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:20 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:21 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Ok @ 2026-11-11, 4:12:21 p.m.
+POST https://instant-worker.leerosen686.workers.dev/dash/apps/REDACTED/status - Ok @ 2026-11-11, 4:12:24 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 4:12:31 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:12:31 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 4:12:31 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 4:12:31 p.m.
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost. Reconnecting (attempt 1 of 5) in 1s...[0m
+
+
+Reconnected to instant-worker.
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost. Reconnecting (attempt 1 of 5) in 1s...[0m
+
+
+Reconnected to instant-worker.
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost: the Worker did not respond to a keep-alive ping within 10000ms.[0m
+
+
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1mTail connection lost. Reconnecting (attempt 1 of 5) in 1s...[0m
+
+
+Reconnected to instant-worker.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 6:46:09 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 6:45:57 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 6:45:57 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 6:45:57 p.m.
+  (log)  INFO sqlx::postgres::notice: relation "rust_presence" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_nodes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_spill" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_tx_changes_app_tx_idx" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_rate_limit_buckets" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: trigger "rust_capture_trigger" for relation "triples" does not exist, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_blobs" already exists, skipping
+  (log)  INFO sqlx::postgres::notice: relation "rust_server_config" already exists, skipping
+  (log)  INFO instant_server: SERVER_SECRET not set; using a generated secret persisted in Postgres
+  (log)  INFO sqlx::postgres::notice: relation "rust_webhook_history" already exists, skipping
+  (log)  INFO instant_server::storage_sweeper: storage sweeper started every_secs=3600 grace_hours=768
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Unknown @ 2026-11-11, 6:45:57 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 6:46:10 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 6:46:35 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 6:46:35 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 6:46:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/runtime/session?app_id=REDACTED - Canceled @ 2026-11-11, 6:46:44 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 6:47:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 6:47:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 6:47:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 6:47:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 6:47:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 6:47:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 6:47:00 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 6:47:01 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 6:47:01 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 6:47:01 p.m.
+GET https://instant-worker.leerosen686.workers.dev/ - Ok @ 2026-11-11, 6:47:01 p.m.
+GET https://instant-worker.leerosen686.workers.dev/ - Ok @ 2026-11-11, 6:47:01 p.m.
+GET https://instant-worker.leerosen686.workers.dev/no-such-route - Ok @ 2026-11-11, 6:47:01 p.m.
+GET https://instant-worker.leerosen686.workers.dev/no-such-route - Ok @ 2026-11-11, 6:47:01 p.m.
+GET https://instant-worker.leerosen686.workers.dev/health - Ok @ 2026-11-11, 6:52:01 p.m.

@@ -12,6 +12,7 @@
 <p align="center">
   <a href="https://instantdbrust.com"><b>Website</b></a> ·
   <a href="#quick-start">Self-host</a> ·
+  <a href="#serverless-on-cloudflare-workers-experimental">Cloudflare Workers</a> ·
   <a href="docs/PARITY.md">Parity</a> ·
   <a href="docs/PERF.md">Performance</a>
 </p>
@@ -37,6 +38,10 @@ yourself. Point `@instantdb/react`, `@instantdb/core`, `@instantdb/admin` or
 - **Checked against the original, not just ported.** A differential harness
   runs every counted API surface item against the official legacy server and
   compares the responses. [Parity report →](docs/PARITY.md)
+- **Serverless too (experimental).** The same server runs inside a
+  Cloudflare Durable Object with your Postgres behind Hyperdrive: nothing to
+  host, and it scales to zero when nobody is connected.
+  [Cloudflare Workers →](#serverless-on-cloudflare-workers-experimental)
 - **Cheap to run.** About 48 KB per live connection, results computed once per
   distinct query and shared with every subscriber, and Postgres is the
   bottleneck before the server is. [Numbers →](docs/PERF.md)
@@ -89,6 +94,37 @@ Set `DATABASE_URL` if you're not using the default
 `postgres://instant:instant@localhost:5432/instant`.
 </details>
 
+## Serverless on Cloudflare Workers (experimental)
+
+The whole sync engine also runs on Cloudflare Workers: the same Rust server,
+compiled to WebAssembly, inside a Durable Object, talking to your Postgres
+through Hyperdrive. There is no machine to run. Unmodified `@instantdb`
+clients connect to it the same way.
+
+```bash
+./scripts/apply-migrations.sh           # schema, against your Postgres
+cd crates/instant-worker
+npx wrangler hyperdrive create instant --connection-string="postgres://..." --caching-disabled
+# put the printed id and your BASE_URL in wrangler.toml, then:
+npx wrangler deploy
+```
+
+Measured on a real deployment (client in Toronto, Postgres in AWS us-east-2):
+
+| | |
+|---|---|
+| **Protocol** | The wire-conformance suite (222 assertions), sync tables, streams, SSE, presence, OAuth, magic codes and webhooks pass against the deployed Worker |
+| **Latency** | A new query in about 120 ms; a write reaches another client in about 340 ms |
+| **Idle** | Evicted about a minute after the last client leaves; the next request wakes it in 0.4 to 1 s |
+| **Connections** | 2,000 idle subscribed clients held on one Durable Object |
+| **Stability** | A 3 hour soak with no failed operations or missed updates; live queries survive dropped database connections |
+
+It is experimental. It builds with a Cloudflare preview toolchain (Rust beta
+and Emscripten) and a patched Postgres driver, one Durable Object serves all
+apps, and speed depends on where Cloudflare places it. The self-hosted
+server above is the dependable way to run this today.
+[Design, limits and test reports →](docs/CLOUDFLARE.md)
+
 ## What works
 
 Everything the official clients use is implemented:
@@ -115,6 +151,8 @@ reasons, in [docs/PARITY.md](docs/PARITY.md).
   server and how it's verified.
 - **[Performance](docs/PERF.md)**: load-test method, results, and how to
   reproduce them.
+- **[Cloudflare Workers](docs/CLOUDFLARE.md)**: experimental; running the
+  server in a Durable Object, what was measured on Cloudflare, and the limits.
 - **[Migrating from Instant Cloud](docs/MIGRATION.md)**: coming soon.
 
 ## Development
@@ -136,6 +174,7 @@ the legacy one. CI runs all of them.
 |---|---|
 | `crates/instant-core` | Attributes, triples, InstaML, InstaQL, CEL permissions, system catalog |
 | `crates/instant-server` | axum HTTP/websocket server: sessions, invalidation, presence, auth, admin and dashboard APIs, storage |
+| `crates/instant-worker` | Experimental Cloudflare Workers host, outside the workspace ([docs/CLOUDFLARE.md](docs/CLOUDFLARE.md)) |
 | `crates/instant-loadtest` | The load generator behind [docs/PERF.md](docs/PERF.md) |
 | `web/` | The [instantdbrust.com](https://instantdbrust.com) site |
 | `LEGACY/` | The original Instant codebase (Clojure + TypeScript), kept for reference and for the differential harness |

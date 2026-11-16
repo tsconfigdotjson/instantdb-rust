@@ -176,9 +176,17 @@ pub async fn load_or_generate_key(pool: &sqlx::PgPool) -> Result<WebhookKey> {
             _ => {}
         }
     }
+    key_from_stored(&seed_hex, kid)
+}
+
+/// The signing key as stored in `rust_server_config` (hex seed + key id).
+pub fn key_from_stored(seed_hex: &str, kid: String) -> Result<WebhookKey> {
+    if !seed_hex.is_ascii() {
+        return Err(InstantError::internal("corrupt webhook signing key"));
+    }
     let bytes: Vec<u8> = (0..seed_hex.len())
         .step_by(2)
-        .filter_map(|i| u8::from_str_radix(&seed_hex[i..i + 2], 16).ok())
+        .filter_map(|i| u8::from_str_radix(seed_hex.get(i..i + 2)?, 16).ok())
         .collect();
     let seed: [u8; 32] = bytes
         .try_into()
@@ -1414,25 +1422,38 @@ fn retry_after(previous_attempts: i64) -> chrono::Duration {
 /// hostile endpoint can't make the sender buffer an unbounded body.
 const MAX_RESPONSE_BYTES: usize = 4096;
 
+const USER_AGENT: &str = "InstantDB Webhook Sender";
+
 fn http_client(target: &ValidatedUrl) -> Option<reqwest::Client> {
-    let mut b = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(20))
-        .user_agent("InstantDB Webhook Sender");
-    if !target.addrs.is_empty() {
-        b = b.resolve_to_addrs(&target.host, &target.addrs);
-    }
+    let b = crate::http::guarded(
+        crate::http::builder(Duration::from_secs(20)),
+        &target.host,
+        &target.addrs,
+    );
+    // fetch has no client-wide user agent; there it is set per request
+    #[cfg(not(target_arch = "wasm32"))]
+    let b = b.user_agent(USER_AGENT);
     b.build().ok()
 }
 
-async fn read_capped(resp: &mut reqwest::Response) -> String {
-    let mut buf: Vec<u8> = vec![];
-    while let Ok(Some(chunk)) = resp.chunk().await {
-        buf.extend_from_slice(&chunk);
-        if buf.len() >= MAX_RESPONSE_BYTES {
-            break;
+async fn read_capped(resp: &mut crate::http::Response) -> String {
+    // natively the body is read chunk by chunk, and whatever arrived before a
+    // read error is kept
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut buf = {
+        let mut buf: Vec<u8> = vec![];
+        while let Ok(Some(chunk)) = resp.chunk().await {
+            buf.extend_from_slice(&chunk);
+            if buf.len() >= MAX_RESPONSE_BYTES {
+                break;
+            }
         }
-    }
+        buf
+    };
+    #[cfg(target_arch = "wasm32")]
+    let mut buf = crate::http::read_capped(resp, MAX_RESPONSE_BYTES)
+        .await
+        .unwrap_or_default();
     buf.truncate(MAX_RESPONSE_BYTES);
     String::from_utf8_lossy(&buf).chars().take(256).collect()
 }
@@ -1464,14 +1485,16 @@ async fn send_webhook(
     let Some(client) = http_client(&target) else {
         return fail("unknown", "Unknown error.");
     };
-    let res = client
-        .post(url)
-        .header("Content-Type", "application/json; charset=utf-8")
-        .header("Instant-Signature", format!("t={t},kid={kid},v1={sig}"))
-        .header("Idempotency-Key", idempotency_key.to_string())
-        .body(body)
-        .send()
-        .await;
+    let req = client.post(url);
+    #[cfg(target_arch = "wasm32")]
+    let req = req.header("User-Agent", USER_AGENT);
+    let res = crate::http::send(
+        req.header("Content-Type", "application/json; charset=utf-8")
+            .header("Instant-Signature", format!("t={t},kid={kid},v1={sig}"))
+            .header("Idempotency-Key", idempotency_key.to_string())
+            .body(body),
+    )
+    .await;
     match res {
         Ok(mut resp) => {
             let status = resp.status().as_u16() as i32;
@@ -1490,7 +1513,7 @@ async fn send_webhook(
         Err(e) => {
             let (error_type, message) = if e.is_timeout() {
                 ("timeout", "Request timed out.")
-            } else if e.is_connect() {
+            } else if crate::http::is_connect(&e) {
                 ("connect", "Could not connect.")
             } else if e.is_redirect() {
                 ("redirect", "Unexpected redirect.")
@@ -1580,18 +1603,30 @@ async fn record_attempt(state: &AppState, ev: &ClaimedEvent, a: Attempt) -> Resu
 }
 
 async fn handle_event(state: &Arc<AppState>, ev: ClaimedEvent) -> Result<()> {
-    let webhook = get_by_id(state, ev.app_id, ev.webhook_id).await?;
+    // An event can outlive its webhook. Without a recorded attempt it stays
+    // `processing`, is freed by free_stuck and claimed again every few
+    // minutes for good, as on the original server. A node on the local bus
+    // (where each of those claims is a round trip to a distant database)
+    // ends the event instead, like a disabled webhook does. The default bus
+    // keeps the original behaviour.
+    let ended = |message: &str| Attempt {
+        at: chrono::Utc::now(),
+        duration_ms: 0,
+        success: false,
+        status_code: None,
+        response_text: None,
+        error_type: Some("disabled".into()),
+        error_message: Some(message.into()),
+    };
+    let webhook = match get_by_id(state, ev.app_id, ev.webhook_id).await {
+        Ok(webhook) => webhook,
+        Err(e) if e.error_type == "record-not-found" && state.cfg.bus_local => {
+            return record_attempt(state, &ev, ended("Webhook was deleted.")).await;
+        }
+        Err(e) => return Err(e),
+    };
     if webhook.status != "active" {
-        let a = Attempt {
-            at: chrono::Utc::now(),
-            duration_ms: 0,
-            success: false,
-            status_code: None,
-            response_text: None,
-            error_type: Some("disabled".into()),
-            error_message: Some("Webhook is disabled.".into()),
-        };
-        return record_attempt(state, &ev, a).await;
+        return record_attempt(state, &ev, ended("Webhook is disabled.")).await;
     }
     let idempotency_key = payload_idempotency_key(ev.webhook_id, ev.isn);
     let payload_url = format!(

@@ -245,6 +245,7 @@ pub async fn app_clear(
         .bind(app_id)
         .execute(&state.pool)
         .await?;
+        crate::service::rules_written(&state, app_id);
         Ok(json!({"ok": true}))
     }
     .await;
@@ -278,12 +279,7 @@ pub async fn app_status_post(
         let status =
             coerce_status(raw).ok_or_else(|| param_malformed(&["body", "status"], raw.clone()))?;
         let app_id = app_uuid(&app);
-        sqlx::query("UPDATE apps SET status = $1 WHERE id = $2")
-            .bind(status)
-            .bind(app_id)
-            .execute(&state.pool)
-            .await?;
-        service::set_app_status(&state, app_id, status.to_string());
+        service::write_app_status(&state, app_id, status).await?;
         Ok(json!({"status": status}))
     }
     .await;
