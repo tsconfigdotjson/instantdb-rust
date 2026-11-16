@@ -501,7 +501,12 @@ everything and checks coverage itself, as before.
 - `errors.mjs` / `errors-allowed.json` — the error matrix: one probe per
   externally reachable legacy error type (`err:*` in surface.json) over HTTP
   and the ws session; the normalized envelope (status, type, message, hint)
-  must match. The timeout probes hold `LOCK TABLE triples IN SHARE MODE` on
+  must match. Two probes race concurrent upserts on one new lookup value:
+  every writer must succeed and share one entity, and a guest race under
+  `create: newData.quantity < 100` / `update: false` must let no
+  high-quantity write through, allow at least one low-quantity create per
+  round, and leave one entity per lookup (the exact count of allowed racers
+  is scheduler-dependent). The timeout probes hold `LOCK TABLE triples IN SHARE MODE` on
   each server's database so a transact outlives the 5s handler timeout
   (ws, `operation-timed-out`) or the 30s statement timeout (HTTP, `timeout`).
   `unreachable.json` lists the error types no request can produce, with the
