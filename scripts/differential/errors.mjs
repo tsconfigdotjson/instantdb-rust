@@ -54,6 +54,11 @@ const FIXED = {
   reqOwnerId: mk(),
   reqEntity: mk(),
   reqOwner: mk(),
+  // the concurrent lookup-upsert / racing guest probes (upsertrace.sku is
+  // unique, so every writer in a round upserts through the same lookup)
+  upsertId: mk(),
+  upsertSku: mk(),
+  upsertQuantity: mk(),
 };
 const isFixed = (s) => typeof s === "string" && s.includes("-0000-4000-8000-");
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
@@ -554,6 +559,90 @@ probe("ws/validation-failed/required-link-unlink-allowed", async (ctx) => {
   return v;
 });
 
+// concurrent lookup upserts on one new unique value. Legacy's
+// lookup-ref-inserts CTE (triple.clj:312-319) inserts ON CONFLICT DO NOTHING
+// on the av index and reads the winner's row, so every writer succeeds and
+// they all share one entity; a plain INSERT leaves the losers with
+// record-not-unique. Three rounds, because the losing INSERTs only happen
+// while the requests overlap.
+probe("http/no-error/concurrent-lookup-upserts", async (ctx) => {
+  const rounds = 3;
+  const writers = 20;
+  let ok = 0;
+  const errors = new Set();
+  const entities = [];
+  for (let round = 0; round < rounds; round++) {
+    const sku = `upsert-race-${round}`;
+    const replies = await Promise.all(
+      Array.from({ length: writers }, (_, i) =>
+        admin(ctx, "/admin/transact", { steps: [["update", "upsertrace", { sku }, { quantity: i + 1 }]] })),
+    );
+    for (const r of replies) {
+      if (r.status === 200) ok++;
+      else errors.add(`${r.status} ${r.body?.type ?? "<none>"}`);
+    }
+    const q = await admin(ctx, "/admin/query", { query: { upsertrace: { $: { where: { sku } } } } });
+    entities.push((q.body?.upsertrace ?? []).length);
+  }
+  const errorTypes = [...errors].sort();
+  return {
+    status: errorTypes.length ? 500 : 200,
+    type: errorTypes[0]?.split(" ")[1] ?? "<none>",
+    ok,
+    total: rounds * writers,
+    entities,
+    errorTypes,
+  };
+});
+
+// a racing guest upsert is checked as a create from the pre-tx snapshot
+// (post-create-checks `create?` is `(nil? entity)`, permissioned_transaction.clj:490-497):
+// the first writer that saw no entity may pass the create rule, later racers
+// see it and must pass the denying update rule. A writer that reaches the
+// write without a create or update check would let quantity >= 100 through.
+// Counts of allowed low-quantity racers are scheduler-dependent; the pinned
+// invariants are no high-quantity success, a low-quantity success each round,
+// one entity per lookup, and only permission-denied replies.
+probe("http/permission-denied/racing-lookup-upsert-as-create", async (ctx) => {
+  const rules = { upsertrace: { allow: { view: "true", create: "newData.quantity < 100", update: "false", delete: "false" } } };
+  const pushed = await call(ctx.url, "POST", `/dash/apps/${appId}/rules`, { token: userToken, body: { code: rules } });
+  if (pushed.status !== 200) throw new Error(`[${ctx.name}] upsert rules push failed: ${JSON.stringify(pushed.body)}`);
+  const rounds = 3;
+  const writers = 20;
+  let highAllowed = 0;
+  let lowAllowedRounds = 0;
+  const denied = new Set();
+  const entities = [];
+  for (let round = 0; round < rounds; round++) {
+    const sku = `upsert-perms-${round}`;
+    const quantities = Array.from({ length: writers }, (_, i) => (i % 2 ? 100 + i : i + 1));
+    const replies = await Promise.all(
+      quantities.map((quantity) =>
+        admin(ctx, "/admin/transact", { steps: [["update", "upsertrace", { sku }, { quantity }]] }, { "as-guest": "true" })),
+    );
+    let lowAllowed = 0;
+    replies.forEach((r, i) => {
+      if (r.status === 200) {
+        if (quantities[i] < 100) lowAllowed++;
+        else highAllowed++;
+      } else {
+        denied.add(`${r.status} ${r.body?.type ?? "<none>"}`);
+      }
+    });
+    if (lowAllowed > 0) lowAllowedRounds++;
+    const q = await admin(ctx, "/admin/query", { query: { upsertrace: { $: { where: { sku } } } } });
+    entities.push((q.body?.upsertrace ?? []).length);
+  }
+  return {
+    status: 400,
+    type: "permission-denied",
+    highAllowed,
+    lowAllowedRounds,
+    entities,
+    denied: [...denied].sort(),
+  };
+});
+
 // ---------------------------------------------------------------------------
 
 async function setup(ctx) {
@@ -570,6 +659,10 @@ async function setup(ctx) {
       ["add-attr", { id: FIXED.reqLinkId, "forward-identity": [FIXED.reqLinkId, "reqlink", "id"], "value-type": "blob", cardinality: "one", "unique?": true, "index?": true }],
       ["add-attr", { id: FIXED.reqOwnerId, "forward-identity": [FIXED.reqOwnerId, "reqowner", "id"], "value-type": "blob", cardinality: "one", "unique?": true, "index?": true }],
       ["add-attr", { id: FIXED.reqLinkCreator, "forward-identity": [FIXED.reqLinkCreator, "reqlink", "creator"], "reverse-identity": [FIXED.reqLinkReverse, "reqowner", "reqlinks"], "value-type": "ref", cardinality: "one", "unique?": false, "index?": false, "required?": true }],
+      // the lookup-upsert probes: a unique sku every writer upserts through
+      ["add-attr", { id: FIXED.upsertId, "forward-identity": [FIXED.upsertId, "upsertrace", "id"], "value-type": "blob", cardinality: "one", "unique?": true, "index?": true }],
+      ["add-attr", { id: FIXED.upsertSku, "forward-identity": [FIXED.upsertSku, "upsertrace", "sku"], "value-type": "blob", cardinality: "one", "unique?": true, "index?": true }],
+      ["add-attr", { id: FIXED.upsertQuantity, "forward-identity": [FIXED.upsertQuantity, "upsertrace", "quantity"], "value-type": "blob", cardinality: "one", "unique?": false, "index?": false }],
     ],
   });
   if (res.status !== 200) throw new Error(`[${ctx.name}] setup transact failed: ${JSON.stringify(res.body)}`);

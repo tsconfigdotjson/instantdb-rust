@@ -2977,6 +2977,12 @@ pub async fn permissioned_transact_checked(
     let mut link_specs: Vec<LinkSpec> = vec![];
     let mut explicit_ref_touch: HashSet<(Uuid, String)> = HashSet::new();
     let mut other_touch: HashSet<(Uuid, String)> = HashSet::new();
+    // eid-position lookups of add / merge steps that matched nothing in the
+    // pre-pass. Legacy decides create vs update from this pre-tx snapshot
+    // (post-create-checks `create?` is `(nil? entity)`), so the entity they
+    // resolve to in the write is checked as a create even when a concurrent
+    // transaction committed it in between and the write reuses it.
+    let mut unpeeked_lookups: Vec<(Uuid, crate::triple::CanonicalValue, String)> = vec![];
 
     // resolve an EidRef without creating
     async fn peek_eid(
@@ -3046,6 +3052,10 @@ pub async fn permissioned_transact_checked(
                     if let std::collections::hash_map::Entry::Vacant(slot) = old_maps.entry(key) {
                         let m = fetch_entity_map(conn, app_id, attrs, &attr.etype, e).await?;
                         slot.insert(m);
+                    }
+                } else if let EidRef::Lookup(la, lv) = eid {
+                    if !matches!(step, TxStep::RetractTriple { .. }) {
+                        unpeeked_lookups.push((*la, lv.clone(), attr.etype.clone()));
                     }
                 }
                 if attr.value_type == ValueType::Ref {
@@ -3479,6 +3489,16 @@ pub async fn permissioned_transact_checked(
     for (key, s) in &local_steps {
         if !matches!(s, LocalStep::Dissoc(_)) && !created_order.contains(key) {
             created_order.push(key.clone());
+        }
+    }
+    // a lookup that matched nothing before the tx is a create, also when the
+    // write reused an entity a concurrent transaction committed meanwhile
+    for (la, lv, et) in &unpeeked_lookups {
+        if let Some(e) = report.resolved_lookups.get(&(*la, lv.clone())) {
+            let key = (*e, et.clone());
+            if !created_order.contains(&key) {
+                created_order.push(key);
+            }
         }
     }
     let created: HashSet<(Uuid, String)> = created_order

@@ -123,3 +123,21 @@ pub struct SchemaIds {
     pub owners_name: Uuid,
     pub todos_owner: Uuid,
 }
+
+/// Waits until backend `pid` is blocked by another backend (e.g. an insert
+/// waiting on a concurrent transaction's uncommitted row). Lets concurrency
+/// tests order transactions on Postgres' own lock state instead of sleeps.
+pub async fn wait_until_blocked(pool: &PgPool, pid: i32) {
+    for _ in 0..400 {
+        let (blocked,): (bool,) = sqlx::query_as("SELECT cardinality(pg_blocking_pids($1)) > 0")
+            .bind(pid)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        if blocked {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("backend {pid} never blocked");
+}
