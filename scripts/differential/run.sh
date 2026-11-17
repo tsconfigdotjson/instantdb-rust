@@ -197,6 +197,52 @@ for SEED in $SEEDS; do
     FUZZ_FAILED="$FUZZ_FAILED $SEED"
   fi
 done
+# Seeded layers run on their own apps, so several seeds can run at once. Each
+# *_JOBS knob caps how many seeds of that layer run concurrently (default 1:
+# unchanged serial behaviour). Their logs are buffered and printed in seed
+# order so a failure stays readable.
+seeded_seed() {
+  local layer="$1" seed="$2" app token
+  app=$(python3 -c "import uuid; print(uuid.uuid4())")
+  token=$(python3 -c "import uuid; print(uuid.uuid4())")
+  ./provision.sh "$app" "$token" > /dev/null || return 1
+  case "$layer" in
+    fuzzschema) node fuzz-schema.mjs "$app" "$app" "$token" "$seed" "${FUZZ_SCHEMA_ROUNDS:-200}" ;;
+    perms) node fuzz-perms.mjs "$app" "$app" "$token" "$seed" "${FUZZ_PERMS_ROUNDS:-120}" ;;
+    presence) node fuzz-presence.mjs "$app" "$app" "$token" "$seed" "${FUZZ_PRESENCE_ROUNDS:-100}" ;;
+    storagefuzz) node fuzz-storage.mjs "$app" "$app" "$token" "$seed" "${FUZZ_STORAGE_ROUNDS:-80}" ;;
+    syncfuzz) node fuzz-sync.mjs "$app" "$app" "$token" "$seed" "${FUZZ_SYNC_ROUNDS:-60}" ;;
+    *) echo "unknown seeded layer: $layer"; return 1 ;;
+  esac
+}
+run_seeded_layer() {
+  local layer="$1" jobs="$2" seed logs run=""
+  shift 2
+  logs=$(mktemp -d)
+  for seed in "$@"; do
+    want "$layer:$seed" || continue
+    run="$run $seed"
+    # Log a start marker now: the seed's own output is buffered until it
+    # finishes, so this is what per-seed CI timing is read from.
+    echo "$layer: seed=$seed starting"
+    (
+      if seeded_seed "$layer" "$seed" > "$logs/$seed.log" 2>&1; then
+        echo 0 > "$logs/$seed.rc"
+      else
+        echo 1 > "$logs/$seed.rc"
+      fi
+    ) &
+    while [ "$(jobs -rp | wc -l)" -ge "$jobs" ]; do wait -n || true; done
+  done
+  wait
+  for seed in $run; do
+    cat "$logs/$seed.log"
+    if [ "$(cat "$logs/$seed.rc" 2>/dev/null)" != "0" ]; then
+      FUZZ_FAILED="$FUZZ_FAILED $layer:$seed"
+    fi
+  done
+  rm -rf "$logs"
+}
 # schema-evolution fuzz: inline add-attr / update-attr / delete-attr /
 # restore-attr interleaved with data writes, one-shot queries (where / order /
 # pagination) and live subscriptions, with admin and non-admin sessions
@@ -205,92 +251,35 @@ done
 # refresh-ok are compared; a legacy session whose cache has not caught up is
 # accepted only when a fresh legacy probe agrees with rust.
 SCHEMA_SEEDS="${FUZZ_SCHEMA_SEEDS:-31 32}"
-for SEED in $SCHEMA_SEEDS; do
-  want "fuzzschema:$SEED" || continue
-  SCHEMA_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
-  SCHEMA_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
-  ./provision.sh "$SCHEMA_APP" "$SCHEMA_TOKEN" > /dev/null
-  if ! node fuzz-schema.mjs "$SCHEMA_APP" "$SCHEMA_APP" "$SCHEMA_TOKEN" "$SEED" "${FUZZ_SCHEMA_ROUNDS:-200}"; then
-    FUZZ_FAILED="$FUZZ_FAILED fuzzschema:$SEED"
-  fi
-done
+run_seeded_layer fuzzschema "${FUZZ_SCHEMA_JOBS:-1}" $SCHEMA_SEEDS
 # permissions + concurrency fuzz: generated rules, four concurrent sessions,
 # subscriptions compared at settled checkpoints (fuzz-perms.mjs). A seed is
-# mostly waiting for streams to go quiet, and each runs on its own apps, so
-# FUZZ_PERMS_JOBS seeds run at once; their logs print in seed order.
+# mostly waiting for streams to go quiet, so its seeds are the most parallel
+# layer: one per CI leg at PR depth and four at a time at nightly depth.
 PERMS_SEEDS="${FUZZ_PERMS_SEEDS:-7 8 9}"
-PERMS_RUN=""
-PERMS_LOGS=$(mktemp -d)
-perms_seed() {
-  local seed="$1" app token
-  app=$(python3 -c "import uuid; print(uuid.uuid4())")
-  token=$(python3 -c "import uuid; print(uuid.uuid4())")
-  if ./provision.sh "$app" "$token" > /dev/null &&
-    node fuzz-perms.mjs "$app" "$app" "$token" "$seed" "${FUZZ_PERMS_ROUNDS:-120}"; then
-    echo 0 > "$PERMS_LOGS/$seed.rc"
-  else
-    echo 1 > "$PERMS_LOGS/$seed.rc"
-  fi
-}
-for SEED in $PERMS_SEEDS; do
-  want "perms:$SEED" || continue
-  PERMS_RUN="$PERMS_RUN $SEED"
-  perms_seed "$SEED" > "$PERMS_LOGS/$SEED.log" 2>&1 &
-  while [ "$(jobs -rp | wc -l)" -ge "${FUZZ_PERMS_JOBS:-1}" ]; do wait -n || true; done
-done
-wait
-for SEED in $PERMS_RUN; do
-  cat "$PERMS_LOGS/$SEED.log"
-  if [ "$(cat "$PERMS_LOGS/$SEED.rc" 2>/dev/null)" != "0" ]; then
-    FUZZ_FAILED="$FUZZ_FAILED perms:$SEED"
-  fi
-done
-rm -rf "$PERMS_LOGS"
+run_seeded_layer perms "${FUZZ_PERMS_JOBS:-1}" $PERMS_SEEDS
 # rooms / presence fuzz: concurrent old and new clients join / leave / set
 # presence / broadcast over several rooms, with re-joins, invalid ops and
 # /admin/rooms/presence reads (fuzz-presence.mjs). Each seed folds the settled
 # client state and compares every ack / error / broadcast / admin shape.
 PRESENCE_SEEDS="${FUZZ_PRESENCE_SEEDS:-101 102 103}"
-for SEED in $PRESENCE_SEEDS; do
-  want "presence:$SEED" || continue
-  PZ_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
-  PZ_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
-  ./provision.sh "$PZ_APP" "$PZ_TOKEN" > /dev/null
-  if ! node fuzz-presence.mjs "$PZ_APP" "$PZ_APP" "$PZ_TOKEN" "$SEED" "${FUZZ_PRESENCE_ROUNDS:-100}"; then
-    FUZZ_FAILED="$FUZZ_FAILED presence:$SEED"
-  fi
-done
+run_seeded_layer presence "${FUZZ_PRESENCE_JOBS:-1}" $PRESENCE_SEEDS
 # storage / $files fuzz: admin and client uploads, signed upload consumption,
 # overwrites, odd / blank paths, content-type / disposition variants, deletes,
 # signed downloads, $files queries / pagination / links, impersonated admin
 # calls and generated $files rules (fuzz-storage.mjs). Every HTTP response,
 # query result, download fetch and settled subscription state is compared.
+# A seed is mostly waiting on uploads/downloads, so run several at once.
 STORAGE_SEEDS="${FUZZ_STORAGE_SEEDS:-201 202}"
-for SEED in $STORAGE_SEEDS; do
-  want "storagefuzz:$SEED" || continue
-  ST_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
-  ST_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
-  ./provision.sh "$ST_APP" "$ST_TOKEN" > /dev/null
-  if ! node fuzz-storage.mjs "$ST_APP" "$ST_APP" "$ST_TOKEN" "$SEED" "${FUZZ_STORAGE_ROUNDS:-80}"; then
-    FUZZ_FAILED="$FUZZ_FAILED storagefuzz:$SEED"
-  fi
-done
+run_seeded_layer storagefuzz "${FUZZ_STORAGE_JOBS:-1}" $STORAGE_SEEDS
 # sync-table fuzz: seeded start-sync over every supported order, random
 # creates / updates / deletes / links from several sessions, view rules,
 # remove-sync, reconnects with resync-table from the last seen tx, an attr
 # added after a sub started, and a >100-tx burst (fuzz-sync.mjs). Every sync
 # frame, its batching and tx-id watermarks, and the folded client store are
-# compared.
+# compared. The two PR seeds (and all ten nightly seeds) ride the replay leg.
 SYNC_SEEDS="${FUZZ_SYNC_SEEDS:-301 302}"
-for SEED in $SYNC_SEEDS; do
-  want "syncfuzz:$SEED" || continue
-  SYNC_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
-  SYNC_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
-  ./provision.sh "$SYNC_APP" "$SYNC_TOKEN" > /dev/null
-  if ! node fuzz-sync.mjs "$SYNC_APP" "$SYNC_APP" "$SYNC_TOKEN" "$SEED" "${FUZZ_SYNC_ROUNDS:-60}"; then
-    FUZZ_FAILED="$FUZZ_FAILED syncfuzz:$SEED"
-  fi
-done
+run_seeded_layer syncfuzz "${FUZZ_SYNC_JOBS:-1}" $SYNC_SEEDS
 # subscription race fuzz (issue #51): rust-only invariants for queries
 # registered while transactions are in flight, against a rust server booted
 # with INSTANT_CHAOS_DELAY_MS (RACE_URL; defaults to RUST_URL)
