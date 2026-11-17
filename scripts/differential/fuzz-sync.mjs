@@ -841,7 +841,17 @@ async function runOn(serverName, plan) {
         }
         if (!["start-sync-ok", "sync-load-batch", "sync-init-finish", "sync-update-triples"].includes(m.op)) continue;
         let frame = m;
-        if (m.op === "sync-update-triples") {
+        if (m.op === "sync-load-batch") {
+          // SyncTable builds a store from an entity's rows; the order of an
+          // entity's own triples inside json_agg is physical row order, not
+          // client-visible. Keep the entity batch order, canonicalize inside.
+          frame = {
+            ...m,
+            "join-rows": m["join-rows"].map((rows) =>
+              [...rows].sort((a, b) => (canon(a) < canon(b) ? -1 : canon(a) > canon(b) ? 1 : 0)),
+            ),
+          };
+        } else if (m.op === "sync-update-triples") {
           maxTxPerFrame = Math.max(maxTxPerFrame, m.txes?.length ?? 0);
           if ((m.txes?.length ?? 0) > 100) {
             throw new Error(`[${serverName}] sync-update-triples carried ${m.txes.length} txes (legacy cap is 100)`);
