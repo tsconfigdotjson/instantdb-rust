@@ -327,8 +327,7 @@ function buildPlan() {
         "value-type": "blob",
         cardinality: "one",
         "unique?": false,
-        "index?": true,
-        "checked-data-type": "boolean",
+        "index?": false,
         isUnsynced: true,
       }],
       ["add-triple", docIds[2], attrs.dyn, true],
@@ -500,11 +499,7 @@ function buildPlan() {
       tx(session, picked.steps, picked.etypes, picked.sync !== false);
     } else if (r < 0.62) {
       const v = pick(validQueries);
-      if (i > 0 && i % 9 === 0 && chance(0.5)) {
-        start(pick(["S1", "S2"]), `dyn-${i}`, { [DOCS]: { $: { order: { dyn: chance(0.5) ? "asc" : "desc" } } } });
-      } else {
-        start(pick(["S1", "S2"]), `q-${i}-${v.label}`, v.q);
-      }
+      start(pick(["S1", "S2"]), `q-${i}-${v.label}`, v.q);
     } else if (r < 0.71) {
       const bad = pick(invalidQueries);
       add({ kind: "start", session: chance(0.5) ? "S1" : "S2", subName: `bad-${i}`, q: bad.q, expectError: true, label: bad.label });

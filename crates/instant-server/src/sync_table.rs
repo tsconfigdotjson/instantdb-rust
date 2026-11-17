@@ -128,9 +128,11 @@ fn parse_sync_query(attrs: &AttrMap, q: &Value) -> Result<SyncQuery> {
     let order = if order_key == "serverCreatedAt" {
         SyncOrder::ServerCreatedAt { dir }
     } else {
-        let attr = attrs
-            .by_fwd_name(&etype, &order_key)
-            .ok_or_else(|| order_verr(format!("Unknown order field {order_key}")))?;
+        let attr = attrs.by_fwd_name(&etype, &order_key).ok_or_else(|| {
+            // legacy validates the query through instaql-query->patterns
+            // before create-sync-process looks at the order attr
+            order_verr(format!("There is no `{order_key}` attribute for {etype}."))
+        })?;
         let checked = if attr.is_indexed && !attr.indexing {
             attr.checked_data_type
         } else {
