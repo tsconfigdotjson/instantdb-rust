@@ -426,8 +426,11 @@ everything and checks coverage itself, as before.
   tables bypass view filtering like legacy. The layer also covers:
   - `sync-load-batch` order (the custom-order initial query, not just the
     client's later sorts) and every `sync-update-triples` frame's exact tx
-    grouping, change order and tx-id watermark; frames carry at most legacy's
-    100 txes, including after a >100-transaction burst;
+    grouping and tx-id watermark; frames carry at most legacy's 100 txes,
+    including after a >100-transaction burst. The change set is compared
+    whole, with only the within-tx row order canonicalized by entity/attr
+    (removed before added): Postgres transition-table / WAL row order is not
+    stable, and SyncTable applies different attrs independently;
   - `remove-sync` (both `keep-subscription` values, no reply) and a later
     `resync-table` of the same persisted subscription id from the last seen
     tx, plus a full disconnect / reconnect that resyncs every active sub;
