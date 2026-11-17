@@ -883,7 +883,13 @@ async function runOn(serverName, plan) {
     for (const sub of subs) {
       if (!sub.active) continue;
       const target = committed
-        .filter((c) => c.txId > (sub.txId ?? -1) && (!etypes || etypes.includes(c.etype)))
+        .filter((c) =>
+          c.txId > (sub.txId ?? -1)
+            ? etypes
+              ? etypes.includes(c.etype)
+              : c.etype === sub.etype
+            : false,
+        )
         .reduce((m, c) => Math.max(m, c.txId), 0);
       if (target) out.push({ sub, target });
     }
@@ -891,12 +897,19 @@ async function runOn(serverName, plan) {
   };
 
   const waitTargets = async (targets) => {
-    await Promise.all(
-      targets.map(({ sub, target }) => {
-        const c = conns[sub.role];
-        return c.waitFor((m) => syncFrameAfter(m, sub.subId, target), 20000);
-      }),
-    );
+    try {
+      await Promise.all(
+        targets.map(({ sub, target }) => {
+          const c = conns[sub.role];
+          return c.waitFor((m) => syncFrameAfter(m, sub.subId, target), 20000);
+        }),
+      );
+    } catch (e) {
+      const waiting = targets
+        .map(({ sub, target }) => `${sub.name ?? sub.subId}(${sub.etype})@tx${target}`)
+        .join(", ");
+      throw new Error(`${e.message}; waiting ${waiting}`);
+    }
   };
 
   for (const role of ROLES) await openRole(role);
