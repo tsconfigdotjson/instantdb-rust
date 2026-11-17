@@ -275,6 +275,22 @@ for SEED in $STORAGE_SEEDS; do
     FUZZ_FAILED="$FUZZ_FAILED storagefuzz:$SEED"
   fi
 done
+# sync-table fuzz: seeded start-sync over every supported order, random
+# creates / updates / deletes / links from several sessions, view rules,
+# remove-sync, reconnects with resync-table from the last seen tx, an attr
+# added after a sub started, and a >100-tx burst (fuzz-sync.mjs). Every sync
+# frame, its batching and tx-id watermarks, and the folded client store are
+# compared.
+SYNC_SEEDS="${FUZZ_SYNC_SEEDS:-301 302}"
+for SEED in $SYNC_SEEDS; do
+  want "syncfuzz:$SEED" || continue
+  SYNC_APP=$(python3 -c "import uuid; print(uuid.uuid4())")
+  SYNC_TOKEN=$(python3 -c "import uuid; print(uuid.uuid4())")
+  ./provision.sh "$SYNC_APP" "$SYNC_TOKEN" > /dev/null
+  if ! node fuzz-sync.mjs "$SYNC_APP" "$SYNC_APP" "$SYNC_TOKEN" "$SEED" "${FUZZ_SYNC_ROUNDS:-60}"; then
+    FUZZ_FAILED="$FUZZ_FAILED syncfuzz:$SEED"
+  fi
+done
 # subscription race fuzz (issue #51): rust-only invariants for queries
 # registered while transactions are in flight, against a rust server booted
 # with INSTANT_CHAOS_DELAY_MS (RACE_URL; defaults to RUST_URL)
@@ -289,7 +305,7 @@ for SEED in ${FUZZ_RACE_SEEDS:-1 2 3}; do
 done
 if [ -n "$FUZZ_FAILED" ]; then
   echo "FUZZ FAILED for seeds:$FUZZ_FAILED"
-  echo "  (rerun a fuzz seed with FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60}, a presence seed with FUZZ_PRESENCE_SEEDS=<seed> FUZZ_PRESENCE_ROUNDS=${FUZZ_PRESENCE_ROUNDS:-100}, a schema seed with FUZZ_SCHEMA_SEEDS=<seed> FUZZ_SCHEMA_ROUNDS=${FUZZ_SCHEMA_ROUNDS:-200}, a storage seed with FUZZ_STORAGE_SEEDS=<seed> FUZZ_STORAGE_ROUNDS=${FUZZ_STORAGE_ROUNDS:-80}; LAYERS narrows the run)"
+  echo "  (rerun a fuzz seed with FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60}, a presence seed with FUZZ_PRESENCE_SEEDS=<seed> FUZZ_PRESENCE_ROUNDS=${FUZZ_PRESENCE_ROUNDS:-100}, a schema seed with FUZZ_SCHEMA_SEEDS=<seed> FUZZ_SCHEMA_ROUNDS=${FUZZ_SCHEMA_ROUNDS:-200}, a storage seed with FUZZ_STORAGE_SEEDS=<seed> FUZZ_STORAGE_ROUNDS=${FUZZ_STORAGE_ROUNDS:-80}, a sync seed with FUZZ_SYNC_SEEDS=<seed> FUZZ_SYNC_ROUNDS=${FUZZ_SYNC_ROUNDS:-60}; LAYERS narrows the run)"
   FAILED_LAYERS="$FAILED_LAYERS fuzz"
 fi
 

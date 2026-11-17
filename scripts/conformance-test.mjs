@@ -840,9 +840,15 @@ await expectError(
 );
 
 // resync after the change log lost coverage: an attr-only tx creates a
-// transactions row with no triple changes, so the sub is "too far behind"
-// and the client must restart with start-sync (SyncTable.ts:904-918)
+// transactions row with no triple changes; backdate it past the hourly
+// change-log retention (a recent no-change tx is not treated as pruned), then
+// remove the log so the sub is "too far behind" and the client must restart
+// with start-sync (SyncTable.ts:904-918)
 await sendTx(a, [mkAttr(uuid(), "prune-marker")]);
+psql(
+  `UPDATE transactions SET created_at = now() - interval '2 hours'
+   WHERE app_id = '${appId}' AND id = (SELECT max(id) FROM transactions WHERE app_id = '${appId}')`,
+);
 psql(`DELETE FROM rust_tx_changes WHERE app_id = '${appId}'`);
 const pruneErr = await expectError(
   st,
