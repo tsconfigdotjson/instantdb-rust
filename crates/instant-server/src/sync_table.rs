@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use instant_core::attr::{Attr, AttrMap, Cardinality, CheckedDataType};
+use instant_core::attr::{Attr, AttrMap, Cardinality, CheckedDataType, ValueType};
 use instant_core::error::{InstantError, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -90,7 +90,21 @@ fn parse_sync_query(attrs: &AttrMap, q: &Value) -> Result<SyncQuery> {
                     }
                 }
             } else {
-                return Err(verr("Links are not yet supported."));
+                // legacy validates the query through instaql-query->patterns
+                // before create-sync-process rejects link forms: a non-link
+                // child is the attr error, an unknown child the no-attribute
+                // error, and only a real link reaches the sync error.
+                match attrs.by_fwd_name(&etype, k) {
+                    Some(a) if a.value_type != ValueType::Ref => {
+                        return Err(InstantError::validation_failed(
+                            "attr",
+                            format!("{etype}.{k} needs to be a link"),
+                            json!([{"message": format!("{etype}.{k} needs to be a link")}]),
+                        ))
+                    }
+                    Some(_) => return Err(verr("Links are not yet supported.")),
+                    None => return Err(verr(format!("There is no `{k}` attribute for {etype}."))),
+                }
             }
         }
     }
