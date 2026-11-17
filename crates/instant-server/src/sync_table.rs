@@ -103,7 +103,7 @@ fn parse_sync_query(attrs: &AttrMap, q: &Value) -> Result<SyncQuery> {
                         ))
                     }
                     Some(_) => return Err(verr("Links are not yet supported.")),
-                    None => return Err(verr(format!("There is no `{k}` attribute for {etype}."))),
+                    None => return Err(verr(&format!("There is no `{k}` attribute for {etype}."))),
                 }
             }
         }
