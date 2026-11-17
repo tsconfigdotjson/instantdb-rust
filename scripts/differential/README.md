@@ -24,11 +24,14 @@ The storage/`$files` fuzz seeds also have their own leg: `storagefuzz` takes
 shard 1/2 (~137s at PR depth) while the dash leg takes the complementary 2/2
 (one ~72s seed), so neither stacks all three; the nightly's ten storage seeds
 split 5/5 the same way and run several at a time (`FUZZ_STORAGE_JOBS`). The
-other seven legs each carry one schema-evolution seed (~2 minutes at PR depth;
-the nightly's 12 seeds spread over the same 7 shards, two at a time with
-`FUZZ_SCHEMA_JOBS`) plus a measured-cost share of the remaining seeded layers,
-which `LAYER_SHARDS` spreads independently. Presence is split four ways (one
-seed per PR leg, three concurrent nightly seeds with `FUZZ_PRESENCE_JOBS`) and
+two cheap sync-table seeds ride on the replay leg (and all ten nightly seeds
+there), which is 1/1 so it never owns only part of a seed list; they use
+`run_seeded_layer` with `FUZZ_SYNC_JOBS` defaulting to 1. The other seven legs
+each carry one schema-evolution seed (~2 minutes at PR depth; the nightly's 12
+seeds spread over the same 7 shards, two at a time with `FUZZ_SCHEMA_JOBS`)
+plus a measured-cost share of the remaining seeded layers, which
+`LAYER_SHARDS` spreads independently. Presence is split four ways (one seed
+per PR leg, three concurrent nightly seeds with `FUZZ_PRESENCE_JOBS`) and
 race/conflicts stay on the three legs without a presence seed:
 
 ```
@@ -421,6 +424,45 @@ everything and checks coverage itself, as before.
   [seed] [rounds]`; seeds 201-203 at 80 rounds per PR
   (`FUZZ_STORAGE_SEEDS` / `FUZZ_STORAGE_ROUNDS`), 10 seeds at 160 nightly,
   `FUZZ_STORAGE_JOBS` (4 nightly) at a time per leg.
+- `fuzz-sync.mjs` — seeded **sync tables**: random `start-sync` subscriptions
+  over the shapes legacy supports (one namespace, `$.order` only:
+  `serverCreatedAt` asc/desc and typed number / date / string / boolean attrs
+  in both directions, including missing / null values), invalid starts
+  (where / links / non-link child forms / other options, unknown or unindexed
+  order fields, several namespaces, null q, non-admin) compared by error, and
+  interleaved creates / updates / retracts / deletes / link+unlink from admin
+  and signed-in sessions. A view rule hides some rows, pinning that admin
+  sync tables bypass view filtering like legacy. The layer also covers:
+  - `sync-load-batch` order (the custom-order initial query, not just the
+    client's later sorts) and every `sync-update-triples` frame's exact tx
+    grouping and tx-id watermark; frames carry at most legacy's 100 txes,
+    including after a >100-transaction burst. The change set is compared
+    whole, with only the within-tx row order canonicalized by entity/attr
+    (removed before added): Postgres transition-table / WAL row order is not
+    stable, and SyncTable applies different attrs independently;
+  - `remove-sync` (both `keep-subscription` values, no reply) and a later
+    `resync-table` of the same persisted subscription id from the last seen
+    tx, plus a full disconnect / reconnect that resyncs every active sub;
+  - an attr added after a sub started: legacy freezes the subscription's
+    topic attrs in `sync_sub_topics`, so writes to the new attr are invisible
+    to the live sub and to a resync from its old watermark until a new
+    `start-sync`; the layer writes the attr, updates it and reconnects before
+    comparing.
+  Every sync frame is folded the way `SyncTable.ts` reads it: load rows build
+  the entity store (the entity batch order is compared, while an entity's own
+  triples inside a json_agg row are canonicalized because their order is
+  physical row order), update txes at or below the watermark are skipped,
+  changes are grouped by entity and applied as added / removed triples,
+  entities with no triples left disappear, and entities are sorted with the
+  client's order comparator. Both the normalized frame sequence and the
+  folded store / entity objects are compared; only server-chosen ids,
+  timestamps, tx ids and trace ids are normalized. Each synced transaction
+  is awaited to its `sync-update-triples` before the next op so legacy's
+  invalidator cannot coalesce two fuzz transactions into a different frame
+  grouping. `node fuzz-sync.mjs <app> <app> <token> [seed] [rounds]`; seeds
+  301-302 at 60 rounds per PR (`FUZZ_SYNC_SEEDS` / `FUZZ_SYNC_ROUNDS`), 10
+  seeds at 120 nightly through `run_seeded_layer` on the replay leg
+  (`FUZZ_SYNC_JOBS` defaults to 1).
 - `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):
   seeded bursts of unawaited transacts and add-queries of order/limit pages
   (a transact then a subscription to the page it changes, as an infinite
@@ -566,8 +608,8 @@ everything and checks coverage itself, as before.
 ## Allowlists
 
 `allowed-divergences.json` (replay, dash, storage, rule-wheres, ref-topics,
-fuzz-perms, fuzz-schema and fuzz-presence layers, keyed by `path`) and
-`errors-allowed.json` (error matrix, keyed by `probe`) share one
+fuzz-perms, fuzz-schema, fuzz-presence and sync-fuzz layers, keyed by `path`)
+and `errors-allowed.json` (error matrix, keyed by `probe`) share one
 strict entry format, checked by `loadAllowlist` / `allowDivergence` in
 `lib.mjs`. An entry allows one documented difference, not whatever else later
 shows up at the same path:
@@ -592,7 +634,8 @@ shows up at the same path:
   `fuzzschema:<kind>/<op>[/<session>]`, with checkpoints named
   `fuzzschema:checkpoint/<label>`; fuzz-presence paths
   `presence:<probe>/<session>`, `presence:final/<session>` and
-  `presence:<checkpoint>`; errors-allowed.json uses probe names.
+  `presence:<checkpoint>`; sync-fuzz paths `syncfuzz:<op-name>` (including
+  `syncfuzz:final`); errors-allowed.json uses probe names.
 - `differs` (required): anchored regexes over sub-paths of the compared value.
   Object keys and array indexes join with dots, as in the log's "first
   differing sub-path": `.status`, `.hint.debug-uri`, `.0.status`; `^$` is
@@ -610,7 +653,7 @@ shows up at the same path:
 - Each layer loads only the entries whose path prefix it owns (replay:
   `step:` / `final/` / `keyset/`; dash: `dash:`; storage: `storage:`;
   rule-wheres: `rulewheres:`; ref-topics: `reftopics:`; fuzz-perms:
-  `fuzzperms:`; presence: `presence:`). An
+  `fuzzperms:`; presence: `presence:`; sync-fuzz: `syncfuzz:`). An
   entry no layer owns is a load error, and so is a malformed entry or an
   unknown field. If an owned entry allowed nothing in a run, the layer fails
   (`[STALE ALLOWLIST]`). The exception is `"flaky": true` with a

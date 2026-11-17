@@ -294,7 +294,7 @@ jobs:
       matrix:
         include:
           - leg: replay
-            layers: schema replay reftopics stress
+            layers: schema replay reftopics stress syncfuzz
             shard: 1/1
           - leg: dash
             layers: dash storage storagefuzz rulewheres errors
@@ -493,6 +493,10 @@ jobs:
           # storage seeds wait on uploads / downloads; four at a time keeps
           # the nightly's five-per-leg work to two short waves.
           FUZZ_STORAGE_JOBS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '4' || '2' }}
+          # sync tables: two cheap seeds per PR; the nightly drives every
+          # supported order, reconnect/resync and the >100-tx batch path deeper
+          FUZZ_SYNC_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '301 302 303 304 305 306 307 308 309 310' || '301 302' }}
+          FUZZ_SYNC_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '120' || '60' }}
           FUZZ_RACE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '1 2 3 4 5 6 7 8 9 10' || '1 2 3' }}
           RACE_URL: http://localhost:8885
         run: KEEP=1 ./scripts/differential/run.sh
