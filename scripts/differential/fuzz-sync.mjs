@@ -831,7 +831,7 @@ async function runOn(serverName, plan) {
     }
   };
 
-  const flush = () => {
+  const flushNow = () => {
     const frames = {};
     for (const role of ROLES) {
       const c = conns[role];
@@ -857,7 +857,19 @@ async function runOn(serverName, plan) {
           // duplicate WAL frame from moving a stale update into a later fuzz op.
           const sub = models.get(m["subscription-id"]);
           if (!sub || !sub.active) continue;
-          const txes = (m.txes ?? []).filter((tx) => sub.txId == null || tx["tx-id"] > sub.txId);
+          const txes = (m.txes ?? [])
+            .filter((tx) => sub.txId == null || tx["tx-id"] > sub.txId)
+            .map((tx) => ({
+              ...tx,
+              // Postgres transition-table / WAL row order is not stable and
+              // SyncTable applies a tx's changes per entity/attr; canonicalize
+              // only the within-tx order (removed before added per attr).
+              changes: [...(tx.changes ?? [])].sort((a, b) => {
+                const ka = `${a.triple[0]}|${a.triple[1]}|${a.action === "removed" ? "0" : "1"}|${canon(a.triple)}`;
+                const kb = `${b.triple[0]}|${b.triple[1]}|${b.action === "removed" ? "0" : "1"}|${canon(b.triple)}`;
+                return ka < kb ? -1 : ka > kb ? 1 : 0;
+              }),
+            }));
           if (!txes.length) continue;
           frame = { ...m, txes };
         }
@@ -867,6 +879,14 @@ async function runOn(serverName, plan) {
       frames[role] = views;
     }
     return frames;
+  };
+
+  const flush = async () => {
+    // let legacy's asynchronous refresh-sync-table requeue / duplicate WAL
+    // frame land before taking this op's frames; SyncTable folds those away.
+    await new Promise((r) => setTimeout(r, 100));
+    await settle(Object.values(conns), 100);
+    return flushNow();
   };
 
   const stateView = () => {
@@ -935,7 +955,7 @@ async function runOn(serverName, plan) {
         const subs = [...models.values()].filter((m) => m.active && op.etypes.includes(m.etype));
         await waitTargets(targetsFor(subs, op.etypes));
       }
-      outcomes.push({ name: op.name, kind: "tx", reply: replyView(reply), frames: flush() });
+      outcomes.push({ name: op.name, kind: "tx", reply: replyView(reply), frames: await flush() });
     } else if (op.kind === "start") {
       const ceid = crypto.randomUUID();
       const msg = { "client-event-id": ceid, op: "start-sync" };
@@ -948,7 +968,7 @@ async function runOn(serverName, plan) {
           (m) => m.op === "sync-init-finish" && m["subscription-id"] === reply["subscription-id"],
         );
       }
-      const frames = flush();
+      const frames = await flush();
       const subId = subByName.get(op.subName);
       const model = subId ? models.get(subId) : null;
       if (model) model.name = op.subName;
@@ -963,7 +983,7 @@ async function runOn(serverName, plan) {
         "keep-subscription": op.keep,
       });
       await new Promise((r) => setTimeout(r, 60));
-      const frames = flush();
+      const frames = await flush();
       const model = models.get(subId);
       if (model) model.active = false;
       outcomes.push({ name: op.name, kind: "remove", keep: op.keep, frames });
@@ -984,10 +1004,10 @@ async function runOn(serverName, plan) {
       const targets = targetsFor([model]);
       if (targets.length) await waitTargets(targets);
       else await new Promise((r) => setTimeout(r, 100));
-      outcomes.push({ name: op.name, kind: "resync", frames: flush() });
+      outcomes.push({ name: op.name, kind: "resync", frames: await flush() });
     } else if (op.kind === "reconnect") {
       const role = op.session;
-      const before = flush();
+      const before = await flush();
       for (const model of models.values()) {
         if (model.role === role) model.active = false;
       }
@@ -1012,17 +1032,17 @@ async function runOn(serverName, plan) {
       const targets = targetsFor(resumed);
       if (targets.length) await waitTargets(targets);
       else await new Promise((r) => setTimeout(r, 100));
-      const after = flush();
+      const after = await flush();
       const frames = Object.fromEntries(ROLES.map((r) => [r, [...(before[r] ?? []), ...(after[r] ?? [])]]));
       outcomes.push({ name: op.name, kind: "reconnect", frames });
     } else if (op.kind === "checkpoint") {
       await new Promise((r) => setTimeout(r, 80));
       await settle(Object.values(conns), QUIET_MS);
-      outcomes.push({ name: op.name, kind: "checkpoint", frames: flush(), states: stateView() });
+      outcomes.push({ name: op.name, kind: "checkpoint", frames: await flush(), states: stateView() });
     } else if (op.kind === "state-checkpoint") {
       await new Promise((r) => setTimeout(r, 80));
       await settle(Object.values(conns), QUIET_MS);
-      flush();
+      await flush();
       outcomes.push({ name: op.name, kind: "state-checkpoint", states: stateView() });
     } else if (op.kind === "burst") {
       const sends = op.items.map((item) => {
@@ -1040,7 +1060,7 @@ async function runOn(serverName, plan) {
       const targets = targetsFor(subs, [DOCS]);
       if (targets.length) await waitTargets(targets);
       await settle(Object.values(conns), QUIET_MS);
-      flush();
+      await flush();
       outcomes.push({
         name: op.name,
         kind: "burst",
@@ -1054,7 +1074,7 @@ async function runOn(serverName, plan) {
 
   await new Promise((r) => setTimeout(r, 80));
   await settle(Object.values(conns), QUIET_MS);
-  const finalFrames = flush();
+  const finalFrames = await flush();
   outcomes.push({ name: "final", kind: "final", frames: finalFrames, states: stateView() });
   for (const c of Object.values(conns)) c.close();
   return { outcomes, maxTxPerFrame };
