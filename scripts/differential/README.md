@@ -440,7 +440,9 @@ everything and checks coverage itself, as before.
     watermark until a new `start-sync`; the layer writes the attr, updates it
     and reconnects before comparing.
   Every sync frame is folded the way `SyncTable.ts` reads it: load rows build
-  the entity store, update txes at or below the watermark are skipped,
+  the entity store (the entity batch order is compared, while an entity's own
+  triples inside a json_agg row are canonicalized because their order is
+  physical row order), update txes at or below the watermark are skipped,
   changes are grouped by entity and applied as added / removed triples,
   entities with no triples left disappear, and entities are sorted with the
   client's order comparator. Both the normalized frame sequence and the
