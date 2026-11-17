@@ -15,21 +15,25 @@ Prerequisites: docker, node ≥ 20, psql, and the rust server already running on
 
 ### Parallel legs in CI
 
-CI's `differential` job runs `run.sh` as a thirteen-leg matrix. Each leg boots
+CI's `differential` job runs `run.sh` as a fourteen-leg matrix. Each leg boots
 its own legacy stack and rust servers and runs part of the harness. The
 unseeded replay layers have a leg each, and the dash/storage/rulewheres/errors
-layers share a leg; every `perms` seed gets its own leg because a perms seed
-is ~2.5-3 minutes on its own. The storage/`$files` fuzz seeds also have their
-own leg: `storagefuzz` takes shard 1/2 (~137s at PR depth) while the dash leg
-takes the complementary 2/2 (one ~72s seed), so neither stacks all three; the
-nightly's ten storage seeds split 5/5 the same way. The other seven legs each
-carry one schema-evolution seed (~2 minutes at PR depth; the nightly's 12
-seeds spread over the same 7 shards) plus a measured-cost share of the
-remaining seeded layers, which `LAYER_SHARDS` spreads independently:
+layers share a leg; the four PR `perms` seeds get a leg each (the nightly's 16
+run four at a time per leg) because a perms seed is ~2.5-3 minutes on its own.
+The storage/`$files` fuzz seeds also have their own leg: `storagefuzz` takes
+shard 1/2 (~137s at PR depth) while the dash leg takes the complementary 2/2
+(one ~72s seed), so neither stacks all three; the nightly's ten storage seeds
+split 5/5 the same way and run several at a time (`FUZZ_STORAGE_JOBS`). The
+other seven legs each carry one schema-evolution seed (~2 minutes at PR depth;
+the nightly's 12 seeds spread over the same 7 shards, two at a time with
+`FUZZ_SCHEMA_JOBS`) plus a measured-cost share of the remaining seeded layers,
+which `LAYER_SHARDS` spreads independently. Presence is split four ways (one
+seed per PR leg, three concurrent nightly seeds with `FUZZ_PRESENCE_JOBS`) and
+race/conflicts stay on the three legs without a presence seed:
 
 ```
 LAYERS="schema replay stress" ./run.sh   # only these layers
-LAYERS="fuzzschema fuzz presence" SHARD=2/7 LAYER_SHARDS="presence:2/3" ./run.sh
+LAYERS="fuzzschema fuzz presence" SHARD=2/7 LAYER_SHARDS="presence:2/4" ./run.sh
 LAYERS="fuzz presence race" SHARD=2/3 ./run.sh   # every 3rd seed of each, from the 2nd
 ```
 
@@ -293,7 +297,8 @@ everything and checks coverage itself, as before.
   instead of applying a type unchecked.
   `node fuzz-schema.mjs <app> <app> <token> [seed] [rounds]`; seeds 31-32 at
   200 rounds per PR plus the nightly regression seeds 33, 34, 36, 37 and 41
-  (`FUZZ_SCHEMA_SEEDS` / `FUZZ_SCHEMA_ROUNDS`), 12 seeds at 350 nightly.
+  (`FUZZ_SCHEMA_SEEDS` / `FUZZ_SCHEMA_ROUNDS`), 12 seeds at 350 nightly,
+  two at a time with `FUZZ_SCHEMA_JOBS` when a leg carries two.
 - `fuzz-perms.mjs` — the same grammar under **generated permission rules**
   (view / create / update / delete per namespace, binds, field rules,
   `ruleParams`, and auth / `data.ref` / `auth.ref` / `request.*`
@@ -349,7 +354,8 @@ everything and checks coverage itself, as before.
   a nested form ships them.
   `node fuzz-perms.mjs <app> <app> <token> [seed] [rounds]`; seeds 7-9 at 120
   rounds per PR (`FUZZ_PERMS_SEEDS` / `FUZZ_PERMS_ROUNDS`), 16 seeds at 300
-  nightly, `FUZZ_PERMS_JOBS` (4 nightly) at a time.
+  nightly, `FUZZ_PERMS_JOBS` at a time (4 at both depths: PR puts its four
+  seeds on four legs, nightly runs four per leg).
 - `fuzz-presence.mjs` — seeded rooms / presence sequences over several
   concurrent sessions: two old clients (`@instantdb/core` 0.17.5), two modern
   clients (0.21.0 / 0.22.76, the latter also exercising array frames), two
@@ -385,7 +391,8 @@ everything and checks coverage itself, as before.
   ids and timestamps are normalized; user ids are seeded deterministically
   on both servers and stay raw. `node fuzz-presence.mjs <app> <app> <token>
   [seed] [rounds]`; seeds 101-103 and 110 at 250 rounds per PR
-  (`FUZZ_PRESENCE_SEEDS` / `FUZZ_PRESENCE_ROUNDS`), 12 seeds at 250 nightly.
+  (`FUZZ_PRESENCE_SEEDS` / `FUZZ_PRESENCE_ROUNDS`), 12 seeds at 250 nightly,
+  `FUZZ_PRESENCE_JOBS` (3 nightly) at a time per leg.
 - `fuzz-storage.mjs` — seeded storage / `$files` sequences: admin and client
   uploads, the deprecated signed-upload-url + consume flow, overwrites of the
   same path, odd / unicode / nested / whitespace-padded paths, missing and
@@ -412,7 +419,8 @@ everything and checks coverage itself, as before.
   (legacy-only / rust-only triples) and both fresh probes, since the full
   state dump is too large to reach them. `node fuzz-storage.mjs <app> <app> <token>
   [seed] [rounds]`; seeds 201-203 at 80 rounds per PR
-  (`FUZZ_STORAGE_SEEDS` / `FUZZ_STORAGE_ROUNDS`), 10 seeds at 160 nightly.
+  (`FUZZ_STORAGE_SEEDS` / `FUZZ_STORAGE_ROUNDS`), 10 seeds at 160 nightly,
+  `FUZZ_STORAGE_JOBS` (4 nightly) at a time per leg.
 - `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):
   seeded bursts of unawaited transacts and add-queries of order/limit pages
   (a transact then a subscription to the page it changes, as an infinite
