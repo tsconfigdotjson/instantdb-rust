@@ -584,6 +584,7 @@ const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
 
 function norm(value, key = null) {
   if (typeof value === "string") {
+    if (key === "isn" || key === "processed-isn") return "<isn>";
     return value.replace(UUID_RE, (m) => (m.includes("-0000-4000-8000-") ? m : "<uuid>"));
   }
   if (typeof value === "number") {
@@ -844,14 +845,24 @@ async function runOn(serverName, plan) {
           continue;
         }
         if (!["start-sync-ok", "sync-load-batch", "sync-init-finish", "sync-update-triples"].includes(m.op)) continue;
+        let frame = m;
         if (m.op === "sync-update-triples") {
           maxTxPerFrame = Math.max(maxTxPerFrame, m.txes?.length ?? 0);
           if ((m.txes?.length ?? 0) > 100) {
             throw new Error(`[${serverName}] sync-update-triples carried ${m.txes.length} txes (legacy cap is 100)`);
           }
+          // SyncTable.ts drops a frame for a subscription it no longer knows
+          // (remove-sync) and skips every tx at or below the watermark. Applying
+          // that here keeps legacy's asynchronous refresh-sync-table requeue /
+          // duplicate WAL frame from moving a stale update into a later fuzz op.
+          const sub = models.get(m["subscription-id"]);
+          if (!sub || !sub.active) continue;
+          const txes = (m.txes ?? []).filter((tx) => sub.txId == null || tx["tx-id"] > sub.txId);
+          if (!txes.length) continue;
+          frame = { ...m, txes };
         }
-        foldFrame(role, m);
-        views.push(frameView(m));
+        foldFrame(role, frame);
+        views.push(frameView(frame));
       }
       frames[role] = views;
     }
