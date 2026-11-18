@@ -26,7 +26,11 @@ shard 1/2 (~137s at PR depth) while the dash leg takes the complementary 2/2
 split 5/5 the same way and run several at a time (`FUZZ_STORAGE_JOBS`). The
 two cheap sync-table seeds ride on the replay leg (and all ten nightly seeds
 there), which is 1/1 so it never owns only part of a seed list; they use
-`run_seeded_layer` with `FUZZ_SYNC_JOBS` defaulting to 1. The other seven legs
+`run_seeded_layer` with `FUZZ_SYNC_JOBS` defaulting to 1. The two PR stream
+seeds ride the same leg (eight nightly, two at a time with
+`FUZZ_STREAMS_JOBS`): streams are mostly short append / subscribe round trips,
+so this only adds a few tens of seconds to the replay leg instead of a new
+leg. The other seven legs
 each carry one schema-evolution seed (~2 minutes at PR depth; the nightly's 12
 seeds spread over the same 7 shards, two at a time with `FUZZ_SCHEMA_JOBS`)
 plus a measured-cost share of the remaining seeded layers, which
@@ -463,6 +467,35 @@ everything and checks coverage itself, as before.
   301-302 at 60 rounds per PR (`FUZZ_SYNC_SEEDS` / `FUZZ_SYNC_ROUNDS`), 10
   seeds at 120 nightly through `run_seeded_layer` on the replay leg
   (`FUZZ_SYNC_JOBS` defaults to 1).
+- `fuzz-streams.mjs` — seeded **streams** over client, signed-in and admin
+  writers under generated `$streams` create / view rules. Guest create only
+  accepts guest-/public- client ids (a `ruleParams` exception lets a guest
+  create a private one), guest view only public- streams, user/admin bypass;
+  root and denied create / subscribe paths are compared by full error
+  envelope. The script covers appends of empty / unicode / multi-chunk and
+  >1MB sizes (a big chunk forces legacy's file flush), done and abort,
+  appends after done, late subscribers, subscribers from zero, the current
+  end and a flushed-file boundary, multiple concurrent readers, reader
+  reconnects that resume every live subscription from its seen byte offset,
+  unsubscribes, a writer resume after a flush, and missing / malformed
+  parameters for all four ops (missing / bad ids, chunks, offset, done,
+  abort-reason, start / unsubscribe parameters, append by a non-writer).
+  A subscriber's frames are folded exactly as `Stream.ts` reads them: `files`
+  are fetched, the frame offset discards already-seen bytes, content is
+  decoded per delivered piece, done / abort close the iterator, and late
+  frames for an unsubscribed or finished iterator are ignored. Legacy splits
+  a live append into a content frame then a done frame while this server
+  combines them, and legacy may send flushed segments as `files` instead of
+  inline content, so the compared frame projection is the client delivery per
+  op (first offset, delivered byte count / content SHA-256, done,
+  abort-reason). `stream-flushed` is folded to its high-water mark and
+  compared on the forced-flush and done ops. Every start / error ack
+  envelope and every settled subscriber byte stream is compared; only
+  server-chosen ids, timestamps and trace ids are normalized.
+  `node fuzz-streams.mjs <app> <app> <token> [seed] [rounds]`; seeds 401-402
+  at 30 rounds per PR (`FUZZ_STREAMS_SEEDS` / `FUZZ_STREAMS_ROUNDS`), 8 seeds
+  at 60 nightly through `run_seeded_layer` on the replay leg
+  (`FUZZ_STREAMS_JOBS` defaults to 1, nightly 2).
 - `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):
   seeded bursts of unawaited transacts and add-queries of order/limit pages
   (a transact then a subscription to the page it changes, as an infinite
@@ -608,7 +641,7 @@ everything and checks coverage itself, as before.
 ## Allowlists
 
 `allowed-divergences.json` (replay, dash, storage, rule-wheres, ref-topics,
-fuzz-perms, fuzz-schema, fuzz-presence and sync-fuzz layers, keyed by `path`)
+fuzz-perms, fuzz-schema, fuzz-presence, sync-fuzz and stream-fuzz layers, keyed by `path`)
 and `errors-allowed.json` (error matrix, keyed by `probe`) share one
 strict entry format, checked by `loadAllowlist` / `allowDivergence` in
 `lib.mjs`. An entry allows one documented difference, not whatever else later
@@ -635,7 +668,8 @@ shows up at the same path:
   `fuzzschema:checkpoint/<label>`; fuzz-presence paths
   `presence:<probe>/<session>`, `presence:final/<session>` and
   `presence:<checkpoint>`; sync-fuzz paths `syncfuzz:<op-name>` (including
-  `syncfuzz:final`); errors-allowed.json uses probe names.
+  `syncfuzz:final`); stream-fuzz paths `streamfuzz:<op-name>` (including
+  `streamfuzz:final`); errors-allowed.json uses probe names.
 - `differs` (required): anchored regexes over sub-paths of the compared value.
   Object keys and array indexes join with dots, as in the log's "first
   differing sub-path": `.status`, `.hint.debug-uri`, `.0.status`; `^$` is
@@ -653,7 +687,8 @@ shows up at the same path:
 - Each layer loads only the entries whose path prefix it owns (replay:
   `step:` / `final/` / `keyset/`; dash: `dash:`; storage: `storage:`;
   rule-wheres: `rulewheres:`; ref-topics: `reftopics:`; fuzz-perms:
-  `fuzzperms:`; presence: `presence:`; sync-fuzz: `syncfuzz:`). An
+  `fuzzperms:`; presence: `presence:`; sync-fuzz: `syncfuzz:`; stream-fuzz:
+  `streamfuzz:`). An
   entry no layer owns is a load error, and so is a malformed entry or an
   unknown field. If an owned entry allowed nothing in a run, the layer fails
   (`[STALE ALLOWLIST]`). The exception is `"flaky": true` with a

@@ -31,6 +31,114 @@ fn param_malformed_at(path: &[&str], input: &Value) -> InstantError {
     )
 }
 
+/// Legacy `get-param!` / `get-optional-param!` treat nil and false as absent
+/// (util/exception.clj:421-439); everything else is passed to the coercer.
+fn present_param<'a>(msg: &'a Value, key: &str) -> Option<&'a Value> {
+    match msg.get(key) {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => None,
+        Some(v) => Some(v),
+    }
+}
+
+/// `string-util/coerce-non-blank-str`: numbers become their string form,
+/// strings are trimmed and must not be blank, every other JSON type is
+/// malformed.
+fn coerce_non_blank_str(v: &Value) -> Option<String> {
+    match v {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        _ => None,
+    }
+}
+
+/// `uuid-util/coerce`: only a 36-character string is even attempted (uuid.clj:18-22).
+fn coerce_uuid(v: &Value) -> Option<Uuid> {
+    let s = v.as_str()?.trim();
+    (s.len() == 36).then(|| Uuid::parse_str(s).ok()).flatten()
+}
+
+fn required_string(msg: &Value, key: &str) -> Result<String> {
+    let v = present_param(msg, key).ok_or_else(|| param_missing_at(&[key]))?;
+    coerce_non_blank_str(v).ok_or_else(|| param_malformed_at(&[key], v))
+}
+
+fn optional_string(msg: &Value, key: &str) -> Result<Option<String>> {
+    match present_param(msg, key) {
+        None => Ok(None),
+        Some(v) => coerce_non_blank_str(v)
+            .map(Some)
+            .ok_or_else(|| param_malformed_at(&[key], v)),
+    }
+}
+
+fn required_uuid(msg: &Value, key: &str) -> Result<Uuid> {
+    let v = present_param(msg, key).ok_or_else(|| param_missing_at(&[key]))?;
+    coerce_uuid(v).ok_or_else(|| param_malformed_at(&[key], v))
+}
+
+fn optional_uuid(msg: &Value, key: &str) -> Result<Option<Uuid>> {
+    match present_param(msg, key) {
+        None => Ok(None),
+        Some(v) => coerce_uuid(v)
+            .map(Some)
+            .ok_or_else(|| param_malformed_at(&[key], v)),
+    }
+}
+
+fn optional_done(msg: &Value) -> Result<bool> {
+    match present_param(msg, "done") {
+        None => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(v) => Err(param_malformed_at(&["done"], v)),
+    }
+}
+
+fn optional_abort_reason(msg: &Value) -> Result<Option<String>> {
+    match present_param(msg, "abort-reason") {
+        None => Ok(None),
+        Some(v) => coerce_non_blank_str(v)
+            .map(Some)
+            .ok_or_else(|| param_malformed_at(&["abort-reason"], v)),
+    }
+}
+
+fn required_offset(msg: &Value) -> Result<i64> {
+    let v = present_param(msg, "offset").ok_or_else(|| param_missing_at(&["offset"]))?;
+    v.as_i64()
+        .filter(|n| *n >= 0)
+        .ok_or_else(|| param_malformed_at(&["offset"], v))
+}
+
+fn optional_offset(msg: &Value) -> Result<i64> {
+    match present_param(msg, "offset") {
+        None => Ok(0),
+        Some(v) => v
+            .as_i64()
+            .filter(|n| *n >= 0)
+            .ok_or_else(|| param_malformed_at(&["offset"], v)),
+    }
+}
+
+fn required_chunks(msg: &Value) -> Result<Vec<String>> {
+    let v = present_param(msg, "chunks").ok_or_else(|| param_missing_at(&["chunks"]))?;
+    let Some(chunks) = v.as_array() else {
+        return Err(param_malformed_at(&["chunks"], v));
+    };
+    chunks
+        .iter()
+        .map(|c| {
+            c.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| param_malformed_at(&["chunks"], v))
+        })
+        .collect()
+}
+
+/// `create` rule data (app_stream.clj:65-68): only the requested client id.
+fn create_perm_data(client_id: &str) -> Value {
+    json!({"clientId": client_id})
+}
+
 /// blob key for a stream's bytes (prefix keeps it apart from $files blobs)
 fn stream_key(stream_id: Uuid) -> String {
     format!("stream-{stream_id}")
@@ -82,6 +190,7 @@ async fn check_stream_perm(
     action: &str,
     rule_params: Option<&Value>,
     stream: Option<Uuid>,
+    create_client_id: Option<&str>,
 ) -> Result<()> {
     let (admin, user_id) = {
         let st = session.state.lock().await;
@@ -106,16 +215,20 @@ async fn check_stream_perm(
     let auth_val =
         instant_core::perms::build_auth_value(&mut conn, app_id, &attrs, &auth_ctx, &[&program])
             .await?;
-    // the rule's `data` is the $streams row when there is one (legacy binds
-    // the fetched stream for view checks, session.clj:897-908)
-    let data = match stream {
-        Some(sid) => {
-            instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$streams", sid)
-                .await?
-                .map(Value::Object)
-                .unwrap_or_else(|| json!({}))
+    // `create` binds `{\"clientId\": <client-id>}` (app_stream.clj:65-68);
+    // `view` binds the fetched $streams row (session.clj:897-908).
+    let data = if let Some(client_id) = create_client_id {
+        create_perm_data(client_id)
+    } else {
+        match stream {
+            Some(sid) => {
+                instant_core::perms::fetch_entity_map(&mut conn, app_id, &attrs, "$streams", sid)
+                    .await?
+                    .map(Value::Object)
+                    .unwrap_or_else(|| json!({}))
+            }
+            None => json!({}),
         }
-        None => json!({}),
     };
     let ok = instant_core::perms::eval_program(
         &program,
@@ -148,36 +261,9 @@ pub async fn handle_start_stream(
         st.app_id
             .ok_or_else(|| crate::ws::not_initialized(session.id))?
     };
-    let client_id = msg
-        .get("client-id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| InstantError::param_missing("missing client-id"))?;
-    // legacy `ex/get-param! event [:reconnect-token] uuid-util/coerce`
-    // (session.clj:767-769): the token is required, so every stream has a
-    // hashed token and resuming under an existing client-id always proves
-    // knowledge of it. Optional here would let a second session take over
-    // a token-less stream by replaying its client-id.
-    let reconnect_token = match msg.get("reconnect-token") {
-        None | Some(Value::Null) => {
-            return Err(InstantError::new(
-                "param-missing",
-                400,
-                "Missing parameter: [\"reconnect-token\"]",
-                Some(json!({"in": ["reconnect-token"]})),
-            ))
-        }
-        Some(v) => match v.as_str().and_then(|s| Uuid::parse_str(s).ok()) {
-            Some(u) => u.to_string(),
-            None => {
-                return Err(InstantError::new(
-                    "param-malformed",
-                    400,
-                    "Malformed parameter: [\"reconnect-token\"]",
-                    Some(json!({"in": ["reconnect-token"], "original-input": v})),
-                ))
-            }
-        },
-    };
+    let client_id = required_string(msg, "client-id")?;
+    // Legacy validates client-id, then the create rule, then the reconnect
+    // token (session.clj:761-769).
     check_stream_perm(
         state,
         app_id,
@@ -185,10 +271,16 @@ pub async fn handle_start_stream(
         "create",
         msg.get("rule-params"),
         None,
+        Some(&client_id),
     )
     .await?;
+    // The token is required, so every stream has a hashed token and resuming
+    // under an existing client-id always proves knowledge of it. Optional
+    // here would let a second session take over a token-less stream by
+    // replaying its client-id.
+    let reconnect_token = required_uuid(msg, "reconnect-token")?.to_string();
 
-    let existing = stream_by_client_id(state, app_id, client_id).await?;
+    let existing = stream_by_client_id(state, app_id, &client_id).await?;
     let (stream_id, offset) = match existing {
         Some(sid) => {
             // resume: reconnect token must match (legacy session.clj:776-786)
@@ -273,31 +365,13 @@ pub async fn handle_append_stream(
         st.app_id
             .ok_or_else(|| crate::ws::not_initialized(session.id))?
     };
-    let stream_id = msg
-        .get("stream-id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| InstantError::param_missing("missing stream-id"))?;
-    // legacy `ex/get-param!` on chunks (a vector of strings) and offset
-    let chunks: Vec<String> = match msg.get("chunks") {
-        None | Some(Value::Null) => return Err(param_missing_at(&["chunks"])),
-        Some(v) => match v.as_array() {
-            Some(a) if a.iter().all(|c| c.is_string()) => a
-                .iter()
-                .filter_map(|c| c.as_str().map(|s| s.to_string()))
-                .collect(),
-            _ => return Err(param_malformed_at(&["chunks"], v)),
-        },
-    };
-    let offset = match msg.get("offset") {
-        None | Some(Value::Null) => return Err(param_missing_at(&["offset"])),
-        Some(v) => v
-            .as_i64()
-            .filter(|n| *n >= 0)
-            .ok_or_else(|| param_malformed_at(&["offset"], v))?,
-    };
-    let done = msg.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
-    let abort_reason = msg.get("abort-reason").and_then(|v| v.as_str());
+    // Legacy's binding order (session.clj:809-831): stream-id, done,
+    // abort-reason, offset, chunks.
+    let stream_id = required_uuid(msg, "stream-id")?;
+    let done = optional_done(msg)?;
+    let abort_reason = optional_abort_reason(msg)?;
+    let offset = required_offset(msg)?;
+    let chunks = required_chunks(msg)?;
     // legacy rs/get-stream-object-for-append (session.clj:828-838): only the
     // session that started the stream holds its append object; anyone else
     // (and an unknown stream id) is "Stream is missing."
@@ -361,7 +435,7 @@ pub async fn handle_append_stream(
             done
         ]),
     ];
-    if let Some(reason) = abort_reason {
+    if let Some(reason) = &abort_reason {
         steps.push(json!([
             "add-triple",
             stream_id,
@@ -416,22 +490,23 @@ pub async fn handle_subscribe_stream(
         st.app_id
             .ok_or_else(|| crate::ws::not_initialized(session.id))?
     };
-    // legacy validates params before perms (session.clj:889-896 missing ids,
-    // :928-931 missing stream)
+    // Legacy parses stream-id, client-id and offset before it checks the ids
+    // or fetches the stream (session.clj:874-896).
+    let stream_id_param = optional_uuid(msg, "stream-id")?;
+    let client_id_param = optional_string(msg, "client-id")?;
+    let offset = optional_offset(msg)?;
     let missing_stream = || {
         InstantError::validation_failed_input(
             "subscribe-stream",
             json!({
                 "sess-id": session.id,
-                "stream-id": msg.get("stream-id").and_then(|v| v.as_str()),
-                "client-id": msg.get("client-id").and_then(|v| v.as_str()),
+                "stream-id": stream_id_param.map(|id| id.to_string()),
+                "client-id": client_id_param,
             }),
             json!([{"message": "Stream is missing."}]),
         )
     };
-    if msg.get("stream-id").and_then(|v| v.as_str()).is_none()
-        && msg.get("client-id").and_then(|v| v.as_str()).is_none()
-    {
+    if stream_id_param.is_none() && client_id_param.is_none() {
         let m = "Must provide either a stream-id or a client-id";
         return Err(InstantError::validation_failed_input(
             "subscribe-stream",
@@ -439,12 +514,10 @@ pub async fn handle_subscribe_stream(
             json!([{"message": m}]),
         ));
     }
-    let stream_id = match msg.get("stream-id").and_then(|v| v.as_str()) {
-        Some(s) => {
-            Uuid::parse_str(s).map_err(|_| InstantError::param_malformed("malformed stream-id"))?
-        }
+    let stream_id = match stream_id_param {
+        Some(id) => id,
         None => {
-            let client_id = msg.get("client-id").and_then(|v| v.as_str()).unwrap();
+            let client_id = client_id_param.as_deref().unwrap();
             stream_by_client_id(state, app_id, client_id)
                 .await?
                 .ok_or_else(missing_stream)?
@@ -461,6 +534,7 @@ pub async fn handle_subscribe_stream(
         "view",
         msg.get("rule-params"),
         Some(stream_id),
+        None,
     )
     .await?;
     let subscribe_event_id = msg
@@ -468,7 +542,6 @@ pub async fn handle_subscribe_stream(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    let offset = msg.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
 
     // Register before reading the catch-up snapshot so an append landing
     // between the two is delivered instead of lost. Live frames that arrive
@@ -564,19 +637,21 @@ pub async fn handle_unsubscribe_stream(
     session: &Arc<Session>,
     msg: &Value,
 ) -> std::result::Result<(), InstantError> {
-    let target = msg
-        .get("subscribe-event-id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+    // Legacy's optional string coercion: a blank / non-string value is
+    // param-malformed, a missing one is just a reader lookup that misses.
+    let target = optional_string(msg, "subscribe-event-id")?;
     let mut removed = false;
-    state.stream_subs.iter_mut().for_each(|mut e| {
-        let before = e.value().len();
-        e.value_mut()
-            .retain(|(sid, ev)| !(*sid == session.id && *ev == target));
-        removed |= e.value().len() != before;
-    });
-    state.stream_catchup.remove(&(session.id, target.clone()));
+    if let Some(target) = target.as_deref() {
+        state.stream_subs.iter_mut().for_each(|mut e| {
+            let before = e.value().len();
+            e.value_mut()
+                .retain(|(sid, ev)| !(*sid == session.id && ev == target));
+            removed |= e.value().len() != before;
+        });
+        state
+            .stream_catchup
+            .remove(&(session.id, target.to_string()));
+    }
     if !removed {
         return Err(InstantError::validation_failed_input(
             "unsubscribe-stream",
@@ -636,5 +711,130 @@ pub async fn deliver_append(state: &Arc<AppState>, payload: &Value) {
     }
     if done {
         state.stream_subs.remove(&(app_id, stream_id));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_params_follow_legacy_get_param_coercion() {
+        // required string: missing / null / false, blank, trimmed, numbers
+        let err = required_string(&json!({}), "client-id").unwrap_err();
+        assert_eq!(err.error_type, "param-missing");
+        assert_eq!(err.message, "Missing parameter: [\"client-id\"]");
+        assert_eq!(err.hint, Some(json!({"in": ["client-id"]})));
+        for absent in [Value::Null, json!(false)] {
+            let err = required_string(&json!({"client-id": absent}), "client-id").unwrap_err();
+            assert_eq!(err.error_type, "param-missing");
+        }
+        let err = required_string(&json!({"client-id": "  "}), "client-id").unwrap_err();
+        assert_eq!(err.error_type, "param-malformed");
+        assert_eq!(
+            err.hint,
+            Some(json!({"in": ["client-id"], "original-input": "  "}))
+        );
+        assert_eq!(
+            required_string(&json!({"client-id": "  guest-a  "}), "client-id").unwrap(),
+            "guest-a"
+        );
+        assert_eq!(
+            required_string(&json!({"client-id": 12345}), "client-id").unwrap(),
+            "12345"
+        );
+    }
+
+    #[test]
+    fn stream_uuid_params_trim_and_reject_non_uuids() {
+        let id = "00000000-0000-4000-8000-000000000001";
+        assert_eq!(
+            required_uuid(&json!({"stream-id": format!("  {id}  ")}), "stream-id")
+                .unwrap()
+                .to_string(),
+            id
+        );
+        let err = required_uuid(&json!({"stream-id": "nope"}), "stream-id").unwrap_err();
+        assert_eq!(err.error_type, "param-malformed");
+        assert_eq!(
+            err.hint,
+            Some(json!({"in": ["stream-id"], "original-input": "nope"}))
+        );
+        assert!(optional_uuid(&json!({"stream-id": false}), "stream-id")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn append_params_match_legacy_optional_coercers() {
+        // done is a boolean or absent; every other shape is malformed.
+        assert!(!optional_done(&json!({})).unwrap());
+        assert!(!optional_done(&json!({"done": false})).unwrap());
+        assert!(optional_done(&json!({"done": true})).unwrap());
+        assert_eq!(
+            optional_done(&json!({"done": "true"}))
+                .unwrap_err()
+                .error_type,
+            "param-malformed"
+        );
+        // offset: required non-negative integer for append; optional for
+        // subscribe, but a present invalid value is still malformed (legacy
+        // get-optional-param! does not fall back to 0).
+        assert_eq!(required_offset(&json!({"offset": 5})).unwrap(), 5);
+        assert_eq!(
+            required_offset(&json!({"offset": -1}))
+                .unwrap_err()
+                .error_type,
+            "param-malformed"
+        );
+        assert_eq!(optional_offset(&json!({})).unwrap(), 0);
+        assert_eq!(
+            optional_offset(&json!({"offset": -1}))
+                .unwrap_err()
+                .error_type,
+            "param-malformed"
+        );
+        assert_eq!(
+            optional_offset(&json!({"offset": "5"}))
+                .unwrap_err()
+                .error_type,
+            "param-malformed"
+        );
+        // chunks: a vector of strings, including the empty vector.
+        assert_eq!(
+            required_chunks(&json!({"chunks": []})).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            required_chunks(&json!({"chunks": ["a", ""]})).unwrap(),
+            vec!["a".to_string(), String::new()]
+        );
+        assert_eq!(
+            required_chunks(&json!({"chunks": [1]}))
+                .unwrap_err()
+                .error_type,
+            "param-malformed"
+        );
+        // abort-reason is trimmed and blank is malformed.
+        assert_eq!(
+            optional_abort_reason(&json!({"abort-reason": "  cancelled  "})).unwrap(),
+            Some("cancelled".to_string())
+        );
+        assert_eq!(
+            optional_abort_reason(&json!({"abort-reason": "   "}))
+                .unwrap_err()
+                .error_type,
+            "param-malformed"
+        );
+    }
+
+    #[test]
+    fn create_permission_data_has_the_requested_client_id() {
+        // A rule such as data.clientId.startsWith('guest-') must evaluate
+        // against the requested id; this used to be {} for creates.
+        assert_eq!(
+            create_perm_data("guest-abc"),
+            json!({"clientId": "guest-abc"})
+        );
     }
 }

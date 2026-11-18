@@ -130,7 +130,11 @@ node scripts/smoke-ws.mjs <app-id>     # websocket protocol smoke test
 against a running server (`admin-sdk-test.mjs`, `oauth-test.mjs`,
 `multinode-ws.mjs`, `cli-test.mjs`, …), and the
 [differential harness](scripts/differential/) that compares this server with
-the legacy one. CI runs all of them.
+the legacy one. Its seeded fuzz layers cover transactions and queries,
+schema evolution, permissions, rooms / presence, storage / `$files`, sync
+tables and streams (`fuzz-streams.mjs`: create / append / done / abort,
+late and concurrent readers, offsets and reconnect resume, generated
+`$streams` rules and invalid parameter envelopes). CI runs all of them.
 
 | path | |
 |---|---|
