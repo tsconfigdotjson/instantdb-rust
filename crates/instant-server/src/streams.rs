@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use instant_core::error::{InstantError, Result};
 use instant_core::system_catalog as sc;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -760,11 +760,9 @@ mod tests {
             err.hint,
             Some(json!({"in": ["stream-id"], "original-input": "nope"}))
         );
-        assert!(
-            optional_uuid(&json!({"stream-id": false}), "stream-id")
-                .unwrap()
-                .is_none()
-        );
+        assert!(optional_uuid(&json!({"stream-id": false}), "stream-id")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

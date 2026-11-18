@@ -112,6 +112,7 @@ function buildPlan() {
     unsubscribeUnknown: mk(),
     resumeWrongToken: mk(),
   };
+  const randomBadOffset = pick([-1, "0", 1.5, true]);
 
   const readerRoles = ["RG", "RU", "RA"];
   const roleAuth = { RG: "guest", RU: "user", RA: "admin" };
@@ -248,7 +249,7 @@ function buildPlan() {
       raw(pick(readerRoles), `random-bad-subscribe-${i}`, () => ({
         op: "subscribe-stream",
         "client-id": st.clientId,
-        offset: pick([-1, "0", 1.5, true]),
+        offset: randomBadOffset,
       }));
     }
   }
@@ -410,15 +411,23 @@ function buildPlan() {
 // client-visible projection
 
 function errorView(m) {
-  // Full request-scoped error envelope (status / type / message / hint), with
-  // session / stream / client-event ids left to normalize().
+  // Full request-scoped error envelope (status / type / message / hint). The
+  // original event is projected to the keys the client routes on; legacy also
+  // injects a session-id into it, which no handler reads (Reactor.js:1009-1046).
+  const oe = m["original-event"] ?? {};
   return {
     op: "error",
     status: m.status,
     type: m.type,
     message: m.message,
     hint: normalize(m.hint),
-    "original-event": normalize(m["original-event"] ?? null),
+    "original-event": normalize(
+      Object.fromEntries(
+        ["op", "q", "subscription-id", "stream-id", "client-event-id", "tx-steps"]
+          .filter((k) => k in oe)
+          .map((k) => [k, oe[k]]),
+      ),
+    ),
     "client-event-id": normalize(m["client-event-id"] ?? null),
   };
 }
@@ -653,6 +662,33 @@ async function runOn(serverName, plan) {
     return 0;
   };
 
+  const activeReadersFor = (streamLabel) =>
+    [...readers.values()].filter((r) => r.active && r.stream === streamLabel);
+
+  // A live append reaches every active subscriber as a frame at the append's
+  // start offset; a completing append also reaches them with done=true (legacy
+  // may split that into a content frame plus a done frame). Waiting for those
+  // frames keeps a slow delivery from being attributed to the next op.
+  const waitAppendDeliveries = async (st, done, startOffset) => {
+    const active = activeReadersFor(st.label);
+    await Promise.all(
+      active.map((reader) =>
+        conns[reader.role]
+          .waitFor(
+            (m) =>
+              m.op === "stream-append" &&
+              m["client-event-id"] === reader.eventId &&
+              (done ? m.done === true : m.offset === startOffset),
+            20000,
+          )
+          .catch((e) => {
+            throw new Error(`${e.message} waiting for ${reader.label} on ${st.label} at ${startOffset}`);
+          }),
+      ),
+    );
+    return active.length;
+  };
+
   const waitReply = (role, ceid, op, timeout = 15000) =>
     conns[role].waitFor((m) => m["client-event-id"] === ceid && m.op === op, timeout);
 
@@ -738,9 +774,11 @@ async function runOn(serverName, plan) {
               (!done || m.done === true)),
           20000,
         );
-        await sleep(100);
+        await waitAppendDeliveries(st, done, offset);
+        await sleep(30);
       } else {
-        await sleep(180);
+        const delivered = await waitAppendDeliveries(st, false, offset);
+        await sleep(delivered ? 30 : 120);
       }
       const events = await drain();
       const outcome = { name: op.name, kind: op.kind, events };
@@ -768,7 +806,7 @@ async function runOn(serverName, plan) {
       conns[op.role].send(msg);
       const reply = await waitErrorOr(op.role, ceid, "stream-append");
       if (reply.op === "error") {
-        reader.error = normalize(reply);
+        reader.error = errorView(reply);
         reader.active = false;
       }
       await sleep(30);
@@ -811,7 +849,7 @@ async function runOn(serverName, plan) {
         conns[op.role].send(msg);
         const reply = await waitErrorOr(op.role, ceid, "stream-append");
         if (reply.op === "error") {
-          reader.error = normalize(reply);
+          reader.error = errorView(reply);
           reader.active = false;
         }
         await sleep(30);
