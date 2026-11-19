@@ -25,10 +25,14 @@
 // the store, update txes are skipped at or below the watermark, grouped by
 // entity, applied as added/removed triples, removed entities drop out), and
 // both the normalized frame sequence and the folded store/entity projection
-// are compared byte-for-byte. Only server-chosen ids, timestamps, tx ids and
-// trace ids are normalized. Every transaction touching a synced namespace is
-// awaited to its sync-update before the next op, so legacy's invalidator can
-// not coalesce separate fuzz transactions into a different frame grouping.
+// are compared byte-for-byte. Frames for different subscription ids are
+// grouped by the plan's stable subscription name before comparison (each id
+// has its own independent store, so their relative arrival order is not
+// client-visible; a subscription's own frame order still is). Only
+// server-chosen ids, timestamps, tx ids and trace ids are normalized. Every
+// transaction touching a synced namespace is awaited to its sync-update
+// before the next op, so legacy's invalidator can not coalesce separate fuzz
+// transactions into a different frame grouping.
 //
 // Usage: node fuzz-sync.mjs <app-id-legacy> <app-id-rust> <admin-token> [seed] [rounds]
 // Env: LEGACY_URL, RUST_URL, LEGACY_DATABASE_URL, RUST_DATABASE_URL
@@ -46,6 +50,7 @@ import {
   normalize,
   psql,
   settle,
+  sortFramesByKey,
 } from "./lib.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -741,6 +746,7 @@ async function runOn(serverName, plan) {
   const conns = {};
   const models = new Map();
   const subByName = new Map();
+  const pendingNames = new Map();
   const committed = [];
   const outcomes = [];
   let maxTxPerFrame = 0;
@@ -769,6 +775,7 @@ async function runOn(serverName, plan) {
       models.set(m["subscription-id"], {
         subId: m["subscription-id"],
         role,
+        name: pendingNames.get(m["subscription-id"]),
         q: m.q,
         token: m.token,
         order,
@@ -836,7 +843,9 @@ async function runOn(serverName, plan) {
       for (const m of raw) {
         if (m.op === "error") {
           const oe = m["original-event"]?.op;
-          if (["start-sync", "resync-table", "remove-sync"].includes(oe)) views.push(frameView(m));
+          if (["start-sync", "resync-table", "remove-sync"].includes(oe)) {
+            views.push({ key: "error", view: frameView(m) });
+          }
           continue;
         }
         if (!["start-sync-ok", "sync-load-batch", "sync-init-finish", "sync-update-triples"].includes(m.op)) continue;
@@ -879,9 +888,13 @@ async function runOn(serverName, plan) {
           frame = { ...m, txes };
         }
         foldFrame(role, frame);
-        views.push(frameView(frame));
+        const sub = models.get(frame["subscription-id"]);
+        views.push({ key: sub?.name ?? frame["subscription-id"], view: frameView(frame) });
       }
-      frames[role] = views;
+      // SyncTable keeps one independent store per subscription id, so frames
+      // for different subscriptions may arrive in either order. Group them by
+      // the plan's stable subscription name; each sub's own order is kept.
+      frames[role] = sortFramesByKey(views, (v) => v.key).map((v) => v.view);
     }
     return frames;
   };
@@ -969,6 +982,7 @@ async function runOn(serverName, plan) {
       const reply = await waitReply(op.session, ceid);
       if (reply.op === "start-sync-ok") {
         subByName.set(op.subName, reply["subscription-id"]);
+        pendingNames.set(reply["subscription-id"], op.subName);
         await conns[op.session].waitFor(
           (m) => m.op === "sync-init-finish" && m["subscription-id"] === reply["subscription-id"],
         );

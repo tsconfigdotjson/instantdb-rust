@@ -55,6 +55,17 @@ export function psql(url, sql) {
   execSync(`psql "${url}" -q -v ON_ERROR_STOP=1 -f -`, { input: sql });
 }
 
+// Frames for independent client objects (one sync/stream subscription each)
+// may arrive in any order. Only a single key's own frame sequence is
+// client-visible, so canonicalize across keys while keeping each key's
+// arrival order stable.
+export function sortFramesByKey(frames, keyOf) {
+  return frames
+    .map((frame, i) => ({ frame, key: String(keyOf(frame)), i }))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.i - b.i))
+    .map((x) => x.frame);
+}
+
 // ---------------------------------------------------------------------------
 // capture client
 

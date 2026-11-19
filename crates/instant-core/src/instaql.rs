@@ -647,6 +647,41 @@ fn extract_fn(t: CheckedDataType) -> &'static str {
     }
 }
 
+/// Legacy `page-info-of-form` order checks (instaql.clj:951-969): every
+/// reason a non-`serverCreatedAt` order attr cannot be used, in legacy's
+/// order. Shared with the sync-table start/resync validation, which legacy
+/// runs through `instaql-query->patterns` before `create-sync-process`.
+pub fn order_attr_errors(etype: &str, order_key: &str, attr: &Attr) -> Vec<String> {
+    let name = format!("{etype}.{order_key}");
+    let mut errors = vec![];
+    if attr.checking_data_type {
+        errors.push(format!(
+            "The `{name}` attribute is still in the process of validating its type. It must finish before ordering by the attribute."
+        ));
+    }
+    if attr.indexing {
+        errors.push(format!(
+            "The `{name}` attribute is still in the process of indexing. It must finish before ordering by the attribute."
+        ));
+    }
+    if !attr.is_indexed {
+        errors.push(format!(
+            "The `{name}` attribute is not indexed. Only indexed and typed attributes can be used to order by."
+        ));
+    }
+    if attr.checked_data_type.is_none() {
+        errors.push(format!(
+            "The `{name}` attribute is not typed. Only typed and indexed attributes can be used to order by."
+        ));
+    }
+    if attr.cardinality != crate::attr::Cardinality::One {
+        errors.push(format!(
+            "The `{name}` attribute has cardinality `many`. Only attributes with cardinality `one` can be used to order by."
+        ));
+    }
+    errors
+}
+
 /// Coerce a query value for a typed comparison; returns the SQL-bindable text
 /// and validates types roughly like attr_pat.clj.
 /// Legacy `json-type-of-clj`.
@@ -1692,70 +1727,43 @@ async fn run_top_form(
     });
 
     // Resolve order attr
-    let (order_attr, order_type): (Attr, Option<CheckedDataType>) = if order.key
-        == "serverCreatedAt"
-    {
-        (id_attr.clone(), None)
-    } else {
-        let a = ctx
-            .attrs
-            .by_fwd_name(&form.etype, &order.key)
-            .cloned()
-            .ok_or_else(|| {
-                // legacy message (LEGACY instaql.clj:945-949)
-                verr(format!(
-                    "There is no `{}` attribute for {}.",
-                    order.key, form.etype
-                ))
-            })?;
-        // legacy per-condition messages (LEGACY instaql.clj:951-969)
-        let name = format!("{}.{}", form.etype, order.key);
-        let mut order_errors: Vec<String> = vec![];
-        if a.checking_data_type {
-            order_errors.push(format!(
-                    "The `{name}` attribute is still in the process of validating its type. It must finish before ordering by the attribute."
-                ));
-        }
-        if a.indexing {
-            order_errors.push(format!(
-                    "The `{name}` attribute is still in the process of indexing. It must finish before ordering by the attribute."
-                ));
-        }
-        if !a.is_indexed {
-            order_errors.push(format!(
-                    "The `{name}` attribute is not indexed. Only indexed and typed attributes can be used to order by."
-                ));
-        }
-        if a.checked_data_type.is_none() {
-            order_errors.push(format!(
-                    "The `{name}` attribute is not typed. Only typed and indexed attributes can be used to order by."
-                ));
-        }
-        if a.cardinality != crate::attr::Cardinality::One {
-            order_errors.push(format!(
-                    "The `{name}` attribute has cardinality `many`. Only attributes with cardinality `one` can be used to order by."
-                ));
-        }
-        if !order_errors.is_empty() {
-            let errors: Vec<Value> = order_errors
-                .iter()
-                .map(|m| {
-                    json!({
-                        "expected": "supported-order?",
-                        "in": [form.k, "$", "order"],
-                        "message": m,
+    let (order_attr, order_type): (Attr, Option<CheckedDataType>) =
+        if order.key == "serverCreatedAt" {
+            (id_attr.clone(), None)
+        } else {
+            let a = ctx
+                .attrs
+                .by_fwd_name(&form.etype, &order.key)
+                .cloned()
+                .ok_or_else(|| {
+                    // legacy message (LEGACY instaql.clj:945-949)
+                    verr(format!(
+                        "There is no `{}` attribute for {}.",
+                        order.key, form.etype
+                    ))
+                })?;
+            // legacy per-condition messages (LEGACY instaql.clj:951-969)
+            let order_errors = order_attr_errors(&form.etype, &order.key, &a);
+            if !order_errors.is_empty() {
+                let errors: Vec<Value> = order_errors
+                    .iter()
+                    .map(|m| {
+                        json!({
+                            "expected": "supported-order?",
+                            "in": [form.k, "$", "order"],
+                            "message": m,
+                        })
                     })
-                })
-                .collect();
-            return Err(InstantError::validation_failed_input(
-                "query",
-                (*form.root).clone(),
-                Value::Array(errors),
-            ));
-        }
-        let t = a.checked_data_type.unwrap();
-        (a, Some(t))
-    };
+                    .collect();
+                return Err(InstantError::validation_failed_input(
+                    "query",
+                    (*form.root).clone(),
+                    Value::Array(errors),
+                ));
+            }
+            let t = a.checked_data_type.unwrap();
+            (a, Some(t))
+        };
 
     // Validate cursors reference the order attr — legacy message format
     // (LEGACY instaql.clj:911-922, 979-997): an attr's order label is its

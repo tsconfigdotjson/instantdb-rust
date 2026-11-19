@@ -278,8 +278,8 @@ run_seeded_layer storagefuzz "${FUZZ_STORAGE_JOBS:-1}" $STORAGE_SEEDS
 # remove-sync, reconnects with resync-table from the last seen tx, an attr
 # added after a sub started, and a >100-tx burst (fuzz-sync.mjs). Every sync
 # frame, its batching and tx-id watermarks, and the folded client store are
-# compared. The two PR seeds (and all ten nightly seeds) ride the replay leg.
-SYNC_SEEDS="${FUZZ_SYNC_SEEDS:-301 302}"
+# compared. The three PR seeds (and all ten nightly seeds) ride the replay leg.
+SYNC_SEEDS="${FUZZ_SYNC_SEEDS:-301 302 308}"
 run_seeded_layer syncfuzz "${FUZZ_SYNC_JOBS:-1}" $SYNC_SEEDS
 # stream fuzz: seeded create / append / done / abort / subscribe from an
 # offset / reconnect / unsubscribe sequences over client, signed-in and admin
