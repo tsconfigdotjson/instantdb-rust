@@ -51,6 +51,7 @@ import {
   psql,
   settle,
   sortFramesByKey,
+  syncTargets,
 } from "./lib.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -927,23 +928,7 @@ async function runOn(serverName, plan) {
     return last != null && last >= target;
   };
 
-  const targetsFor = (subs, etypes = null) => {
-    const out = [];
-    for (const sub of subs) {
-      if (!sub.active) continue;
-      const target = committed
-        .filter((c) =>
-          c.txId > (sub.txId ?? -1)
-            ? etypes
-              ? etypes.includes(c.etype)
-              : c.etype === sub.etype
-            : false,
-        )
-        .reduce((m, c) => Math.max(m, c.txId), 0);
-      if (target) out.push({ sub, target });
-    }
-    return out;
-  };
+  const targetsFor = (subs, etypes = null) => syncTargets(committed, subs, etypes);
 
   const waitTargets = async (targets) => {
     try {

@@ -55,6 +55,27 @@ export function psql(url, sql) {
   execSync(`psql "${url}" -q -v ON_ERROR_STOP=1 -f -`, { input: sql });
 }
 
+// Latest committed tx a sync subscription still needs to receive. Committed
+// entries carry an `etypes` array (one transaction can touch several
+// namespaces); with an explicit filter the entry must touch one of those
+// namespaces, otherwise it must touch the subscription's namespace.
+export function syncTargets(committed, subs, etypes = null) {
+  const out = [];
+  for (const sub of subs) {
+    if (!sub.active) continue;
+    if (etypes && !etypes.includes(sub.etype)) continue;
+    const target = committed
+      .filter((c) => {
+        if (c.txId <= (sub.txId ?? -1)) return false;
+        if (etypes) return etypes.some((etype) => c.etypes.includes(etype));
+        return c.etypes.includes(sub.etype);
+      })
+      .reduce((max, c) => Math.max(max, c.txId), 0);
+    if (target) out.push({ sub, target });
+  }
+  return out;
+}
+
 // Frames for independent client objects (one sync/stream subscription each)
 // may arrive in any order. Only a single key's own frame sequence is
 // client-visible, so canonicalize across keys while keeping each key's

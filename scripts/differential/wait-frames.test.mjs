@@ -1,7 +1,7 @@
 // Regression test for the presence seed 110 harness race: waiting for a
 // re-join's full snapshot must ignore matching frames from before the join.
 import assert from "node:assert/strict";
-import { firstFrameAfter, sortFramesByKey } from "./lib.mjs";
+import { firstFrameAfter, sortFramesByKey, syncTargets } from "./lib.mjs";
 
 const oldSnapshot = { op: "refresh-presence", "room-id": "" };
 const other = { op: "join-room-ok", "room-id": "" };
@@ -36,3 +36,31 @@ assert.deepEqual(
 );
 assert.deepEqual(sortFramesByKey([], () => "x"), []);
 console.log("wait-frames: per-subscription frame grouping passed");
+
+// Committed sync tx entries carry an `etypes` array. The old target filter
+// read `c.etype` (always undefined), so the burst never waited for its docs
+// subscriptions and compared whatever happened to arrive within 180ms.
+const committed = [
+  { txId: 1, etypes: ["docs"] },
+  { txId: 2, etypes: ["notes"] },
+  { txId: 3, etypes: ["docs", "notes"] },
+  { txId: 4, etypes: [] },
+];
+const docsSub = { active: true, etype: "docs", txId: 0 };
+const notesSub = { active: true, etype: "notes", txId: 2 };
+const otherSub = { active: true, etype: "other", txId: 0 };
+const inactiveDocs = { active: false, etype: "docs", txId: 0 };
+assert.deepEqual(
+  syncTargets(committed, [docsSub, notesSub, otherSub, inactiveDocs], ["docs"]),
+  [{ sub: docsSub, target: 3 }],
+);
+assert.deepEqual(
+  syncTargets(committed, [docsSub, notesSub, otherSub]),
+  [
+    { sub: docsSub, target: 3 },
+    { sub: notesSub, target: 3 },
+  ],
+);
+const burstCommitted = Array.from({ length: 130 }, (_, i) => ({ txId: i + 1, etypes: ["docs"] }));
+assert.deepEqual(syncTargets(burstCommitted, [docsSub], ["docs"]), [{ sub: docsSub, target: 130 }]);
+console.log("wait-frames: sync target namespace matching passed");
