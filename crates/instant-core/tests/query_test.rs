@@ -702,6 +702,10 @@ async fn pagination_and_ordering() {
     )
     .await;
     assert_eq!(err.error_type, "validation-failed");
+    assert_eq!(
+        err.message,
+        "Validation failed for query: The `users.nickname` attribute is not indexed. Only indexed and typed attributes can be used to order by., The `users.nickname` attribute is not typed. Only typed and indexed attributes can be used to order by."
+    );
 
     // pagination on nested form errors
     let err = run_query_err(

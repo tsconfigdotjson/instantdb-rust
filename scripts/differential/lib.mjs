@@ -55,6 +55,115 @@ export function psql(url, sql) {
   execSync(`psql "${url}" -q -v ON_ERROR_STOP=1 -f -`, { input: sql });
 }
 
+// Latest committed tx a sync subscription still needs to receive. Committed
+// entries carry an `etypes` array (one transaction can touch several
+// namespaces) and the attr ids its steps actually changed. A transaction that
+// changed nothing, or only attrs outside the subscription's frozen sync attr
+// set, produces no frame for that sub and must not be waited on.
+export function syncTargets(committed, subs, etypes = null) {
+  const out = [];
+  for (const sub of subs) {
+    if (!sub.active) continue;
+    if (etypes && !etypes.includes(sub.etype)) continue;
+    const target = committed
+      .filter((c) => {
+        if (c.txId <= (sub.txId ?? -1)) return false;
+        if (etypes ? !etypes.some((etype) => c.etypes.includes(etype)) : !c.etypes.includes(sub.etype)) {
+          return false;
+        }
+        if (c.attrs && c.attrs.length === 0) return false;
+        if (c.attrs && sub.syncAttrs) {
+          return c.attrs.some((attrId) => sub.syncAttrs.includes(attrId));
+        }
+        return true;
+      })
+      .reduce((max, c) => Math.max(max, c.txId), 0);
+    if (target) out.push({ sub, target });
+  }
+  return out;
+}
+
+// Annotate a fuzz plan with the attr ids each transaction actually changes in
+// a simple triple store (add triples, retract exact triples, delete an
+// entity). Start ops get the card-one attrs available at that point, matching
+// the sync-table topic freeze. This lets the harness wait only for txs that
+// can produce a sync frame: seed 308 tx-51 repeated a retraction that was
+// already gone and set the same title/rank, so it emitted no frame at all.
+export function annotateSyncChanges(script, manyAttrs = []) {
+  const many = new Set(manyAttrs);
+  const triples = new Map(); // key -> { e, a }
+  const byEa = new Map(); // "e|a" -> Set<key>
+  const available = new Set();
+
+  const keyOf = (e, a, v) => `${e}|${a}|${canon(v)}`;
+  const remove = (key) => {
+    const t = triples.get(key);
+    if (!t) return false;
+    triples.delete(key);
+    const ea = `${t.e}|${t.a}`;
+    const keys = byEa.get(ea);
+    if (keys) {
+      keys.delete(key);
+      if (!keys.size) byEa.delete(ea);
+    }
+    return true;
+  };
+
+  for (const op of script) {
+    if (op.kind === "start") {
+      op.syncAttrs = [...available].filter((attrId) => !many.has(attrId));
+      continue;
+    }
+    if (op.kind !== "tx") continue;
+
+    const changed = new Set();
+    const appliesTriples = op.etypes.length > 0;
+    for (const step of op.steps) {
+      const [kind] = step;
+      if (kind === "add-attr") {
+        available.add(step[1].id);
+        continue;
+      }
+      if (!appliesTriples) continue;
+
+      if (kind === "add-triple") {
+        const [, e, a, v] = step;
+        const key = keyOf(e, a, v);
+        if (triples.has(key)) continue;
+        if (!many.has(a)) {
+          const ea = `${e}|${a}`;
+          for (const oldKey of [...(byEa.get(ea) ?? [])]) remove(oldKey);
+        }
+        triples.set(key, { e, a });
+        const ea = `${e}|${a}`;
+        if (!byEa.has(ea)) byEa.set(ea, new Set());
+        byEa.get(ea).add(key);
+        changed.add(a);
+      } else if (kind === "retract-triple") {
+        const [, e, a, v] = step;
+        if (remove(keyOf(e, a, v))) changed.add(a);
+      } else if (kind === "delete-entity") {
+        const [, e] = step;
+        for (const [key, t] of [...triples]) {
+          if (t.e === e && remove(key)) changed.add(t.a);
+        }
+      }
+    }
+    op.changedAttrs = [...changed];
+  }
+}
+
+// Frames for independent client objects (one sync/stream subscription each)
+// may arrive in any order. Only a single key's own frame sequence is
+// client-visible, so canonicalize across keys while keeping each key's
+// arrival order stable.
+export function sortFramesByKey(frames, keyOf) {
+  return frames
+    .map((frame, i) => ({ frame, key: String(keyOf(frame)), i }))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.i - b.i))
+    .map((x) => x.frame);
+}
+
 // ---------------------------------------------------------------------------
 // capture client
 

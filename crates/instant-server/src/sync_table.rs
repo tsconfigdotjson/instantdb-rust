@@ -147,14 +147,31 @@ fn parse_sync_query(attrs: &AttrMap, q: &Value) -> Result<SyncQuery> {
             // before create-sync-process looks at the order attr
             order_verr(format!("There is no `{order_key}` attribute for {etype}."))
         })?;
-        let checked = if attr.is_indexed && !attr.indexing {
-            attr.checked_data_type
-        } else {
-            None
+        // Legacy validates the order through instaql-query->patterns before
+        // create-sync-process runs, so an unindexed / untyped / in-flight /
+        // cardinality-many attr reports every per-condition message it would
+        // report for a regular query, in the same order.
+        let order_errors = instant_core::instaql::order_attr_errors(&etype, &order_key, attr);
+        if !order_errors.is_empty() {
+            let errors: Vec<Value> = order_errors
+                .iter()
+                .map(|message| {
+                    json!({
+                        "expected": "supported-order?",
+                        "in": [etype, "$", "order"],
+                        "message": message,
+                    })
+                })
+                .collect();
+            return Err(InstantError::validation_failed_input(
+                "query",
+                q.clone(),
+                Value::Array(errors),
+            ));
         }
-        .ok_or_else(|| {
-            order_verr("Order field must be indexed with a checked data type.".into())
-        })?;
+        let checked = attr
+            .checked_data_type
+            .expect("order validation guarantees a checked data type");
         SyncOrder::Attr {
             attr: Box::new(attr.clone()),
             dir,
@@ -715,6 +732,66 @@ fn chunk_txes(txes: Vec<Value>) -> Vec<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_attr(
+        etype: &str,
+        label: &str,
+        indexed: bool,
+        checked: Option<CheckedDataType>,
+    ) -> Attr {
+        Attr {
+            id: Uuid::new_v4(),
+            value_type: ValueType::Blob,
+            cardinality: Cardinality::One,
+            forward_ident: Uuid::new_v4(),
+            etype: etype.to_string(),
+            label: label.to_string(),
+            reverse_ident: None,
+            reverse_etype: None,
+            reverse_label: None,
+            is_unique: false,
+            is_indexed: indexed,
+            is_required: false,
+            checked_data_type: checked,
+            on_delete_cascade: false,
+            on_delete_reverse_cascade: false,
+            is_system: false,
+            indexing: false,
+            checking_data_type: false,
+            setting_unique: false,
+            inferred_types: None,
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn start_sync_order_errors_use_legacy_per_problem_messages() {
+        let mut attrs = AttrMap::default();
+        attrs.insert(test_attr(
+            "syncDocs",
+            "id",
+            true,
+            Some(CheckedDataType::String),
+        ));
+        attrs.insert(test_attr("syncDocs", "title", false, None));
+        let q = json!({"syncDocs": {"$": {"order": {"title": "asc"}}}});
+
+        let err = parse_sync_query(&attrs, &q).unwrap_err();
+        assert_eq!(err.error_type, "validation-failed");
+        assert_eq!(
+            err.message,
+            "Validation failed for query: The `syncDocs.title` attribute is not indexed. Only indexed and typed attributes can be used to order by., The `syncDocs.title` attribute is not typed. Only typed and indexed attributes can be used to order by."
+        );
+        let errors = err
+            .hint
+            .as_ref()
+            .and_then(|h| h.get("errors"))
+            .and_then(|e| e.as_array())
+            .unwrap();
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0]["expected"], "supported-order?");
+        assert_eq!(errors[0]["in"], json!(["syncDocs", "$", "order"]));
+    }
 
     #[test]
     fn sync_updates_are_sent_in_legacy_100_tx_chunks() {

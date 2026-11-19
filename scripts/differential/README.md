@@ -443,7 +443,11 @@ everything and checks coverage itself, as before.
     including after a >100-transaction burst. The change set is compared
     whole, with only the within-tx row order canonicalized by entity/attr
     (removed before added): Postgres transition-table / WAL row order is not
-    stable, and SyncTable applies different attrs independently;
+    stable, and SyncTable applies different attrs independently. Frames for
+    different subscription ids are grouped by the plan's stable subscription
+    name: SyncTable keeps one independent store per id, so their relative
+    arrival order is not client-visible; each subscription's own frame order
+    is still compared;
   - `remove-sync` (both `keep-subscription` values, no reply) and a later
     `resync-table` of the same persisted subscription id from the last seen
     tx, plus a full disconnect / reconnect that resyncs every active sub;
@@ -460,13 +464,16 @@ everything and checks coverage itself, as before.
   entities with no triples left disappear, and entities are sorted with the
   client's order comparator. Both the normalized frame sequence and the
   folded store / entity objects are compared; only server-chosen ids,
-  timestamps, tx ids and trace ids are normalized. Each synced transaction
-  is awaited to its `sync-update-triples` before the next op so legacy's
-  invalidator cannot coalesce two fuzz transactions into a different frame
-  grouping. `node fuzz-sync.mjs <app> <app> <token> [seed] [rounds]`; seeds
-  301-302 at 60 rounds per PR (`FUZZ_SYNC_SEEDS` / `FUZZ_SYNC_ROUNDS`), 10
-  seeds at 120 nightly through `run_seeded_layer` on the replay leg
-  (`FUZZ_SYNC_JOBS` defaults to 1).
+  timestamps, tx ids and trace ids are normalized. A transaction that changed
+  any attr in a subscription's frozen sync topic is awaited to its
+  `sync-update-triples` before the next op so legacy's invalidator cannot
+  coalesce two fuzz transactions into a different frame grouping; a no-op
+  transaction, or one changing only attrs outside that topic, emits no frame
+  and is not waited on. Start-sync order validation uses the same per-problem
+  messages as regular queries (`order_attr_errors`). `node fuzz-sync.mjs <app> <app>
+  <token> [seed] [rounds]`; seeds 301, 302 and 308 at 60 rounds per PR
+  (`FUZZ_SYNC_SEEDS` / `FUZZ_SYNC_ROUNDS`), 10 seeds at 120 nightly through
+  `run_seeded_layer` on the replay leg (`FUZZ_SYNC_JOBS` defaults to 1).
 - `fuzz-streams.mjs` — seeded **streams** over client, signed-in and admin
   writers under generated `$streams` create / view rules. Guest create only
   accepts guest-/public- client ids (a `ruleParams` exception lets a guest

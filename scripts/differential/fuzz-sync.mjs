@@ -25,10 +25,14 @@
 // the store, update txes are skipped at or below the watermark, grouped by
 // entity, applied as added/removed triples, removed entities drop out), and
 // both the normalized frame sequence and the folded store/entity projection
-// are compared byte-for-byte. Only server-chosen ids, timestamps, tx ids and
-// trace ids are normalized. Every transaction touching a synced namespace is
-// awaited to its sync-update before the next op, so legacy's invalidator can
-// not coalesce separate fuzz transactions into a different frame grouping.
+// are compared byte-for-byte. Frames for different subscription ids are
+// grouped by the plan's stable subscription name before comparison (each id
+// has its own independent store, so their relative arrival order is not
+// client-visible; a subscription's own frame order still is). Only
+// server-chosen ids, timestamps, tx ids and trace ids are normalized. Every
+// transaction touching a synced namespace is awaited to its sync-update
+// before the next op, so legacy's invalidator can not coalesce separate fuzz
+// transactions into a different frame grouping.
 //
 // Usage: node fuzz-sync.mjs <app-id-legacy> <app-id-rust> <admin-token> [seed] [rounds]
 // Env: LEGACY_URL, RUST_URL, LEGACY_DATABASE_URL, RUST_DATABASE_URL
@@ -36,6 +40,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  annotateSyncChanges,
   canon,
   connect,
   describeAllowVerdict,
@@ -46,6 +51,8 @@ import {
   normalize,
   psql,
   settle,
+  sortFramesByKey,
+  syncTargets,
 } from "./lib.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -543,11 +550,13 @@ function buildPlan() {
         ["add-triple", burstDoc, attrs.rank, i],
       ],
       etypes: [DOCS],
+      changedAttrs: [attrs.title, attrs.rank],
     });
   }
   burst(burstItems);
   stateCheckpoint("after-burst");
   checkpoint("final-checkpoint");
+  annotateSyncChanges(script, [attrs.tags]);
   return {
     rules,
     script,
@@ -741,6 +750,7 @@ async function runOn(serverName, plan) {
   const conns = {};
   const models = new Map();
   const subByName = new Map();
+  const pendingStarts = new Map();
   const committed = [];
   const outcomes = [];
   let maxTxPerFrame = 0;
@@ -766,9 +776,12 @@ async function runOn(serverName, plan) {
     if (m.op === "start-sync-ok") {
       const order = orderOf(m.q);
       const etype = order.etype;
+      const pending = pendingStarts.get(m["subscription-id"]);
       models.set(m["subscription-id"], {
         subId: m["subscription-id"],
         role,
+        name: pending?.name,
+        syncAttrs: pending?.syncAttrs ?? [],
         q: m.q,
         token: m.token,
         order,
@@ -836,7 +849,9 @@ async function runOn(serverName, plan) {
       for (const m of raw) {
         if (m.op === "error") {
           const oe = m["original-event"]?.op;
-          if (["start-sync", "resync-table", "remove-sync"].includes(oe)) views.push(frameView(m));
+          if (["start-sync", "resync-table", "remove-sync"].includes(oe)) {
+            views.push({ key: "error", view: frameView(m) });
+          }
           continue;
         }
         if (!["start-sync-ok", "sync-load-batch", "sync-init-finish", "sync-update-triples"].includes(m.op)) continue;
@@ -879,9 +894,13 @@ async function runOn(serverName, plan) {
           frame = { ...m, txes };
         }
         foldFrame(role, frame);
-        views.push(frameView(frame));
+        const sub = models.get(frame["subscription-id"]);
+        views.push({ key: sub?.name ?? frame["subscription-id"], view: frameView(frame) });
       }
-      frames[role] = views;
+      // SyncTable keeps one independent store per subscription id, so frames
+      // for different subscriptions may arrive in either order. Group them by
+      // the plan's stable subscription name; each sub's own order is kept.
+      frames[role] = sortFramesByKey(views, (v) => v.key).map((v) => v.view);
     }
     return frames;
   };
@@ -914,23 +933,7 @@ async function runOn(serverName, plan) {
     return last != null && last >= target;
   };
 
-  const targetsFor = (subs, etypes = null) => {
-    const out = [];
-    for (const sub of subs) {
-      if (!sub.active) continue;
-      const target = committed
-        .filter((c) =>
-          c.txId > (sub.txId ?? -1)
-            ? etypes
-              ? etypes.includes(c.etype)
-              : c.etype === sub.etype
-            : false,
-        )
-        .reduce((m, c) => Math.max(m, c.txId), 0);
-      if (target) out.push({ sub, target });
-    }
-    return out;
-  };
+  const targetsFor = (subs, etypes = null) => syncTargets(committed, subs, etypes);
 
   const waitTargets = async (targets) => {
     try {
@@ -956,7 +959,7 @@ async function runOn(serverName, plan) {
       conns[op.session].send({ "client-event-id": ceid, op: "transact", "tx-steps": op.steps });
       const reply = await waitReply(op.session, ceid);
       if (reply.op === "transact-ok" && op.sync) {
-        committed.push({ txId: reply["tx-id"], etypes: op.etypes });
+        committed.push({ txId: reply["tx-id"], etypes: op.etypes, attrs: op.changedAttrs ?? [] });
         const subs = [...models.values()].filter((m) => m.active && op.etypes.includes(m.etype));
         await waitTargets(targetsFor(subs, op.etypes));
       }
@@ -969,6 +972,10 @@ async function runOn(serverName, plan) {
       const reply = await waitReply(op.session, ceid);
       if (reply.op === "start-sync-ok") {
         subByName.set(op.subName, reply["subscription-id"]);
+        pendingStarts.set(reply["subscription-id"], {
+          name: op.subName,
+          syncAttrs: op.syncAttrs ?? [],
+        });
         await conns[op.session].waitFor(
           (m) => m.op === "sync-init-finish" && m["subscription-id"] === reply["subscription-id"],
         );
@@ -1058,7 +1065,11 @@ async function runOn(serverName, plan) {
       const replies = await Promise.all(sends.map(({ ceid, item }) => waitReply(item.session, ceid)));
       replies.forEach((reply, i) => {
         if (reply.op === "transact-ok") {
-          committed.push({ txId: reply["tx-id"], etypes: sends[i].item.etypes });
+          committed.push({
+            txId: reply["tx-id"],
+            etypes: sends[i].item.etypes,
+            attrs: sends[i].item.changedAttrs ?? [],
+          });
         }
       });
       const subs = [...models.values()].filter((m) => m.active && m.etype === DOCS);
