@@ -40,6 +40,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  annotateSyncChanges,
   canon,
   connect,
   describeAllowVerdict,
@@ -549,11 +550,13 @@ function buildPlan() {
         ["add-triple", burstDoc, attrs.rank, i],
       ],
       etypes: [DOCS],
+      changedAttrs: [attrs.title, attrs.rank],
     });
   }
   burst(burstItems);
   stateCheckpoint("after-burst");
   checkpoint("final-checkpoint");
+  annotateSyncChanges(script, [attrs.tags]);
   return {
     rules,
     script,
@@ -747,7 +750,7 @@ async function runOn(serverName, plan) {
   const conns = {};
   const models = new Map();
   const subByName = new Map();
-  const pendingNames = new Map();
+  const pendingStarts = new Map();
   const committed = [];
   const outcomes = [];
   let maxTxPerFrame = 0;
@@ -773,10 +776,12 @@ async function runOn(serverName, plan) {
     if (m.op === "start-sync-ok") {
       const order = orderOf(m.q);
       const etype = order.etype;
+      const pending = pendingStarts.get(m["subscription-id"]);
       models.set(m["subscription-id"], {
         subId: m["subscription-id"],
         role,
-        name: pendingNames.get(m["subscription-id"]),
+        name: pending?.name,
+        syncAttrs: pending?.syncAttrs ?? [],
         q: m.q,
         token: m.token,
         order,
@@ -954,7 +959,7 @@ async function runOn(serverName, plan) {
       conns[op.session].send({ "client-event-id": ceid, op: "transact", "tx-steps": op.steps });
       const reply = await waitReply(op.session, ceid);
       if (reply.op === "transact-ok" && op.sync) {
-        committed.push({ txId: reply["tx-id"], etypes: op.etypes });
+        committed.push({ txId: reply["tx-id"], etypes: op.etypes, attrs: op.changedAttrs ?? [] });
         const subs = [...models.values()].filter((m) => m.active && op.etypes.includes(m.etype));
         await waitTargets(targetsFor(subs, op.etypes));
       }
@@ -967,7 +972,10 @@ async function runOn(serverName, plan) {
       const reply = await waitReply(op.session, ceid);
       if (reply.op === "start-sync-ok") {
         subByName.set(op.subName, reply["subscription-id"]);
-        pendingNames.set(reply["subscription-id"], op.subName);
+        pendingStarts.set(reply["subscription-id"], {
+          name: op.subName,
+          syncAttrs: op.syncAttrs ?? [],
+        });
         await conns[op.session].waitFor(
           (m) => m.op === "sync-init-finish" && m["subscription-id"] === reply["subscription-id"],
         );
@@ -1057,7 +1065,11 @@ async function runOn(serverName, plan) {
       const replies = await Promise.all(sends.map(({ ceid, item }) => waitReply(item.session, ceid)));
       replies.forEach((reply, i) => {
         if (reply.op === "transact-ok") {
-          committed.push({ txId: reply["tx-id"], etypes: sends[i].item.etypes });
+          committed.push({
+            txId: reply["tx-id"],
+            etypes: sends[i].item.etypes,
+            attrs: sends[i].item.changedAttrs ?? [],
+          });
         }
       });
       const subs = [...models.values()].filter((m) => m.active && m.etype === DOCS);

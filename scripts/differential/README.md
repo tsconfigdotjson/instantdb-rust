@@ -464,11 +464,13 @@ everything and checks coverage itself, as before.
   entities with no triples left disappear, and entities are sorted with the
   client's order comparator. Both the normalized frame sequence and the
   folded store / entity objects are compared; only server-chosen ids,
-  timestamps, tx ids and trace ids are normalized. Each synced transaction
-  is awaited to its `sync-update-triples` before the next op so legacy's
-  invalidator cannot coalesce two fuzz transactions into a different frame
-  grouping. Start-sync order validation uses the same per-problem messages as
-  regular queries (`order_attr_errors`). `node fuzz-sync.mjs <app> <app>
+  timestamps, tx ids and trace ids are normalized. A transaction that changed
+  any attr in a subscription's frozen sync topic is awaited to its
+  `sync-update-triples` before the next op so legacy's invalidator cannot
+  coalesce two fuzz transactions into a different frame grouping; a no-op
+  transaction, or one changing only attrs outside that topic, emits no frame
+  and is not waited on. Start-sync order validation uses the same per-problem
+  messages as regular queries (`order_attr_errors`). `node fuzz-sync.mjs <app> <app>
   <token> [seed] [rounds]`; seeds 301, 302 and 308 at 60 rounds per PR
   (`FUZZ_SYNC_SEEDS` / `FUZZ_SYNC_ROUNDS`), 10 seeds at 120 nightly through
   `run_seeded_layer` on the replay leg (`FUZZ_SYNC_JOBS` defaults to 1).
