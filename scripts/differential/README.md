@@ -224,7 +224,15 @@ everything and checks coverage itself, as before.
   the exception fires; it also appends a truly missing link-value lookup
   (without a same-tx create/delete) as a negative control, which must stay
   a strict two-sided validation error and must not be covered by the
-  exception. Two more fixed mixed-invalid batches cover nightly seed 31255:
+  exception. The same shape with unrelated writes (nightly seed 32063) has
+  its own `lookup-created-entity-deleted-with-other-writes` exception: legacy
+  rolls the whole tx back while this server commits every step. It records the
+  exact entity ids the matched tx wrote or deleted; later reads are compared
+  with only those entities' triples masked, so changed values and page
+  membership/order shifts from the rollback are accepted while every other
+  entity, query shape and error stays strict. The generator keeps producing
+  both the pure and mixed shapes. Two more fixed mixed-invalid batches cover
+  nightly seed 31255:
   a batch with an unknown attr and a missing link-value lookup may make
   legacy raise the attr `sql-raise` instead of the lookup error, depending
   on its insert plan, while this server always answers the lookup. The
@@ -259,10 +267,9 @@ everything and checks coverage itself, as before.
   the same tx creates. Legacy refuses it ("Could not find the entity for
   this lookup", a post-create check bug listed in docs/PARITY.md) and this
   server links it, after which the two states would differ for the rest of
-  the seed. For the same reason an id-attr lookup that creates an entity a
-  random tx also deletes is dropped: legacy rolls the whole tx back (nightly
-  seed 32063), while the fixed two-step regression above pins the pure shape
-  whose final state is the same.
+  the seed. The id-attr lookup + delete shape is still generated in both its
+  pure and mixed forms; the exceptions above cover the lookup refusal and the
+  mixed form's rolled-back entities.
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
   runs nineteen seeds at 250 rounds (42, 99, the nightly's original 1-10 and
   the regression seeds 31201, 31255, 31299, 31586, 31642, 32047 and 32063);

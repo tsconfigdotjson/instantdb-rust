@@ -375,23 +375,7 @@ function buildScript() {
       );
       const linksCreated = ([o, , a, v]) =>
         o === "add-triple" && (a === attrs.tags || a === attrs.profile) && Array.isArray(v) && created.has(JSON.stringify(v));
-      // Also not generated in a random tx: an id-attr lookup creates an
-      // entity that another step in the same tx deletes. Legacy fetches the
-      // tx's lookups back after all groups run, cannot resolve the deleted
-      // one, and rolls the whole tx back; this server commits every write.
-      // The pure two-step shape has the same final state and is pinned below
-      // as a fixed regression; mixing it with unrelated writes would leave
-      // the two databases different (nightly seed 32063).
-      const deletedIds = new Set(
-        steps.filter(([o, e]) => o === "delete-entity" && typeof e === "string").map(([, e]) => e),
-      );
-      const idAttrIds = new Set([attrs.id, attrs.ownerId, attrs.tagId, attrs.profileId]);
-      const createsDeletedLookup = ([o, e]) =>
-        (o === "add-triple" || o === "deep-merge-triple") &&
-        Array.isArray(e) &&
-        idAttrIds.has(e[0]) &&
-        deletedIds.has(e[1]);
-      script.push({ kind: "tx", steps: steps.filter((st) => !linksCreated(st) && !createsDeletedLookup(st)), features: [...features] });
+      script.push({ kind: "tx", steps: steps.filter((st) => !linksCreated(st)), features: [...features] });
     } else if (r < 0.64) {
       // schema churn: delete-attr then restore-attr (p2), or an update-attr
       if (chance(0.5)) {
@@ -1023,6 +1007,49 @@ const whereEntries = (v, out = []) => {
   }
   return out;
 };
+// An `id`-attr lookup creates an entity, the same tx deletes it by id, and
+// other steps write elsewhere. Legacy's post-create lookup fetch runs after
+// all groups, cannot resolve the deleted lookup, and rolls the whole tx back;
+// Rust commits every step. The pure two-step version leaves both databases in
+// the same state and has its own exception. This mixed version needs a second
+// narrow exception that also remembers the exact entities the rolled-back tx
+// wrote, so later reads can ignore only those entities (nightly seed 32063).
+const MIXED_LOOKUP_ROLLBACK_EXCEPTION = "lookup-created-entity-deleted-with-other-writes";
+const idAttrIds = new Set(
+  script[0].steps
+    .filter(([o, a]) => o === "add-attr" && a["forward-identity"]?.[2] === "id")
+    .map(([, a]) => a.id),
+);
+const knownStepEntity = (e) =>
+  Array.isArray(e) ? (idAttrIds.has(e[0]) && typeof e[1] === "string" ? e[1] : null) : typeof e === "string" ? e : null;
+function mixedLookupCreateDelete(op) {
+  if (op?.kind !== "tx") return null;
+  const createdByLookup = new Set(
+    op.steps
+      .filter(([o, e]) => (o === "add-triple" || o === "deep-merge-triple") && Array.isArray(e) && idAttrIds.has(e[0]))
+      .map(([, e]) => e[1])
+      .filter((v) => typeof v === "string"),
+  );
+  const deletes = op.steps.filter(([o, e]) => o === "delete-entity" && typeof e === "string").map(([, e]) => e);
+  const targets = [...createdByLookup].filter((t) => deletes.includes(t));
+  // Exactly one lookup-created id is deleted, and it is the only delete step:
+  // the shape seed 32063 caught, without adding unrelated delete semantics.
+  if (targets.length !== 1 || deletes.length !== 1) return null;
+  const target = targets[0];
+  const entities = new Set([target]);
+  let hasUnrelatedWrite = false;
+  for (const [kind, e] of op.steps) {
+    if (kind === "rule-params") continue;
+    if (!["add-triple", "deep-merge-triple", "retract-triple", "delete-entity"].includes(kind)) return null;
+    const entity = knownStepEntity(e);
+    // A non-id lookup target cannot be named until the tx runs, so keep this
+    // exception to direct ids and id-attr lookups whose entity is known.
+    if (!entity) return null;
+    entities.add(entity);
+    if (entity !== target) hasUnrelatedWrite = true;
+  }
+  return hasUnrelatedWrite ? { target, entities: [...entities] } : null;
+}
 const EXCEPTIONS = [
   {
     // attr_pat.clj:308-317 coerced-type-comparison-value!: for a `date`
@@ -1073,9 +1100,8 @@ const EXCEPTIONS = [
     // docs/PARITY.md for a link target) and is not copied.
     //
     // Only the fixed two-step regression matches: a tx that also carries
-    // unrelated writes would be rolled back on legacy but committed here,
-    // parting the databases. The random generator drops those lookups (see
-    // the "Also not generated" comment above).
+    // unrelated writes is the separate mixed-shape exception below, which
+    // also has to account for the writes legacy rolled back.
     name: "lookup-created-entity-deleted-in-same-tx",
     matches: (op) => {
       if (op?.kind !== "tx" || op.steps.length !== 2) return false;
@@ -1095,6 +1121,18 @@ const EXCEPTIONS = [
         del[1] === e[1]
       );
     },
+    legacy: { type: "validation-failed", status: 400 },
+    rust: { tx: "ok" },
+    legacyMessage: "Validation failed for lookup: Could not find the entity for this lookup",
+  },
+  {
+    // The same post-create lookup bug, but the tx also writes elsewhere, so
+    // legacy rolls back those writes while Rust commits them. Pin only the
+    // exact mixed shape, and remember the entities it touched so the rest of
+    // the seed can mask reads of just those entities (nightly seed 32063).
+    name: MIXED_LOOKUP_ROLLBACK_EXCEPTION,
+    matches: (op) => mixedLookupCreateDelete(op) !== null,
+    record: (op) => mixedLookupCreateDelete(op)?.entities ?? [],
     legacy: { type: "validation-failed", status: 400 },
     rust: { tx: "ok" },
     legacyMessage: "Validation failed for lookup: Could not find the entity for this lookup",
@@ -1127,6 +1165,7 @@ const EXCEPTIONS = [
 ];
 const exceptionHits = {};
 const exceptionSlots = {};
+const rolledBackEntities = new Set();
 const matchesReply = (entry, expected) =>
   expected.tx === "ok" ? entry?.tx === "ok" && !entry.error : canon(entry?.error) === canon(expected);
 const allowedByException = (l, r) => {
@@ -1146,6 +1185,7 @@ const allowedByException = (l, r) => {
   if (ex) {
     exceptionHits[ex.name] = (exceptionHits[ex.name] ?? 0) + 1;
     (exceptionSlots[ex.name] ??= []).push(l.i);
+    if (ex.record) for (const e of ex.record(op)) rolledBackEntities.add(canon(e));
   }
   return ex;
 };
@@ -1381,6 +1421,28 @@ function legacyStaleRetractAfterDeepMerge(l, r) {
   return true;
 }
 
+// Reads after a matched mixed lookup rollback differ only because legacy kept
+// the pre-tx rows for entities the tx wrote (and Rust applied the new ones).
+// Mask exactly those entities' triples on both sides; every other triple, the
+// query shape and every error still have to match. This is deliberately
+// entity-scoped: it covers both changed values and page membership/order
+// shifts caused by the rolled-back writes.
+const maskRolledBack = (entry) => {
+  if (!rolledBackEntities.size || !entry) return entry;
+  const keep = (triples) => triples?.filter(([e]) => !rolledBackEntities.has(canon(e)));
+  const maskPage = (page) =>
+    page?.result ? { ...page, result: { ...page.result, triples: keep(page.result.triples) } } : page;
+  if (entry.result) return { ...entry, result: { ...entry.result, triples: keep(entry.result.triples) } };
+  if (entry.pages || entry.inclusivePage) {
+    return {
+      ...entry,
+      ...(entry.pages ? { pages: entry.pages.map(maskPage) } : {}),
+      ...(entry.inclusivePage ? { inclusivePage: maskPage(entry.inclusivePage) } : {}),
+    };
+  }
+  return entry;
+};
+
 let mismatches = 0;
 const n = Math.max(legacy.queryResults.length, rust.queryResults.length);
 for (let i = 0; i < n; i++) {
@@ -1390,6 +1452,11 @@ for (let i = 0; i < n; i++) {
     if (allowedByException(l, r)) continue;
     if (legacyDropsSameTxDeepMerge(l, r)) continue;
     if (legacyStaleRetractAfterDeepMerge(l, r)) continue;
+    if (canon(comparable(maskRolledBack(l))) === canon(comparable(maskRolledBack(r)))) {
+      exceptionHits[MIXED_LOOKUP_ROLLBACK_EXCEPTION] = (exceptionHits[MIXED_LOOKUP_ROLLBACK_EXCEPTION] ?? 0) + 1;
+      console.log(`ignoring rolled-back mixed-lookup writes at slot ${i}; only their entities differ`);
+      continue;
+    }
     const msgs = l?.error || r?.error ? `\n  messages: legacy ${JSON.stringify(l?.error?.message)} / rust ${JSON.stringify(r?.error?.message)}` : "";
     console.error(`query mismatch at slot ${i}:\n  legacy: ${JSON.stringify(l)}\n  rust:   ${JSON.stringify(r)}${msgs}`);
     mismatches++;
@@ -1466,7 +1533,7 @@ for (const [slot, label] of [
 }
 const finalL = legacy.queryResults.at(-1);
 const finalR = rust.queryResults.at(-1);
-const finalMatch = canon(finalL?.result) === canon(finalR?.result);
+const finalMatch = canon(maskRolledBack(finalL)?.result) === canon(maskRolledBack(finalR)?.result);
 if (!finalMatch) {
   console.error("FINAL full-table results differ between servers");
 }
