@@ -234,9 +234,10 @@ everything and checks coverage itself, as before.
   itself on both servers. A missing lookup without an unknown attr remains
   the strict negative control above. Error messages ride along
   non-enumerable: mismatch reports print them, comparisons ignore them.
-  **Result exceptions** (`RESULT_EXCEPTIONS` in fuzz.mjs) keep one documented
-  legacy defect from failing a page walk without loosening the comparison.
-  Each matches one op shape, allows only named sub-paths, and requires every
+  **Result exceptions** (`RESULT_EXCEPTIONS` in fuzz.mjs, plus the
+  stale-retract handler below) keep documented legacy defects from failing a
+  comparison without loosening it. Each matches one op shape, allows only
+  named sub-paths or the stale triples described below, and requires every
   differing leaf to be one of the pinned value pairs; the rest of the page is
   still compared. `string-order-page-info-flags`: for a string order
   (`fuzz.tstr` or `tag.label`) legacy orders by the raw jsonb value without a
@@ -244,14 +245,27 @@ everything and checks coverage itself, as before.
   `NULL`; its `has-next-page?` / `has-previous-page?` then disagree with the
   page it returned. The rows and cursors match this server, and the exception
   pins the legacy/rust boolean pair (true/false or false/true).
+  `legacy-stale-retract-after-deep-merge`: legacy hashes `value_md5` from
+  the raw client JSON on add / retract but from canonical jsonb text after
+  a deep-merge, so retracting the same object value leaves the merged triple
+  behind (nightly seed 32047). This server uses the canonical hash on every
+  write and removes it. The exception accepts only a one-shot query where
+  legacy is a strict superset of rust, every extra triple is an object/array
+  whose latest write was that retract, immediately preceded by a deep-merge
+  of the same entity/attr, and nothing touched it in between. Every seed
+  appends that shape as a fixed regression and deletes the entity afterwards
+  so the final tables agree.
   Not generated: a link whose value lookup names the entity an eid lookup of
   the same tx creates. Legacy refuses it ("Could not find the entity for
   this lookup", a post-create check bug listed in docs/PARITY.md) and this
   server links it, after which the two states would differ for the rest of
-  the seed.
+  the seed. For the same reason an id-attr lookup that creates an entity a
+  random tx also deletes is dropped: legacy rolls the whole tx back (nightly
+  seed 32063), while the fixed two-step regression above pins the pure shape
+  whose final state is the same.
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
-  runs fifteen seeds at 250 rounds (42, 99, the nightly's original 1-10 and
-  the regression seeds 31201, 31255 and 31299);
+  runs nineteen seeds at 250 rounds (42, 99, the nightly's original 1-10 and
+  the regression seeds 31201, 31255, 31299, 31586, 31642, 32047 and 32063);
   the nightly (`schedule` in ci.yml, or a manual run with the `nightly`
   input) runs them at 400 rounds plus a window of 40 fresh seeds that moves
   every day (`FUZZ_SEED_WINDOW`). `run.sh` runs every seed and lists the

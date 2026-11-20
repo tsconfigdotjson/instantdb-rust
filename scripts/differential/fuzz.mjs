@@ -375,7 +375,23 @@ function buildScript() {
       );
       const linksCreated = ([o, , a, v]) =>
         o === "add-triple" && (a === attrs.tags || a === attrs.profile) && Array.isArray(v) && created.has(JSON.stringify(v));
-      script.push({ kind: "tx", steps: steps.filter((st) => !linksCreated(st)), features: [...features] });
+      // Also not generated in a random tx: an id-attr lookup creates an
+      // entity that another step in the same tx deletes. Legacy fetches the
+      // tx's lookups back after all groups run, cannot resolve the deleted
+      // one, and rolls the whole tx back; this server commits every write.
+      // The pure two-step shape has the same final state and is pinned below
+      // as a fixed regression; mixing it with unrelated writes would leave
+      // the two databases different (nightly seed 32063).
+      const deletedIds = new Set(
+        steps.filter(([o, e]) => o === "delete-entity" && typeof e === "string").map(([, e]) => e),
+      );
+      const idAttrIds = new Set([attrs.id, attrs.ownerId, attrs.tagId, attrs.profileId]);
+      const createsDeletedLookup = ([o, e]) =>
+        (o === "add-triple" || o === "deep-merge-triple") &&
+        Array.isArray(e) &&
+        idAttrIds.has(e[0]) &&
+        deletedIds.has(e[1]);
+      script.push({ kind: "tx", steps: steps.filter((st) => !linksCreated(st) && !createsDeletedLookup(st)), features: [...features] });
     } else if (r < 0.64) {
       // schema churn: delete-attr then restore-attr (p2), or an update-attr
       if (chance(0.5)) {
@@ -613,6 +629,43 @@ function buildScript() {
   script.push({
     kind: "query",
     q: { [NS]: { $: { where: { "owner.items.tstr": { $isNull: false } } }, owner: {} } },
+  });
+  // Fixed regression from nightly seed 32047. Legacy's add/retract hash
+  // `value_md5` from the raw JSON text, but deep-merge-multi! rewrites it
+  // from Postgres' canonical jsonb text, so a later retract with the same
+  // object value no longer matches on legacy and the merged triple survives
+  // until the entity is deleted. Rust uses the canonical hash everywhere and
+  // removes it. Keep the shape at PR depth (the seed's own mismatch was at
+  // slot 347, past 250 rounds), then delete the entity so both final tables
+  // agree; the stale-retract result exception below covers the one-shot read.
+  const staleRetractId = mk();
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [
+      ["add-triple", staleRetractId, attrs.id, staleRetractId],
+      ["add-triple", staleRetractId, attrs.labels.p3, { k: 1 }],
+    ],
+  });
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [["deep-merge-triple", staleRetractId, attrs.labels.p3, { k2: null }]],
+  });
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [["retract-triple", staleRetractId, attrs.labels.p3, { k: 1 }]],
+  });
+  script.push({
+    kind: "query",
+    regression: true,
+    q: { [NS]: { $: { where: { id: staleRetractId } } } },
+  });
+  script.push({
+    kind: "tx",
+    regression: true,
+    steps: [["delete-entity", staleRetractId, NS]],
   });
   // final full queries on every namespace, both directions of every link
   script.push({ kind: "query", q: { [TAG]: { fuzzes: {} } } });
@@ -1018,22 +1071,28 @@ const EXCEPTIONS = [
     // the later delete, which leaves the same final database state; the
     // legacy refusal is a bug (the same post-create lookup bug listed in
     // docs/PARITY.md for a link target) and is not copied.
+    //
+    // Only the fixed two-step regression matches: a tx that also carries
+    // unrelated writes would be rolled back on legacy but committed here,
+    // parting the databases. The random generator drops those lookups (see
+    // the "Also not generated" comment above).
     name: "lookup-created-entity-deleted-in-same-tx",
     matches: (op) => {
-      if (op?.kind !== "tx") return false;
+      if (op?.kind !== "tx" || op.steps.length !== 2) return false;
       const idAttrs = new Set(
         script[0].steps
           .filter(([o, a]) => o === "add-attr" && a["forward-identity"]?.[2] === "id")
           .map(([, a]) => a.id),
       );
-      const idsCreatedByLookup = new Set(
-        op.steps
-          .filter(([o, e]) => (o === "add-triple" || o === "deep-merge-triple") && Array.isArray(e) && idAttrs.has(e[0]))
-          .map(([, e]) => e[1])
-          .filter((v) => typeof v === "string"),
-      );
-      return op.steps.some(
-        ([o, e]) => o === "delete-entity" && typeof e === "string" && idsCreatedByLookup.has(e),
+      const [create, del] = op.steps;
+      if (!["add-triple", "deep-merge-triple"].includes(create[0])) return false;
+      const e = create[1];
+      return (
+        Array.isArray(e) &&
+        idAttrs.has(e[0]) &&
+        typeof e[1] === "string" &&
+        del[0] === "delete-entity" &&
+        del[1] === e[1]
       );
     },
     legacy: { type: "validation-failed", status: 400 },
@@ -1239,6 +1298,89 @@ function legacyDropsSameTxDeepMerge(l, r) {
   return true;
 }
 
+// Nightly seed 32047: legacy's insert-multi! / delete-multi! hash value_md5
+// from the JSON text as the client sent it, while deep-merge-multi! rewrites
+// it from Postgres' canonical jsonb text (`{"k":1}` vs `{"k": 1}`). A retract
+// of the same object value after a deep-merge therefore misses on legacy and
+// leaves the old triple behind; Rust hashes every write the same canonical
+// way and removes it. Accept only a one-shot query where legacy is a strict
+// superset of Rust, and every extra triple is an object/array whose latest
+// write before the query was that retract, immediately preceded by a
+// deep-merge of the same entity/attr (and no add/retract in between). Extra
+// scalar values, other writes, or any additional difference still fail.
+const STALE_RETRACT_EXCEPTION = "legacy-stale-retract-after-deep-merge";
+const sameDirectEntity = (stepEid, eid) => !Array.isArray(stepEid) && canon(stepEid) === canon(eid);
+const tripleWriteIn = (tx, e, a) =>
+  tx.steps.filter(
+    ([kind, se, sa]) =>
+      ["add-triple", "deep-merge-triple", "retract-triple"].includes(kind) &&
+      canon(sa) === canon(a) &&
+      sameDirectEntity(se, e),
+  );
+const entityWriteIn = (tx, e, a) =>
+  tripleWriteIn(tx, e, a).length > 0 ||
+  tx.steps.some(([kind, se]) => kind === "delete-entity" && sameDirectEntity(se, e));
+const latestTxBefore = (slot, pred) => {
+  for (let i = slot - 1; i >= 0; i--) {
+    const tx = script[i];
+    if (tx?.kind === "tx" && pred(tx, i)) return { i, tx };
+  }
+  return null;
+};
+// A failed tx wrote nothing, so only committed txs count when finding the
+// retract and the preceding deep-merge (seed 32047's tx319 retracts the same
+// value but fails on an invalid date step and changes neither database).
+const committedTx = (slot) =>
+  legacy.queryResults[slot]?.tx === "ok" && rust.queryResults[slot]?.tx === "ok";
+function legacyStaleRetractAfterDeepMerge(l, r) {
+  const op = script[l?.i];
+  if (l?.i !== r?.i || op?.kind !== "query" || l.error || r.error || !l.result || !r.result) return false;
+  if (canon(l.result.aggregate) !== canon(r.result.aggregate)) return false;
+  const lt = l.result.triples ?? [];
+  const rt = r.result.triples ?? [];
+  const lset = new Set(lt.map((t) => canon(t)));
+  const rset = new Set(rt.map((t) => canon(t)));
+  if (!rt.every((t) => lset.has(canon(t)))) return false;
+  const extra = lt.filter((t) => !rset.has(canon(t)));
+  if (!extra.length) return false;
+  for (const [e, a, v] of extra) {
+    if (v === null || typeof v !== "object") return false;
+    const retract = latestTxBefore(
+      l.i,
+      (tx, i) =>
+        committedTx(i) &&
+        tx.steps.some(
+          ([kind, se, sa, sv]) =>
+            kind === "retract-triple" &&
+            canon(sa) === canon(a) &&
+            sameDirectEntity(se, e) &&
+            canon(sv) === canon(v),
+        ),
+    );
+    if (!retract) return false;
+    // A later committed write to the same entity/attr would overwrite legacy's
+    // md5 again, so the retract has to be the last one before the query.
+    const afterRetract = script.slice(retract.i + 1, l.i);
+    if (
+      afterRetract.some(
+        (tx, idx) => tx.kind === "tx" && committedTx(retract.i + 1 + idx) && entityWriteIn(tx, e, a),
+      )
+    )
+      return false;
+    // The retract tx must not also write a fresh value for the same triple.
+    if (tripleWriteIn(retract.tx, e, a).some(([kind]) => kind !== "retract-triple")) return false;
+    // Immediately before the retract, only committed deep-merges touched this
+    // triple: that is what rewrote legacy's value_md5 to the canonical hash.
+    const prior = latestTxBefore(retract.i, (tx, i) => committedTx(i) && entityWriteIn(tx, e, a));
+    if (!prior) return false;
+    const priorWrites = tripleWriteIn(prior.tx, e, a);
+    if (!priorWrites.length || !priorWrites.every(([kind]) => kind === "deep-merge-triple")) return false;
+  }
+  exceptionHits[STALE_RETRACT_EXCEPTION] = (exceptionHits[STALE_RETRACT_EXCEPTION] ?? 0) + extra.length;
+  console.log(`legacy kept ${extra.length} stale deep-merged triple(s) after a value retract at slot ${l.i}; rust removed them`);
+  return true;
+}
+
 let mismatches = 0;
 const n = Math.max(legacy.queryResults.length, rust.queryResults.length);
 for (let i = 0; i < n; i++) {
@@ -1247,6 +1389,7 @@ for (let i = 0; i < n; i++) {
     if (allowedResultException(l, r)) continue;
     if (allowedByException(l, r)) continue;
     if (legacyDropsSameTxDeepMerge(l, r)) continue;
+    if (legacyStaleRetractAfterDeepMerge(l, r)) continue;
     const msgs = l?.error || r?.error ? `\n  messages: legacy ${JSON.stringify(l?.error?.message)} / rust ${JSON.stringify(r?.error?.message)}` : "";
     console.error(`query mismatch at slot ${i}:\n  legacy: ${JSON.stringify(l)}\n  rust:   ${JSON.stringify(r)}${msgs}`);
     mismatches++;
