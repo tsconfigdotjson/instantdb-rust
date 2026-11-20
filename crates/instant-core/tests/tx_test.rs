@@ -526,6 +526,88 @@ async fn deep_merge_merges_and_deletes_keys() {
     assert_eq!(title, json!({"a": {"b": 1, "c": 2}}));
 }
 
+/// Nightly fuzz seed 32047: a deep-merge rewrites the stored value (and its
+/// hash); a later retract of that exact object must still remove it. Legacy
+/// hashes the raw client JSON, so after a deep-merge its retract misses and
+/// leaves a stale triple (exception `legacy-stale-retract-after-deep-merge`);
+/// this server hashes the canonical jsonb text on every write and retract.
+#[tokio::test]
+async fn retract_after_deep_merge_removes_the_merged_value() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+
+    let eid = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", eid, ids.todos_id, eid],
+            ["add-triple", eid, ids.todos_title, {"k": 1}]
+        ]),
+    )
+    .await
+    .unwrap();
+    transact_json(
+        &pool,
+        app,
+        json!([["deep-merge-triple", eid, ids.todos_title, {"k2": null}]]),
+    )
+    .await
+    .unwrap();
+    transact_json(
+        &pool,
+        app,
+        json!([["retract-triple", eid, ids.todos_title, {"k": 1}]]),
+    )
+    .await
+    .unwrap();
+
+    assert!(entity_triples(&pool, app, eid)
+        .await
+        .into_iter()
+        .all(|(l, _)| l != "todos.title"));
+}
+
+/// Nightly fuzz seed 32063: an id-attr lookup creates an entity that the
+/// same tx deletes; the tx also writes another entity. Legacy's post-create
+/// lookup fetch cannot resolve the deleted lookup and rolls the whole tx
+/// back, while this server commits every step. The target ends deleted and
+/// the unrelated write survives.
+#[tokio::test]
+async fn id_lookup_create_delete_with_other_writes_commits_all() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+
+    let target = Uuid::new_v4();
+    let kept = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            [
+                "add-triple",
+                [ids.todos_id, target],
+                ids.todos_title,
+                "lookup-then-delete"
+            ],
+            ["add-triple", kept, ids.todos_id, kept],
+            ["add-triple", kept, ids.todos_title, "kept"],
+            ["delete-entity", target, "todos"]
+        ]),
+    )
+    .await
+    .unwrap();
+
+    assert!(entity_triples(&pool, app, target).await.is_empty());
+    let kept_triples = entity_triples(&pool, app, kept).await;
+    assert!(kept_triples.contains(&("todos.id".to_string(), json!(kept))));
+    assert!(kept_triples.contains(&("todos.title".to_string(), json!("kept"))));
+}
+
 #[tokio::test]
 async fn delete_entity_removes_triples_and_reverse_refs() {
     let pool = pool().await;
