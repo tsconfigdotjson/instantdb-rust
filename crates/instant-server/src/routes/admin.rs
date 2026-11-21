@@ -2619,13 +2619,15 @@ mod link_value_tests {
         let owner_attr = Uuid::new_v4();
         let mut attrs = AttrMap::default();
         attrs.insert(attr(posts_id, "posts", "id", None, true));
-        attrs.insert(attr(
+        let mut owner = attr(
             owner_attr,
             "posts",
             "owner",
             Some(("owners", "posts")),
             false,
-        ));
+        );
+        owner.cardinality = Cardinality::One;
+        attrs.insert(owner);
         let post = Uuid::new_v4();
         let result = QueryResult {
             forms: vec![instaql::FormOut {

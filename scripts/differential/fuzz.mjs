@@ -183,7 +183,7 @@ const adminMirrorUnsafe = (v) => {
   if (Array.isArray(v)) return v.some(adminMirrorUnsafe);
   if (v && typeof v === "object") {
     for (const [k, x] of Object.entries(v)) {
-      if (k === "aggregate") return true;
+      if (k === "aggregate" || k === "$$ruleParams") return true;
       if (k === "$" && x && typeof x === "object") {
         if (x.aggregate != null) return true;
         if (x.where && typeof x.where === "object" && !Array.isArray(x.where) && "or" in x.where) return true;
@@ -300,16 +300,16 @@ async function adminSseWalk(serverName, op) {
       conn.close();
     }
     if (openError) {
-      pages.push({ q, openError });
+      pages.push({ q: normalize(q), openError });
       break;
     }
     if (frame.op === "error") {
-      pages.push({ q, error: adminSseErrorView(frame) });
+      pages.push({ q: normalize(q), error: adminSseErrorView(frame) });
       break;
     }
     const rawInfo = frame["result-meta"]?.["page-info"]?.[ns] ?? null;
     pages.push({
-      q,
+      q: normalize(q),
       result: adminResultTree(frame.result, false),
       "result-meta": adminMetaView(frame["result-meta"], key),
       keys: Object.keys(frame).sort(),
@@ -947,7 +947,7 @@ function buildScript() {
   const adminAutoEntity = mk();
   const adminUpsertEntity = mk();
   const adminEmpty = mk();
-  const adminProfile = pick(profiles.slice(0, 3));
+  const adminProfile = profiles[3];
   const adminTagLabel = "red";
   const adminMissingLabel = `adminMissing${seed}`;
   const adminMissingYesLabel = `adminMissingYes${seed}`;
@@ -993,7 +993,8 @@ function buildScript() {
   }]]);
   atx([["link", NS, entities[3], { tags: [["label", adminTagLabel]] }]]);
   atx([["link", NS, entities[3], { tags: [{ label: adminTagLabel }] }]]);
-  atx([["link", NS, e0, { profile: lookup("profile.id", adminProfile) }]]);
+  atx([["update", NS, lookup("profile.id", adminProfile), { p1: pick(values) }]]);
+  atx([["link", NS, e0, { profile: lookup("id", adminProfile) }]]);
   atx([["ruleParams", NS, e0, { k: pick([0, 1]) }]]);
   // throw-on-missing-attrs? true refuses the missing label; false (default)
   // auto-creates it on the throwaway entity, which is deleted again
@@ -1041,6 +1042,7 @@ function buildScript() {
   aq({ [NS]: { $: { fields: ["p1", "tdate", "tbool", "owner"], where: { tbool: true }, order: { tdate: "desc" }, limit: 2 } } });
   aq({ [NS]: { $: { order: { id: "asc" }, limit: 2, offset: 1 } } });
   aq({ [NS]: { $: { where: { id: adminEmpty } }, owner: {}, profile: {} } }, true);
+  aq({ $$ruleParams: { k: 1 }, [NS]: { $: { where: { tnum: { $gt: 0 } } }, owner: {} } });
   // $aggregate is admin-only; legacy's one-shot object tree drops the count,
   // this server keeps {count} (the socket fuzz compares the count itself)
   aq({ [NS]: { $: { aggregate: "count" } } }, false, "aggregate");
@@ -1134,11 +1136,14 @@ async function runOn(serverName, script) {
         adminResults.push({
           kind: "admin-query-fixed",
           label: q.label,
-          q: q.q,
+          q: normalize(q.q),
           inference: q.inference,
           ...adminQueryView(r, q.q),
         });
       }
+      // keep queryResults slot-aligned with the script for the fixed
+      // regression checks below
+      queryResults.push({ i, kind: "admin-phase" });
     } else if (op.kind === "tx") {
       conn.send({ "client-event-id": ceid, op: "transact", "tx-steps": op.steps });
       const reply = await conn.waitFor(
@@ -1169,7 +1174,13 @@ async function runOn(serverName, script) {
       if (!adminMirrorUnsafe(op.q) && !adminDateBooleanUnsafe(op.q)) {
         const inference = i % 3 === 0;
         const ar = await adminHttp(serverName, "/admin/query", { query: op.q, "inference?": inference });
-        adminResults.push({ i, kind: "admin-query", q: op.q, inference, ...adminQueryView(ar, op.q) });
+        adminResults.push({
+        i,
+        kind: "admin-query",
+        q: normalize(op.q),
+        inference,
+        ...adminQueryView(ar, op.q),
+      });
       }
     } else if (op.kind === "paginate") {
       // Walk the pages with each server's own pageInfo cursors, and compare
@@ -1203,7 +1214,13 @@ async function runOn(serverName, script) {
         const pageForm = formFor(cursor, pageNo === 0);
         const r = await query(pageForm);
         const ar = await adminHttp(serverName, "/admin/query", { query: pageForm, "inference?": false });
-        adminResults.push({ i, kind: "admin-paginate-page", pageNo, q: pageForm, ...adminQueryView(ar, pageForm) });
+        adminResults.push({
+          i,
+          kind: "admin-paginate-page",
+          pageNo,
+          q: normalize(pageForm),
+          ...adminQueryView(ar, pageForm),
+        });
         const features = featuresFor(cursor, pageNo === 0);
         if (r.error) {
           pages.push({ features, error: r.error });
@@ -1241,7 +1258,12 @@ async function runOn(serverName, script) {
         const pageForm = { [ns]: { $, ...(nested ?? {}) } };
         const r = await query(pageForm);
         const ar = await adminHttp(serverName, "/admin/query", { query: pageForm, "inference?": false });
-        adminResults.push({ i, kind: "admin-inclusive-page", q: pageForm, ...adminQueryView(ar, pageForm) });
+        adminResults.push({
+          i,
+          kind: "admin-inclusive-page",
+          q: normalize(pageForm),
+          ...adminQueryView(ar, pageForm),
+        });
         const features = featuresFor(firstCursor, false, ["pagination.inclusive"]);
         const rawInfo = r.error ? null : pageInfoOf(r.raw, ns);
         if (rawInfo) features.push("pagination.pageInfo");
