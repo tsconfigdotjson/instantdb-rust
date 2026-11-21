@@ -975,7 +975,9 @@ function buildScript() {
   const adminAutoEntity = mk();
   const adminUpsertEntity = mk();
   const adminEmpty = mk();
-  const adminProfile = profiles[3];
+  const adminRefEntity = mk();
+  const adminRefProfile = mk();
+  const adminRefHandle = `adminref-${seed}`;
   const adminTagLabel = "red";
   const adminMissingLabel = `adminMissing${seed}`;
   const adminMissingYesLabel = `adminMissingYes${seed}`;
@@ -1004,7 +1006,6 @@ function buildScript() {
   atx([["link", NS, e0, { tags: [pick(tags), pick(tags)] }]]);
   atx([["link", NS, e0, { profile: pick(profiles) }]]);
   atx([["unlink", NS, e0, { profile: profiles }]]);
-  atx([["link", NS, e0, { profile: adminProfile }]]);
   atx([["unlink", NS, e0, { tags: [pick(tags)] }]]);
   atx([["unlink", NS, e0, { owner: pick(owners) }]]);
   atx([["link", OWNER, pick(owners), { items: pick(entities) }]]);
@@ -1021,8 +1022,14 @@ function buildScript() {
   }]]);
   atx([["link", NS, entities[3], { tags: [["label", adminTagLabel]] }]]);
   atx([["link", NS, entities[3], { tags: [{ label: adminTagLabel }] }]]);
-  atx([["update", NS, lookup("profile.id", adminProfile), { p1: pick(values) }]]);
-  atx([["link", NS, e0, { profile: lookup("id", adminProfile) }]]);
+  // a ref lookup on its own fixed entity/profile, so a lookup that matches
+  // nothing can never mint a server-chosen NS id that a later page walk would
+  // order differently
+  atx([["create", NS, adminRefEntity, { p1: "admin-ref" }]]);
+  atx([["create", PROFILE, adminRefProfile, { handle: adminRefHandle, bio: "ref" }]]);
+  atx([["link", NS, adminRefEntity, { profile: adminRefProfile }]]);
+  atx([["update", NS, lookup("profile.id", adminRefProfile), { p1: pick(values) }]]);
+  atx([["link", NS, adminRefEntity, { profile: lookup("id", adminRefProfile) }]]);
   atx([["ruleParams", NS, e0, { k: pick([0, 1]) }]]);
   // throw-on-missing-attrs? true refuses the missing label; false (default)
   // auto-creates it on the throwaway entity, which is deleted again
