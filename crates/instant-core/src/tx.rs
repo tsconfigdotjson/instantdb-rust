@@ -1167,14 +1167,15 @@ async fn resolve_eid(
                     }
                     Ok(id)
                 }
-                None => Err(InstantError::validation_failed(
+                None => Err(InstantError::validation_failed_input(
                     "lookup",
-                    "The entity for the lookup does not exist.",
-                    json!([{
-                        "message": "The entity for the lookup does not exist.",
-                        "attr-id": attr_id,
+                    json!({
+                        "attribute-id": attr_id,
+                        "namespace": attrs.get(attr_id).map(|a| a.etype.clone()),
+                        "label": attrs.get(attr_id).map(|a| a.label.clone()),
                         "value": value.value(),
-                    }]),
+                    }),
+                    json!([{ "message": "The entity for the lookup does not exist." }]),
                 )),
             }
         }
@@ -1460,16 +1461,15 @@ async fn resolve_add_batch(
                         }
                         None => {
                             let m = "The entity for the lookup does not exist.";
-                            return Err(InstantError::validation_failed(
+                            return Err(InstantError::validation_failed_input(
                                 "lookup",
-                                m,
-                                json!([{
-                                    "message": m,
+                                json!({
                                     "attribute-id": a,
                                     "namespace": attrs.get(&a).map(|la| la.etype.clone()),
                                     "label": attrs.get(&a).map(|la| la.label.clone()),
                                     "value": v.value(),
-                                }]),
+                                }),
+                                json!([{ "message": m }]),
                             ));
                         }
                     }

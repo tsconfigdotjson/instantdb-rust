@@ -270,6 +270,56 @@ everything and checks coverage itself, as before.
   the seed. The id-attr lookup + delete shape is still generated in both its
   pure and mixed forms; the exceptions above cover the lookup refusal and the
   mixed form's rolled-back entities.
+  **Admin SDK HTTP coverage rides every fuzz seed** (no extra seed or CI leg,
+  so the leg inventory and the coverage baseline are unchanged). With the
+  plain app admin token (no impersonation) the same generated queries are
+  also sent to `POST /admin/query`, with `inference?` both true and false,
+  and every page of a generated page walk is re-asked over the admin route
+  with that server's own socket cursor. Generated top-level `or` and
+  `aggregate` queries stay on the socket route: legacy's object tree exposes
+  only the plan-chosen `or` where row and loses an aggregate count, while the
+  socket comparison recovers both from join-rows (the fixed admin queries
+  still cover `or`, `and` and the rest of the where grammar); the existing
+  `date-comparison-with-boolean` 500 shape also stays on the socket route, as
+  do nested forms that walk a link back to an ancestor namespace (legacy
+  returns an empty reverse form there; the fixed phase still covers one-level
+  reverse links) and forms whose dotted where path is also nested (legacy's
+  object tree returns the nested form empty; the fixed queries cover the path
+  and the nested link separately). On a seed where
+  one of the documented socket result exceptions fired, admin mirrors after
+  that slot are skipped for that seed because the two databases themselves
+  differ there; the fixed admin phase runs before the churn and is always
+  compared. Compared: HTTP status, the error
+  body fields `InstantAPIError` reads (`type`, `message`, `hint`, and the key
+  set), and the admin object tree (legacy `query-post` returns
+  `instaql-nodes->object-tree` verbatim; nested arrays are sorted by
+  server-created-at / id (both servers' tie-break), an unordered top-level
+  array is sorted because its default tie-break is not part of the contract,
+  and an explicit `order` is compared raw). The first two page walks also run over
+  `POST /admin/subscribe-query`, feeding each page's real
+  `result-meta.page-info` cursor into the next session and comparing the
+  object tree plus the whole result-meta: this is the only admin HTTP surface
+  that exposes page-info (legacy `query-post` has none; the one-shot SDK
+  `query()` therefore cannot walk cursors). Right after the seed data (and
+  before the random churn) a seeded admin phase drives `/admin/transact` with
+  the SDK's op grammar — create /
+  update / merge / link / unlink / delete / ruleParams, lookup strings
+  (`lookup__...`), `[attr, value]` pairs and single-key objects, links of
+  every cardinality in both directions, typed date shapes / booleans /
+  checked-type violations, `throw-on-missing-attrs?` true and false, a
+  missing-attr auto-create whose entity is deleted again, malformed steps and
+  raw client tx-steps (legacy's route takes the admin `::ops` spec, so those
+  are a validation error) — then admin queries over the where grammar,
+  one-to-three-hop paths, fields, order / limit / offset / first / last,
+  `$isNull`, an inferred empty singular link (`null`, not a missing key), and
+  an admin `$aggregate` (legacy's object tree returns `[]` for it, this
+  server `{count}`; the narrow `admin-object-tree-aggregate` exception pins
+  both while the socket fuzz compares the count itself).
+  Only server-chosen ids, tx ids, dates-as-values (kept raw) and timestamps
+  are normalized. The phase
+  adds a few dozen HTTP round trips and at most two short SSE page walks per
+  seed; the fuzz layer still plans one run per seed, so `legs.sh inventory`
+  and the CI matrix do not change.
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
   runs nineteen seeds at 250 rounds (42, 99, the nightly's original 1-10 and
   the regression seeds 31201, 31255, 31299, 31586, 31642, 32047 and 32063);

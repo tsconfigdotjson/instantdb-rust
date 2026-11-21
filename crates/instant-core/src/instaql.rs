@@ -575,12 +575,24 @@ impl SqlCtx<'_> {
     /// validation error with the root query as input and
     /// `[form.. "$" "where" <path>]` as `in`
     fn where_err(&self, expected: &str, message: String) -> InstantError {
+        self.where_err_at(expected, message, None)
+    }
+
+    /// Like [`SqlCtx::where_err`], with the legacy operator segment
+    /// (`$gt`, `$like`, ...) appended: `coerced-type-comparison-value!` /
+    /// `assert-like-is-string!` run after the where state adds the operator,
+    /// while the equality path does not (attr_pat.clj:349-363).
+    fn where_err_at(&self, expected: &str, message: String, tail: Option<&str>) -> InstantError {
         let joined = self.cur_where.lock().unwrap().join(".");
+        let mut rest = vec!["$", "where", joined.as_str()];
+        if let Some(t) = tail {
+            rest.push(t);
+        }
         qerr(
             self.root,
             "expected?",
             expected,
-            in_path(self.path, &["$", "where", joined.as_str()]),
+            in_path(self.path, &rest),
             message,
         )
     }
@@ -696,30 +708,60 @@ fn json_type_name(v: &Value) -> &'static str {
     }
 }
 
-/// Legacy `throw-invalid-data-value!` / `throw-invalid-date-string!`
-/// (attr_pat.clj:228-262): the value's type must match the attr's checked
-/// type. `op` distinguishes the equality path (`coerce-value-data-value!`,
-/// which refuses the relative date keywords) from the comparison path
-/// (`coerced-type-comparison-value!`, which parses them).
-fn coerce_typed(attr: &Attr, t: CheckedDataType, v: &Value, op: &str) -> Result<Value> {
+/// Legacy `throw-invalid-data-value!` / `throw-invalid-date-string!` /
+/// `throw-invalid-timestamp!` (attr_pat.clj:228-262): the value's type must
+/// match the attr's checked type. `op` distinguishes the equality path
+/// (`coerce-value-data-value!`, which refuses the relative date keywords)
+/// from the comparison path (`coerced-type-comparison-value!`, which parses
+/// them); `tail` is the operator segment legacy appends to the hint's `in`
+/// only on the comparison / like path.
+fn coerce_typed(
+    ctx: &SqlCtx<'_>,
+    attr: &Attr,
+    t: CheckedDataType,
+    v: &Value,
+    op: &str,
+    tail: Option<&str>,
+) -> Result<Value> {
     let bad = || {
-        verr(format!(
-            "The data type of `{}.{}` is `{}`, but the query got the value `{}` of type `{}`.",
-            attr.etype,
-            attr.label,
-            t.as_str(),
-            v,
-            json_type_name(v)
-        ))
+        ctx.where_err_at(
+            &format!("{}?", t.as_str()),
+            format!(
+                "The data type of `{}.{}` is `{}`, but the query got the value `{}` of type `{}`.",
+                attr.etype,
+                attr.label,
+                t.as_str(),
+                v,
+                json_type_name(v)
+            ),
+            tail,
+        )
     };
     let bad_date = || {
-        verr(format!(
-            "The data type of `{}.{}` is `date`, but the query got value `{}` of type `{}`.",
-            attr.etype,
-            attr.label,
-            v,
-            json_type_name(v)
-        ))
+        ctx.where_err_at(
+            "date-string?",
+            format!(
+                "The data type of `{}.{}` is `date`, but the query got value `{}` of type `{}`.",
+                attr.etype,
+                attr.label,
+                v,
+                json_type_name(v)
+            ),
+            tail,
+        )
+    };
+    let bad_date_value = || {
+        ctx.where_err_at(
+            "date?",
+            format!(
+                "The data type of `{}.{}` is `date`, but the query got the value `{}` of type `{}`.",
+                attr.etype,
+                attr.label,
+                v,
+                json_type_name(v)
+            ),
+            tail,
+        )
     };
     match t {
         CheckedDataType::Number => {
@@ -758,6 +800,12 @@ fn coerce_typed(attr: &Attr, t: CheckedDataType, v: &Value, op: &str) -> Result<
                 }
                 Ok(v.clone())
             }
+            // equality-path non-string/non-number values are
+            // throw-invalid-data-value! (`date?`, "the value"); the
+            // comparison path crashes legacy for them (the documented
+            // date-comparison-with-boolean exception), so the 400 message
+            // here is only the fuzz exception's rust side.
+            _ if tail.is_none() => Err(bad_date_value()),
             _ => Err(bad_date()),
         },
     }
@@ -1227,11 +1275,11 @@ impl<'a> SqlCtx<'a> {
             match emit {
                 LeafEmit::Eq(vals) => {
                     for v in vals.iter().filter(|v| !v.is_null()) {
-                        coerce_typed(attr, t, v, "$eq")?;
+                        coerce_typed(self, attr, t, v, "$eq", None)?;
                     }
                 }
                 LeafEmit::NotRaw(v) if !v.is_null() => {
-                    coerce_typed(attr, t, v, "$not")?;
+                    coerce_typed(self, attr, t, v, "$not", None)?;
                 }
                 _ => {}
             }
@@ -1271,7 +1319,7 @@ impl<'a> SqlCtx<'a> {
                 };
                 if let Some(t) = typed.filter(|_| !typed_vals.is_empty()) {
                     for v in &typed_vals {
-                        coerce_typed(attr, t, v, "$eq")?;
+                        coerce_typed(self, attr, t, v, "$eq", None)?;
                     }
                     push_typed_any(qb, t, alias, &typed_vals);
                 }
@@ -1297,7 +1345,7 @@ impl<'a> SqlCtx<'a> {
                     first = false;
                     match typed {
                         Some(t) if t != CheckedDataType::String && !v.is_null() => {
-                            coerce_typed(attr, t, v, "$eq")?;
+                            coerce_typed(self, attr, t, v, "$eq", None)?;
                             qb.push(format!("({}({}.value) = ", extract_fn(t), alias));
                             push_typed_value(qb, t, v);
                             qb.push(format!(
@@ -1348,7 +1396,16 @@ impl<'a> SqlCtx<'a> {
             }
             LeafEmit::Cmp(op, v) => {
                 let t = self.require_indexed_checked(attr)?;
-                let v = coerce_typed(attr, t, v, op)?;
+                // WhereOp stores the SQL comparison for the query builder;
+                // legacy's hint `in` path carries the InstaQL operator name.
+                let where_op = match *op {
+                    ">" => "$gt",
+                    ">=" => "$gte",
+                    "<" => "$lt",
+                    "<=" => "$lte",
+                    other => other,
+                };
+                let v = coerce_typed(self, attr, t, v, where_op, Some(where_op))?;
                 base(qb, false);
                 qb.push(format!("{}({}.value) {} ", extract_fn(t), alias, op));
                 push_typed_value(qb, t, &v);
@@ -1361,18 +1418,17 @@ impl<'a> SqlCtx<'a> {
             }
             LeafEmit::Like(pattern, ci) => {
                 let t = self.require_indexed_checked(attr)?;
+                let op = if *ci { "$ilike" } else { "$like" };
+                // legacy coerced-type-comparison-value! (attr_pat.clj:319-363)
+                // runs for a like pattern on a non-string attr, after the
+                // operator was pushed onto the where state.
                 if t != CheckedDataType::String {
-                    return Err(verr(format!(
-                        "$like requires a string-typed attribute, but `{}.{}` is {}.",
-                        attr.etype,
-                        attr.label,
-                        t.as_str()
-                    )));
+                    coerce_typed(self, attr, t, pattern, op, Some(op))?;
                 }
                 // legacy assert-like-is-string! (attr_pat.clj:307-317), after
                 // the attr checks; the message says `$like` for `$ilike` too
                 let pattern = pattern.as_str().ok_or_else(|| {
-                    self.where_err(
+                    self.where_err_at(
                         "string?",
                         format!(
                             "The $like value for `{}.{}` must be a string, but the query got the value `{}` of type `{}`.",
@@ -1381,6 +1437,7 @@ impl<'a> SqlCtx<'a> {
                             pattern,
                             json_type_name(pattern)
                         ),
+                        Some(op),
                     )
                 })?;
                 base(qb, false);
@@ -2222,8 +2279,10 @@ async fn fetch_entities(
             continue;
         }
         if let Some(fields) = &form.opts.fields {
-            // legacy keeps the order attr in a fields projection (the client
-            // orders by it): instaql.clj fields + order handling
+            // legacy keeps the order attr in a fields projection on the socket
+            // result (the client orders by it): instaql.clj fields + order
+            // handling. The admin object tree below drops it again unless the
+            // caller asked for it.
             let keep = a.label == "id"
                 || fields.contains(&a.label)
                 || form
