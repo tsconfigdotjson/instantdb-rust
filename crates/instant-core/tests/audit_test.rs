@@ -190,8 +190,10 @@ async fn value_lookup_never_creates_a_phantom_entity() {
     );
     let hint = err.hint.unwrap();
     assert_eq!(hint["data-type"], json!("lookup"));
-    assert_eq!(hint["errors"][0]["namespace"], json!("owners"));
-    assert_eq!(hint["errors"][0]["label"], json!("name"));
+    // legacy `throw-validation-err! :lookup` puts the offending ref in
+    // hint.input and keeps only the message in errors (triple.clj:744-764)
+    assert_eq!(hint["input"]["namespace"], json!("owners"));
+    assert_eq!(hint["input"]["label"], json!("name"));
     assert_eq!(
         count_triples(&pool, app, ids.owners_name, json!("ghost")).await,
         0,

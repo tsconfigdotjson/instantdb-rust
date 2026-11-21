@@ -303,7 +303,7 @@ fn entity_created_at(node: &EntityNode, attrs: &AttrMap) -> i64 {
 fn node_to_object(
     node: &EntityNode,
     attrs: &AttrMap,
-    forms: Option<&[instaql::Form]>,
+    form: Option<&instaql::Form>,
     inference: bool,
 ) -> Value {
     let mut m = Map::new();
@@ -326,6 +326,17 @@ fn node_to_object(
         let Some(attr) = attrs.get(&t.a) else {
             continue;
         };
+        // legacy's object tree runs over the row fields, not the wider socket
+        // projection: a `fields` list that omits the order attr does not get
+        // that attr back (the socket result does, see instaql.rs fetch_entities)
+        if let (Some(fields), Some(order_key)) = (
+            form.and_then(|f| f.opts.fields.as_ref()),
+            form.and_then(|f| f.opts.order.as_ref()).map(|o| &o.key),
+        ) {
+            if &attr.label == order_key && !fields.contains(&attr.label) {
+                continue;
+            }
+        }
         // legacy triples->map labels every triple of the entity, its forward
         // links included: a link the query doesn't nest shows up as the
         // linked id (`owner: "<uuid>"`, the last triple for a many link); a
@@ -342,7 +353,7 @@ fn node_to_object(
         m.insert(attr.label.clone(), t.v.clone());
     }
     for child in &node.children {
-        let child_form = forms.and_then(|fs| fs.iter().find(|f| f.k == child.k));
+        let child_form = form.and_then(|f| f.children.iter().find(|c| c.k == child.k));
         let mut entities: Vec<(&EntityNode, i64)> = child
             .entities
             .iter()
@@ -363,14 +374,7 @@ fn node_to_object(
         }
         let vals: Vec<Value> = entities
             .iter()
-            .map(|(e, _)| {
-                node_to_object(
-                    e,
-                    attrs,
-                    child_form.map(|f| f.children.as_slice()),
-                    inference,
-                )
-            })
+            .map(|(e, _)| node_to_object(e, attrs, child_form, inference))
             .collect();
         // inference: singular for forward-cardinality-one links (or reverse-unique)
         let singular = inference && {
@@ -523,7 +527,7 @@ pub fn object_tree(result: &QueryResult, attrs: &AttrMap, q: &Value, inference: 
         sort_entities(&mut entities, f, attrs);
         let vals: Vec<Value> = entities
             .iter()
-            .map(|(e, _)| node_to_object(e, attrs, f.map(|f| f.children.as_slice()), inference))
+            .map(|(e, _)| node_to_object(e, attrs, f, inference))
             .collect();
         out.insert(form.k.clone(), Value::Array(vals));
     }
