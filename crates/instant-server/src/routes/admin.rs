@@ -421,9 +421,20 @@ fn sort_entities(
         .map(|o| o.key.clone())
         .unwrap_or_else(|| "serverCreatedAt".to_string());
     let desc = matches!(order.as_ref().map(|o| o.dir), Some(instaql::Dir::Desc));
+    // legacy sort-entries runs over the object entries, after `fields` has
+    // selected the row fields: an order attr the projection leaves out is
+    // absent from every entry, so the sort key is nil for all and only the id
+    // tie-break remains.
+    let field_hidden = form
+        .and_then(|f| f.opts.fields.as_ref())
+        .map(|fields| key != "serverCreatedAt" && !fields.contains(&key))
+        .unwrap_or(false);
     let sort_value = |node: &EntityNode, created: i64| -> Value {
         if key == "serverCreatedAt" {
             return json!(created);
+        }
+        if field_hidden {
+            return Value::Null;
         }
         node.triples
             .iter()
