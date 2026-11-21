@@ -265,6 +265,20 @@ async fn origin_authorized(state: &AppState, app_id: Uuid, url: &str) -> Result<
     Ok(false)
 }
 
+/// The runtime OAuth `__session` cookie. `/runtime/oauth/start` asks providers
+/// for `response_mode=form_post`, so the callback is a cross-site POST. On
+/// HTTPS that needs `SameSite=None; Secure`: an explicit `SameSite=Lax` is not
+/// attached to the POST. On HTTP/dev neither applies (browsers reject
+/// `SameSite=None` without `Secure`), so omit both and keep login working.
+fn session_cookie(base_url: &str, cookie_uuid: Uuid) -> String {
+    let mut cookie =
+        format!("__session=instantdb_{cookie_uuid}; HttpOnly; Path=/runtime/oauth; Max-Age=3600");
+    if base_url.starts_with("https://") {
+        cookie.push_str("; SameSite=None; Secure");
+    }
+    cookie
+}
+
 // ---------------------------------------------------------------------------
 // GET /runtime/oauth/start
 
@@ -439,9 +453,7 @@ async fn start_impl(state: &AppState, params: &HashMap<String, String>) -> Resul
         }
     }
 
-    let cookie = format!(
-        "__session=instantdb_{cookie_uuid}; HttpOnly; Path=/runtime/oauth; Max-Age=3600; SameSite=Lax"
-    );
+    let cookie = session_cookie(&state.cfg.base_url, cookie_uuid);
     // legacy `response/found`
     let mut resp = found(auth_url.as_str());
     resp.headers_mut()
@@ -1564,4 +1576,36 @@ pub async fn well_known(
         "authorization_endpoint": format!("{}/runtime/{}/oauth/start", state.cfg.base_url, app_id),
         "token_endpoint": format!("{}/runtime/{}/oauth/token", state.cfg.base_url, app_id),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_cookie;
+    use uuid::Uuid;
+
+    const COOKIE_UUID: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn cookie(base_url: &str) -> String {
+        session_cookie(base_url, Uuid::parse_str(COOKIE_UUID).unwrap())
+    }
+
+    #[test]
+    fn https_cookie_allows_cross_site_form_post() {
+        assert_eq!(
+            cookie("https://instant.example.com"),
+            "__session=instantdb_11111111-1111-1111-1111-111111111111; HttpOnly; Path=/runtime/oauth; Max-Age=3600; SameSite=None; Secure"
+        );
+    }
+
+    #[test]
+    fn http_cookie_keeps_dev_login_working() {
+        let http = cookie("http://localhost:8888");
+        assert_eq!(
+            http,
+            "__session=instantdb_11111111-1111-1111-1111-111111111111; HttpOnly; Path=/runtime/oauth; Max-Age=3600"
+        );
+        assert!(!http.contains("SameSite=None"));
+        assert!(!http.contains("SameSite=Lax"));
+        assert!(!http.contains("Secure"));
+    }
 }
