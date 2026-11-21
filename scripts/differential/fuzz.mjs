@@ -198,6 +198,38 @@ const adminMirrorUnsafe = (v) => {
 // (legacy's coercion crashes into a typeless 500); the admin route returns
 // the same legacy 500, which is already documented, so keep that op shape on
 // the socket side rather than turning it into an admin mismatch.
+// A where path through a link (`fuzzes.owner.name`) whose first segment is
+// also a nested form is another legacy object-tree artifact: the nested form
+// comes back empty on legacy even though the socket join-rows compare equal.
+// The fixed admin queries cover dotted where paths and nested links
+// separately; the generated mirror skips only the combined shape.
+const adminNestedWherePathUnsafe = (form) => {
+  if (!form || typeof form !== "object" || Array.isArray(form)) return false;
+  const $ = form.$;
+  const where = $ && typeof $ === "object" ? $.where : null;
+  if (where && typeof where === "object") {
+    const firstSegs = [];
+    const walk = (w) => {
+      if (Array.isArray(w)) return w.forEach(walk);
+      if (!w || typeof w !== "object") return;
+      for (const [k, x] of Object.entries(w)) {
+        if (k === "or" || k === "and") walk(x);
+        else if (k.includes(".")) firstSegs.push(k.split(".")[0]);
+      }
+    };
+    walk(where);
+    for (const k of Object.keys(form)) {
+      if (k === "$" || k === "$$ruleParams") continue;
+      if (firstSegs.includes(k)) return true;
+    }
+  }
+  for (const [k, x] of Object.entries(form)) {
+    if (k === "$" || k === "$$ruleParams") continue;
+    if (adminNestedWherePathUnsafe(x)) return true;
+  }
+  return false;
+};
+
 const adminDateBooleanUnsafe = (v) => {
   if (Array.isArray(v)) return v.some(adminDateBooleanUnsafe);
   if (v && typeof v === "object") {
@@ -1206,7 +1238,12 @@ async function runOn(serverName, script) {
       // the same question over the admin one-shot route, with the option the
       // SDK sends (`inference?` when the app has a schema). Vary it so both
       // singular and array link shapes are compared.
-      if (!adminMirrorUnsafe(op.q) && !adminDateBooleanUnsafe(op.q) && !adminNestedCycle(op.q, script.schema)) {
+      if (
+        !adminMirrorUnsafe(op.q) &&
+        !adminDateBooleanUnsafe(op.q) &&
+        !adminNestedCycle(op.q, script.schema) &&
+        !adminNestedWherePathUnsafe(op.q)
+      ) {
         const inference = i % 3 === 0;
         const ar = await adminHttp(serverName, "/admin/query", { query: op.q, "inference?": inference });
         adminResults.push({
