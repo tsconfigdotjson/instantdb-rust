@@ -509,10 +509,21 @@ pub fn object_tree(result: &QueryResult, attrs: &AttrMap, q: &Value, inference: 
             continue;
         }
         let f = forms.iter().find(|f| f.k == form.k);
-        let vals: Vec<Value> = form
+        // legacy instaql-nodes->object-tree sorts every level through
+        // sort-entries, including the top-level form (util/instaql.clj:64-97).
+        // The SQL order uses the database collation for typed strings, while
+        // legacy's object tree re-sorts with Clojure compare; sorting here
+        // keeps the admin object tree (and its ties) on the legacy side of
+        // that difference.
+        let mut entities: Vec<(&EntityNode, i64)> = form
             .entities
             .iter()
-            .map(|e| node_to_object(e, attrs, f.map(|f| f.children.as_slice()), inference))
+            .map(|e| (e, entity_created_at(e, attrs)))
+            .collect();
+        sort_entities(&mut entities, f, attrs);
+        let vals: Vec<Value> = entities
+            .iter()
+            .map(|(e, _)| node_to_object(e, attrs, f.map(|f| f.children.as_slice()), inference))
             .collect();
         out.insert(form.k.clone(), Value::Array(vals));
     }

@@ -2270,16 +2270,12 @@ async fn fetch_entities(
             continue;
         }
         if let Some(fields) = &form.opts.fields {
-            // legacy keeps the order attr in a fields projection (the client
-            // orders by it): instaql.clj fields + order handling
+            // legacy `etype-attr-ids` only adds the id attr plus the requested
+            // fields; the order attr is not selected unless it is in `fields`
+            // (instaql.clj:1142-1160). Keeping it here leaked an extra key
+            // into an admin object tree with `fields` + `order`.
             let keep = a.label == "id"
                 || fields.contains(&a.label)
-                || form
-                    .opts
-                    .order
-                    .as_ref()
-                    .map(|o| o.key == a.label)
-                    .unwrap_or(false)
                 || (form.etype == "$files"
                     && a.label == "location-id"
                     && fields.contains(&"url".to_string()));

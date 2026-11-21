@@ -216,6 +216,34 @@ const adminDateBooleanUnsafe = (v) => {
   return false;
 };
 
+// A nested form that walks a link back to an ancestor namespace
+// (`fuzz.profile.fuzz`, `owner.items`) is a legacy object-tree artifact: the
+// reverse form comes back empty on legacy while this server returns the
+// ancestor row. The socket grammar still fuzzes the same nested shapes; the
+// admin mirror keeps one-level reverse links (owner.items, tag.fuzzes,
+// profile.fuzz) in the fixed phase.
+const adminNestedCycle = (q, schema) => {
+  const walk = (form, ns, seen) => {
+    if (!form || typeof form !== "object" || Array.isArray(form)) return false;
+    for (const [k, x] of Object.entries(form)) {
+      if (k === "$" || k === "$$ruleParams") continue;
+      const entry = schema[ns]?.[k];
+      if (!entry || !entry[1]) continue;
+      const next = entry[1];
+      const nextSeen = new Set(seen);
+      if (nextSeen.has(next)) return true;
+      nextSeen.add(next);
+      if (walk(x, next, nextSeen)) return true;
+    }
+    return false;
+  };
+  for (const [k, v] of Object.entries(q ?? {})) {
+    if (k === "$$ruleParams") continue;
+    if (walk(v, k, new Set([k]))) return true;
+  }
+  return false;
+};
+
 // The admin one-shot query response is the object tree only: legacy query-post
 // returns `(instaql-nodes->object-tree ...)` and the SDK hands it through
 // verbatim (admin/src/index.ts:1191-1227). Nested link arrays are sorted like
@@ -1171,7 +1199,7 @@ async function runOn(serverName, script) {
       // the same question over the admin one-shot route, with the option the
       // SDK sends (`inference?` when the app has a schema). Vary it so both
       // singular and array link shapes are compared.
-      if (!adminMirrorUnsafe(op.q) && !adminDateBooleanUnsafe(op.q)) {
+      if (!adminMirrorUnsafe(op.q) && !adminDateBooleanUnsafe(op.q) && !adminNestedCycle(op.q, script.schema)) {
         const inference = i % 3 === 0;
         const ar = await adminHttp(serverName, "/admin/query", { query: op.q, "inference?": inference });
         adminResults.push({

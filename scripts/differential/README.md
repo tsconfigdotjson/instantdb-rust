@@ -280,7 +280,10 @@ everything and checks coverage itself, as before.
   only the plan-chosen `or` where row and loses an aggregate count, while the
   socket comparison recovers both from join-rows (the fixed admin queries
   still cover `or`, `and` and the rest of the where grammar); the existing
-  `date-comparison-with-boolean` 500 shape also stays on the socket route. On a seed where
+  `date-comparison-with-boolean` 500 shape also stays on the socket route, as
+  do nested forms that walk a link back to an ancestor namespace (legacy
+  returns an empty reverse form there; the fixed phase still covers one-level
+  reverse links). On a seed where
   one of the documented socket result exceptions fired, admin mirrors after
   that slot are skipped for that seed because the two databases themselves
   differ there; the fixed admin phase runs before the churn and is always
