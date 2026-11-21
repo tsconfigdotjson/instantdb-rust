@@ -94,17 +94,28 @@ assert(startRes.status === 307 || startRes.status === 302, "start redirects");
 const authUrl = new URL(startRes.headers.get("location"));
 assert(authUrl.pathname === "/authorize", "redirects to provider authorize");
 assert(authUrl.searchParams.get("client_id") === "mock-client-id", "client_id in auth url");
+assert(authUrl.searchParams.get("response_mode") === "form_post", "auth url asks for form_post");
 const state = authUrl.searchParams.get("state");
 assert(state.length === 72, "state is appid+uuid");
 issued.redirectUri = authUrl.searchParams.get("redirect_uri");
 assert(issued.redirectUri.endsWith("/runtime/oauth/callback"), "default redirect_uri is this server's callback");
-const cookie = startRes.headers.get("set-cookie").split(";")[0];
+const startCookie = startRes.headers.get("set-cookie");
+const expectedStartCookie = SERVER.startsWith("https://")
+  ? /^__session=instantdb_[0-9a-f-]{36}; HttpOnly; Path=\/runtime\/oauth; Max-Age=3600; SameSite=None; Secure$/
+  : /^__session=instantdb_[0-9a-f-]{36}; HttpOnly; Path=\/runtime\/oauth; Max-Age=3600$/;
+assert(expectedStartCookie.test(startCookie), `start cookie flags match ${SERVER.startsWith("https://") ? "HTTPS" : "HTTP"}: ${startCookie}`);
+assert(!startCookie.includes("SameSite=Lax"), "start cookie is not SameSite=Lax (form_post needs None on HTTPS)");
+const cookie = startCookie.split(";")[0];
 assert(cookie.startsWith("__session=instantdb_"), "session cookie set");
 
-// --- provider "redirects back" with a code (simulate browser GET) ---
-const cbUrl = `${SERVER}/runtime/oauth/callback?state=${state}&code=${issued.code}`;
-const cbRes = await fetch(cbUrl, { redirect: "manual", headers: { cookie } });
-assert(cbRes.status === 307 || cbRes.status === 302, "callback redirects to app");
+// --- provider returns with a cross-site form POST (response_mode=form_post) ---
+const cbRes = await fetch(`${SERVER}/runtime/oauth/callback`, {
+  method: "POST",
+  redirect: "manual",
+  headers: { cookie, "content-type": "application/x-www-form-urlencoded" },
+  body: new URLSearchParams({ state, code: issued.code }).toString(),
+});
+assert(cbRes.status === 307 || cbRes.status === 302, "form_post callback redirects to app");
 const appRedirect = new URL(cbRes.headers.get("location"));
 assert(appRedirect.origin + appRedirect.pathname === "http://localhost:5173/app", "back to app");
 assert(appRedirect.searchParams.get("_instant_oauth_redirect") === "true", "oauth marker");
