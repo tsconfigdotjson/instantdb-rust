@@ -253,6 +253,36 @@ jobs:
           echo "=== s3 proxy node (:8897) ==="; cat /tmp/server-s3-proxy.log || true
           echo "=== minio ==="; docker logs minio 2>&1 | tail -100 || true
 
+  # Build the differential harness's debug server once instead of in every
+  # leg. On run 44734596634 the 14 legs each restored the same rust cache and
+  # recompiled instant-server (18-90s; the late seeds-6/replay legs paid 32-90s
+  # on the critical path), after ~0-22s installing the toolchain and ~3-18s
+  # restoring the cache. This job starts with the run, compiles once and hands
+  # the binary to the legs; upload/download is a few seconds. shared-key keeps
+  # using the differential job's existing rust-cache entry (the default key is
+  # job-specific, so a new job would miss it).
+  build-server:
+    name: build rust server
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          shared-key: differential
+      - name: Build instant-server
+        run: cargo build -p instant-server
+      - name: Upload instant-server
+        uses: actions/upload-artifact@v4
+        with:
+          name: instant-server-debug
+          path: target/debug/instant-server
+          if-no-files-found: error
+          # just this workflow run's legs need it
+          retention-days: 1
+
   # The differential harness (scripts/differential/run.sh) split over parallel
   # legs: each boots its own legacy stack + rust servers and runs part of the
   # layers (LAYERS) or every n-th seed of the seeded layers (SHARD), and
@@ -283,6 +313,7 @@ jobs:
   # two serial schema seeds behind a presence seed.
   differential:
     name: differential vs legacy (${{ matrix.leg }})
+    needs: build-server
     runs-on: ubuntu-latest
     # nightly depth (inputs.nightly runs it on demand): 16 perms seeds of
     # ~2.7 min each, 4 at a time, plus the 40-seed fuzz window and the schema
@@ -376,8 +407,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # Boot in the background: the legacy image pulls (up to ~80s, the ghcr
-      # server image dominates) overlap the rust cache restore/migrations/
-      # build below instead of sitting on the critical path. Pull the images
+      # server image dominates) overlap the binary download/migrations/boot
+      # below instead of sitting on the critical path. Pull the images
       # in parallel first: compose otherwise fetches the dependency images in
       # order and leaves the large ghcr server image last, which made one leg
       # of the leg matrix wait an extra ~70s on run 41009536933. Waited on
@@ -390,12 +421,13 @@ jobs:
             docker compose -f scripts/differential/docker-compose.yml up -d --quiet-pull
             echo $? > /tmp/legacy-up.rc
           ' > /tmp/legacy-up.log 2>&1 &
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Download rust server
+        uses: actions/download-artifact@v4
         with:
-          cache-on-failure: true
-          # the legs build the same thing; one uploads the cache
-          save-if: ${{ matrix.leg == 'replay' }}
+          name: instant-server-debug
+          path: target/debug
+      - name: Mark rust server executable
+        run: chmod +x target/debug/instant-server
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -403,7 +435,7 @@ jobs:
         run: ./scripts/apply-migrations.sh
       - name: Boot rust server
         run: |
-          cargo build -p instant-server
+          # built once by the build-server job; no toolchain/rust-cache here
           # INSTANT_TRACE_REFRESH logs each tx notification and the $files
           # queries each refresh batch recomputes/sends. The logs are uploaded
           # as artifacts even when a leg passes, so an intermittent missed
