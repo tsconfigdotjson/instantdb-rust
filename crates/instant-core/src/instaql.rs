@@ -1396,7 +1396,16 @@ impl<'a> SqlCtx<'a> {
             }
             LeafEmit::Cmp(op, v) => {
                 let t = self.require_indexed_checked(attr)?;
-                let v = coerce_typed(self, attr, t, v, op, Some(op))?;
+                // WhereOp stores the SQL comparison for the query builder;
+                // legacy's hint `in` path carries the InstaQL operator name.
+                let where_op = match *op {
+                    ">" => "$gt",
+                    ">=" => "$gte",
+                    "<" => "$lt",
+                    "<=" => "$lte",
+                    other => other,
+                };
+                let v = coerce_typed(self, attr, t, v, where_op, Some(where_op))?;
                 base(qb, false);
                 qb.push(format!("{}({}.value) {} ", extract_fn(t), alias, op));
                 push_typed_value(qb, t, &v);
