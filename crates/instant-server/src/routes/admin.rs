@@ -69,6 +69,19 @@ pub(crate) fn app_id_param(headers: &HeaderMap, params: &HashMap<String, String>
     })
 }
 
+/// Legacy `boolean` coercion of an optional body flag: absent and null are
+/// false, a JSON false is false, and every other JSON value (0, "", [], {})
+/// is truthy, exactly like Clojure's `boolean` and `get-optional-param!`
+/// (exception.clj:430-438). `.as_bool()` would silently read "false" as false
+/// and reject the truthy values legacy accepts.
+pub(crate) fn bool_param(body: &Value, key: &str) -> bool {
+    match body.get(key) {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => true,
+    }
+}
+
 /// `[:body :query]` must be a map (legacy `get-param!` with a `map?`
 /// coercer: absent → param-missing, anything else → param-malformed).
 pub(crate) fn body_query(body: &Value) -> Result<&Value> {
@@ -295,10 +308,15 @@ fn node_to_object(
 ) -> Value {
     let mut m = Map::new();
     // legacy builds the object from the entity's triples, so `id` is only
-    // there when the etype has an id attr: a link auto-created for a bare
-    // label (`link docs.owner`) has reverse etype `owner`, which has no
-    // attrs, and its nested entities come back as `{}`
-    if attrs.id_attr_of(&node.etype).is_some() {
+    // there when the entity actually has its id triple: a link auto-created
+    // for a bare label (`link docs.owner`) has reverse etype `owner`, which
+    // has no attrs, and a target created by a link step alone can have none
+    // even when its etype has an id attr; both come back without `id`
+    let has_id_triple = node
+        .triples
+        .iter()
+        .any(|t| attrs.get(&t.a).map(|a| a.label == "id").unwrap_or(false));
+    if has_id_triple {
         m.insert("id".into(), json!(node.eid));
     }
     // `$files` rows arrive with their synthetic `url` triple already in
@@ -365,9 +383,12 @@ fn node_to_object(
             }
         };
         if singular {
-            if let Some(first) = vals.into_iter().next() {
-                m.insert(child.k.clone(), first);
-            }
+            // legacy `(first entries)` of an empty link is nil, and JSON
+            // encodes the key as null (instaql.clj:88-97)
+            m.insert(
+                child.k.clone(),
+                vals.into_iter().next().unwrap_or(Value::Null),
+            );
         } else {
             m.insert(child.k.clone(), Value::Array(vals));
         }
@@ -375,42 +396,90 @@ fn node_to_object(
     Value::Object(m)
 }
 
+/// Legacy `sort-entries` (util/instaql.clj:64-87): every object-tree level is
+/// ordered by the form's order field (default `$serverCreatedAt`, the id
+/// triple's timestamp) and ties are broken by the entity id
+/// (`uuid-util/pg-compare`, the same unsigned byte order as Postgres' uuid
+/// comparison). A checked-data-type `date` field sorts by instant, not by the
+/// raw jsonb string.
 fn sort_entities(
     entities: &mut [(&EntityNode, i64)],
     form: Option<&instaql::Form>,
     attrs: &AttrMap,
 ) {
-    let order = form.and_then(|f| f.opts.order.clone());
-    match order {
-        Some(o) if o.key != "serverCreatedAt" => {
-            entities.sort_by(|(a, at), (b, bt)| {
-                let av = a
-                    .triples
-                    .iter()
-                    .find(|t| attrs.get(&t.a).map(|x| x.label == o.key).unwrap_or(false))
-                    .map(|t| t.v.clone())
-                    .unwrap_or(Value::Null);
-                let bv = b
-                    .triples
-                    .iter()
-                    .find(|t| attrs.get(&t.a).map(|x| x.label == o.key).unwrap_or(false))
-                    .map(|t| t.v.clone())
-                    .unwrap_or(Value::Null);
-                let ord = cmp_json(&av, &bv).then(at.cmp(bt));
-                if o.dir == instaql::Dir::Desc {
-                    ord.reverse()
-                } else {
-                    ord
-                }
-            });
-        }
-        Some(o) if o.dir == instaql::Dir::Desc => {
-            entities.sort_by(|(_, at), (_, bt)| bt.cmp(at));
-        }
-        _ => {
-            entities.sort_by_key(|(_, at)| *at);
-        }
+    use std::cmp::Ordering;
+    if entities.is_empty() {
+        return;
     }
+    let order = form.and_then(|f| f.opts.order.clone());
+    let key = order
+        .as_ref()
+        .map(|o| o.key.clone())
+        .unwrap_or_else(|| "serverCreatedAt".to_string());
+    let desc = matches!(order.as_ref().map(|o| o.dir), Some(instaql::Dir::Desc));
+    let sort_value = |node: &EntityNode, created: i64| -> Value {
+        if key == "serverCreatedAt" {
+            return json!(created);
+        }
+        node.triples
+            .iter()
+            .find(|t| attrs.get(&t.a).map(|x| x.label == key).unwrap_or(false))
+            .map(|t| t.v.clone())
+            .unwrap_or(Value::Null)
+    };
+    let checked = (key != "serverCreatedAt")
+        .then(|| attrs.by_fwd_name(&entities[0].0.etype, &key))
+        .flatten()
+        .and_then(|a| a.checked_data_type);
+    let cmp = |av: &Value, bv: &Value| -> Ordering {
+        match checked {
+            Some(instant_core::attr::CheckedDataType::Number)
+                if av.is_number() && bv.is_number() =>
+            {
+                av.as_f64()
+                    .unwrap_or(0.0)
+                    .partial_cmp(&bv.as_f64().unwrap_or(0.0))
+                    .unwrap_or(Ordering::Equal)
+            }
+            Some(instant_core::attr::CheckedDataType::String)
+                if av.is_string() && bv.is_string() =>
+            {
+                av.as_str()
+                    .unwrap_or_default()
+                    .cmp(bv.as_str().unwrap_or_default())
+            }
+            Some(instant_core::attr::CheckedDataType::Boolean)
+                if av.is_boolean() && bv.is_boolean() =>
+            {
+                av.as_bool()
+                    .unwrap_or(false)
+                    .cmp(&bv.as_bool().unwrap_or(false))
+            }
+            Some(instant_core::attr::CheckedDataType::Date) if !av.is_null() && !bv.is_null() => {
+                fn instant(v: &Value) -> Option<i64> {
+                    match v {
+                        Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+                        Value::String(s) => instant_core::cel_ext::parse_date_string(s)
+                            .map(|t| t.timestamp_millis()),
+                        _ => None,
+                    }
+                }
+                match (instant(av), instant(bv)) {
+                    (Some(x), Some(y)) => x.cmp(&y),
+                    _ => cmp_json(av, bv),
+                }
+            }
+            _ => cmp_json(av, bv),
+        }
+    };
+    entities.sort_by(|(a, at), (b, bt)| {
+        let ord = cmp(&sort_value(a, *at), &sort_value(b, *bt)).then_with(|| a.eid.cmp(&b.eid));
+        if desc {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
 }
 
 fn cmp_json(a: &Value, b: &Value) -> std::cmp::Ordering {
@@ -521,10 +590,7 @@ async fn query_impl(
 ) -> Result<Value> {
     let ctx = authed(state, headers, params).await?;
     let q = body_query(body)?;
-    let inference = body
-        .get("inference?")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let inference = bool_param(body, "inference?");
     service::assert_read_allowed(state, ctx.app_id).await?;
     let attrs = service::load_attrs(state, ctx.app_id).await?;
     // legacy query-post (admin/routes.clj:295-316): a query that outlives
@@ -960,7 +1026,7 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                 .map_err(|e| at_step(e, steps, idx, 2))?;
                 out.push(json!(["delete-entity", eid, etype]));
             }
-            "ruleParams" | "rule-params" => {
+            "ruleParams" => {
                 let etype = sarr.get(1).and_then(|v| v.as_str()).unwrap_or_default();
                 let eid = eid_to_lookup(
                     attrs,
@@ -976,8 +1042,12 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
                     sarr.get(3).cloned().unwrap_or(json!({}))
                 ]));
             }
-            "add-attr" | "update-attr" | "delete-attr" | "restore-attr" | "add-triple"
-            | "deep-merge-triple" | "retract-triple" | "delete-entity" => {
+            // legacy's ::ops spec admits only these raw schema ops beside the
+            // admin actions above (admin/model.clj:468-492); the client
+            // tx-steps (add-triple, retract-triple, deep-merge-triple,
+            // delete-entity, restore-attr) are not part of this route and
+            // fall through to the spec error below like any unknown action.
+            "add-attr" | "update-attr" | "delete-attr" => {
                 out.push(step.clone());
             }
             _ => {
@@ -1027,10 +1097,7 @@ async fn transact_impl(
 ) -> Result<Value> {
     let ctx = authed(state, headers, params).await?;
     let steps = body_steps(body)?;
-    let throw_missing = body
-        .get("throw-on-missing-attrs?")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let throw_missing = bool_param(body, "throw-on-missing-attrs?");
     let attrs = service::load_attrs(state, ctx.app_id).await?;
     let tx_steps = translate_steps(&attrs, steps, throw_missing)?;
     let report = service::run_transact(state, ctx.app_id, &ctx.perms, &tx_steps).await?;
@@ -2276,10 +2343,7 @@ async fn query_perms_check_impl(
         ));
     }
     let q = body_query(body)?;
-    let inference = body
-        .get("inference?")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let inference = bool_param(body, "inference?");
     service::assert_read_allowed(state, ctx.app_id).await?;
     let attrs = service::load_attrs(state, ctx.app_id).await?;
 
@@ -2397,14 +2461,8 @@ async fn transact_perms_check_impl(
         ));
     }
     let steps = body_steps(body)?;
-    let throw_missing = body
-        .get("throw-on-missing-attrs?")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let commit = body
-        .get("dangerously-commit-tx")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let throw_missing = bool_param(body, "throw-on-missing-attrs?");
+    let commit = bool_param(body, "dangerously-commit-tx");
     let mut attrs = (*service::load_attrs(state, ctx.app_id).await?).clone();
     let tx_steps = translate_steps(&attrs, steps, throw_missing)?;
     let parsed = instant_core::tx::parse_tx_steps(&tx_steps)?;
@@ -2521,6 +2579,88 @@ mod link_value_tests {
             .filter(|s| s[0] == "add-triple" && s[2] == json!(fx.tags_link.to_string()))
             .map(|s| s[3].clone())
             .collect()
+    }
+
+    #[test]
+    fn boolean_flags_use_legacy_truthiness() {
+        assert!(!bool_param(&json!({}), "inference?"));
+        assert!(!bool_param(&json!({"inference?": null}), "inference?"));
+        assert!(!bool_param(&json!({"inference?": false}), "inference?"));
+        assert!(bool_param(&json!({"inference?": true}), "inference?"));
+        // legacy `boolean` / `(not commit-tx)`: every non-nil non-false value
+        assert!(bool_param(&json!({"inference?": 0}), "inference?"));
+        assert!(bool_param(&json!({"inference?": "false"}), "inference?"));
+        assert!(bool_param(&json!({"inference?": []}), "inference?"));
+    }
+
+    #[test]
+    fn raw_client_tx_steps_are_refused_like_legacy_spec() {
+        let fx = fixture();
+        let p = Uuid::new_v4();
+        let steps = json!([[
+            "add-triple",
+            p.to_string(),
+            fx.attrs.id_attr_of("posts").unwrap().id,
+            p.to_string()
+        ]]);
+        assert!(translate_steps(&fx.attrs, &steps, false).is_err());
+        // the raw schema ops the legacy spec does admit still pass through
+        let ok = translate_steps(
+            &fx.attrs,
+            &json!([["add-attr", {"id": Uuid::new_v4(), "forward-identity": [Uuid::new_v4(), "x", "y"], "value-type": "blob", "cardinality": "one", "unique?": false, "index?": false}]]),
+            false,
+        );
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn admin_tree_omits_missing_id_and_keeps_null_singular_link() {
+        let posts_id = Uuid::new_v4();
+        let owner_attr = Uuid::new_v4();
+        let mut attrs = AttrMap::default();
+        attrs.insert(attr(posts_id, "posts", "id", None, true));
+        attrs.insert(attr(
+            owner_attr,
+            "posts",
+            "owner",
+            Some(("owners", "posts")),
+            false,
+        ));
+        let post = Uuid::new_v4();
+        let result = QueryResult {
+            forms: vec![instaql::FormOut {
+                k: "posts".into(),
+                etype: "posts".into(),
+                where_rows: vec![],
+                entities: vec![EntityNode {
+                    eid: post,
+                    etype: "posts".into(),
+                    triples: vec![instaql::TripleOut {
+                        e: post,
+                        a: posts_id,
+                        v: json!(post),
+                        t: 1,
+                    }],
+                    children: vec![instaql::ChildResult {
+                        k: "owner".into(),
+                        etype: "owners".into(),
+                        link_triples: vec![],
+                        rows: vec![],
+                        entities: vec![],
+                    }],
+                }],
+                page_info: None,
+                aggregate: None,
+            }],
+        };
+        let tree = object_tree(&result, &attrs, &json!({"posts": {"owner": {}}}), true);
+        assert_eq!(tree["posts"][0]["owner"], Value::Null);
+        assert_eq!(tree["posts"][0]["id"], json!(post));
+        // an entity with no id triple (created by a bare link) has no id key
+        let mut no_id = result.clone();
+        no_id.forms[0].entities[0].triples.clear();
+        let tree = object_tree(&no_id, &attrs, &json!({"posts": {}}), false);
+        assert!(tree["posts"][0].get("id").is_none());
     }
 
     #[test]

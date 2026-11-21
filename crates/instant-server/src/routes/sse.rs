@@ -255,10 +255,7 @@ async fn open_admin_session(
     body: &Value,
 ) -> Result<(Arc<Session>, mpsc::UnboundedReceiver<Outgoing>)> {
     let ctx = crate::routes::admin::authed(state, headers, params).await?;
-    let inference = body
-        .get("inference?")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let inference = crate::routes::admin::bool_param(body, "inference?");
     let session_id = Uuid::new_v4();
     let sse_token = Uuid::new_v4();
     let (tx, rx) = mpsc::unbounded_channel::<Outgoing>();

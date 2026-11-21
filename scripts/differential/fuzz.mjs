@@ -20,15 +20,34 @@
 // where clauses and nested links), fields, nested links, $$ruleParams, and
 // admin-only options that must be rejected alike.
 //
+// The admin SDK's HTTP path runs beside the socket grammar with the plain app
+// admin token (no impersonation): generated queries (and every page of a
+// generated page walk) are also asked over POST /admin/query, so their object
+// tree and error envelope (status, type, message, hint, key set) are compared
+// with `inference?` both true and false. The first two page walks also run
+// over POST /admin/subscribe-query, feeding each page's real
+// result-meta.page-info cursor into the next session, because legacy's
+// one-shot /admin/query response has no page-info. Right after the seed data
+// (before the random churn) a seeded admin phase compares /admin/transact in
+// the SDK's op grammar
+// (create / update / merge / link / unlink / delete / ruleParams; strings,
+// [attr, value] pairs and single-key objects as lookups; link values of every
+// cardinality; typed dates / booleans / checked-type violations;
+// throw-on-missing-attrs? true and false; malformed steps and raw client
+// tx-steps, which legacy refuses on this route) and a set of admin queries
+// covering the where grammar, hops, fields, orders, offsets and empty
+// inferred links. Only server-chosen ids and tx ids are normalized.
+//
 // Usage: node fuzz.mjs <app-id-legacy> <app-id-rust> <admin-token> [seed] [rounds]
 // Env: LEGACY_URL, RUST_URL (defaults as in replay.mjs)
 
 import {
+  canon,
   connect,
-  settle,
+  connectSse,
   makeIdFactory,
   normalize,
-  canon,
+  settle,
   uuid,
 } from "./lib.mjs";
 
@@ -53,6 +72,255 @@ function prng(a) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Admin SDK HTTP transport: POST /admin/query and /admin/transact with the
+// plain app admin token (no impersonation), as @instantdb/admin sends them.
+
+const ADMIN_VERSIONS = { "@instantdb/admin": "v0.22.0", "@instantdb/core": "v0.22.0" };
+
+async function adminHttp(serverName, route, body) {
+  const { url, appId } = SERVERS[serverName];
+  const res = await fetch(`${url}${route}?app_id=${appId}`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "app-id": appId,
+      authorization: `Bearer ${adminToken}`,
+      "Instant-Admin-Version": ADMIN_VERSIONS["@instantdb/admin"],
+      "Instant-Core-Version": ADMIN_VERSIONS["@instantdb/core"],
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    parsed = undefined;
+  }
+  return { status: res.status, body: parsed, raw: parsed === undefined ? text.slice(0, 200) : null };
+}
+
+// Numbers in an admin object tree are client-written values (a date can be
+// epoch ms); only strings may carry a server-chosen uuid, so unlike
+// lib.mjs normalize this must not turn a large number into "<ts>".
+const ADMIN_VOLATILE_KEYS = {
+  "tx-id": "<tx>",
+  "trace-id": "<trace>",
+  "processed-tx-id": "<tx>",
+  "duration-ms": "<ms>",
+};
+const adminNormalize = (value) => {
+  if (typeof value === "string") return normalize(value);
+  if (Array.isArray(value)) return value.map(adminNormalize);
+  if (value !== null && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = k in ADMIN_VOLATILE_KEYS ? ADMIN_VOLATILE_KEYS[k] : adminNormalize(v);
+    }
+    return out;
+  }
+  return value;
+};
+
+// Object tree projection: a nested link array is ordered by server-created-at
+// / id (both servers' tie-break) and is sorted here so an id-less target or a
+// server-chosen id cannot make equal objects reorder; top-level arrays keep
+// their order when the query asks for one (see adminQueryView).
+const adminTreeWalk = (v) => {
+  if (Array.isArray(v)) {
+    const items = v.map(adminTreeWalk);
+    items.sort((a, b) => (canon(a) < canon(b) ? -1 : 1));
+    return items;
+  }
+  if (v !== null && typeof v === "object") {
+    const out = {};
+    for (const [k, x] of Object.entries(v)) out[k] = adminTreeWalk(x);
+    return out;
+  }
+  return typeof v === "string" ? normalize(v) : v;
+};
+const adminResultTree = (body, sortTop) => {
+  const out = {};
+  for (const [k, v] of Object.entries(body ?? {})) {
+    out[k] = Array.isArray(v) && !sortTop ? v.map(adminTreeWalk) : adminTreeWalk(v);
+  }
+  return out;
+};
+
+// What InstantAPIError keeps from an HTTP error body (core/src/utils/fetch.ts:
+// message, hint and the type the admin SDK surfaces) plus the body key set.
+const adminErrorView = (r) => ({
+  status: r.status,
+  type: r.body?.type ?? null,
+  message: r.body?.message ?? null,
+  hint: adminNormalize(r.body?.hint ?? null),
+  keys: r.body && typeof r.body === "object" ? Object.keys(r.body).sort() : null,
+  ...(r.body === undefined ? { raw: r.raw } : {}),
+});
+
+const queryHasOrder = (v) => {
+  if (Array.isArray(v)) return v.some(queryHasOrder);
+  if (v && typeof v === "object") {
+    return Object.entries(v).some(
+      ([k, x]) => (k === "$" && x && typeof x === "object" && x.order != null) || queryHasOrder(x),
+    );
+  }
+  return false;
+};
+
+// Legacy's top-level where `or` keeps one where row per entity and its admin
+// object tree exposes only the surviving branch's triples, which the socket
+// comparison recovers from join-rows but an object tree cannot. The core
+// grammar still fuzzes `or` over the socket; the generated admin mirrors skip
+// only this known query-plan artifact (the fixed admin queries below still
+// compare `$isNull` / `and` / link paths). An aggregate form likewise loses
+// its count in legacy's object tree, so generated aggregate queries stay on
+// the socket route.
+const adminMirrorUnsafe = (v) => {
+  if (Array.isArray(v)) return v.some(adminMirrorUnsafe);
+  if (v && typeof v === "object") {
+    for (const [k, x] of Object.entries(v)) {
+      if (k === "aggregate") return true;
+      if (k === "$" && x && typeof x === "object") {
+        if (x.aggregate != null) return true;
+        if (x.where && typeof x.where === "object" && !Array.isArray(x.where) && "or" in x.where) return true;
+      }
+      if (k !== "$$ruleParams" && adminMirrorUnsafe(x)) return true;
+    }
+  }
+  return false;
+};
+
+// The socket fuzz has a named exception for a boolean bound on a date attr
+// (legacy's coercion crashes into a typeless 500); the admin route returns
+// the same legacy 500, which is already documented, so keep that op shape on
+// the socket side rather than turning it into an admin mismatch.
+const adminDateBooleanUnsafe = (v) => {
+  if (Array.isArray(v)) return v.some(adminDateBooleanUnsafe);
+  if (v && typeof v === "object") {
+    for (const [k, x] of Object.entries(v)) {
+      if (
+        (k === "tdate" || k.endsWith(".tdate")) &&
+        x &&
+        typeof x === "object" &&
+        ["$gt", "$gte", "$lt", "$lte"].some((op) => typeof x[op] === "boolean")
+      ) {
+        return true;
+      }
+      if (adminDateBooleanUnsafe(x)) return true;
+    }
+  }
+  return false;
+};
+
+// The admin one-shot query response is the object tree only: legacy query-post
+// returns `(instaql-nodes->object-tree ...)` and the SDK hands it through
+// verbatim (admin/src/index.ts:1191-1227). Nested link arrays are sorted like
+// one query's entities (both servers order them by createdAt and break ties by
+// id); without an explicit `order` the top-level array's order is not part of
+// the query contract, and server-chosen ids can make its default tie-break
+// differ, so it is sorted too. A query that asks for an order keeps it raw.
+const adminQueryView = (r, q) => {
+  if (r.status !== 200) return adminErrorView(r);
+  return { status: 200, result: adminResultTree(r.body, !queryHasOrder(q)) };
+};
+
+const adminTxView = (r) => {
+  if (r.status !== 200) return adminErrorView(r);
+  // the SDK reads only tx-id (admin/src/index.ts:1320-1340); it is
+  // server-chosen, so normalize it while still comparing the body key set.
+  return {
+    status: 200,
+    body: adminNormalize(r.body ?? null),
+    keys: r.body && typeof r.body === "object" ? Object.keys(r.body).sort() : null,
+  };
+};
+
+// `result-meta` of the admin SSE tree transport: page-info keyed by form.
+const adminMetaView = (meta, orderKey) => {
+  if (meta === null || meta === undefined) return null;
+  if (typeof meta !== "object") return normalize(meta);
+  return {
+    "page-info": Object.fromEntries(
+      Object.entries(meta["page-info"] ?? {}).map(([ns, info]) => [ns, normalizePageInfo(info, orderKey)]),
+    ),
+    aggregate: adminNormalize(meta.aggregate ?? {}),
+  };
+};
+
+const adminSseErrorView = (m) => ({
+  status: m.status ?? null,
+  type: m.type ?? null,
+  message: m.message ?? null,
+  hint: adminNormalize(m.hint ?? null),
+});
+
+// A page walk over POST /admin/subscribe-query (the admin SDK's
+// subscribeQuery): each page's real result-meta page-info cursor is fed into
+// the next session's query, and the object tree plus the whole result-meta is
+// compared. This is the only admin HTTP surface that returns page-info
+// (legacy query-sse; the one-shot /admin/query has none).
+async function adminSseWalk(serverName, op) {
+  const { url, appId } = SERVERS[serverName];
+  const { ns, key, dir, size, modifier, backwards, offset, where, nested } = op;
+  const formFor = (cursor, first) => {
+    const $ = { order: { [key]: dir } };
+    if (modifier === "last") $.last = size;
+    else if (modifier === "first") $.first = size;
+    else $.limit = size;
+    if (first && offset > 0) $.offset = offset;
+    if (cursor) $[backwards ? "before" : "after"] = cursor;
+    if (where) $.where = where;
+    return { [ns]: { $, ...(nested ?? {}) } };
+  };
+  const pages = [];
+  let cursor = null;
+  for (let pageNo = 0; pageNo < 30; pageNo++) {
+    const q = formFor(cursor, pageNo === 0);
+    const conn = connectSse(url, appId, `${serverName}:admin-sse:${ns}:${key}:${pageNo}`, {
+      path: `/admin/subscribe-query?local_connection_id=${uuid()}`,
+      headers: {
+        "app-id": appId,
+        authorization: `Bearer ${adminToken}`,
+        "Instant-Admin-Version": ADMIN_VERSIONS["@instantdb/admin"],
+      },
+      body: { query: q, "inference?": false, versions: ADMIN_VERSIONS },
+    });
+    let frame;
+    let openError = null;
+    try {
+      await conn.open;
+      frame = await conn.waitFor((m) => m.op === "add-query-ok" || m.op === "error", 20000);
+    } catch (e) {
+      openError = String(e?.message ?? e).slice(0, 300);
+    } finally {
+      conn.close();
+    }
+    if (openError) {
+      pages.push({ q, openError });
+      break;
+    }
+    if (frame.op === "error") {
+      pages.push({ q, error: adminSseErrorView(frame) });
+      break;
+    }
+    const rawInfo = frame["result-meta"]?.["page-info"]?.[ns] ?? null;
+    pages.push({
+      q,
+      result: adminResultTree(frame.result, false),
+      "result-meta": adminMetaView(frame["result-meta"], key),
+      keys: Object.keys(frame).sort(),
+    });
+    if (isStringOrderPage(op)) break;
+    const more = backwards ? rawInfo?.["has-previous-page?"] : rawInfo?.["has-next-page?"];
+    const next = backwards ? rawInfo?.["start-cursor"] : rawInfo?.["end-cursor"];
+    if (!more || !next) break;
+    cursor = next;
+  }
+  return pages;
 }
 
 const blob = (id, ns, label, extra = {}) => [
@@ -203,6 +471,10 @@ function buildScript() {
       ...(i < 3 ? [["add-triple", e, attrs.profile, profiles[i]]] : []),
     ]),
   });
+  // the admin HTTP phase runs here, after the fixed seed data and before the
+  // random churn (so both servers compare it on the clean state, and the
+  // admin-side page walks below still see the churn)
+  script.push({ kind: "admin-phase" });
   const orderKeys = ["serverCreatedAt", "tnum", "tstr", "tdate", "tbool", "tpage"];
   // order keys for generated page walks: the first walks rotate through
   // serverCreatedAt and each typed kind (tpage carries ties, nulls and
@@ -413,7 +685,10 @@ function buildScript() {
       const where = pageIx % 2 === 0 || chance(0.4) ? pageWhere() : null;
       const nested = pageIx % 3 !== 0 || chance(0.5) ? pageNested(ns) : null;
       const inclusive = pageIx % 4 === 3 || chance(0.25);
-      script.push({ kind: "paginate", ns, key, dir, size, modifier, backwards, offset, where, nested, inclusive });
+      // the first two walks also run over the admin SSE transport, where
+      // result-meta.page-info is visible (legacy's one-shot /admin/query has
+      // no page-info)
+      script.push({ kind: "paginate", ns, key, dir, size, modifier, backwards, offset, where, nested, inclusive, adminSse: pageIx < 2 });
     } else {
       // random query over the where grammar, links, fields, pagination
       const opts = {};
@@ -656,6 +931,125 @@ function buildScript() {
   script.push({ kind: "query", q: { [PROFILE]: { fuzz: {} } } });
   script.push({ kind: "query", q: { [NS]: { owner: {}, tags: {}, profile: {} } } });
   script.push({ kind: "query", q: { [OWNER]: { items: {} } } });
+
+  // Admin HTTP phase: the admin SDK's op grammar (create / update / merge /
+  // link / unlink / delete / ruleParams, lookup strings / pairs / objects,
+  // throw-on-missing-attrs?) and queries over the same typed attrs, dates,
+  // booleans, links, lookups, where grammar, fields, orders and pagination.
+  // It runs right after the seed data and before the random churn (marker
+  // below) on fixed ids only; the one auto-created attr's entity is deleted
+  // again so later reads do not depend on a server-chosen attr id.
+  const admin = { txs: [], queries: [] };
+  const atx = (steps, flags = {}) => admin.txs.push({ steps, ...flags });
+  const aq = (q, inference = false, label = null) => admin.queries.push({ q, inference, label });
+  const adminMissingEntity = mk();
+  const adminMissingYesEntity = mk();
+  const adminAutoEntity = mk();
+  const adminUpsertEntity = mk();
+  const adminEmpty = mk();
+  const adminProfile = pick(profiles.slice(0, 3));
+  const adminTagLabel = "red";
+  const adminMissingLabel = `adminMissing${seed}`;
+  const adminMissingYesLabel = `adminMissingYes${seed}`;
+  const adminAutoLabel = `adminAuto${seed}`;
+  const lookup = (label, value) => `lookup__${label}__${JSON.stringify(value)}`;
+  const e0 = entities[0];
+  atx([["create", NS, adminEmpty, { p1: "admin-empty" }]]);
+  atx([["update", NS, e0, {
+    p1: pick(values),
+    tnum: pick(nums),
+    tstr: pick(strs),
+    tdate: pick(dates),
+    tbool: pick([true, false]),
+  }]]);
+  atx([["update", NS, entities[1], { tdate: "2024-06-15T12:00:00+02:00", tbool: false }]]);
+  atx([["update", NS, entities[1], { tnum: "oops" }]]);
+  atx([["update", NS, entities[1], { tdate: pick(["not-a-date", "2024-13-45", "", true, { d: 1 }]) }]]);
+  atx([["update", NS, entities[1], { tbool: "true" }]]);
+  atx([["create", NS, entities[2], { p1: pick(values), tnum: pick(nums) }]]);
+  atx([["update", NS, e0, { p1: pick(values) }, { upsert: false }]]);
+  atx([["update", NS, adminUpsertEntity, { p1: pick(values) }, { upsert: false }]]);
+  atx([["update", NS, adminUpsertEntity, { p1: pick(values) }, { upsert: true }]]);
+  atx([["merge", NS, entities[2], { p3: { k: pick(values) } }]]);
+  atx([["update", NS, entities[2], { p3: { k2: pick(values) } }]]);
+  atx([["link", NS, e0, { owner: pick(owners) }]]);
+  atx([["link", NS, e0, { tags: [pick(tags), pick(tags)] }]]);
+  atx([["link", NS, e0, { profile: pick(profiles) }]]);
+  atx([["unlink", NS, e0, { profile: profiles }]]);
+  atx([["link", NS, e0, { profile: adminProfile }]]);
+  atx([["unlink", NS, e0, { tags: [pick(tags)] }]]);
+  atx([["unlink", NS, e0, { owner: pick(owners) }]]);
+  atx([["link", OWNER, pick(owners), { items: pick(entities) }]]);
+  atx([["link", TAG, pick(tags), { fuzzes: pick(entities) }]]);
+  atx([["link", PROFILE, pick(profiles), { fuzz: pick(entities) }]]);
+  atx([["unlink", OWNER, pick(owners), { items: pick(entities) }]]);
+  // lookups in every admin form: the SDK's lookup__ string, an [attr, value]
+  // pair and a single-key object, as the entity and as a link target
+  atx([["update", NS, lookup("id", e0), { p1: pick(values) }]]);
+  atx([["update", NS, ["id", e0], { p1: pick(values) }]]);
+  atx([["update", NS, { id: e0 }, { p1: pick(values) }]]);
+  atx([["link", NS, lookup("id", e0), {
+    tags: [lookup("label", adminTagLabel), pick(tags)],
+  }]]);
+  atx([["link", NS, entities[3], { tags: [["label", adminTagLabel]] }]]);
+  atx([["link", NS, entities[3], { tags: [{ label: adminTagLabel }] }]]);
+  atx([["link", NS, e0, { profile: lookup("profile.id", adminProfile) }]]);
+  atx([["ruleParams", NS, e0, { k: pick([0, 1]) }]]);
+  // throw-on-missing-attrs? true refuses the missing label; false (default)
+  // auto-creates it on the throwaway entity, which is deleted again
+  atx([["create", NS, adminMissingEntity, { p1: pick(values), [adminMissingLabel]: 1 }]], {
+    "throw-on-missing-attrs?": true,
+  });
+  // legacy's boolean coercion: a string is truthy too
+  atx([["create", NS, adminMissingYesEntity, { p1: pick(values), [adminMissingYesLabel]: 1 }]], {
+    "throw-on-missing-attrs?": "yes",
+  });
+  atx([["update", NS, adminAutoEntity, { [adminAutoLabel]: pick(values) }]]);
+  atx([["delete", NS, adminAutoEntity]]);
+  atx([["delete", NS, entities[7]]]);
+  // the admin route takes the SDK op grammar, not raw client tx-steps
+  atx([["add-triple", e0, attrs.id, e0]]);
+  atx([["frobnicate", NS, e0, {}]]);
+  atx([["update", NS, "not-a-uuid", { p1: 1 }]]);
+  aq({ [NS]: { owner: {}, tags: {}, profile: {} } });
+  aq({ [NS]: { owner: {}, tags: {}, profile: {} } }, true);
+  aq({ [NS]: { owner: {}, tags: {}, profile: {} } }, "yes");
+  aq({ [NS]: { owner: {}, tags: {}, profile: {} } }, 0);
+  aq({ [OWNER]: { items: {} } });
+  aq({ [OWNER]: { items: {} } }, true);
+  aq({ [TAG]: { fuzzes: {} } });
+  aq({ [PROFILE]: { fuzz: {} } }, true);
+  aq({
+    [NS]: {
+      $: { where: { tnum: { $gte: pick(nums) } }, order: { tdate: "desc" }, limit: 3 },
+      owner: {},
+      tags: {},
+    },
+  });
+  aq({
+    [NS]: {
+      $: { where: { tdate: { $lt: pick(dateQs) } }, first: 2, order: { tnum: "asc" }, afterInclusive: true },
+      owner: {},
+    },
+  });
+  aq({ [NS]: { $: { where: { tbool: pick([true, false]), "owner.items.tstr": pick(strs) } } } });
+  aq({ [NS]: { $: { where: { and: [{ tnum: { $gt: 0 } }, { tstr: { $like: "%a%" } }] } } } });
+  aq({ [NS]: { $: { where: { or: [{ tnum: { $gt: 0 } }, { tstr: pick(strs) }] } } } });
+  aq({ [NS]: { $: { where: { tdate: { $gte: pick(dateQs) } }, order: { tdate: "asc" }, last: 2 }, owner: {} } });
+  aq({ [NS]: { $: { where: { tags: { $isNull: true } } } } });
+  aq({ [NS]: { $: { where: { "owner.name": { $isNull: false } } } } });
+  aq({ [NS]: { $: { fields: ["p1", "tdate", "tbool", "owner"], where: { tbool: true }, order: { tdate: "desc" }, limit: 2 } } });
+  aq({ [NS]: { $: { order: { id: "asc" }, limit: 2, offset: 1 } } });
+  aq({ [NS]: { $: { where: { id: adminEmpty } }, owner: {}, profile: {} } }, true);
+  // $aggregate is admin-only; legacy's one-shot object tree drops the count,
+  // this server keeps {count} (the socket fuzz compares the count itself)
+  aq({ [NS]: { $: { aggregate: "count" } } }, false, "aggregate");
+  // invalid on both servers, compared by the admin error envelope
+  aq({ [NS]: { $: { where: { p1: { $gt: 1 } } } } });
+  aq({ [NS]: { $: { where: { tnum: { $like: "%1%" } } } } });
+  aq({ [NS]: { $: { where: { or: [] } } } });
+  script.admin = admin;
+
   // what each label of a namespace names: [attr id, namespace a link leads
   // to, whether it is the link's reverse, whether it can reach several
   // entities] (pagedWhereOnly resolves where paths with it)
@@ -687,6 +1081,7 @@ async function runOn(serverName, script) {
   await conn.waitFor((m) => m.op === "init-ok");
 
   const queryResults = [];
+  const adminResults = [];
   let lastTxId = 0;
   let violations = 0;
   let txOk = 0;
@@ -722,7 +1117,29 @@ async function runOn(serverName, script) {
     // each op only ever matches frames that arrive after it was sent
     conn.takeNewFrames();
     const ceid = uuid();
-    if (op.kind === "tx") {
+    if (op.kind === "admin-phase") {
+      for (const t of script.admin?.txs ?? []) {
+        const body = { steps: t.steps };
+        if ("throw-on-missing-attrs?" in t) body["throw-on-missing-attrs?"] = t["throw-on-missing-attrs?"];
+        const r = await adminHttp(serverName, "/admin/transact", body);
+        adminResults.push({
+          kind: "admin-tx",
+          steps: t.steps,
+          flags: t["throw-on-missing-attrs?"] ?? null,
+          ...adminTxView(r),
+        });
+      }
+      for (const q of script.admin?.queries ?? []) {
+        const r = await adminHttp(serverName, "/admin/query", { query: q.q, "inference?": q.inference });
+        adminResults.push({
+          kind: "admin-query-fixed",
+          label: q.label,
+          q: q.q,
+          inference: q.inference,
+          ...adminQueryView(r, q.q),
+        });
+      }
+    } else if (op.kind === "tx") {
       conn.send({ "client-event-id": ceid, op: "transact", "tx-steps": op.steps });
       const reply = await conn.waitFor(
         (m) => ["transact-ok", "error"].includes(m.op) && m["client-event-id"] === ceid,
@@ -746,6 +1163,14 @@ async function runOn(serverName, script) {
     } else if (op.kind === "query") {
       const r = await query(op.q);
       queryResults.push({ i, q: op.q, ...(r.error ? { error: r.error } : { result: r.result }) });
+      // the same question over the admin one-shot route, with the option the
+      // SDK sends (`inference?` when the app has a schema). Vary it so both
+      // singular and array link shapes are compared.
+      if (!adminMirrorUnsafe(op.q) && !adminDateBooleanUnsafe(op.q)) {
+        const inference = i % 3 === 0;
+        const ar = await adminHttp(serverName, "/admin/query", { query: op.q, "inference?": inference });
+        adminResults.push({ i, kind: "admin-query", q: op.q, inference, ...adminQueryView(ar, op.q) });
+      }
     } else if (op.kind === "paginate") {
       // Walk the pages with each server's own pageInfo cursors, and compare
       // every page's full result plus its page-info. Cursors are sent back
@@ -775,7 +1200,10 @@ async function runOn(serverName, script) {
       let firstCursor = null;
       let error = null;
       for (let pageNo = 0; pageNo < 30; pageNo++) {
-        const r = await query(formFor(cursor, pageNo === 0));
+        const pageForm = formFor(cursor, pageNo === 0);
+        const r = await query(pageForm);
+        const ar = await adminHttp(serverName, "/admin/query", { query: pageForm, "inference?": false });
+        adminResults.push({ i, kind: "admin-paginate-page", pageNo, q: pageForm, ...adminQueryView(ar, pageForm) });
         const features = featuresFor(cursor, pageNo === 0);
         if (r.error) {
           pages.push({ features, error: r.error });
@@ -810,7 +1238,10 @@ async function runOn(serverName, script) {
         $[backwards ? "before" : "after"] = firstCursor;
         $[backwards ? "beforeInclusive" : "afterInclusive"] = true;
         if (where) $.where = where;
-        const r = await query({ [ns]: { $, ...(nested ?? {}) } });
+        const pageForm = { [ns]: { $, ...(nested ?? {}) } };
+        const r = await query(pageForm);
+        const ar = await adminHttp(serverName, "/admin/query", { query: pageForm, "inference?": false });
+        adminResults.push({ i, kind: "admin-inclusive-page", q: pageForm, ...adminQueryView(ar, pageForm) });
         const features = featuresFor(firstCursor, false, ["pagination.inclusive"]);
         const rawInfo = r.error ? null : pageInfoOf(r.raw, ns);
         if (rawInfo) features.push("pagination.pageInfo");
@@ -819,6 +1250,9 @@ async function runOn(serverName, script) {
           : { features, result: { triples: r.result.triples, pageInfo: normalizePageInfo(rawInfo, key) } };
       }
       queryResults.push({ i, paginate: op, pages, ...(inclusivePage ? { inclusivePage } : {}), ...(error ? { error } : {}) });
+      if (op.adminSse) {
+        adminResults.push({ i, kind: "admin-sse-paginate", paginate: op, pages: await adminSseWalk(serverName, op) });
+      }
     }
   }
   if (watermarkLags) {
@@ -826,7 +1260,7 @@ async function runOn(serverName, script) {
   }
   await settle([conn], 500);
   conn.close();
-  return { queryResults, violations, txOk, txOkBy };
+  return { queryResults, adminResults, violations, txOk, txOkBy };
 }
 
 // An error compares by type and status. Its message rides along
@@ -1444,17 +1878,41 @@ const maskRolledBack = (entry) => {
 };
 
 let mismatches = 0;
+// Admin mirrors that run after a socket result the harness had to tolerate
+// are skipped for that seed: the legacy database state itself differs after
+// those documented bugs, so an object tree cannot be compared strictly. The
+// fixed admin phase runs before the churn and stays compared.
+const adminSkipOps = new Set();
+let adminTaintedFrom = Infinity;
 const n = Math.max(legacy.queryResults.length, rust.queryResults.length);
 for (let i = 0; i < n; i++) {
   const l = legacy.queryResults[i], r = rust.queryResults[i];
   if (canon(comparable(l)) !== canon(comparable(r))) {
-    if (allowedResultException(l, r)) continue;
-    if (allowedByException(l, r)) continue;
-    if (legacyDropsSameTxDeepMerge(l, r)) continue;
-    if (legacyStaleRetractAfterDeepMerge(l, r)) continue;
+    if (allowedResultException(l, r)) {
+      adminSkipOps.add(l?.i ?? r?.i);
+      continue;
+    }
+    if (allowedByException(l, r)) {
+      adminSkipOps.add(l?.i ?? r?.i);
+      // the mixed lookup rollback and the same-tx delete bug leave the two
+      // databases in different states, not just one reply different
+      if (script[l?.i]?.kind === "tx") adminTaintedFrom = Math.min(adminTaintedFrom, l.i);
+      continue;
+    }
+    if (legacyDropsSameTxDeepMerge(l, r)) {
+      adminSkipOps.add(l?.i ?? r?.i);
+      adminTaintedFrom = Math.min(adminTaintedFrom, l?.i ?? Infinity);
+      continue;
+    }
+    if (legacyStaleRetractAfterDeepMerge(l, r)) {
+      adminSkipOps.add(l?.i ?? r?.i);
+      adminTaintedFrom = Math.min(adminTaintedFrom, l?.i ?? Infinity);
+      continue;
+    }
     if (canon(comparable(maskRolledBack(l))) === canon(comparable(maskRolledBack(r)))) {
       exceptionHits[MIXED_LOOKUP_ROLLBACK_EXCEPTION] = (exceptionHits[MIXED_LOOKUP_ROLLBACK_EXCEPTION] ?? 0) + 1;
       console.log(`ignoring rolled-back mixed-lookup writes at slot ${i}; only their entities differ`);
+      adminTaintedFrom = Math.min(adminTaintedFrom, l?.i ?? Infinity);
       continue;
     }
     const msgs = l?.error || r?.error ? `\n  messages: legacy ${JSON.stringify(l?.error?.message)} / rust ${JSON.stringify(r?.error?.message)}` : "";
@@ -1462,6 +1920,122 @@ for (let i = 0; i < n; i++) {
     mismatches++;
   }
 }
+// Admin HTTP parity: every mirrored /admin/query page and result, every fixed
+// admin query and every admin transact outcome. Both servers ran the same op
+// sequence, so the arrays align slot by slot.
+//
+// One named result exception: legacy's one-shot admin object tree has no
+// aggregate branch (instaql-nodes->object-tree only walks child-nodes, so an
+// aggregate form comes back as `[]`), while this server exposes `{count}` like
+// the socket result. The count itself is already compared over the socket by
+// the main fuzz, and the exception pins legacy `[]` against this server's
+// `{count: <number>}` before comparing every other form strictly.
+const adminAggregateException = (l, r) => {
+  if (l?.label !== "aggregate" || r?.label !== "aggregate") return false;
+  if (l.status !== 200 || r.status !== 200) return false;
+  const keys = Object.keys(l.q ?? {}).filter((k) => l.q?.[k]?.$?.aggregate != null);
+  if (!keys.length) return false;
+  const left = { ...l.result };
+  const right = { ...r.result };
+  for (const k of keys) {
+    const lv = left[k];
+    const rv = right[k];
+    if (!Array.isArray(lv) || lv.length) return false;
+    if (!rv || typeof rv !== "object" || Array.isArray(rv)) return false;
+    if (Object.keys(rv).length !== 1 || typeof rv.count !== "number") return false;
+    delete left[k];
+    delete right[k];
+  }
+  if (canon(left) !== canon(right)) return false;
+  exceptionHits["admin-object-tree-aggregate"] = (exceptionHits["admin-object-tree-aggregate"] ?? 0) + 1;
+  return true;
+};
+
+let adminMismatches = 0;
+const adminN = Math.max(legacy.adminResults.length, rust.adminResults.length);
+for (let k = 0; k < adminN; k++) {
+  const l = legacy.adminResults[k];
+  const r = rust.adminResults[k];
+  if (canon(l) === canon(r)) continue;
+  const opIndex = l?.i ?? r?.i;
+  if (
+    opIndex !== undefined &&
+    (adminSkipOps.has(opIndex) || opIndex > adminTaintedFrom)
+  ) {
+    continue;
+  }
+  if (adminAggregateException(l, r)) continue;
+  adminMismatches++;
+  if (adminMismatches > 12) continue;
+  const shape = l?.kind ?? r?.kind ?? "?";
+  const idx = l?.i ?? r?.i;
+  console.error(`admin mismatch at slot ${k} (${shape}${idx !== undefined ? ` op ${idx}` : ""}):`);
+  if (l?.q || r?.q) console.error(`  query:  ${JSON.stringify(l?.q ?? r?.q).slice(0, 1200)}`);
+  if (l?.steps || r?.steps) console.error(`  steps:  ${JSON.stringify(l?.steps ?? r?.steps).slice(0, 1200)}`);
+  if (l?.pages || r?.pages) {
+    const lp = l?.pages ?? [];
+    const rp = r?.pages ?? [];
+    console.error(`  pages:  legacy ${lp.length} / rust ${rp.length}`);
+    for (let p = 0; p < Math.max(lp.length, rp.length); p++) {
+      if (canon(lp[p]) === canon(rp[p])) continue;
+      console.error(`    page ${p} legacy: ${JSON.stringify(lp[p]).slice(0, 1600)}`);
+      console.error(`    page ${p} rust:   ${JSON.stringify(rp[p]).slice(0, 1600)}`);
+      break;
+    }
+  } else {
+    console.error(`  legacy: ${JSON.stringify(l).slice(0, 2500)}`);
+    console.error(`  rust:   ${JSON.stringify(r).slice(0, 2500)}`);
+  }
+}
+
+// Admin coverage floor: the mirrored grammar must actually have been sent and
+// answered, not just generated.
+const adminCount = (pred, arr = legacy.adminResults) => arr.filter(pred).length;
+const adminQueryEntries = legacy.adminResults.filter((e) => e.kind === "admin-query" || e.kind === "admin-query-fixed");
+const adminTxEntries = legacy.adminResults.filter((e) => e.kind === "admin-tx");
+const adminSsePages = legacy.adminResults
+  .filter((e) => e.kind === "admin-sse-paginate")
+  .flatMap((e) => e.pages ?? []);
+const adminSseWithInfo = adminSsePages.filter((p) => {
+  const info = p["result-meta"]?.["page-info"] ?? {};
+  return Object.values(info).some(Boolean);
+});
+const adminFloor = {
+  queries: adminQueryEntries.length,
+  queryOk: adminQueryEntries.filter((e) => e.status === 200).length,
+  queryErr: adminQueryEntries.filter((e) => e.status !== 200).length,
+  queriesInference: adminQueryEntries.filter((e) => e.inference === true).length,
+  queriesNoInference: adminQueryEntries.filter((e) => e.inference === false).length,
+  pageRequests: adminCount((e) => e.kind === "admin-paginate-page" || e.kind === "admin-inclusive-page"),
+  pageRequestsOk: adminCount((e) => (e.kind === "admin-paginate-page" || e.kind === "admin-inclusive-page") && e.status === 200),
+  ssePages: adminSsePages.length,
+  ssePagesWithPageInfo: adminSseWithInfo.length,
+  ssePagesWithData: adminSsePages.filter((p) => (p.result?.[Object.keys(p.result ?? {})[0]] ?? []).length > 0).length,
+  transacts: adminTxEntries.length,
+  transactsOk: adminTxEntries.filter((e) => e.status === 200).length,
+  transactErrors: adminTxEntries.filter((e) => e.status !== 200).length,
+  missingFlags: adminTxEntries.filter((e) => e.flags === true).length,
+};
+let adminFloorOk =
+  adminFloor.queries >= 10 &&
+  adminFloor.queryOk >= 5 &&
+  adminFloor.queryErr >= 3 &&
+  adminFloor.queriesInference >= 2 &&
+  adminFloor.queriesNoInference >= 2 &&
+  adminFloor.pageRequests >= 2 &&
+  adminFloor.pageRequestsOk >= 2 &&
+  adminFloor.ssePages >= 2 &&
+  adminFloor.ssePagesWithPageInfo >= 1 &&
+  adminFloor.ssePagesWithData >= 1 &&
+  adminFloor.transacts >= 20 &&
+  adminFloor.transactsOk >= 5 &&
+  adminFloor.transactErrors >= 5 &&
+  adminFloor.missingFlags >= 1;
+if (!adminFloorOk) {
+  console.error(`ADMIN HTTP FLOOR NOT MET: ${JSON.stringify(adminFloor)}`);
+}
+console.log(`admin HTTP floor: ${JSON.stringify(adminFloor)}`);
+
 // The fixed regression must hit its pinned exception, and the missing
 // link-value lookup control must not be covered by it.
 const lookupRegressionHit = (exceptionSlots[LOOKUP_REGRESSION_EXCEPTION] ?? []).includes(lookupRegressionSlot);
@@ -1629,10 +2203,12 @@ console.log(`grammar floor: ${JSON.stringify(floor)}`);
 for (const [name, hits] of Object.entries(exceptionHits)) {
   console.log(`exception ${name}: ${hits} result(s) allowed`);
 }
-if (legacy.violations || rust.violations || !finalMatch || mismatches || !floorOk) {
+if (legacy.violations || rust.violations || !finalMatch || mismatches || !floorOk || adminMismatches || !adminFloorOk) {
   console.error(
-    `FUZZ FAILED: ${mismatches} query mismatches, invariant violations legacy=${legacy.violations} rust=${rust.violations}, final match=${finalMatch}`,
+    `FUZZ FAILED: ${mismatches} query mismatches, ${adminMismatches} admin HTTP mismatches, invariant violations legacy=${legacy.violations} rust=${rust.violations}, final match=${finalMatch}`,
   );
   process.exit(1);
 }
-console.log(`FUZZ PASSED: ${script.length} ops replayed identically (seed ${seed})`);
+console.log(
+  `FUZZ PASSED: ${script.length} ops replayed identically, ${adminN} admin HTTP results identical (seed ${seed})`,
+);
