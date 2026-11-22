@@ -227,12 +227,16 @@ everything and checks coverage itself, as before.
   exception. The same shape with unrelated writes (nightly seed 32063) has
   its own `lookup-created-entity-deleted-with-other-writes` exception: legacy
   rolls the whole tx back while this server commits every step. It records the
-  exact entity ids the matched tx wrote or deleted; later reads are compared
-  with only those entities' triples masked, so changed values and page
-  membership/order shifts from the rollback are accepted while every other
-  entity, query shape and error stays strict. The generator keeps producing
-  both the pure and mixed shapes. Two more fixed mixed-invalid batches cover
-  nightly seed 31255:
+  exact entity ids the matched tx wrote or deleted by direct id or `id`-attr
+  lookup; later reads are compared with only those entities' triples masked,
+  so changed values and page membership/order shifts from the rollback are
+  accepted while every other entity, query shape and error stays strict. A
+  non-id lookup step (seed 31299's 400-round shape) is accepted without
+  masking its target, because the target is unknown until the tx runs; any
+  change it makes is still caught by later strict comparisons. The generator
+  keeps producing both the pure and mixed shapes, and every seed appends a
+  fixed mixed regression with an unrelated write and a non-id lookup step.
+  Two more fixed mixed-invalid batches cover nightly seed 31255:
   a batch with an unknown attr and a missing link-value lookup may make
   legacy raise the attr `sql-raise` instead of the lookup error, depending
   on its insert plan, while this server always answers the lookup. The
@@ -256,13 +260,17 @@ everything and checks coverage itself, as before.
   `legacy-stale-retract-after-deep-merge`: legacy hashes `value_md5` from
   the raw client JSON on add / retract but from canonical jsonb text after
   a deep-merge, so retracting the same object value leaves the merged triple
-  behind (nightly seed 32047). This server uses the canonical hash on every
-  write and removes it. The exception accepts only a one-shot query where
-  legacy is a strict superset of rust, every extra triple is an object/array
-  whose latest write was that retract, immediately preceded by a deep-merge
-  of the same entity/attr, and nothing touched it in between. Every seed
-  appends that shape as a fixed regression and deletes the entity afterwards
-  so the final tables agree.
+  behind (nightly seed 32047). Repeated retracts of that value also miss, and
+  later deep-merges build on the stale object (seed 32139). This server uses
+  the canonical hash on every write and removes it. The exception accepts only
+  result differences confined to `(entity, attr)` pairs whose latest write
+  before the query is such a retract, with only repeated retracts between the
+  originating deep-merge (possibly in the same tx) and it, and only
+  deep-merges after it. It recomputes the expected value on both sides by
+  applying those deep-merges to the stale base (legacy) or an absent triple
+  (rust); every other triple, page shape, page-info and error stays strict.
+  Every seed appends the shape with two identical retracts as a fixed
+  regression and deletes the entity afterwards so the final tables agree.
   Not generated: a link whose value lookup names the entity an eid lookup of
   the same tx creates. Legacy refuses it ("Could not find the entity for
   this lookup", a post-create check bug listed in docs/PARITY.md) and this
@@ -321,12 +329,12 @@ everything and checks coverage itself, as before.
   seed; the fuzz layer still plans one run per seed, so `legs.sh inventory`
   and the CI matrix do not change.
   `node fuzz.mjs <app> <app> <token> [seed] [rounds]`. Every PR and push
-  runs nineteen seeds at 250 rounds (42, 99, the nightly's original 1-10 and
-  the regression seeds 31201, 31255, 31299, 31586, 31642, 32047 and 32063);
-  the nightly (`schedule` in ci.yml, or a manual run with the `nightly`
-  input) runs them at 400 rounds plus a window of 40 fresh seeds that moves
-  every day (`FUZZ_SEED_WINDOW`). `run.sh` runs every seed and lists the
-  failing ones at the end.
+  runs twenty-one seeds at 400 rounds (42, 99, the nightly's original 1-10
+  and the regression seeds 31201, 31255, 31299, 31586, 31642, 32047, 32063,
+  32139 and 32141); the nightly (`schedule` in ci.yml, or a manual run with
+  the `nightly` input) runs the same seeds at 400 rounds plus a window of 40
+  fresh seeds that moves every day (`FUZZ_SEED_WINDOW`). `run.sh` runs every
+  seed and lists the failing ones at the end.
 - `fuzz-schema.mjs` — seeded **schema evolution** interleaved with data and
   subscriptions, which no other layer generates. A fixed catalog plus
   seed-chosen values drives inline `add-attr` (blob and ref, forward and

@@ -512,17 +512,130 @@ fn parse_where(v: &Value, path: &[String], root: &Value) -> Result<WhereCond> {
     })
 }
 
+/// Legacy's `::$in` spec is `(s/coll-of ... :into #{})` (instaql.clj:46-48),
+/// so an `$in` list reaches validation as a Clojure `PersistentHashSet`.
+/// Coercing it walks the set in hash-trie order, not request order, and
+/// names the first invalid value in that order. Reproduce that order here:
+/// dedupe like the set, then sort by the 5-bit chunks of Clojure's `hasheq`
+/// from least-significant to most-significant (the order `BitmapIndexedNode`
+/// and `ArrayNode` iterate; a full hash collision keeps insertion order, as
+/// `HashCollisionNode` does).
+fn legacy_in_order(vals: &[Value]) -> Vec<Value> {
+    let mut deduped: Vec<Value> = Vec::with_capacity(vals.len());
+    for v in vals {
+        if !deduped.iter().any(|x| x == v) {
+            deduped.push(v.clone());
+        }
+    }
+    deduped.sort_by_key(|v| clojure_hash_route(clojure_hasheq(v)));
+    deduped
+}
+
+fn clojure_hash_route(hash: i32) -> [u8; 7] {
+    let h = hash as u32;
+    std::array::from_fn(|i| ((h >> (5 * i)) & 0x1f) as u8)
+}
+
+fn clojure_hasheq(v: &Value) -> i32 {
+    match v {
+        Value::Null => 0,
+        // java.lang.Boolean.hashCode
+        Value::Bool(true) => 1231,
+        Value::Bool(false) => 1237,
+        // Util.hasheq: Strings go through Murmur3.hashInt(String.hashCode)
+        Value::String(s) => murmur3_hash_int(java_string_hash(s)),
+        // Numbers.hasheq: Long -> Murmur3.hashLong, Double -> Double.hashCode
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                murmur3_hash_long(i)
+            } else if let Some(u) = n.as_u64() {
+                murmur3_hash_long(u as i64)
+            } else if let Some(f) = n.as_f64() {
+                let bits = f.to_bits();
+                (bits ^ (bits >> 32)) as i32
+            } else {
+                0
+            }
+        }
+        // Not valid $in values in legacy's spec; keep an order anyway.
+        _ => murmur3_hash_ordered(v),
+    }
+}
+
+fn java_string_hash(s: &str) -> i32 {
+    let mut h: i32 = 0;
+    for c in s.encode_utf16() {
+        h = h.wrapping_mul(31).wrapping_add(c as i32);
+    }
+    h
+}
+
+fn murmur3_mix_k1(k1: i32) -> i32 {
+    let k1 = k1.wrapping_mul(0xcc9e_2d51u32 as i32);
+    k1.rotate_left(15).wrapping_mul(0x1b87_3593u32 as i32)
+}
+
+fn murmur3_mix_h1(h1: i32, k1: i32) -> i32 {
+    let h1 = (h1 ^ k1).rotate_left(13);
+    h1.wrapping_mul(5).wrapping_add(0xe654_6b64u32 as i32)
+}
+
+fn murmur3_fmix(mut h1: i32, length: i32) -> i32 {
+    h1 ^= length;
+    h1 ^= ((h1 as u32) >> 16) as i32;
+    h1 = h1.wrapping_mul(0x85eb_ca6bu32 as i32);
+    h1 ^= ((h1 as u32) >> 13) as i32;
+    h1 = h1.wrapping_mul(0xc2b2_ae35u32 as i32);
+    h1 ^ ((h1 as u32) >> 16) as i32
+}
+
+fn murmur3_hash_int(input: i32) -> i32 {
+    if input == 0 {
+        return 0;
+    }
+    let h1 = murmur3_mix_h1(0, murmur3_mix_k1(input));
+    murmur3_fmix(h1, 4)
+}
+
+fn murmur3_hash_long(input: i64) -> i32 {
+    if input == 0 {
+        return 0;
+    }
+    let low = input as i32;
+    let high = ((input as u64) >> 32) as i32;
+    let mut h1 = murmur3_mix_h1(0, murmur3_mix_k1(low));
+    h1 = murmur3_mix_h1(h1, murmur3_mix_k1(high));
+    murmur3_fmix(h1, 8)
+}
+
+fn murmur3_hash_ordered(v: &Value) -> i32 {
+    // Murmur3.hashOrdered over the JSON array; only a fallback for values
+    // legacy's `$in` spec doesn't admit.
+    let mut hash: i32 = 1;
+    let mut n = 0;
+    if let Value::Array(xs) = v {
+        for x in xs {
+            hash = hash.wrapping_mul(31).wrapping_add(clojure_hasheq(x));
+            n += 1;
+        }
+    } else {
+        hash = 31i32.wrapping_add(clojure_hasheq(v));
+        n = 1;
+    }
+    let h1 = murmur3_mix_h1(0, murmur3_mix_k1(hash));
+    murmur3_fmix(h1, n)
+}
+
 fn parse_where_value(v: &Value) -> Result<Vec<WhereOp>> {
     match v {
         Value::Object(m) => {
             let mut ops = vec![];
             for (k, val) in m {
                 let op = match k.as_str() {
-                    "$in" | "in" => WhereOp::In(
+                    "$in" | "in" => WhereOp::In(legacy_in_order(
                         val.as_array()
-                            .ok_or_else(|| verr("`$in` expects an array."))?
-                            .clone(),
-                    ),
+                            .ok_or_else(|| verr("`$in` expects an array."))?,
+                    )),
                     "$not" | "$ne" => WhereOp::Not(val.clone()),
                     "$isNull" => WhereOp::IsNull(
                         val.as_bool()
@@ -2986,4 +3099,26 @@ async fn fetch_triples(
             t: row.get::<Option<i64>, _>("created_at").unwrap_or(0),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod in_order_tests {
+    use super::legacy_in_order;
+    use serde_json::json;
+
+    #[test]
+    fn dollar_in_uses_legacy_set_iteration_order() {
+        // `#{"2024-13-45" true}` iterates `true` first: Boolean.hashCode is
+        // 1231, while the string's Clojure hasheq is
+        // Murmur3.hashInt("2024-13-45".hashCode()) = 0x5058ac5a.
+        assert_eq!(
+            legacy_in_order(&[json!("2024-13-45"), json!(true)]),
+            vec![json!(true), json!("2024-13-45")]
+        );
+        // The set conversion ignores request order and dedupes.
+        assert_eq!(
+            legacy_in_order(&[json!(true), json!("2024-13-45"), json!(true)]),
+            vec![json!(true), json!("2024-13-45")]
+        );
+    }
 }
