@@ -521,13 +521,16 @@ fn parse_where(v: &Value, path: &[String], root: &Value) -> Result<WhereCond> {
 /// and `ArrayNode` iterate; a full hash collision keeps insertion order, as
 /// `HashCollisionNode` does).
 fn legacy_in_order(vals: &[Value]) -> Vec<Value> {
+    let mut seen = HashSet::with_capacity(vals.len());
     let mut deduped: Vec<Value> = Vec::with_capacity(vals.len());
     for v in vals {
-        if !deduped.iter().any(|x| x == v) {
+        // Serializing is O(size) per value; comparing against every earlier
+        // value would make the 70k-value $in probe quadratic.
+        if seen.insert(v.to_string()) {
             deduped.push(v.clone());
         }
     }
-    deduped.sort_by_key(|v| clojure_hash_route(clojure_hasheq(v)));
+    deduped.sort_by_cached_key(|v| clojure_hash_route(clojure_hasheq(v)));
     deduped
 }
 

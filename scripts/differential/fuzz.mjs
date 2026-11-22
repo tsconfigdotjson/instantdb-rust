@@ -2033,13 +2033,20 @@ function tripleValueMap(entry) {
   for (const triples of resultTriples(entry)) {
     for (const t of triples) {
       const key = tripleKey(t);
-      if (values.has(key) && canon(values.get(key)) !== canon(t[2])) return null;
-      values.set(key, t[2]);
+      // A has-many link has several values under one (entity, attr) key; keep
+      // them all so only the differing keys are considered.
+      if (!values.has(key)) values.set(key, []);
+      values.get(key).push(t[2]);
       entities.set(key, [t[0], t[1]]);
     }
   }
   return { values, entities };
 }
+const sameTripleValues = (a, b) => {
+  const left = a.map(canon).sort();
+  const right = b.map(canon).sort();
+  return canon(left) === canon(right);
+};
 function stripTripleKeys(entry, keys) {
   const copy = JSON.parse(JSON.stringify(entry));
   const strip = (res) => {
@@ -2060,9 +2067,14 @@ function legacyStaleRetractAfterDeepMerge(l, r) {
   const keys = new Set([...left.values.keys(), ...right.values.keys()]);
   const stale = new Set();
   for (const key of keys) {
-    const lv = left.values.has(key) ? left.values.get(key) : ABSENT;
-    const rv = right.values.has(key) ? right.values.get(key) : ABSENT;
-    if (sameMaybe(lv, rv)) continue;
+    const lvs = left.values.get(key) ?? [];
+    const rvs = right.values.get(key) ?? [];
+    if (sameTripleValues(lvs, rvs)) continue;
+    // A stale deep-merged triple is cardinality one: exactly one value (or
+    // none) on each side. A differing has-many key is not this defect.
+    if (lvs.length > 1 || rvs.length > 1) return false;
+    const lv = lvs.length ? lvs[0] : ABSENT;
+    const rv = rvs.length ? rvs[0] : ABSENT;
     const [e, a] = left.entities.get(key) ?? right.entities.get(key);
     const expected = staleRetractExpectation(l.i, e, a);
     if (!expected || !sameMaybe(lv, expected.legacy) || !sameMaybe(rv, expected.rust)) return false;
