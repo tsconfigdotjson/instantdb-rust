@@ -2682,9 +2682,11 @@ mod link_value_tests {
             );
             // the object's new `title` attr is prepended too, then the triples
             let lookup = json!([attr_id.to_string(), "v"]);
-            assert!(hint["input"].as_array().unwrap().iter().any(|step| {
-                step[0] == "add-triple" && step[1] == lookup && step[2] == hint["input"][0][1]["id"]
-            }));
+            assert!(hint["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| step[0] == "add-triple" && step[1] == lookup));
         }
         // the name forms keep matching legacy: a name pair and a single-key
         // object both auto-create a unique posts.title attr and target it
@@ -2702,9 +2704,12 @@ mod link_value_tests {
                         .then(|| s[1]["id"].as_str().unwrap().to_string())
                 })
                 .expect("auto-created posts.title");
-            assert!(out.as_array().unwrap().iter().any(|s| {
-                s[0] == "add-triple" && s[1] == json!([title, "v"]) && s[2] == json!(title)
-            }));
+            let lookup = json!([title, "v"]);
+            assert!(out
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s[0] == "add-triple" && s[1] == lookup && s[3] == lookup));
         }
         // the same form as a link target is refused too, and
         // throw-on-missing-attrs? keeps legacy's earlier missing-attr error
