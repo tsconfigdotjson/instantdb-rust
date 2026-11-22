@@ -671,6 +671,41 @@ async function runAgainst(name) {
   raw("24b-admin-link-arrays", r24b);
   record("24b-admin-link-arrays", r24b);
 
+  // 24c admin uuid-attr lookups (issue #120): /admin/transact refuses an eid
+  // lookup whose first element is an attribute id (`[<attr-uuid>, value]`),
+  // including another namespace's attr. Legacy auto-creates an attr named
+  // after the UUID string and then rejects its coerced label in the tx-steps
+  // spec; this server returns that same envelope. The name pair and the
+  // single-key object still auto-create/target the step's own attr.
+  const r24c = {};
+  const OL = "uuidlookuporders";
+  const OC = "uuidlookupcustomers";
+  const tx24c = async (steps) => txView(await adminCall("POST", "/admin/transact", { steps }));
+  const rows24c = (res, ns) =>
+    res.status === 200
+      ? { status: 200, rows: (res.body[ns] ?? []).map((d) => norm(d)).sort((a, c) => (canon(a) < canon(c) ? -1 : 1)) }
+      : errView(res);
+  r24c.seedOrder = await tx24c([["update", OL, ["sku", "s1"], { quantity: 1 }]]);
+  r24c.seedCustomer = await tx24c([["update", OC, ["email", "e0"], { name: "n" }]]);
+  const pulled24c = await call(base, "GET", `/dash/apps/${appId}/schema/pull`);
+  const attrId24c = (etype, label) =>
+    (pulled24c.body?.attrs ?? []).find(
+      (a) => a["forward-identity"]?.[1] === etype && a["forward-identity"]?.[2] === label,
+    )?.id;
+  const SKU = attrId24c(OL, "sku");
+  const EMAIL = attrId24c(OC, "email");
+  r24c.sameUuidNew = await tx24c([["update", OL, [SKU, "s1"], { quantity: 2 }]]);
+  r24c.crossUuidNew = await tx24c([["update", OL, [EMAIL, "e1"], { quantity: 2 }]]);
+  r24c.crossUuidExisting = await tx24c([["update", OL, [EMAIL, "e0"], { quantity: 3 }]]);
+  r24c.sameName = await tx24c([["update", OL, ["sku", "s2"], { quantity: 2 }]]);
+  r24c.sameObject = await tx24c([["update", OL, { sku: "s3" }, { quantity: 2 }]]);
+  r24c.sameUuidExisting = await tx24c([["update", OL, [SKU, "s2"], { quantity: 4 }]]);
+  const q24c = await adminCall("POST", "/admin/query", { query: { [OL]: {}, [OC]: {} } });
+  r24c.orders = rows24c(q24c, OL);
+  r24c.customers = rows24c(q24c, OC);
+  raw("24c-admin-uuid-lookups", r24c);
+  record("24c-admin-uuid-lookups", r24c);
+
   // 25 admin SSE transports (issue #8): the HTTP side of subscribe-query /
   // sse / sse/push — auth and parameter errors before a stream opens, and
   // the push envelope checks (admin/routes.clj:160-210, session.clj:1250-1261).

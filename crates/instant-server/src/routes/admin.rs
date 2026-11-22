@@ -657,9 +657,12 @@ fn eid_to_lookup(
         }
         Value::Array(arr) if arr.len() == 2 => {
             let attr_name = arr[0].as_str().ok_or_else(|| invalid_eid(&v.to_string()))?;
-            if Uuid::parse_str(attr_name).is_ok() {
-                return Ok(v.clone());
-            }
+            // Legacy treats the first element as an attribute name even when
+            // it is a UUID string (admin/model.clj eid->lookup-pair ->
+            // extract-lookup). That auto-creates `etype.<uuid-label>`, whose
+            // label tx/coerce! then turns into a UUID and the attr spec
+            // rejects. [`uuid_attr_label_index`] reports that same tx-steps
+            // validation error after translation.
             let attr_id = resolve_lookup_attr(attrs, etype, attr_name, &arr[1], v, new_attrs)?;
             Ok(json!([attr_id, arr[1]]))
         }
@@ -1103,7 +1106,40 @@ pub fn translate_steps(attrs: &AttrMap, steps: &Value, throw_missing: bool) -> R
     }
     let mut all = new_attrs;
     all.extend(out);
-    Ok(Value::Array(all))
+    let selected = Value::Array(all);
+    // Legacy auto-creates an attr for the `[<attr-uuid>, value]` lookup form,
+    // then tx/coerce! UUIDifies its forward label and the attr spec rejects
+    // it (`expected string?` at the label). This is how legacy refuses the
+    // uuid-attr form on /admin/transact; its hint carries the whole
+    // translated tx-steps, so match that rather than trusting the caller.
+    if let Some(idx) = uuid_attr_label_index(selected.as_array().map(Vec::as_slice).unwrap_or(&[]))
+    {
+        return Err(InstantError::validation_failed_input(
+            "tx-steps",
+            selected,
+            json!([{"expected": "string?", "in": [idx, 1, "forward-identity", 2]}]),
+        ));
+    }
+    Ok(selected)
+}
+
+/// Index of the first `add-attr` whose forward label would be UUID-coerced by
+/// legacy's `tx/coerce!`, making the attr spec fail. The admin `[attr-uuid,
+/// value]` lookup form reaches this through the attr that
+/// `create-missing-attrs` auto-creates for the UUID string (admin/model.clj
+/// `add-attrs-for-lookup`), and a raw `add-attr` step with a UUID label does
+/// the same. Only forward labels matter for the lookup gap; other UUID-valued
+/// strings in an attr are not part of this route's contract.
+fn uuid_attr_label_index(steps: &[Value]) -> Option<usize> {
+    steps.iter().position(|step| {
+        step.get(0).and_then(Value::as_str) == Some("add-attr")
+            && step
+                .get(1)
+                .and_then(|attr| attr.get("forward-identity"))
+                .and_then(|identity| identity.get(2))
+                .and_then(Value::as_str)
+                .is_some_and(|label| Uuid::parse_str(label).is_ok())
+    })
 }
 
 pub async fn transact(
@@ -2617,6 +2653,67 @@ mod link_value_tests {
         assert!(bool_param(&json!({"inference?": 0}), "inference?"));
         assert!(bool_param(&json!({"inference?": "false"}), "inference?"));
         assert!(bool_param(&json!({"inference?": []}), "inference?"));
+    }
+
+    #[test]
+    fn uuid_attr_lookups_are_refused_like_legacy() {
+        let fx = fixture();
+        let p = Uuid::new_v4();
+        // same namespace (posts.id) and another namespace (tags.name); both
+        // are unique attrs, but legacy never resolves an attr id in this form
+        for attr_id in [fx.attrs.id_attr_of("posts").unwrap().id, fx.tags_name] {
+            let steps = json!([["update", "posts", [attr_id.to_string(), "v"], {"title": "x"}]]);
+            let err = translate_steps(&fx.attrs, &steps, false).unwrap_err();
+            assert_eq!(err.status, 400);
+            assert_eq!(err.error_type, "validation-failed");
+            assert_eq!(err.message, "Validation failed for tx-steps");
+            let hint = err.hint.unwrap();
+            assert_eq!(hint["data-type"], "tx-steps");
+            assert_eq!(
+                hint["errors"],
+                json!([{"expected": "string?", "in": [0, 1, "forward-identity", 2]}])
+            );
+            // the hint echoes legacy's translated steps: an auto-created attr
+            // whose forward label is the attr-id string, then the triples
+            assert_eq!(hint["input"][0][0], "add-attr");
+            assert_eq!(
+                hint["input"][0][1]["forward-identity"][2],
+                attr_id.to_string()
+            );
+            assert_eq!(hint["input"][1][0], "add-triple");
+            assert_eq!(hint["input"][1][1], json!([attr_id.to_string(), "v"]));
+        }
+        // the name forms keep matching legacy: a name pair and a single-key
+        // object both auto-create a unique posts.title attr and target it
+        for eid in [json!(["title", "v"]), json!({"title": "v"})] {
+            let steps = json!([["update", "posts", eid, {"body": "x"}]]);
+            let out = translate_steps(&fx.attrs, &steps, false).expect("name lookup");
+            let title = out
+                .as_array()
+                .unwrap()
+                .iter()
+                .find_map(|s| {
+                    (s[0] == "add-attr"
+                        && s[1]["forward-identity"][1] == "posts"
+                        && s[1]["forward-identity"][2] == "title")
+                        .then(|| s[1]["id"].as_str().unwrap().to_string())
+                })
+                .expect("auto-created posts.title");
+            assert!(out.as_array().unwrap().iter().any(|s| {
+                s[0] == "add-triple" && s[1] == json!([title, "v"]) && s[2] == json!(title)
+            }));
+        }
+        // the same form as a link target is refused too, and
+        // throw-on-missing-attrs? keeps legacy's earlier missing-attr error
+        let link =
+            json!([["link", "posts", p.to_string(), {"tags": [[fx.tags_name.to_string(), "v"]]}]]);
+        let err = translate_steps(&fx.attrs, &link, false).unwrap_err();
+        assert_eq!(err.message, "Validation failed for tx-steps");
+        let err = translate_steps(&fx.attrs, &link, true).unwrap_err();
+        assert_eq!(
+            err.message,
+            "Validation failed for steps: Attributes are missing in your schema"
+        );
     }
 
     #[test]
