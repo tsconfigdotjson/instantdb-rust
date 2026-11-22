@@ -486,19 +486,25 @@ jobs:
           LAYER_SHARDS: ${{ matrix.layer_shards }}
           RUNS_DIR: ${{ github.workspace }}/differential-leg/${{ matrix.leg }}
           COVERAGE_FILE: ${{ github.workspace }}/differential-leg/${{ matrix.leg }}/coverage.jsonl
-          # PRs and main run the nightly's original seeds at nightly depth
-          # (a 250-round seed takes ~10s); the nightly adds a fresh window
-          # of 40 seeds every day (FUZZ_SEED_WINDOW, see run.sh), deeper.
-          # 31201 is the nightly seed that caught delete-entity lookups
-          # resolving against writes earlier in the same tx; 31255 is the
-          # nightly hops seed whose generated where paths all hit empty data;
-          # 31299 caught an id lookup creating an entity the same tx deletes;
-          # 32063 caught the same lookup shape mixed with other writes (now
-          # not generated; its pure shape is pinned), and 32047 caught legacy
-          # leaving a stale triple after a deep-merge + retract because its
-          # value_md5 encoding changes (the stale-retract result exception).
-          FUZZ_SEEDS: "42 99 1 2 3 4 5 6 7 8 9 10 31201 31255 31299 31586 31642 32047 32063"
-          FUZZ_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '400' || '250' }}
+          # PRs and main run the same 400 rounds as the nightly's fixed
+          # seeds (a 250-round seed takes ~10s, 400 ~14s); the nightly adds
+          # a fresh window of 40 seeds every day (FUZZ_SEED_WINDOW, see
+          # run.sh). 400 keeps regression slots past the old PR depth
+          # (31299's own mismatch was slot 347). 31201 is the nightly seed
+          # that caught delete-entity lookups resolving against writes
+          # earlier in the same tx; 31255 is the nightly hops seed whose
+          # generated where paths all hit empty data; 31299 caught an id
+          # lookup creating an entity the same tx deletes (and later caught
+          # the same shape mixed with an unrelated non-id lookup step);
+          # 32063 caught that lookup shape mixed with other writes, and its
+          # pure and mixed shapes stay pinned by fixed regressions; 32047
+          # caught legacy leaving a stale triple after a deep-merge + retract
+          # because its value_md5 encoding changes; 32139 caught the same
+          # stale triple surviving repeated retracts and later deep-merges;
+          # 32141 caught legacy's set-order choice among multiple invalid
+          # $in date values.
+          FUZZ_SEEDS: "42 99 1 2 3 4 5 6 7 8 9 10 31201 31255 31299 31586 31642 32047 32063 32139 32141"
+          FUZZ_ROUNDS: "400"
           FUZZ_SEED_WINDOW: ${{ (github.event_name == 'schedule' || inputs.nightly) && '40' || '0' }}
           FUZZ_PERMS_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22' || '7 8 9 17' }}
           FUZZ_PERMS_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '300' || '120' }}
