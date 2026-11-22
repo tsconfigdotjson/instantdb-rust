@@ -2680,8 +2680,11 @@ mod link_value_tests {
                 hint["input"][0][1]["forward-identity"][2],
                 attr_id.to_string()
             );
-            assert_eq!(hint["input"][1][0], "add-triple");
-            assert_eq!(hint["input"][1][1], json!([attr_id.to_string(), "v"]));
+            // the object's new `title` attr is prepended too, then the triples
+            let lookup = json!([attr_id.to_string(), "v"]);
+            assert!(hint["input"].as_array().unwrap().iter().any(|step| {
+                step[0] == "add-triple" && step[1] == lookup && step[2] == hint["input"][0][1]["id"]
+            }));
         }
         // the name forms keep matching legacy: a name pair and a single-key
         // object both auto-create a unique posts.title attr and target it
