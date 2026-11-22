@@ -2680,8 +2680,9 @@ mod link_value_tests {
                 hint["input"][0][1]["forward-identity"][2],
                 attr_id.to_string()
             );
-            // the object's new `title` attr is prepended too, then the triples
-            let lookup = json!([attr_id.to_string(), "v"]);
+            // the object's new `title` attr is prepended too, then the triples.
+            // The lookup names the auto-created attr, never the caller's id.
+            let lookup = json!([hint["input"][0][1]["id"].clone(), "v"]);
             assert!(hint["input"]
                 .as_array()
                 .unwrap()
