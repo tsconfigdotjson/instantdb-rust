@@ -484,25 +484,33 @@ function normalizePayload(payload) {
 async function waitDeltas(server, hooks, seen, { quietMs = EVENT_SETTLE_MS, maxMs = EVENT_MAX_WAIT_MS } = {}) {
   const started = Date.now();
   let lastNew = Date.now();
-  let current = new Map(hooks.map((h) => [h.id, []]));
+  // Events already discovered by this call stay in `observed`; otherwise the
+  // same new row would count as "new" on every poll and reset the quiet timer
+  // forever.
+  const observed = new Map(hooks.map((h) => [h.id, []]));
   for (;;) {
     const lists = await Promise.all(hooks.map((h) => listEvents(server, h.id)));
     let gotNew = false;
-    current = new Map(
-      hooks.map((h, i) => [h.id, lists[i].filter((e) => !seen.get(h.id).has(e.isn))]),
-    );
-    for (const events of current.values()) if (events.length) gotNew = true;
+    for (const [i, h] of hooks.entries()) {
+      const already = new Set(observed.get(h.id).map((e) => e.isn));
+      for (const e of lists[i]) {
+        if (seen.get(h.id).has(e.isn) || already.has(e.isn)) continue;
+        observed.get(h.id).push(e);
+        already.add(e.isn);
+        gotNew = true;
+      }
+    }
     if (gotNew) lastNew = Date.now();
     if (Date.now() - lastNew >= quietMs) break;
     if (Date.now() - started > maxMs) {
-      const pending = [...current.entries()].map(([id, es]) => `${id}: ${es.length}`).join(", ");
+      const pending = [...observed.entries()].map(([id, es]) => `${id}: ${es.length}`).join(", ");
       throw new Error(`timed out waiting for webhook events on ${server.url} (${pending})`);
     }
     await sleep(60);
   }
   const out = [];
   for (const h of hooks) {
-    const events = current.get(h.id) ?? [];
+    const events = observed.get(h.id) ?? [];
     const payloads = [];
     for (const e of events) payloads.push(normalizePayload(await fetchPayload(server, h.id, e.isn)));
     payloads.sort((a, b) => (canon(a) < canon(b) ? -1 : canon(a) > canon(b) ? 1 : 0));
