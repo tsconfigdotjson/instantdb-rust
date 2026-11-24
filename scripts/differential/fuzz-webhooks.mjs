@@ -112,7 +112,7 @@ function buildPlan() {
     attr(byLabel[A].id, A, "id", { "unique?": true, "index?": true }),
     attr(byLabel[A].name, A, "name"),
     attr(byLabel[A].rank, A, "rank", { "checked-data-type": "number" }),
-    attr(byLabel[A].meta, A, "meta", { "checked-data-type": "json" }),
+    attr(byLabel[A].meta, A, "meta"),
     attr(byLabel[A].flag, A, "flag", { "checked-data-type": "boolean" }),
     attr(byLabel[A].handle, A, "handle", { "unique?": true }),
     refAttr(byLabel[A].peer, A, "peer", byLabel[B].peerRev, B, "peerRev"),
@@ -419,7 +419,8 @@ async function sendTx(conn, tx) {
   conn.send({ "client-event-id": ceid, op: "transact", "tx-steps": tx.steps });
   const reply = await conn.waitFor((m) => m["client-event-id"] === ceid && (m.op === "transact-ok" || m.op === "error"));
   if (reply.op !== "transact-ok") {
-    throw new Error(`transaction ${tx.name} failed: ${JSON.stringify(reply).slice(0, 800)}\nsteps: ${JSON.stringify(tx.steps)}`);
+    const detail = { status: reply.status, type: reply.type, message: reply.message, hint: reply.hint };
+    throw new Error(`transaction ${tx.name} failed: ${JSON.stringify(detail)}\nsteps: ${JSON.stringify(tx.steps)}`);
   }
   return reply;
 }
