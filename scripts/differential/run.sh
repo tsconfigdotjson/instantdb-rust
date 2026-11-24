@@ -213,6 +213,7 @@ seeded_seed() {
     storagefuzz) node fuzz-storage.mjs "$app" "$app" "$token" "$seed" "${FUZZ_STORAGE_ROUNDS:-80}" ;;
     syncfuzz) node fuzz-sync.mjs "$app" "$app" "$token" "$seed" "${FUZZ_SYNC_ROUNDS:-60}" ;;
     streamfuzz) node fuzz-streams.mjs "$app" "$app" "$token" "$seed" "${FUZZ_STREAMS_ROUNDS:-30}" ;;
+    webhookfuzz) node fuzz-webhooks.mjs "$app" "$app" "$token" "$seed" "${FUZZ_WEBHOOKS_ROUNDS:-18}" ;;
     *) echo "unknown seeded layer: $layer"; return 1 ;;
   esac
 }
@@ -291,6 +292,14 @@ run_seeded_layer syncfuzz "${FUZZ_SYNC_JOBS:-1}" $SYNC_SEEDS
 # replay leg with the sync seeds.
 STREAM_SEEDS="${FUZZ_STREAMS_SEEDS:-401 402}"
 run_seeded_layer streamfuzz "${FUZZ_STREAMS_JOBS:-1}" $STREAM_SEEDS
+# webhook event production: generated namespaces / action subsets, then
+# creates, updates, merges, deletes (including missing and cascades), link /
+# unlink, multi-entity and non-webhook namespaces, and lookup upserts. Every
+# transaction compares the set of events each webhook queued on legacy vs rust
+# and each new event's decoded payload records (fuzz-webhooks.mjs). The two
+# cheap PR seeds ride the seed legs; nightly spreads one per seed leg.
+WEBHOOK_SEEDS="${FUZZ_WEBHOOKS_SEEDS:-501 502}"
+run_seeded_layer webhookfuzz "${FUZZ_WEBHOOKS_JOBS:-1}" $WEBHOOK_SEEDS
 # subscription race fuzz (issue #51): rust-only invariants for queries
 # registered while transactions are in flight, against a rust server booted
 # with INSTANT_CHAOS_DELAY_MS (RACE_URL; defaults to RUST_URL)
@@ -305,7 +314,7 @@ for SEED in ${FUZZ_RACE_SEEDS:-1 2 3}; do
 done
 if [ -n "$FUZZ_FAILED" ]; then
   echo "FUZZ FAILED for seeds:$FUZZ_FAILED"
-  echo "  (rerun a fuzz seed with FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60}, a presence seed with FUZZ_PRESENCE_SEEDS=<seed> FUZZ_PRESENCE_ROUNDS=${FUZZ_PRESENCE_ROUNDS:-100}, a schema seed with FUZZ_SCHEMA_SEEDS=<seed> FUZZ_SCHEMA_ROUNDS=${FUZZ_SCHEMA_ROUNDS:-200}, a storage seed with FUZZ_STORAGE_SEEDS=<seed> FUZZ_STORAGE_ROUNDS=${FUZZ_STORAGE_ROUNDS:-80}, a sync seed with FUZZ_SYNC_SEEDS=<seed> FUZZ_SYNC_ROUNDS=${FUZZ_SYNC_ROUNDS:-60}, a stream seed with FUZZ_STREAMS_SEEDS=<seed> FUZZ_STREAMS_ROUNDS=${FUZZ_STREAMS_ROUNDS:-30}; LAYERS narrows the run)"
+  echo "  (rerun a fuzz seed with FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60}, a presence seed with FUZZ_PRESENCE_SEEDS=<seed> FUZZ_PRESENCE_ROUNDS=${FUZZ_PRESENCE_ROUNDS:-100}, a schema seed with FUZZ_SCHEMA_SEEDS=<seed> FUZZ_SCHEMA_ROUNDS=${FUZZ_SCHEMA_ROUNDS:-200}, a storage seed with FUZZ_STORAGE_SEEDS=<seed> FUZZ_STORAGE_ROUNDS=${FUZZ_STORAGE_ROUNDS:-80}, a sync seed with FUZZ_SYNC_SEEDS=<seed> FUZZ_SYNC_ROUNDS=${FUZZ_SYNC_ROUNDS:-60}, a stream seed with FUZZ_STREAMS_SEEDS=<seed> FUZZ_STREAMS_ROUNDS=${FUZZ_STREAMS_ROUNDS:-30}, a webhook seed with FUZZ_WEBHOOKS_SEEDS=<seed> FUZZ_WEBHOOKS_ROUNDS=${FUZZ_WEBHOOKS_ROUNDS:-18}; LAYERS narrows the run)"
   FAILED_LAYERS="$FAILED_LAYERS fuzz"
 fi
 
