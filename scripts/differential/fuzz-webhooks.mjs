@@ -102,7 +102,7 @@ function buildPlan() {
   const C = `whC_${seed}`;
   const N = `whN_${seed}`;
   const byLabel = {
-    [A]: { id: mk(), name: mk(), rank: mk(), meta: mk(), flag: mk(), handle: mk(), peer: mk(), peerRev: mk() },
+    [A]: { id: mk(), name: mk(), rank: mk(), meta: mk(), flag: mk(), handle: mk(), peer: mk(), peerRev: mk(), owned: mk() },
     [B]: { id: mk(), title: mk(), count: mk(), owner: mk(), owned: mk(), peerRev: mk() },
     [C]: { id: mk(), text: mk() },
     [N]: { id: mk(), value: mk() },
