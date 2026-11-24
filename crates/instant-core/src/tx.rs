@@ -901,7 +901,7 @@ pub async fn transact(
                     items,
                 )
                 .await?;
-                let outcome = insert_triples(&mut *conn, app_id, attrs, &resolved, false).await?;
+                let outcome = insert_triples(&mut *conn, app_id, attrs, &resolved).await?;
                 if let Some(e) = id_lookup_refusal {
                     return Err(e);
                 }

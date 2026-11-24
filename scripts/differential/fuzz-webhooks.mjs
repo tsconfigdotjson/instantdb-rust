@@ -164,11 +164,6 @@ function buildPlan() {
     if (cur) cur.alive = false;
     return [["delete-entity", eid, ns]];
   };
-  const markAlive = (ns, eid) => {
-    const cur = state[ns].get(eid) ?? {};
-    cur.alive = true;
-    state[ns].set(eid, cur);
-  };
   const alive = (ns) => [...state[ns].entries()].filter(([, v]) => v.alive).map(([id]) => id);
   const link = (a, b) => {
     links.add(`${a}|${b}`);
@@ -266,12 +261,11 @@ function buildPlan() {
   const b5 = mk();
   tx("create-cascade-child", create(B, b5, { title: "b5-cascade", count: 5, owner: aIds[2] }));
   tx("cascade-delete", remove(A, aIds[2]));
-  const a9 = mk();
-  tx("lookup-create-by-id", [
-    ["add-triple", [byLabel[A].id, a9], byLabel[A].id, [byLabel[A].id, a9]],
-    ["add-triple", [byLabel[A].id, a9], byLabel[A].name, "lookup-created"],
+  // a non-id lookup only resolves/creates the lookup entity (no id triple),
+  // so it produces no event on either server
+  tx("lookup-create-without-id", [
+    ["add-triple", [byLabel[A].handle, `lookup-created-${seed}`], byLabel[A].name, "lookup-created-without-id"],
   ]);
-  markAlive(A, a9);
   tx("lookup-update-by-handle", [
     ["add-triple", [byLabel[A].handle, initialA.get(aIds[0]).handle], byLabel[A].id, [byLabel[A].handle, initialA.get(aIds[0]).handle]],
     ["add-triple", [byLabel[A].handle, initialA.get(aIds[0]).handle], byLabel[A].name, "lookup-updated"],
