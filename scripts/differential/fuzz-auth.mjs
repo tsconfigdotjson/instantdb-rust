@@ -212,8 +212,8 @@ function buildPlan() {
   };
   const guest = ({ admin = false, extraFields, assignUser, assignToken }) => {
     push({ kind: guestKind(admin), extraFields, assignUser, assignToken });
-    setUser(assignUser, {});
-    addToken(assignToken, assignUser);
+    if (assignUser) setUser(assignUser, {});
+    if (assignUser && assignToken) addToken(assignToken, assignUser);
   };
   const guestKind = (admin) => (admin ? "admin_guest" : "guest");
   const adminCode = (email, codeLabel) => {
@@ -283,8 +283,8 @@ function buildPlan() {
       }
     }
   };
-  const init = ({ tokenLabel, literalToken, admin = false, query = false, anonymous = false }) =>
-    push({ kind: "init", tokenLabel, literalToken, admin, query, anonymous });
+  const init = ({ tokenLabel, literalToken, admin = false, query = false, anonymous = false, name }) =>
+    push({ kind: "init", tokenLabel, literalToken, admin, query, anonymous, ...(name ? { name } : {}) });
 
   // ---- fixed prefix: every surface, security sequence and malformed shape
   adminRefresh({
@@ -425,11 +425,11 @@ function buildPlan() {
   verify({ email: emails.U1, literalCode: "nope", consumes: false });
   verify({ email: emails.malformed, literalCode: "000000", consumes: false });
   adminCode(emails.malformed, "cBadEmail");
-  guest({ extraFields: { unknown: "x" }, assignUser: "G3", assignToken: "tG3" });
-  guest({ admin: true, extraFields: { email: "evil@fuzz.example" }, assignUser: "G4", assignToken: "tG4" });
+  guest({ extraFields: { unknown: "x" } });
+  guest({ admin: true, extraFields: { email: "evil@fuzz.example" } });
   adminRefresh({ email: freshEmail(), extraFields: { unknown: "x" } });
-  init({ literalToken: "nope" });
-  init({ literalToken: uuid() });
+  init({ literalToken: "nope", name: "init-malformed-token" });
+  init({ literalToken: uuid(), name: "init-unknown-token" });
 
   // a fresh socket session still sees the generated view rule
   adminRefresh({ email: emails.U4, id: fixedIds.U4, assignUser: "U4", assignToken: "tU4" });
@@ -849,7 +849,9 @@ async function runOn(serverName, plan) {
           outcome = {
             kind: "init",
             authKeys: Object.keys(auth).sort(),
-            admin: auth["admin?"] ?? null,
+            // legacy leaves admin? nil when no token was sent, rust sets
+            // false: both mean "not an admin" to the client
+            admin: Boolean(auth["admin?"] ?? false),
             app: norm(auth.app?.id ?? null),
             user: auth.user
               ? { id: norm(auth.user.id ?? null), email: auth.user.email ?? null }

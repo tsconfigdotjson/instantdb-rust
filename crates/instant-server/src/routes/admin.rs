@@ -1219,7 +1219,13 @@ async fn refresh_tokens_impl(
             Some(u) => (u.id, false),
             None => {
                 auth::validate_extra_fields(&attrs, extra_fields)?;
-                let mut steps = vec![json!(["add-triple", id, sc::attr_id("$users", "id"), id])];
+                // Legacy create! receives :email nil on this branch (the
+                // route always passes the optional email) and writes it as a
+                // null email triple, so the returned user carries email: null.
+                let mut steps = vec![
+                    json!(["add-triple", id, sc::attr_id("$users", "id"), id]),
+                    json!(["add-triple", id, sc::attr_id("$users", "email"), Value::Null]),
+                ];
                 steps.extend(auth::extra_field_steps(&attrs, id, extra_fields));
                 service::run_system_transact(state, ctx.app_id, &Value::Array(steps)).await?;
                 (id, true)
@@ -1263,9 +1269,7 @@ async fn sign_out_impl(
         let email = coerce_email_value(raw, &["body", "email"])?;
         let user = auth::user_by_email(state, ctx.app_id, &email)
             .await?
-            .ok_or_else(|| {
-                app_user_not_found(json!({"app-id": ctx.app_id, "email": email}))
-            })?;
+            .ok_or_else(|| app_user_not_found(json!({"app-id": ctx.app_id, "email": email})))?;
         auth::sign_out(state, ctx.app_id, Some(user.id), None).await?;
     } else if let Some(raw) = optional_body_value(body, "refresh_token") {
         let token = coerce_uuid_value(raw, &["body", "refresh_token"])?;

@@ -92,9 +92,7 @@ pub(crate) fn required_body_value<'a>(body: &'a Value, key: &str) -> Result<&'a 
 }
 
 pub(crate) fn coerce_uuid_value(raw: &Value, ks: &[&str]) -> Result<Uuid> {
-    let s = raw
-        .as_str()
-        .ok_or_else(|| param_malformed_path(ks, raw))?;
+    let s = raw.as_str().ok_or_else(|| param_malformed_path(ks, raw))?;
     Uuid::parse_str(s.trim()).map_err(|_| param_malformed_path(ks, raw))
 }
 
@@ -105,9 +103,7 @@ pub(crate) fn coerce_trimmed_string_value(raw: &Value, ks: &[&str]) -> Result<St
 }
 
 pub(crate) fn coerce_email_value(raw: &Value, ks: &[&str]) -> Result<String> {
-    let s = raw
-        .as_str()
-        .ok_or_else(|| param_malformed_path(ks, raw))?;
+    let s = raw.as_str().ok_or_else(|| param_malformed_path(ks, raw))?;
     let email = s.to_lowercase().trim().to_string();
     if !valid_email(&email) {
         return Err(param_malformed_path(ks, raw));
@@ -226,7 +222,10 @@ pub async fn user_json(
         if attr_id == id_attr {
             created_at_ms = row.get::<Option<i64>, _>("created_at").unwrap_or(0);
         }
-        if attr.value_type == instant_core::attr::ValueType::Blob && !v.is_null() {
+        // Legacy triples->db-format assocs every stored value, including refs
+        // (e.g. $users.linkedPrimaryUser) and explicit nulls (an admin
+        // refresh-token user created by id is written with a null email).
+        if !v.is_null() {
             m.insert(attr.label.clone(), v);
         }
     }
