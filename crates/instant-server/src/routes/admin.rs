@@ -1224,7 +1224,12 @@ async fn refresh_tokens_impl(
                 // null email triple, so the returned user carries email: null.
                 let mut steps = vec![
                     json!(["add-triple", id, sc::attr_id("$users", "id"), id]),
-                    json!(["add-triple", id, sc::attr_id("$users", "email"), Value::Null]),
+                    json!([
+                        "add-triple",
+                        id,
+                        sc::attr_id("$users", "email"),
+                        Value::Null
+                    ]),
                 ];
                 steps.extend(auth::extra_field_steps(&attrs, id, extra_fields));
                 service::run_system_transact(state, ctx.app_id, &Value::Array(steps)).await?;

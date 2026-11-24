@@ -225,9 +225,7 @@ pub async fn user_json(
         // Legacy triples->db-format assocs every stored value, including refs
         // (e.g. $users.linkedPrimaryUser) and explicit nulls (an admin
         // refresh-token user created by id is written with a null email).
-        if !v.is_null() {
-            m.insert(attr.label.clone(), v);
-        }
+        m.insert(attr.label.clone(), v);
     }
     m.insert("id".into(), json!(user_id));
     m.insert("app_id".into(), json!(app_id));
