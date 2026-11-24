@@ -48,15 +48,102 @@ pub fn json_or_err(r: Result<Value>) -> Response {
     }
 }
 
-fn get_str<'a>(body: &'a Value, key: &str) -> Result<&'a str> {
-    body.get(key)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| InstantError::param_missing(format!("Missing required parameter: {key}")))
+/// Legacy `safe-name` rendering of a parameter path (`get-param!`,
+/// util/exception.clj:409-440): `["body" "email"]`.
+fn param_path(ks: &[&str]) -> String {
+    format!(
+        "[{}]",
+        ks.iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+pub(crate) fn param_missing_path(ks: &[&str]) -> InstantError {
+    InstantError::new(
+        "param-missing",
+        400,
+        format!("Missing parameter: {}", param_path(ks)),
+        Some(json!({"in": ks})),
+    )
+}
+
+pub(crate) fn param_malformed_path(ks: &[&str], original: &Value) -> InstantError {
+    InstantError::new(
+        "param-malformed",
+        400,
+        format!("Malformed parameter: {}", param_path(ks)),
+        Some(json!({"in": ks, "original-input": original})),
+    )
+}
+
+/// Legacy truthiness for `get-param!` / `get-optional-param!`: nil and false
+/// are absent, everything else (including "" and 0) is present.
+pub(crate) fn optional_body_value<'a>(body: &'a Value, key: &str) -> Option<&'a Value> {
+    match body.get(key) {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => None,
+        Some(v) => Some(v),
+    }
+}
+
+pub(crate) fn required_body_value<'a>(body: &'a Value, key: &str) -> Result<&'a Value> {
+    optional_body_value(body, key).ok_or_else(|| param_missing_path(&["body", key]))
+}
+
+pub(crate) fn coerce_uuid_value(raw: &Value, ks: &[&str]) -> Result<Uuid> {
+    let s = raw
+        .as_str()
+        .ok_or_else(|| param_malformed_path(ks, raw))?;
+    Uuid::parse_str(s.trim()).map_err(|_| param_malformed_path(ks, raw))
+}
+
+pub(crate) fn coerce_trimmed_string_value(raw: &Value, ks: &[&str]) -> Result<String> {
+    raw.as_str()
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| param_malformed_path(ks, raw))
+}
+
+pub(crate) fn coerce_email_value(raw: &Value, ks: &[&str]) -> Result<String> {
+    let s = raw
+        .as_str()
+        .ok_or_else(|| param_malformed_path(ks, raw))?;
+    let email = s.to_lowercase().trim().to_string();
+    if !valid_email(&email) {
+        return Err(param_malformed_path(ks, raw));
+    }
+    Ok(email)
+}
+
+pub(crate) fn optional_body_uuid(body: &Value, key: &str) -> Result<Option<Uuid>> {
+    optional_body_value(body, key)
+        .map(|v| coerce_uuid_value(v, &["body", key]))
+        .transpose()
+}
+
+pub(crate) fn optional_body_email(body: &Value, key: &str) -> Result<Option<String>> {
+    optional_body_value(body, key)
+        .map(|v| coerce_email_value(v, &["body", key]))
+        .transpose()
+}
+
+pub(crate) fn body_uuid_param(body: &Value, key: &str) -> Result<Uuid> {
+    let v = required_body_value(body, key)?;
+    coerce_uuid_value(v, &["body", key])
+}
+
+pub(crate) fn body_email_param(body: &Value, key: &str) -> Result<String> {
+    let v = required_body_value(body, key)?;
+    coerce_email_value(v, &["body", key])
+}
+
+pub(crate) fn body_trimmed_string_param(body: &Value, key: &str) -> Result<String> {
+    let v = required_body_value(body, key)?;
+    coerce_trimmed_string_value(v, &["body", key])
 }
 
 fn get_app_id(body: &Value, key: &str) -> Result<Uuid> {
-    Uuid::parse_str(get_str(body, key)?)
-        .map_err(|_| InstantError::param_malformed(format!("Malformed parameter: {key}")))
+    body_uuid_param(body, key)
 }
 
 pub fn coerce_email_pub(raw: &str) -> Result<String> {
@@ -171,9 +258,10 @@ pub async fn send_magic_code(
 }
 
 async fn send_magic_code_impl(state: &Arc<AppState>, body: &Value) -> Result<Value> {
+    // legacy send-magic-code-post binds email before app-id (runtime/routes.clj:69-76)
+    let email = body_email_param(body, "email")?;
     let app_id = get_app_id(body, "app-id")?;
     check_auth_limit(state, app_id)?;
-    let email = coerce_email(get_str(body, "email")?)?;
     send_magic_code_for(state, app_id, &email).await?;
     Ok(json!({"sent": true}))
 }
@@ -244,15 +332,18 @@ pub async fn verify_magic_code(
 /// already covered by the /admin/* bucket and its token check. The
 /// (app, email) bucket doubles as the 6-digit-code brute-force guard.
 async fn verify_magic_code_runtime(state: &AppState, body: &Value) -> Result<Value> {
+    // legacy verify-magic-code-post binds email, code, then app-id
+    // (runtime/routes.clj:88-106)
+    let email = body_email_param(body, "email")?;
+    let code = body_trimmed_string_param(body, "code")?;
     let app_id = get_app_id(body, "app-id")?;
     check_auth_limit(state, app_id)?;
-    let email = coerce_email(get_str(body, "email")?)?;
     state
         .limiters
         .magic_code_verify
-        .check((app_id, email), 1.0)
+        .check((app_id, email.clone()), 1.0)
         .map_err(rate_limit::email_rate_limited_err)?;
-    verify_magic_code_impl(state, body, false).await
+    verify_magic_code_core(state, app_id, email, code, body, false).await
 }
 
 pub async fn verify_magic_code_shared(state: &AppState, body: &Value) -> Result<Value> {
@@ -260,16 +351,29 @@ pub async fn verify_magic_code_shared(state: &AppState, body: &Value) -> Result<
 }
 
 async fn verify_magic_code_impl(state: &AppState, body: &Value, admin: bool) -> Result<Value> {
+    let email = body_email_param(body, "email")?;
+    let code = body_trimmed_string_param(body, "code")?;
     let app_id = get_app_id(body, "app-id")?;
-    let email = coerce_email(get_str(body, "email")?)?;
-    let code = get_str(body, "code")?.trim().to_string();
+    verify_magic_code_core(state, app_id, email, code, body, admin).await
+}
+
+async fn verify_magic_code_core(
+    state: &AppState,
+    app_id: Uuid,
+    email: String,
+    code: String,
+    body: &Value,
+    admin: bool,
+) -> Result<Value> {
     let code_hash = auth::hash_string(&code);
 
     // guest-upgrade token must resolve if provided; legacy only treats it
     // as a guest upgrade when that user's type is "guest" (routes.clj:99-104)
     let mut guest_user: Option<auth::AppUser> = None;
-    if let Some(token) = body.get("refresh-token").and_then(|v| v.as_str()) {
-        match auth::user_by_refresh_token(state, app_id, token).await? {
+    if let Some(token_value) = optional_body_value(body, "refresh-token") {
+        let token = coerce_uuid_value(token_value, &["body", "refresh-token"])?;
+        let token = token.to_string();
+        match auth::user_by_refresh_token(state, app_id, &token).await? {
             Some(u) => {
                 let is_guest = user_json(state, app_id, u.id, None)
                     .await
@@ -420,10 +524,13 @@ pub async fn verify_refresh_token(
 }
 
 async fn verify_refresh_token_impl(state: &AppState, body: &Value) -> Result<Value> {
+    // legacy verify-refresh-token-post binds refresh-token before app-id
+    // (runtime/routes.clj:155-159)
+    let token = body_uuid_param(body, "refresh-token")?;
     let app_id = get_app_id(body, "app-id")?;
     check_auth_limit(state, app_id)?;
-    let token = get_str(body, "refresh-token")?;
-    let user = auth::user_by_refresh_token(state, app_id, token)
+    let token = token.to_string();
+    let user = auth::user_by_refresh_token(state, app_id, &token)
         .await?
         .ok_or_else(|| {
             InstantError::record_not_found_args(
@@ -431,7 +538,7 @@ async fn verify_refresh_token_impl(state: &AppState, body: &Value) -> Result<Val
                 json!({"app-id": app_id, "refresh-token": token}),
             )
         })?;
-    let token_uuid = Uuid::parse_str(token).ok();
+    let token_uuid = Uuid::parse_str(&token).ok();
     let user = user_json(state, app_id, user.id, token_uuid).await?;
     Ok(json!({"user": user}))
 }

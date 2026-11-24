@@ -16,7 +16,10 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::auth;
-use crate::routes::runtime::{err_response, json_or_err, user_json};
+use crate::routes::runtime::{
+    body_email_param, coerce_email_value, coerce_uuid_value, err_response, json_or_err,
+    optional_body_email, optional_body_uuid, optional_body_value, user_json,
+};
 use crate::service::{self, PermsCtx};
 use crate::state::AppState;
 
@@ -1185,11 +1188,12 @@ async fn refresh_tokens_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
-    let email = body.get("email").and_then(|v| v.as_str());
-    let id = body
-        .get("id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok());
+    // legacy refresh-tokens-post parses email then id with get-optional-param!
+    // (admin/routes.clj:398-408), so an invalid value is param-malformed even
+    // when the other identifier would have been enough.
+    let email = optional_body_email(body, "email")?;
+    let id = optional_body_uuid(body, "id")?;
+    let email = email.as_deref();
     // legacy refresh-tokens-post (admin/routes.clj:398-427): assert-signup!
     // with skip-perm-check? validates extra-fields against the $users schema
     let extra_fields = auth::extra_fields_of(body, "extra-fields");
@@ -1222,9 +1226,9 @@ async fn refresh_tokens_impl(
             }
         },
         _ => {
-            return Err(InstantError::validation_failed(
+            return Err(InstantError::validation_failed_input(
                 "body",
-                "Please provide an `email` or `id`",
+                body.clone(),
                 json!([{"message": "Please provide an `email` or `id`"}]),
             ))
         }
@@ -1250,25 +1254,26 @@ async fn sign_out_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
-    if let Some(id) = body
-        .get("id")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Uuid::parse_str(s).ok())
-    {
+    // legacy sign-out-post's cond parses only the branch it takes
+    // (admin/routes.clj:429-452), in id / email / refresh_token order.
+    if let Some(raw) = optional_body_value(body, "id") {
+        let id = coerce_uuid_value(raw, &["body", "id"])?;
         auth::sign_out(state, ctx.app_id, Some(id), None).await?;
-    } else if let Some(email) = body.get("email").and_then(|v| v.as_str()) {
-        let user = auth::user_by_email(state, ctx.app_id, email)
+    } else if let Some(raw) = optional_body_value(body, "email") {
+        let email = coerce_email_value(raw, &["body", "email"])?;
+        let user = auth::user_by_email(state, ctx.app_id, &email)
             .await?
             .ok_or_else(|| {
-                InstantError::record_not_found("app-user", "Record not found: app-user")
+                app_user_not_found(json!({"app-id": ctx.app_id, "email": email}))
             })?;
         auth::sign_out(state, ctx.app_id, Some(user.id), None).await?;
-    } else if let Some(token) = body.get("refresh_token").and_then(|v| v.as_str()) {
-        auth::sign_out(state, ctx.app_id, None, Some(token)).await?;
+    } else if let Some(raw) = optional_body_value(body, "refresh_token") {
+        let token = coerce_uuid_value(raw, &["body", "refresh_token"])?;
+        auth::sign_out(state, ctx.app_id, None, Some(&token.to_string())).await?;
     } else {
-        return Err(InstantError::validation_failed(
+        return Err(InstantError::validation_failed_input(
             "body",
-            "Please provide an `id`, `email`, or `refresh_token`",
+            body.clone(),
             json!([{"message": "Please provide an `id`, `email`, or `refresh_token`"}]),
         ));
     }
@@ -1288,20 +1293,26 @@ async fn find_user_by_params(
     app_id: Uuid,
     params: &HashMap<String, String>,
 ) -> Result<Option<auth::AppUser>> {
-    if let Some(email) = params.get("email") {
-        return auth::user_by_email(state, app_id, email).await;
+    // legacy req->app-user! (admin/routes.clj:454-486) takes the first
+    // present key in email / refresh_token / id order and coerces that one.
+    if let Some(raw) = params.get("email") {
+        let raw = Value::String(raw.clone());
+        let email = coerce_email_value(&raw, &["params", "email"])?;
+        return auth::user_by_email(state, app_id, &email).await;
     }
-    if let Some(token) = params.get("refresh_token") {
-        return auth::user_by_refresh_token(state, app_id, token).await;
+    if let Some(raw) = params.get("refresh_token") {
+        let raw = Value::String(raw.clone());
+        let token = coerce_uuid_value(&raw, &["params", "refresh_token"])?;
+        return auth::user_by_refresh_token(state, app_id, &token.to_string()).await;
     }
-    if let Some(id) = params.get("id") {
-        let id = Uuid::parse_str(id)
-            .map_err(|_| InstantError::param_malformed("Malformed parameter: id"))?;
+    if let Some(raw) = params.get("id") {
+        let raw = Value::String(raw.clone());
+        let id = coerce_uuid_value(&raw, &["params", "id"])?;
         return auth::user_by_id(state, app_id, id).await;
     }
-    Err(InstantError::validation_failed(
+    Err(InstantError::validation_failed_input(
         "params",
-        "Please provide a user id, email, or refresh_token",
+        json!(params),
         json!([{"message": "Please provide a user id, email, or refresh_token"}]),
     ))
 }
@@ -1922,12 +1933,9 @@ async fn magic_code_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
-    let email = body
-        .get("email")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| InstantError::param_missing("Missing parameter: email"))?
-        .trim()
-        .to_lowercase();
+    // legacy magic-code-post uses get-param! with email/coerce
+    // (admin/routes.clj:514-520)
+    let email = body_email_param(body, "email")?;
     let code: String = {
         use rand::Rng;
         let mut rng = rand::thread_rng();
@@ -1978,15 +1986,7 @@ async fn admin_send_magic_code_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
-    let email = body.get("email").and_then(|v| v.as_str()).ok_or_else(|| {
-        InstantError::new(
-            "param-missing",
-            400,
-            "Missing parameter: [\"body\" \"email\"]",
-            Some(json!({"in": ["body", "email"]})),
-        )
-    })?;
-    let email = crate::routes::runtime::coerce_email_pub(email)?;
+    let email = body_email_param(body, "email")?;
     let code = crate::routes::runtime::send_magic_code_for(state, ctx.app_id, &email).await?;
     Ok(json!({"code": code}))
 }
@@ -2011,30 +2011,8 @@ async fn verify_magic_code_admin_impl(
     body: &Value,
 ) -> Result<Value> {
     let ctx = authed_admin(state, headers, params).await?;
-    // legacy `ex/get-param!` shapes for the two required body params
-    for key in ["email", "code"] {
-        match body.get(key) {
-            None | Some(Value::Null) => {
-                return Err(InstantError::new(
-                    "param-missing",
-                    400,
-                    format!("Missing parameter: [\"body\" \"{key}\"]"),
-                    Some(json!({"in": ["body", key]})),
-                ))
-            }
-            Some(v) if !v.is_string() => {
-                // legacy's coercer (email/coerce, safe-trim) returns nil for a
-                // non-string, which get-param! reports as malformed
-                return Err(InstantError::new(
-                    "param-malformed",
-                    400,
-                    format!("Malformed parameter: [\"body\" \"{key}\"]"),
-                    Some(json!({"in": ["body", key], "original-input": v})),
-                ));
-            }
-            _ => {}
-        }
-    }
+    // The shared verifier parses email, code and then app-id with legacy's
+    // get-param! semantics; only the app id comes from the auth context here.
     let mut rt_body = body.clone();
     rt_body["app-id"] = json!(ctx.app_id);
     crate::routes::runtime::verify_magic_code_shared(state, &rt_body).await
