@@ -1117,5 +1117,19 @@
     },
     "reason": "Legacy bug: the permission filter drops a nested link form without viewable rows (instaql.clj:1945-1954), so an impersonated admin query for an owner with no items (`db.asUser(...).query({ pzowner: { $: { where: { id } }, items: {} } })`) has no `items` key where the same admin query answers `items: []`. This server returns `[]` either way; the admin SDK's result types promise an array. The fuzz-perms layer runs this probe for as-guest / as-email / as-token with a view rule that keeps the parent visible, and pins both sides' whole result.",
     "citation": "LEGACY/server/src/instant/db/instaql.clj:1932-1954 (permissioned-node drops child-nodes with no join-rows); LEGACY/client/packages/admin/src/index.ts:1150-1220 (asUser query result types)"
+  },
+  {
+    "path": "^authfuzz:init-malformed-token$",
+    "differs": [
+      "^\\.(status|type|message|hint|keys)$"
+    ],
+    "legacy": {
+      "status": 500
+    },
+    "rust": {
+      "status": 400
+    },
+    "reason": "A malformed (non-UUID) refresh-token on socket init makes legacy hash nil through uuid-util/coerce and the uncaught exception becomes a generic 500. This server answers the same 400 record-not-found an unknown UUID token gets. A bad client string must not crash the server; no shipped client sends one. Differential fuzz-auth (authfuzz) pins the exact action and both statuses. docs/PARITY.md records the hardening.",
+    "citation": "LEGACY/server/src/instant/model/app-user-refresh-token.clj:9-12; LEGACY/server/src/instant/util/http.clj:209-218; LEGACY/client/packages/core/src/Connection.ts init/error path"
   }
 ]
