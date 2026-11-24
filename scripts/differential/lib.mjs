@@ -767,6 +767,7 @@ export const DIVERGENCE_PREFIXES = {
   presence: ["presence:"],
   syncfuzz: ["syncfuzz:"],
   streamfuzz: ["streamfuzz:"],
+  authfuzz: ["authfuzz:"],
 };
 
 function anchoredRegex(src, what) {

@@ -30,7 +30,10 @@ there), which is 1/1 so it never owns only part of a seed list; they use
 seeds ride the same leg (eight nightly, two at a time with
 `FUZZ_STREAMS_JOBS`): streams are mostly short append / subscribe round trips,
 so this only adds a few tens of seconds to the replay leg instead of a new
-leg. The other seven legs
+leg. The auth-flow seeds also ride the replay leg (three PR seeds, ten
+nightly): they are cheap HTTP/socket round trips behind a generated setup, so
+they add no leg to the inventory while still getting their own seed list
+(`FUZZ_AUTH_SEEDS` / `FUZZ_AUTH_ROUNDS`). The other seven legs
 each carry one schema-evolution seed (~2 minutes at PR depth; the nightly's 12
 seeds spread over the same 7 shards, two at a time with `FUZZ_SCHEMA_JOBS`)
 plus a measured-cost share of the remaining seeded layers, which
@@ -582,6 +585,29 @@ everything and checks coverage itself, as before.
   at 30 rounds per PR (`FUZZ_STREAMS_SEEDS` / `FUZZ_STREAMS_ROUNDS`), 8 seeds
   at 60 nightly through `run_seeded_layer` on the replay leg
   (`FUZZ_STREAMS_JOBS` defaults to 1, nightly 2).
+- `fuzz-auth.mjs` — seeded **auth-flow** sequences over the client and admin
+  auth surface: guest sign-in (runtime and admin), magic-code send + verify
+  (codes read through `/admin/magic_code`), wrong / reused / expired-shaped
+  codes, guest -> signed-in upgrades (including linking a guest to an
+  existing user), refresh-token verify, runtime signout and `/admin/sign_out`
+  by email / id / refresh token, `/admin/refresh_tokens` creation by email /
+  id / both, and `/admin/users` GET+DELETE by email / id / refresh token,
+  missing and malformed parameters. Generated `$users` attrs drive
+  extra-fields validation (valid, unknown, system and invalid-type values),
+  and generated `$users.allow.create` / `$users.allow.view` rules gate every
+  signup and socket `$users` query. A fixed prefix always covers the security
+  sequences (a signed-out token and a deleted user's token are rejected, a
+  code cannot be reused, an expired code is `record-expired`, malformed
+  parameters keep legacy's `param-missing` / `param-malformed` envelopes);
+  a seed-chosen random tail mixes the same actions. Compared per action:
+  HTTP status, error `type` / `message` / `hint` / key set, the whole
+  normalized response body (user fields, token presence, `created`, guest
+  flags, extra fields), socket init auth identity / admin flag, and the
+  folded `$users` result under the view rule. Only server-chosen ids, tokens,
+  codes and timestamps are normalized; fixed ids stay raw.
+  `node fuzz-auth.mjs <app> <app> <token> [seed] [rounds]`; seeds 501-503 at
+  30 rounds per PR (`FUZZ_AUTH_SEEDS` / `FUZZ_AUTH_ROUNDS`), 10 seeds at 80
+  nightly through `run_seeded_layer` on the replay leg.
 - `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):
   seeded bursts of unawaited transacts and add-queries of order/limit pages
   (a transact then a subscription to the page it changes, as an infinite

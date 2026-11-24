@@ -325,7 +325,7 @@ jobs:
       matrix:
         include:
           - leg: replay
-            layers: schema replay reftopics stress syncfuzz streamfuzz
+            layers: schema replay reftopics stress syncfuzz streamfuzz authfuzz
             shard: 1/1
           - leg: dash
             layers: dash storage storagefuzz rulewheres errors
@@ -547,6 +547,11 @@ jobs:
           FUZZ_STREAMS_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '401 402 403 404 405 406 407 408' || '401 402' }}
           FUZZ_STREAMS_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '60' || '30' }}
           FUZZ_STREAMS_JOBS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '2' || '1' }}
+          # auth flows are cheap HTTP/socket round trips: three seeds on the
+          # replay leg at PR depth, ten at nightly depth.
+          FUZZ_AUTH_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '501 502 503 504 505 506 507 508 509 510' || '501 502 503' }}
+          FUZZ_AUTH_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '80' || '30' }}
+          FUZZ_AUTH_JOBS: "1"
           FUZZ_RACE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '1 2 3 4 5 6 7 8 9 10' || '1 2 3' }}
           RACE_URL: http://localhost:8885
         run: KEEP=1 ./scripts/differential/run.sh
