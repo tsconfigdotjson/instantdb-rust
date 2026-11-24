@@ -574,15 +574,28 @@ impl InsertCols {
     }
 }
 
-/// Insert a batch of add-triple writes. Returns the set of entity ids that were
-/// newly created (their id triple inserted fresh).
+/// Result of an add-triple batch, mirroring the signals legacy's
+/// `insert-multi-new!` leaves in the WAL for webhooks:
+/// - `created`: entities whose id triple was inserted fresh (a create)
+/// - `changed`: entities whose non-id value changed or whose new ref row was
+///   inserted (the `changed-entities` CTE that lets legacy write the id triple
+///   as an update marker)
+pub struct InsertResult {
+    pub created: HashSet<Uuid>,
+    pub changed: HashSet<Uuid>,
+}
+
+/// Insert a batch of add-triple writes. Returns the entities this statement
+/// created and the existing entities it actually changed (triple.clj
+/// `insert-multi-new!`).
 pub async fn insert_triples(
     conn: &mut PgConnection,
     app_id: Uuid,
     attrs: &AttrMap,
     triples: &[ResolvedTriple],
-) -> Result<HashSet<Uuid>> {
+) -> Result<InsertResult> {
     let mut created: HashSet<Uuid> = HashSet::new();
+    let mut changed: HashSet<Uuid> = HashSet::new();
 
     // Split ea (cardinality-one upsert) from non-ea; dedupe ea keeping the last
     // write per (entity, attr).
@@ -599,6 +612,13 @@ pub async fn insert_triples(
             non_ea.push(t);
         }
     }
+    let mut id_attr_ids: Vec<Uuid> = ea_last
+        .values()
+        .filter(|t| t.attr.label == "id")
+        .map(|t| t.attr.id)
+        .collect();
+    id_attr_ids.sort_unstable();
+    id_attr_ids.dedup();
 
     // One multi-row statement per group (UNNEST over parallel arrays): a
     // 300-triple seed is two round trips instead of 300, and the
@@ -606,6 +626,10 @@ pub async fn insert_triples(
     // Rows go in (entity, attr, value-md5) order, like legacy's insert-multi!
     // (triple.clj :order-by), so concurrent txs lock overlapping rows in the
     // same order instead of deadlocking (issue #53).
+    //
+    // The id rows are always rewritten when present (legacy's no-op update is
+    // the WAL "update" marker webhooks key on); non-id rows only when their
+    // value actually changed, like insert-multi-new!'s distinct-value guard.
     if !ea_order.is_empty() {
         let mut cols = InsertCols::with_capacity(ea_order.len());
         for key in &ea_order {
@@ -624,7 +648,58 @@ pub async fn insert_triples(
             ON CONFLICT (app_id, entity_id, attr_id) WHERE ea
             DO UPDATE SET value = excluded.value, value_md5 = excluded.value_md5,
                           checked_data_type = excluded.checked_data_type
+            WHERE triples.attr_id = ANY($11::uuid[])
+               OR triples.value IS DISTINCT FROM excluded.value
             RETURNING entity_id, attr_id, (xmax = 0) AS inserted
+            "#,
+        )
+        .bind(app_id)
+        .bind(&cols.entity_ids)
+        .bind(&cols.attr_ids)
+        .bind(&cols.values)
+        .bind(&cols.ea)
+        .bind(&cols.eav)
+        .bind(&cols.av)
+        .bind(&cols.ave)
+        .bind(&cols.vae)
+        .bind(&cols.cdt)
+        .bind(&id_attr_ids)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| translate_unique_violation(e, attrs))?;
+        for row in rows {
+            let (eid, aid): (Uuid, Uuid) = (row.get("entity_id"), row.get("attr_id"));
+            if id_attr_ids.contains(&aid) {
+                if row.get::<bool, _>("inserted") {
+                    created.insert(eid);
+                }
+            } else {
+                changed.insert(eid);
+            }
+        }
+    }
+
+    if !non_ea.is_empty() {
+        // dedupe exact repeats so one statement never proposes a row twice
+        let mut seen: HashSet<(Uuid, Uuid, String)> = HashSet::new();
+        let mut cols = InsertCols::with_capacity(non_ea.len());
+        for t in non_ea {
+            if seen.insert((t.entity_id, t.attr.id, t.value.to_string())) {
+                cols.push(t);
+            }
+        }
+        let rows = sqlx::query(
+            r#"
+            INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
+                                 ea, eav, av, ave, vae, checked_data_type)
+            SELECT $1, e, a, v::jsonb, md5((v::jsonb)::text),
+                   ea, eav, av, ave, vae, cdt::checked_data_type
+            FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::bool[], $6::bool[],
+                        $7::bool[], $8::bool[], $9::bool[], $10::text[])
+                 AS t(e, a, v, ea, eav, av, ave, vae, cdt)
+            ORDER BY e, a, md5((v::jsonb)::text)
+            ON CONFLICT (app_id, entity_id, attr_id, value_md5) DO NOTHING
+            RETURNING entity_id
             "#,
         )
         .bind(app_id)
@@ -641,55 +716,11 @@ pub async fn insert_triples(
         .await
         .map_err(|e| translate_unique_violation(e, attrs))?;
         for row in rows {
-            let inserted: bool = row.get("inserted");
-            if !inserted {
-                continue;
-            }
-            let (eid, aid): (Uuid, Uuid) = (row.get("entity_id"), row.get("attr_id"));
-            if attrs.get(&aid).is_some_and(|a| a.label == "id") {
-                created.insert(eid);
-            }
+            changed.insert(row.get("entity_id"));
         }
     }
 
-    if !non_ea.is_empty() {
-        // dedupe exact repeats so one statement never proposes a row twice
-        let mut seen: HashSet<(Uuid, Uuid, String)> = HashSet::new();
-        let mut cols = InsertCols::with_capacity(non_ea.len());
-        for t in non_ea {
-            if seen.insert((t.entity_id, t.attr.id, t.value.to_string())) {
-                cols.push(t);
-            }
-        }
-        sqlx::query(
-            r#"
-            INSERT INTO triples (app_id, entity_id, attr_id, value, value_md5,
-                                 ea, eav, av, ave, vae, checked_data_type)
-            SELECT $1, e, a, v::jsonb, md5((v::jsonb)::text),
-                   ea, eav, av, ave, vae, cdt::checked_data_type
-            FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::bool[], $6::bool[],
-                        $7::bool[], $8::bool[], $9::bool[], $10::text[])
-                 AS t(e, a, v, ea, eav, av, ave, vae, cdt)
-            ORDER BY e, a, md5((v::jsonb)::text)
-            ON CONFLICT (app_id, entity_id, attr_id, value_md5) DO NOTHING
-            "#,
-        )
-        .bind(app_id)
-        .bind(&cols.entity_ids)
-        .bind(&cols.attr_ids)
-        .bind(&cols.values)
-        .bind(&cols.ea)
-        .bind(&cols.eav)
-        .bind(&cols.av)
-        .bind(&cols.ave)
-        .bind(&cols.vae)
-        .bind(&cols.cdt)
-        .execute(&mut *conn)
-        .await
-        .map_err(|e| translate_unique_violation(e, attrs))?;
-    }
-
-    Ok(created)
+    Ok(InsertResult { created, changed })
 }
 
 /// Back-fill `'null'::jsonb` rows for indexed blob attrs of newly created
@@ -858,8 +889,8 @@ pub async fn deep_merge_triples(
             attr: attr.clone(),
             value: merged,
         };
-        let newly = insert_triples(conn, app_id, attrs, &[t]).await?;
-        created.extend(newly);
+        let outcome = insert_triples(conn, app_id, attrs, &[t]).await?;
+        created.extend(outcome.created);
     }
     Ok(created)
 }

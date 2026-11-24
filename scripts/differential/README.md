@@ -30,10 +30,13 @@ there), which is 1/1 so it never owns only part of a seed list; they use
 seeds ride the same leg (eight nightly, two at a time with
 `FUZZ_STREAMS_JOBS`): streams are mostly short append / subscribe round trips,
 so this only adds a few tens of seconds to the replay leg instead of a new
-leg. The auth-flow seeds also ride the replay leg (three PR seeds, ten
-nightly): they are cheap HTTP/socket round trips behind a generated setup, so
-they add no leg to the inventory while still getting their own seed list
-(`FUZZ_AUTH_SEEDS` / `FUZZ_AUTH_ROUNDS`). The other seven legs
+leg. The webhook event-production seeds use `SHARD 1/7` on the seven seed
+legs: the two PR seeds land on the first two legs and the seven nightly seeds
+spread one per leg, so no leg gets a new job. The auth-flow seeds also ride
+the replay leg (three PR seeds, ten nightly): they are cheap HTTP/socket round
+trips behind a generated setup, so they add no leg to the inventory while still
+getting their own seed list (`FUZZ_AUTH_SEEDS` / `FUZZ_AUTH_ROUNDS`). The other
+seven legs
 each carry one schema-evolution seed (~2 minutes at PR depth; the nightly's 12
 seeds spread over the same 7 shards, two at a time with `FUZZ_SCHEMA_JOBS`)
 plus a measured-cost share of the remaining seeded layers, which
@@ -585,6 +588,23 @@ everything and checks coverage itself, as before.
   at 30 rounds per PR (`FUZZ_STREAMS_SEEDS` / `FUZZ_STREAMS_ROUNDS`), 8 seeds
   at 60 nightly through `run_seeded_layer` on the replay leg
   (`FUZZ_STREAMS_JOBS` defaults to 1, nightly 2).
+- `fuzz-webhooks.mjs` — seeded **webhook event production**: creates webhooks
+  over generated namespaces and action subsets, then replays deterministic and
+  seeded transactions on both servers. The fixed cases cover creates,
+  client-style updates, merges, id-only / no-op updates, raw non-id updates
+  (including one in a transaction another entity made match), deletes of
+  existing and missing entities, multi-entity transactions with a non-webhook
+  namespace and a link, pure link / unlink (which must queue nothing), cascade
+  deletes across two hooked namespaces, and id / unique-lookup upserts; the
+  random rounds add more of the same against live state. After every
+  transaction, each webhook's event list is read and every new event's payload
+  is fetched from `/webhooks/payload/...` (the sink URL only has to validate;
+  no receiver is needed). The compared projection is the event count plus every
+  payload record's namespace / action / entity id / before / after labels;
+  only ISNs and the payload idempotency keys derived from them are normalized.
+  `node fuzz-webhooks.mjs <app> <app> <token> [seed] [rounds]`; seeds 501-502
+  at 18 rounds per PR (`FUZZ_WEBHOOKS_SEEDS` / `FUZZ_WEBHOOKS_ROUNDS`), 7
+  seeds at 36 nightly through `run_seeded_layer` on the seed legs.
 - `fuzz-auth.mjs` — seeded **auth-flow** sequences over the client and admin
   auth surface: guest sign-in (runtime and admin), magic-code send + verify
   (codes read through `/admin/magic_code`), wrong / reused / expired-shaped
@@ -716,7 +736,9 @@ everything and checks coverage itself, as before.
   states must converge (the reply order is printed; both servers run a
   session's ops on legacy's group keys).
 - `dash.mjs` step 39 drives the webhook management routes, the events a
-  transaction queues and the payload for them on both servers.
+  transaction queues and the payload for them on both servers; the seeded
+  `fuzz-webhooks.mjs` layer compares event production over generated
+  transactions.
 - `dash.mjs` step 40 drives the dashboard's Google login (`/dash/oauth/start`
   with legacy's unconfigured client, every callback error path, a real Google
   rejection, the token errors), the get-a-db creation gates, `track-import`

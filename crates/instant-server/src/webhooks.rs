@@ -983,18 +983,39 @@ pub async fn ensure_tables(pool: &sqlx::PgPool) -> Result<()> {
     Ok(())
 }
 
+fn add_id_action(
+    actions: &mut HashMap<String, HashMap<Uuid, HashSet<&'static str>>>,
+    etype: &str,
+    eid: Uuid,
+    action: &'static str,
+) {
+    actions
+        .entry(etype.to_string())
+        .or_default()
+        .entry(eid)
+        .or_default()
+        .insert(action);
+}
+
+fn touch_entity(touched: &mut HashMap<String, HashSet<Uuid>>, etype: &str, eid: Uuid) {
+    touched.entry(etype.to_string()).or_default().insert(eid);
+}
+
 /// Runs inside the transaction, after the steps and before commit (the
 /// stand-in for legacy's WAL matching, model/webhook.clj `webhook-matches?`):
 /// an event is queued for each active webhook whose namespaces had their id
-/// attr's triple inserted (`create`), written again (`update`) or deleted
-/// (`delete`) by this tx — never for ref / value attrs alone, so a link or
-/// unlink step and the referrers of a deleted entity produce nothing, like
-/// legacy. The snapshot the payload needs (cardinality-one triples of the
-/// touched entities as this tx leaves them, plus the tx's triple changes)
-/// is taken on the same connection, so a later tx can't leak into `after`,
-/// and the history + event rows commit or roll back with the data. Returns
-/// true when events were queued (the caller wakes the delivery loop after
-/// the commit).
+/// attr's triple inserted (`create`), physically rewritten (`update`) or
+/// deleted (`delete`) by this tx — never for ref / value attrs alone, so a
+/// link or unlink step and the referrers of a deleted entity produce nothing,
+/// like legacy. A create / update followed by a delete in the same tx keeps
+/// both actions (legacy matches each action group separately), and an id-only
+/// or no-op add batch writes no marker, like `insert-multi-new!`.
+///
+/// The snapshot the payload needs (cardinality-one triples of every entity the
+/// tx touched, as this tx leaves them, plus the tx's triple changes) is taken
+/// on the same connection, so a later tx can't leak into `after`, and the
+/// history + event rows commit or roll back with the data. Returns true when
+/// events were queued (the caller wakes the delivery loop after the commit).
 pub async fn queue_events(
     state: &AppState,
     conn: &mut sqlx::PgConnection,
@@ -1002,7 +1023,11 @@ pub async fn queue_events(
     attrs: &AttrMap,
     report: &TxReport,
 ) -> Result<bool> {
-    if report.id_written.is_empty() && report.deleted.is_empty() && report.id_retracted.is_empty() {
+    if report.id_written.is_empty()
+        && report.id_merged.is_empty()
+        && report.id_retracted.is_empty()
+        && report.deleted.is_empty()
+    {
         return Ok(false);
     }
     let hooks = active_webhooks(state, app_id).await?;
@@ -1010,23 +1035,77 @@ pub async fn queue_events(
         return Ok(false);
     }
     let created: HashSet<Uuid> = report.created.iter().map(|(e, _)| *e).collect();
-    let deleted: HashSet<Uuid> = report.deleted.iter().map(|(e, _)| *e).collect();
-    // (etype -> [(entity id, action)]) from the id-attr writes of this tx
-    let mut by_etype: HashMap<String, Vec<(Uuid, &'static str)>> = HashMap::new();
-    let mut push = |etype: &str, e: Uuid, action: &'static str| {
-        let list = by_etype.entry(etype.to_string()).or_default();
-        if !list.iter().any(|(x, _)| *x == e) {
-            list.push((e, action));
+    // the change log is written by the triples trigger inside this tx, so
+    // the rows are visible here in insertion order (the same physical order
+    // legacy's `(reverse triple-changes)` walk relies on)
+    let changes: Vec<Value> = sqlx::query(
+        "SELECT entity_id, attr_id, value, action FROM rust_tx_changes
+          WHERE app_id = $1 AND tx_id = $2 ORDER BY ctid",
+    )
+    .bind(app_id)
+    .bind(report.tx_id)
+    .fetch_all(&mut *conn)
+    .await?
+    .iter()
+    .map(|r| {
+        json!({
+            "e": r.get::<Uuid, _>("entity_id"),
+            "a": r.get::<Uuid, _>("attr_id"),
+            "v": r.get::<Value, _>("value"),
+            "action": r.get::<String, _>("action"),
+        })
+    })
+    .collect();
+
+    // The same entity set legacy's update_ents / delete_ents triggers include:
+    // every row changed by the tx (forward entity), plus the reverse entity of
+    // a ref value. That is wider than the id-attr writes, so a raw non-id
+    // update in a tx another entity made webhook-matched still gets a payload
+    // record, exactly like the WAL entity log.
+    let mut touched: HashMap<String, HashSet<Uuid>> = HashMap::new();
+    let mut id_actions: HashMap<String, HashMap<Uuid, HashSet<&'static str>>> = HashMap::new();
+    for c in &changes {
+        let Some(e) = c
+            .get("e")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+        else {
+            continue;
+        };
+        let Some(aid) = c
+            .get("a")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+        else {
+            continue;
+        };
+        let Some(attr) = attrs.get(&aid) else {
+            continue;
+        };
+        touch_entity(&mut touched, &attr.etype, e);
+        if attr.value_type == ValueType::Ref {
+            if let Some(reverse_etype) = &attr.reverse_etype {
+                if let Some(target) = c
+                    .get("v")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Uuid::parse_str(s).ok())
+                {
+                    touch_entity(&mut touched, reverse_etype, target);
+                }
+            }
         }
-    };
-    for (e, etype) in report.deleted.iter().chain(report.id_retracted.iter()) {
-        push(etype, *e, "delete");
+        if attr.label == "id" {
+            match c.get("action").and_then(|v| v.as_str()) {
+                Some("added") => add_id_action(&mut id_actions, &attr.etype, e, "create"),
+                Some("removed") => add_id_action(&mut id_actions, &attr.etype, e, "delete"),
+                _ => {}
+            }
+        }
     }
     for (e, etype) in &report.id_written {
-        if deleted.contains(e) {
-            continue;
-        }
-        push(
+        touch_entity(&mut touched, etype, *e);
+        add_id_action(
+            &mut id_actions,
             etype,
             *e,
             if created.contains(e) {
@@ -1036,15 +1115,26 @@ pub async fn queue_events(
             },
         );
     }
+    for (e, etype) in &report.id_merged {
+        touch_entity(&mut touched, etype, *e);
+        add_id_action(&mut id_actions, etype, *e, "update");
+    }
+    if id_actions.is_empty() {
+        return Ok(false);
+    }
+
     let mut matched: Vec<&Webhook> = vec![];
     let mut wanted_etypes: HashSet<String> = HashSet::new();
     for w in hooks.iter() {
         let ns = namespaces(attrs, w);
         let hit = ns.iter().any(|n| {
-            by_etype
-                .get(n)
-                .map(|ents| ents.iter().any(|(_, a)| w.actions.iter().any(|x| x == a)))
-                .unwrap_or(false)
+            id_actions.get(n).is_some_and(|ents| {
+                ents.values().any(|actions| {
+                    actions
+                        .iter()
+                        .any(|a| w.actions.iter().any(|x| x.as_str() == *a))
+                })
+            })
         });
         if hit {
             matched.push(w);
@@ -1054,12 +1144,13 @@ pub async fn queue_events(
     if matched.is_empty() {
         return Ok(false);
     }
+
     // snapshot: the touched entities of the matched namespaces (cardinality-one
     // attrs, like legacy's entity log) plus this tx's triple changes
     let mut entity_ids: Vec<Uuid> = vec![];
-    for (etype, ents) in &by_etype {
+    for (etype, ents) in &touched {
         if wanted_etypes.contains(etype) {
-            entity_ids.extend(ents.iter().map(|(e, _)| *e));
+            entity_ids.extend(ents.iter().copied());
         }
     }
     let one_attr_ids: Vec<Uuid> = attrs
@@ -1094,27 +1185,6 @@ pub async fn queue_events(
             .unwrap()
             .insert(a.to_string(), v);
     }
-    // the change log is written by the triples trigger inside this tx, so
-    // the rows are visible here in insertion order (the same physical order
-    // legacy's `(reverse triple-changes)` walk relies on)
-    let changes: Vec<Value> = sqlx::query(
-        "SELECT entity_id, attr_id, value, action FROM rust_tx_changes
-          WHERE app_id = $1 AND tx_id = $2 ORDER BY ctid",
-    )
-    .bind(app_id)
-    .bind(report.tx_id)
-    .fetch_all(&mut *conn)
-    .await?
-    .iter()
-    .map(|r| {
-        json!({
-            "e": r.get::<Uuid, _>("entity_id"),
-            "a": r.get::<Uuid, _>("attr_id"),
-            "v": r.get::<Value, _>("value"),
-            "action": r.get::<String, _>("action"),
-        })
-    })
-    .collect();
     sqlx::query(
         "INSERT INTO rust_webhook_history (app_id, tx_id, entities, changes) VALUES ($1, $2, $3, $4)
          ON CONFLICT (app_id, tx_id) DO NOTHING",
@@ -1222,7 +1292,12 @@ pub async fn payload_records(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    // before = after with the tx's changes reversed (cardinality-one attrs only)
+    // before = after with the tx's changes walked in reverse, exactly like
+    // legacy `extract-entities-before` (topics.clj:250-267): an insert removes
+    // the attr from the working snapshot and an update / delete restores its
+    // old value. Walking forward would pick the wrong value when an attr is
+    // written more than once in one tx, and would invent a before-state for an
+    // attr created then deleted in the same tx.
     let mut before: BTreeMap<String, BTreeMap<String, Map<String, Value>>> = BTreeMap::new();
     for (etype, ents) in &after {
         for (eid, ent) in ents.as_object().cloned().unwrap_or_default() {
@@ -1232,47 +1307,37 @@ pub async fn payload_records(
                 .insert(eid, ent.as_object().cloned().unwrap_or_default());
         }
     }
-    let one_etype = |a: Uuid| {
-        attrs
-            .get(&a)
-            .filter(|x| x.cardinality == Cardinality::One)
-            .map(|x| x.etype.clone())
-    };
-    let mut removed: Vec<(String, String, String, Value)> = vec![];
-    for c in &changes {
-        let a = c
+    for c in changes.iter().rev() {
+        let Some(a) = c
             .get("a")
             .and_then(|v| v.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok());
+            .and_then(|s| Uuid::parse_str(s).ok())
+        else {
+            continue;
+        };
+        let Some(attr) = attrs.get(&a).filter(|x| x.cardinality == Cardinality::One) else {
+            continue;
+        };
         let e = c
             .get("e")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let (Some(a), Some(etype)) = (a, a.and_then(one_etype)) else {
-            continue;
-        };
         match c.get("action").and_then(|v| v.as_str()) {
             Some("added") => {
-                if let Some(ent) = before.get_mut(&etype).and_then(|m| m.get_mut(&e)) {
+                if let Some(ent) = before.get_mut(&attr.etype).and_then(|m| m.get_mut(&e)) {
                     ent.remove(&a.to_string());
                 }
             }
-            _ => removed.push((
-                etype,
-                e,
-                a.to_string(),
-                c.get("v").cloned().unwrap_or(Value::Null),
-            )),
+            _ => {
+                before
+                    .entry(attr.etype.clone())
+                    .or_default()
+                    .entry(e)
+                    .or_default()
+                    .insert(a.to_string(), c.get("v").cloned().unwrap_or(Value::Null));
+            }
         }
-    }
-    for (etype, e, a, v) in removed {
-        before
-            .entry(etype)
-            .or_default()
-            .entry(e)
-            .or_default()
-            .insert(a, v);
     }
     // drop entities whose before-state ended up empty (created in this tx)
     for ents in before.values_mut() {

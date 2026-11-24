@@ -310,7 +310,9 @@ jobs:
   # FUZZ_PRESENCE_JOBS), placed on seeds-2/3/4/7; race and conflicts stay on
   # seeds-1/5/6, the legs without presence. Schema seeds on the two-seed legs
   # run concurrently (FUZZ_SCHEMA_JOBS=2 at nightly depth), so no leg stacks
-  # two serial schema seeds behind a presence seed.
+  # two serial schema seeds behind a presence seed. Webhook event-production
+  # seeds share the same SHARD 7, so PR seeds land on seeds-1/2 and nightly
+  # seeds one per leg (~20s each), adding no new leg.
   differential:
     name: differential vs legacy (${{ matrix.leg }})
     needs: build-server
@@ -361,31 +363,31 @@ jobs:
           # conflicts go on the three legs without presence. Measured PR
           # loads after this split: 206-287s of harness work per leg.
           - leg: seeds-1
-            layers: fuzzschema fuzz race conflicts
+            layers: fuzzschema fuzz webhookfuzz race conflicts
             shard: 1/7
             layer_shards: race:1/3 conflicts:1/3
           - leg: seeds-2
-            layers: fuzzschema fuzz presence
+            layers: fuzzschema fuzz webhookfuzz presence
             shard: 2/7
             layer_shards: presence:2/4
           - leg: seeds-3
-            layers: fuzzschema fuzz presence
+            layers: fuzzschema fuzz webhookfuzz presence
             shard: 3/7
             layer_shards: presence:3/4
           - leg: seeds-4
-            layers: fuzzschema fuzz presence
+            layers: fuzzschema fuzz webhookfuzz presence
             shard: 4/7
             layer_shards: presence:4/4
           - leg: seeds-5
-            layers: fuzzschema fuzz race conflicts
+            layers: fuzzschema fuzz webhookfuzz race conflicts
             shard: 5/7
             layer_shards: race:2/3 conflicts:2/3
           - leg: seeds-6
-            layers: fuzzschema fuzz race conflicts
+            layers: fuzzschema fuzz webhookfuzz race conflicts
             shard: 6/7
             layer_shards: race:3/3 conflicts:3/3
           - leg: seeds-7
-            layers: fuzzschema fuzz presence
+            layers: fuzzschema fuzz webhookfuzz presence
             shard: 7/7
             layer_shards: presence:1/4
     services:
@@ -547,6 +549,11 @@ jobs:
           FUZZ_STREAMS_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '401 402 403 404 405 406 407 408' || '401 402' }}
           FUZZ_STREAMS_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '60' || '30' }}
           FUZZ_STREAMS_JOBS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '2' || '1' }}
+          # webhook event production: two cheap seeds per PR (one on each of
+          # the first two seed legs via SHARD), one per seed leg nightly.
+          FUZZ_WEBHOOKS_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '501 502 503 504 505 506 507' || '501 502' }}
+          FUZZ_WEBHOOKS_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '36' || '18' }}
+          FUZZ_WEBHOOKS_JOBS: "1"
           # auth flows are cheap HTTP/socket round trips: three seeds on the
           # replay leg at PR depth, ten at nightly depth.
           FUZZ_AUTH_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '501 502 503 504 505 506 507 508 509 510' || '501 502 503' }}

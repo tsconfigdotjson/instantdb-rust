@@ -471,12 +471,16 @@ pub struct TxReport {
     pub deleted: Vec<(Uuid, String)>,
     /// all touched (eid, etype), for perms/required checks
     pub touched: Vec<(Uuid, String)>,
-    /// entities whose `id` attr triple this tx wrote (add-triple /
-    /// deep-merge-triple on the etype's id attr), with the etype: legacy's
-    /// webhook matcher keys create / update events on writes of the id
-    /// attr's triple (model/webhook.clj `webhook-matches?`), never on ref or
-    /// value attrs alone
+    /// entities whose add-triple batch physically wrote the `id` attr
+    /// triple (legacy's insert-multi-new! create / update marker): legacy's
+    /// webhook matcher keys create / update events on writes of the id attr
+    /// (model/webhook.clj `webhook-matches?`), never on ref or value attrs
+    /// alone. An id-only or fully no-op add batch writes no marker.
     pub id_written: Vec<(Uuid, String)>,
+    /// entities whose `deep-merge-triple` wrote the id attr on an existing
+    /// entity. Legacy deep-merge-multi! updates that row unconditionally, so
+    /// it is a longer WAL "update" marker even when no value changed.
+    pub id_merged: Vec<(Uuid, String)>,
     /// entities whose `id` attr triple this tx retracted (retract-triple on
     /// the id attr): a delete of the id triple for the webhook matcher
     pub id_retracted: Vec<(Uuid, String)>,
@@ -738,6 +742,7 @@ pub async fn transact(
         deleted: vec![],
         touched: vec![],
         id_written: vec![],
+        id_merged: vec![],
         id_retracted: vec![],
         attrs_changed: false,
         schema_changed: false,
@@ -896,17 +901,20 @@ pub async fn transact(
                     items,
                 )
                 .await?;
-                for t in &resolved {
-                    report.touched.push((t.entity_id, t.attr.etype.clone()));
-                    if t.attr.label == "id" {
-                        report.id_written.push((t.entity_id, t.attr.etype.clone()));
-                    }
-                }
-                let newly = insert_triples(&mut *conn, app_id, attrs, &resolved).await?;
+                let outcome = insert_triples(&mut *conn, app_id, attrs, &resolved).await?;
                 if let Some(e) = id_lookup_refusal {
                     return Err(e);
                 }
-                for eid in newly {
+                for t in &resolved {
+                    report.touched.push((t.entity_id, t.attr.etype.clone()));
+                    if t.attr.label == "id"
+                        && (outcome.created.contains(&t.entity_id)
+                            || outcome.changed.contains(&t.entity_id))
+                    {
+                        report.id_written.push((t.entity_id, t.attr.etype.clone()));
+                    }
+                }
+                for eid in outcome.created {
                     if let Some(t) = resolved.iter().find(|t| t.entity_id == eid) {
                         created_etypes.insert(eid, t.attr.etype.clone());
                     }
@@ -924,6 +932,7 @@ pub async fn transact(
             }
             "deep-merge-triple" => {
                 let mut merges: Vec<(Uuid, Attr, Vec<Value>)> = vec![];
+                let mut id_merges: Vec<(Uuid, String)> = vec![];
                 let mut order: HashMap<(Uuid, Uuid), usize> = HashMap::new();
                 for step in group {
                     let TxStep::DeepMergeTriple {
@@ -953,7 +962,7 @@ pub async fn transact(
                     .await?;
                     report.touched.push((eid, attr.etype.clone()));
                     if attr.label == "id" {
-                        report.id_written.push((eid, attr.etype.clone()));
+                        id_merges.push((eid, attr.etype.clone()));
                     }
                     let key = (eid, attr.id);
                     match order.get(&key) {
@@ -965,6 +974,13 @@ pub async fn transact(
                     }
                 }
                 let newly = deep_merge_triples(&mut *conn, app_id, attrs, &merges).await?;
+                for (eid, etype) in id_merges {
+                    if newly.contains(&eid) {
+                        report.id_written.push((eid, etype));
+                    } else {
+                        report.id_merged.push((eid, etype));
+                    }
+                }
                 for eid in newly {
                     if let Some((_, attr, _)) = merges.iter().find(|(e, _, _)| *e == eid) {
                         created_etypes.insert(eid, attr.etype.clone());
