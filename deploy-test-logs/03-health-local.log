@@ -1,0 +1,28 @@
+$ curl -i -s -w '
+time_total=%{time_total}s
+' http://localhost:8787/health   (run 1)
+HTTP/1.1 200 OK
+Content-Length: 2
+Content-Type: text/plain; charset=utf-8
+Access-Control-Allow-Origin: *
+Vary: origin, access-control-request-method, access-control-request-headers
+access-control-expose-headers: *
+
+ok
+time_total=5.787995s
+[exit 0]
+
+$ curl -i -s -w '
+time_total=%{time_total}s
+' http://localhost:8787/health   (run 2)
+HTTP/1.1 200 OK
+Content-Length: 2
+Content-Type: text/plain; charset=utf-8
+Access-Control-Allow-Origin: *
+Vary: origin, access-control-request-method, access-control-request-headers
+access-control-expose-headers: *
+
+ok
+time_total=0.022640s
+[exit 0]
+

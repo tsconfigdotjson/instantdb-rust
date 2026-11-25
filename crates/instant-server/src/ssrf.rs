@@ -94,26 +94,17 @@ pub async fn vet(url: &str, allow_private: bool) -> Result<Vetted, String> {
 }
 
 fn client(v: &Vetted) -> Result<reqwest::Client, String> {
-    let mut b = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(TIMEOUT);
-    if !v.addrs.is_empty() {
-        b = b.resolve_to_addrs(&v.host, &v.addrs);
-    }
-    b.build().map_err(|e| format!("http client: {e}"))
+    crate::http::guarded(crate::http::builder(TIMEOUT), &v.host, &v.addrs)
+        .build()
+        .map_err(|e| format!("http client: {e}"))
 }
 
-async fn read_json(url: &str, mut resp: reqwest::Response) -> Result<Value, String> {
-    let mut buf: Vec<u8> = vec![];
-    while let Some(chunk) = resp
-        .chunk()
+async fn read_json(url: &str, mut resp: crate::http::Response) -> Result<Value, String> {
+    let buf = crate::http::read_capped(&mut resp, MAX_JSON_BYTES)
         .await
-        .map_err(|e| format!("Failed to read {url}: {e}"))?
-    {
-        buf.extend_from_slice(&chunk);
-        if buf.len() > MAX_JSON_BYTES {
-            return Err(format!("Response from {url} is too large."));
-        }
+        .map_err(|e| format!("Failed to read {url}: {e}"))?;
+    if buf.len() > MAX_JSON_BYTES {
+        return Err(format!("Response from {url} is too large."));
     }
     serde_json::from_slice(&buf).map_err(|e| format!("Invalid JSON from {url}: {e}"))
 }
@@ -129,8 +120,7 @@ pub async fn get_json(
     if let Some(token) = bearer {
         req = req.bearer_auth(token);
     }
-    let resp = req
-        .send()
+    let resp = crate::http::send(req)
         .await
         .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
     read_json(url, resp).await
@@ -143,10 +133,7 @@ pub async fn post_form_json(
     allow_private: bool,
 ) -> Result<Value, String> {
     let v = vet(url, allow_private).await?;
-    let resp = client(&v)?
-        .post(url)
-        .form(form)
-        .send()
+    let resp = crate::http::send(client(&v)?.post(url).form(form))
         .await
         .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
     read_json(url, resp).await

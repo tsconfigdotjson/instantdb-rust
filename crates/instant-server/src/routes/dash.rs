@@ -723,6 +723,7 @@ pub async fn rules_post(
         .bind(&code)
         .fetch_optional(&state.pool)
         .await?;
+        crate::service::rules_written(&state, app.id);
         let rules = row.map(|r| {
             json!({
                 "app_id": r.get::<Uuid, _>("app_id"),

@@ -1,0 +1,151 @@
+$ npx wrangler deploy   (statement names from SQL hash; NODE_NAME=node-3)
+
+ ⛅️ wrangler 4.160.1
+────────────────────
+[custom build] Running: cargo install -q --locked --git https://github.com/cloudflare/workers-rs --rev f6c8d1da189cdb91d8bd9576e19cd1dcfd917460 worker-build && worker-build --emscripten --release
+[custom build] [INFO]: 🎯  Checking for the Wasm target...
+[custom build] 
+[custom build] [INFO]: 🎯  Checking the Emscripten toolchain...
+[custom build] 
+[custom build] [INFO]: 🌀  Compiling to Wasm (emscripten)...
+[custom build] 
+[custom build]    Compiling sqlx-postgres v0.8.6 (/Users/lrosen/Workspace/instantdb-rust/crates/instant-worker/vendor/sqlx-postgres)
+[custom build] 
+[custom build] warning: unused import: `Close`
+[custom build]   --> vendor/sqlx-postgres/src/connection/mod.rs:14:27
+[custom build]    |
+[custom build] 14 |     BackendMessageFormat, Close, Query, ReadyForQuery, ReceivedMessage, Terminate,
+[custom build]    |                           ^^^^^
+[custom build]    |
+[custom build]    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+[custom build] 
+[custom build] 
+[custom build] warning: unused import: `Close`
+[custom build]  --> vendor/sqlx-postgres/src/connection/executor.rs:7:39
+[custom build]   |
+[custom build] 7 |     self, BackendMessageFormat, Bind, Close, CommandComplete, DataRow, ParameterDescription, Parse,
+[custom build]   |                                       ^^^^^
+[custom build] 
+[custom build] 
+[custom build] warning: use of deprecated method `futures_channel::mpsc::UnboundedReceiver::<T>::try_next`: please use `try_recv` instead
+[custom build]    --> vendor/sqlx-postgres/src/listener.rs:335:56
+[custom build]     |
+[custom build] 335 |         if let Ok(Some(notification)) = self.buffer_rx.try_next() {
+[custom build]     |                                                        ^^^^^^^^
+[custom build]     |
+[custom build]     = note: `#[warn(deprecated)]` on by default
+[custom build] 
+[custom build] 
+[custom build] warning: field `next_statement_id` is never read
+[custom build]   --> vendor/sqlx-postgres/src/connection/mod.rs:58:5
+[custom build]    |
+[custom build] 40 | pub struct PgConnectionInner {
+[custom build]    |            ----------------- field in this struct
+[custom build] ...
+[custom build] 58 |     next_statement_id: StatementId,
+[custom build]    |     ^^^^^^^^^^^^^^^^^
+[custom build]    |
+[custom build]    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+[custom build] 
+[custom build] 
+[custom build] warning: method `wait_for_close_complete` is never used
+[custom build]    --> vendor/sqlx-postgres/src/connection/executor.rs:152:25
+[custom build]     |
+[custom build] 150 | impl PgConnection {
+[custom build]     | ----------------- method in this implementation
+[custom build] 151 |     // wait for CloseComplete to indicate a statement was closed
+[custom build] 152 |     pub(super) async fn wait_for_close_complete(&mut self, mut count: usize) -> Result<(), Error> {
+[custom build]     |                         ^^^^^^^^^^^^^^^^^^^^^^^
+[custom build] 
+[custom build] warning: method `next` is never used
+[custom build]   --> vendor/sqlx-postgres/src/io/mod.rs:35:12
+[custom build]    |
+[custom build] 24 | impl StatementId {
+[custom build]    | ---------------- method in this implementation
+[custom build] ...
+[custom build] 35 |     pub fn next(&self) -> Self {
+[custom build]    |            ^^^^
+[custom build] 
+[custom build] warning: variants `Close` and `Flush` are never constructed
+[custom build]   --> vendor/sqlx-postgres/src/message/mod.rs:70:5
+[custom build]    |
+[custom build] 68 | pub enum FrontendMessageFormat {
+[custom build]    |          --------------------- variants in this enum
+[custom build] 69 |     Bind = b'B',
+[custom build] 70 |     Close = b'C',
+[custom build]    |     ^^^^^
+[custom build] ...
+[custom build] 76 |     Flush = b'H',
+[custom build]    |     ^^^^^
+[custom build]    |
+[custom build]    = note: `FrontendMessageFormat` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+[custom build] 
+[custom build] warning: constant `CLOSE_PORTAL` is never used
+[custom build]  --> vendor/sqlx-postgres/src/message/close.rs:5:7
+[custom build]   |
+[custom build] 5 | const CLOSE_PORTAL: u8 = b'P';
+[custom build]   |       ^^^^^^^^^^^^
+[custom build] 
+[custom build] warning: constant `CLOSE_STATEMENT` is never used
+[custom build]  --> vendor/sqlx-postgres/src/message/close.rs:6:7
+[custom build]   |
+[custom build] 6 | const CLOSE_STATEMENT: u8 = b'S';
+[custom build]   |       ^^^^^^^^^^^^^^^
+[custom build] 
+[custom build] 
+[custom build] warning: struct `Flush` is never constructed
+[custom build]   
+[custom build] --> vendor/sqlx-postgres/src/message/flush.rs:11:12
+[custom build]    |
+[custom build] 11 | pub struct Flush;
+[custom build]    |            ^^^^^
+[custom build] 
+[custom build] 
+[custom build]    Compiling sqlx-shim v0.1.0 (/Users/lrosen/Workspace/instantdb-rust/crates/sqlx-shim)
+[custom build] 
+[custom build]    Compiling instant-core v0.1.0 (/Users/lrosen/Workspace/instantdb-rust/crates/instant-core)
+[custom build] 
+[custom build] warning: `sqlx-postgres` (lib) generated 10 warnings (run `cargo fix --lib -p sqlx-postgres` to apply 2 suggestions)
+[custom build] 
+[custom build]    Compiling instant-server v0.1.0 (/Users/lrosen/Workspace/instantdb-rust/crates/instant-server)
+[custom build] 
+[custom build]    Compiling instant-worker v0.1.0 (/Users/lrosen/Workspace/instantdb-rust/crates/instant-worker)
+[custom build] 
+[custom build] warning: linker stderr: emcc: MODULARIZE=instance is still experimental. Many features may not work or will change. [-Wexperimental]
+[custom build]          emcc: -sSOURCE_PHASE_IMPORTS is experimental and not yet supported in browsers [-Wexperimental]
+[custom build]          emcc: -sWASM_BINDGEN is experimental and subject to change [-Wexperimental]
+[custom build]   |
+[custom build]   = note: `#[warn(linker_messages)]` on by default
+[custom build] 
+[custom build] 
+[custom build] warning: `instant-worker` (bin "instant-worker") generated 1 warning
+[custom build] 
+[custom build]     Finished `release` profile [optimized] target(s) in 5m 36s
+[custom build] 
+[custom build] [INFO]: ✨  Done in 5m 36s
+[custom build] 
+[custom build] [INFO]: 📦   Your wasm pkg is ready to publish at /Users/lrosen/Workspace/instantdb-rust/crates/instant-worker/build/.tmp.
+[custom build] 
+[custom build] 
+[custom build]   index.js  88.6kb
+[custom build] 
+[custom build] ⚡ Done in 19ms
+[custom build] 
+Total Upload: 12471.57 KiB / gzip: 3940.70 KiB
+Worker Startup Time: 106 ms
+Your Worker has access to the following bindings:
+Binding                                                                                 Resource                  
+env.NODE (Node)                                                                         Durable Object            
+env.HYPERDRIVE (373fc0afe8a7431b88970c9f530f6435)                                       Hyperdrive Config         
+env.BASE_URL ("https://instant-worker.leerosen686.wo...")                               Environment Variable      
+env.PG_POOL_MAX ("5")                                                                   Environment Variable      
+env.PG_POOL_MIN ("0")                                                                   Environment Variable      
+env.INSTANT_HANDLE_RECEIVE_TIMEOUT_MS ("30000")                                         Environment Variable      
+env.NODE_NAME ("node-3")                                                                Environment Variable      
+env.RUST_LOG ("info,sqlx=info")                                                         Environment Variable      
+
+Uploaded instant-worker (4.43 sec)
+Deployed instant-worker triggers (0.58 sec)
+  https://instant-worker.leerosen686.workers.dev
+Current Version ID: 2f04039d-6483-410a-9f4f-c791ae61737f
+[exit 0] [346s]

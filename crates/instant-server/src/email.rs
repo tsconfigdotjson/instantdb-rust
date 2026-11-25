@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+#[cfg(not(target_os = "emscripten"))]
 use lettre::{
     message::{header::ContentType, Mailbox},
     transport::smtp::{
@@ -42,11 +43,13 @@ pub enum EmailProvider {
         server_token: String,
         client: reqwest::Client,
     },
+    #[cfg(not(target_os = "emscripten"))]
     Smtp {
         transport: Box<AsyncSmtpTransport<Tokio1Executor>>,
     },
 }
 
+#[cfg(not(target_os = "emscripten"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SmtpTls {
     Starttls,
@@ -54,6 +57,7 @@ enum SmtpTls {
     None,
 }
 
+#[cfg(not(target_os = "emscripten"))]
 impl SmtpTls {
     fn parse(value: Option<&str>) -> Result<Self, String> {
         match value
@@ -81,6 +85,7 @@ impl SmtpTls {
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SmtpConfig {
     host: String,
@@ -90,6 +95,7 @@ struct SmtpConfig {
     password: Option<String>,
 }
 
+#[cfg(not(target_os = "emscripten"))]
 impl SmtpConfig {
     fn from_env() -> Result<Self, String> {
         let host = env_nonblank("SMTP_HOST").ok_or_else(|| "SMTP_HOST is unset".to_string())?;
@@ -131,6 +137,7 @@ impl SmtpConfig {
     }
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn smtp_port(value: Option<&str>, tls: SmtpTls) -> Result<u16, String> {
     match value {
         Some(raw) => raw
@@ -186,6 +193,8 @@ impl EmailConfig {
                     }
                 }
             }
+            // SMTP needs TLS sockets, which the Workers build does not have
+            #[cfg(not(target_os = "emscripten"))]
             Some("smtp") => match SmtpConfig::from_env().and_then(SmtpConfig::into_transport) {
                 Ok(transport) => EmailProvider::Smtp {
                     transport: Box::new(transport),
@@ -616,11 +625,7 @@ async fn send(state: &AppState, msg: &RenderedEmail) -> Result<(), String> {
                 "subject": msg.subject,
                 "html": msg.html,
             });
-            let resp = client
-                .post(&url)
-                .bearer_auth(api_token)
-                .json(&body)
-                .send()
+            let resp = crate::http::send(client.post(&url).bearer_auth(api_token).json(&body))
                 .await
                 .map_err(|e| format!("cloudflare request error: {e}"))?;
             let status = resp.status();
@@ -644,6 +649,7 @@ async fn send(state: &AppState, msg: &RenderedEmail) -> Result<(), String> {
             server_token,
             client,
         } => send_postmark(client, server_token, msg).await,
+        #[cfg(not(target_os = "emscripten"))]
         EmailProvider::Smtp { transport } => {
             let email = build_smtp_message(msg)?;
             transport
@@ -672,13 +678,14 @@ async fn send_postmark(
     server_token: &str,
     msg: &RenderedEmail,
 ) -> Result<(), String> {
-    let resp = client
-        .post("https://api.postmarkapp.com/email")
-        .header("X-Postmark-Server-Token", server_token)
-        .json(&postmark_body(msg))
-        .send()
-        .await
-        .map_err(|e| format!("postmark request error: {e}"))?;
+    let resp = crate::http::send(
+        client
+            .post("https://api.postmarkapp.com/email")
+            .header("X-Postmark-Server-Token", server_token)
+            .json(&postmark_body(msg)),
+    )
+    .await
+    .map_err(|e| format!("postmark request error: {e}"))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
@@ -688,6 +695,7 @@ async fn send_postmark(
     Ok(())
 }
 
+#[cfg(not(target_os = "emscripten"))]
 fn build_smtp_message(msg: &RenderedEmail) -> Result<Message, String> {
     let sender: Address = msg
         .sender_email

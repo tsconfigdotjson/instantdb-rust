@@ -1,0 +1,12 @@
+$ npx wrangler hyperdrive create instant --connection-string=<REDACTED>
+
+ ⛅️ wrangler 4.160.1
+────────────────────
+🚧 Creating 'instant'
+✅ Created new Hyperdrive PostgreSQL config: 373fc0afe8a7431b88970c9f530f6435
+To access your new Hyperdrive Config in your Worker, add the following snippet to your configuration file:
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "373fc0afe8a7431b88970c9f530f6435"
+
+[exit 0]

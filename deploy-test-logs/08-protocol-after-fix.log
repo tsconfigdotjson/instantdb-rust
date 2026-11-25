@@ -1,0 +1,122 @@
+===== smoke-ws =====
+$ node /tmp/iw-scripts/smoke-ws.mjs 68fead75-7673-4fe5-94c9-8e4b5ec760c9
+[A] -> init
+[A] <- init-ok
+[A] -> transact
+[A] <- error
+file:///private/tmp/iw-scripts/smoke-ws.mjs:52
+      const t = setTimeout(() => reject(new Error(`timeout waiting (${name})`)), timeout);
+                                        ^
+
+Error: timeout waiting (A)
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/smoke-ws.mjs:52:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [6s]
+
+===== sse-test =====
+$ node /tmp/iw-scripts/sse-test.mjs 68fead75-7673-4fe5-94c9-8e4b5ec760c9
+ok: sse stream opens
+<- sse-init
+ok: sse-init has token + session
+<- init-ok
+ok: init over sse
+<- add-query-ok
+ok: add-query over sse
+<- error
+file:///private/tmp/iw-scripts/sse-test.mjs:29
+    const t = setTimeout(() => reject(new Error("timeout")), timeout);
+                                      ^
+
+Error: timeout
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/sse-test.mjs:29:39)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [9s]
+
+===== streams-test =====
+$ node /tmp/iw-scripts/streams-test.mjs 68fead75-7673-4fe5-94c9-8e4b5ec760c9
+    Buffer(319) [Uint8Array] [
+      112, 115, 113, 108,  58,  32, 101, 114, 114, 111, 114,  58,
+       32,  99, 111, 110, 110, 101,  99, 116, 105, 111, 110,  32,
+      116, 111,  32, 115, 101, 114, 118, 101, 114,  32,  97, 116,
+       32,  34, 108, 111,  99,  97, 108, 104, 111, 115, 116,  34,
+       32,  40,  58,  58,  49,  41,  44,  32, 112, 111, 114, 116,
+       32,  53,  52,  51,  50,  32, 102,  97, 105, 108, 101, 100,
+       58,  32,  67, 111, 110, 110, 101,  99, 116, 105, 111, 110,
+       32, 114, 101, 102, 117, 115, 101, 100,  10,   9,  73, 115,
+       32, 116, 104, 101,
+      ... 219 more items
+    ]
+  ],
+  pid: 10235,
+  stdout: Buffer(0) [Uint8Array] [],
+  stderr: Buffer(319) [Uint8Array] [
+    112, 115, 113, 108,  58,  32, 101, 114, 114, 111, 114,  58,
+     32,  99, 111, 110, 110, 101,  99, 116, 105, 111, 110,  32,
+    116, 111,  32, 115, 101, 114, 118, 101, 114,  32,  97, 116,
+     32,  34, 108, 111,  99,  97, 108, 104, 111, 115, 116,  34,
+     32,  40,  58,  58,  49,  41,  44,  32, 112, 111, 114, 116,
+     32,  53,  52,  51,  50,  32, 102,  97, 105, 108, 101, 100,
+     58,  32,  67, 111, 110, 110, 101,  99, 116, 105, 111, 110,
+     32, 114, 101, 102, 117, 115, 101, 100,  10,   9,  73, 115,
+     32, 116, 104, 101,
+    ... 219 more items
+  ]
+}
+
+Node.js v24.22.1
+[exit 1] [1s]
+
+===== synctable-test =====
+$ node /tmp/iw-scripts/synctable-test.mjs 68fead75-7673-4fe5-94c9-8e4b5ec760c9 <REDACTED>
+[A] <- init-ok
+[A] <- error
+file:///private/tmp/iw-scripts/synctable-test.mjs:37
+      const t = setTimeout(() => reject(new Error(`timeout (${name})`)), timeout);
+                                        ^
+
+Error: timeout (A)
+    at Timeout._onTimeout (file:///private/tmp/iw-scripts/synctable-test.mjs:37:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [9s]
+
+===== conformance-test =====
+$ env API_URL=https://instant-worker.leerosen686.workers.dev node scripts/conformance-test.mjs 669c9595-6179-42c1-9085-ad88ae568c55 <REDACTED>
+
+== init-ok / attrs ==
+
+== transact-ok ==
+file:///Users/lrosen/Workspace/instantdb-rust/scripts/conformance-test.mjs:359
+        () => reject(new Error(`timeout waiting in ${name}`)),
+                     ^
+
+Error: timeout waiting in A
+    at Timeout._onTimeout (file:///Users/lrosen/Workspace/instantdb-rust/scripts/conformance-test.mjs:359:22)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [10s]
+
+===== local-bus-test =====
+$ env SERVER_URL=https://instant-worker.leerosen686.workers.dev node scripts/local-bus-test.mjs
+file:///Users/lrosen/Workspace/instantdb-rust/scripts/local-bus-test.mjs:57
+      const t = setTimeout(() => reject(new Error("timeout")), timeout);
+                                        ^
+
+Error: timeout
+    at Timeout._onTimeout (file:///Users/lrosen/Workspace/instantdb-rust/scripts/local-bus-test.mjs:57:41)
+    at listOnTimeout (node:internal/timers:685:17)
+    at process.processTimers (node:internal/timers:618:7)
+
+Node.js v24.22.1
+[exit 1] [6s]
+

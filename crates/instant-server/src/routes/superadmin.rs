@@ -467,6 +467,7 @@ pub async fn apps_create(
                 .bind(code)
                 .fetch_optional(&state.pool)
                 .await?;
+            crate::service::rules_written(&state, id);
                 row.map(|r| r.get::<Value, _>("code")).unwrap_or(Value::Null)
             }
             None => Value::Null,
@@ -754,6 +755,7 @@ pub async fn perms_post(
         .bind(&code)
         .fetch_optional(&state.pool)
         .await?;
+        crate::service::rules_written(&state, app_uuid(&app));
         let rules = row.map(|r| {
             json!({
                 "app_id": r.get::<Uuid, _>("app_id"),

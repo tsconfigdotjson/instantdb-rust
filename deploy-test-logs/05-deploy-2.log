@@ -1,0 +1,47 @@
+$ npx wrangler deploy   (second deploy, BASE_URL=https://instant-worker.leerosen686.workers.dev)
+
+ ⛅️ wrangler 4.160.1
+────────────────────
+[custom build] Running: cargo install -q --locked --git https://github.com/cloudflare/workers-rs --rev f6c8d1da189cdb91d8bd9576e19cd1dcfd917460 worker-build && worker-build --emscripten --release
+[custom build] [INFO]: 🎯  Checking for the Wasm target...
+[custom build] 
+[custom build] [INFO]: 🎯  Checking the Emscripten toolchain...
+[custom build] 
+[custom build] [INFO]: 🌀  Compiling to Wasm (emscripten)...
+[custom build] 
+[custom build] warning: linker stderr: cache:INFO: generating system headers: sysroot_install.stamp... (this will be cached in "/Users/lrosen/Library/Caches/worker-build/emsdk-6.0.10/upstream/emscripten/cache/sysroot_install.stamp" for subsequent builds)
+[custom build]          cache:INFO:  - ok
+[custom build]          emcc: MODULARIZE=instance is still experimental. Many features may not work or will change. [-Wexperimental]
+[custom build]          emcc: -sSOURCE_PHASE_IMPORTS is experimental and not yet supported in browsers [-Wexperimental]
+[custom build]          emcc: -sWASM_BINDGEN is experimental and subject to change [-Wexperimental]
+[custom build]   |
+[custom build]   = note
+[custom build] : `#[warn(linker_messages)]` on by default
+[custom build] 
+[custom build] warning: `instant-worker` (bin "instant-worker") generated 1 warning
+[custom build] 
+[custom build]     Finished `release` profile [optimized] target(s) in 0.29s
+[custom build] 
+[custom build] [INFO]: ✨  Done in 0.34s
+[custom build] [INFO]: 📦   Your wasm pkg is ready to publish at /Users/lrosen/Workspace/instantdb-rust/crates/instant-worker/build/.tmp.
+[custom build] 
+[custom build] 
+[custom build]   index.js  88.6kb
+[custom build] 
+[custom build] ⚡ Done in 17ms
+[custom build] 
+Total Upload: 12337.50 KiB / gzip: 3883.45 KiB
+Worker Startup Time: 73 ms
+Your Worker has access to the following bindings:
+Binding                                                           Resource                  
+env.NODE (Node)                                                   Durable Object            
+env.HYPERDRIVE (373fc0afe8a7431b88970c9f530f6435)                 Hyperdrive Config         
+env.BASE_URL ("https://instant-worker.leerosen686.wo...")         Environment Variable      
+env.PG_POOL_MAX ("5")                                             Environment Variable      
+env.PG_POOL_MIN ("0")                                             Environment Variable      
+
+Uploaded instant-worker (4.79 sec)
+Deployed instant-worker triggers (0.49 sec)
+  https://instant-worker.leerosen686.workers.dev
+Current Version ID: 5d1f4d65-f289-489a-bf6b-d45de041034c
+[exit 0] [10s]

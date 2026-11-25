@@ -1,0 +1,31 @@
+create-app.sh "streams14": app_id=6a6824be-2643-459f-ab38-e78cea8fed9d admin_token=<REDACTED> 
+===== streams-test-neon-db =====
+$ node /tmp/iw-scripts/streams-test-neon.mjs 6a6824be-2643-459f-ab38-e78cea8fed9d
+[R] <- init-ok
+[W] <- init-ok
+[W] <- start-stream-ok
+ok: new stream starts at 0
+[W] <- stream-flushed
+ok: flushed offset counts bytes
+[R] <- stream-append
+ok: append correlated to subscribe event
+ok: catch-up content
+[W] <- stream-flushed
+[R] <- stream-append
+ok: live append carries its offset
+[W] <- start-stream-ok
+ok: resume returns the same stream
+ok: start-stream-ok echoes client-id
+[W] <- error
+ok: bad reconnect token rejected
+[W] <- stream-flushed
+[R] <- stream-append
+ok: done propagated
+[W] <- error
+ok: closed stream resume rejected
+[R2] <- init-ok
+[R2] <- stream-append
+ok: late reader gets full content + done
+STREAMS TEST PASSED
+[exit 0] [14s]
+

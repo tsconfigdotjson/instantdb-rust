@@ -43,6 +43,9 @@ pub async fn run(state: Arc<AppState>) {
 }
 
 pub async fn sweep(state: &AppState) -> Result<()> {
+    if state.cfg.bus_local {
+        return sweep_pooled(state).await;
+    }
     let mut lock_conn = state.pool.acquire().await?;
     let locked: bool = sqlx::query("SELECT pg_try_advisory_lock($1) AS ok")
         .bind(LOCK_KEY)
@@ -57,6 +60,25 @@ pub async fn sweep(state: &AppState) -> Result<()> {
         .bind(LOCK_KEY)
         .execute(&mut *lock_conn)
         .await;
+    result
+}
+
+/// The sweep for a node that may be behind a transaction-mode pooler
+/// (`INSTANT_BUS=local`), where a session-level lock can outlive its client:
+/// a transaction-level lock, held by a transaction that stays open for the
+/// sweep (which runs on other connections).
+async fn sweep_pooled(state: &AppState) -> Result<()> {
+    let mut lock_tx = state.pool.begin().await?;
+    let locked: bool = sqlx::query("SELECT pg_try_advisory_xact_lock($1) AS ok")
+        .bind(LOCK_KEY)
+        .fetch_one(&mut *lock_tx)
+        .await?
+        .get("ok");
+    if !locked {
+        return Ok(());
+    }
+    let result = sweep_locked(state).await;
+    let _ = lock_tx.commit().await;
     result
 }
 
