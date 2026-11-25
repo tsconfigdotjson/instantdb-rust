@@ -472,12 +472,23 @@ fn webhook_not_found(app_id: Uuid, webhook_id: Uuid) -> InstantError {
 }
 
 pub async fn get_by_id(state: &AppState, app_id: Uuid, webhook_id: Uuid) -> Result<Webhook> {
+    let mut conn = state.pool.acquire().await?;
+    get_by_id_on(&mut conn, app_id, webhook_id).await
+}
+
+/// [`get_by_id`] on a caller's connection: a caller holding a transaction
+/// must not take a second pool connection (see [`active_webhooks`]).
+async fn get_by_id_on(
+    conn: &mut sqlx::PgConnection,
+    app_id: Uuid,
+    webhook_id: Uuid,
+) -> Result<Webhook> {
     let row = sqlx::query(&format!(
         "SELECT {WEBHOOK_COLUMNS} FROM webhooks WHERE app_id = $1 AND id = $2"
     ))
     .bind(app_id)
     .bind(webhook_id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *conn)
     .await?
     .ok_or_else(|| webhook_not_found(app_id, webhook_id))?;
     Ok(webhook_from_row(&row))
@@ -502,7 +513,20 @@ const WEBHOOK_CACHE_TTL: Duration = Duration::from_secs(30);
 /// map lookup instead of a query (legacy: model/webhook.clj's cache fed by
 /// the WAL). Management writes evict locally, the `webhooks` row trigger
 /// evicts every node through `instant_webhooks`.
-async fn active_webhooks(state: &AppState, app_id: Uuid) -> Result<Arc<Vec<Webhook>>> {
+///
+/// A cache miss reads on `conn`, the caller's open transaction, never on
+/// `state.pool`. The caller already holds row locks: a racing lookup upsert's
+/// winner holds the new av row that every loser's `INSERT ... ON CONFLICT DO
+/// NOTHING` waits on, each loser holding a pool connection while it waits.
+/// With the pool saturated by losers, a second acquire here never succeeds,
+/// the winner never commits, and the stall only breaks when a loser's 30s
+/// statement timeout fires (`429 timeout`; error matrix
+/// `http/no-error/concurrent-lookup-upserts`, CI run 45373563182).
+async fn active_webhooks(
+    state: &AppState,
+    conn: &mut sqlx::PgConnection,
+    app_id: Uuid,
+) -> Result<Arc<Vec<Webhook>>> {
     if let Some(entry) = state.webhook_cache.get(&app_id) {
         if entry.0.elapsed() < WEBHOOK_CACHE_TTL {
             return Ok(entry.1.clone());
@@ -512,7 +536,7 @@ async fn active_webhooks(state: &AppState, app_id: Uuid) -> Result<Arc<Vec<Webho
         "SELECT {WEBHOOK_COLUMNS} FROM webhooks WHERE app_id = $1 AND status = 'active'"
     ))
     .bind(app_id)
-    .fetch_all(&state.pool)
+    .fetch_all(&mut *conn)
     .await?;
     let hooks: Arc<Vec<Webhook>> = Arc::new(rows.iter().map(webhook_from_row).collect());
     state
@@ -723,7 +747,7 @@ pub async fn update(
         .bind(app_id.to_string())
         .execute(&mut *dbtx)
         .await?;
-    let existing = get_by_id(state, app_id, webhook_id).await?;
+    let existing = get_by_id_on(&mut dbtx, app_id, webhook_id).await?;
     let url = patch.url.clone().unwrap_or(existing.url.clone());
     let ids = new_ids.clone().unwrap_or(existing.id_attr_ids.clone());
     let actions = patch.actions.clone().unwrap_or(existing.actions.clone());
@@ -773,7 +797,7 @@ pub async fn enable(state: &AppState, app_id: Uuid, webhook_id: Uuid) -> Result<
         .execute(&mut *dbtx)
         .await?;
     check_limit(&mut dbtx, app_id).await?;
-    let existing = get_by_id(state, app_id, webhook_id).await?;
+    let existing = get_by_id_on(&mut dbtx, app_id, webhook_id).await?;
     check_duplicate(
         &mut dbtx,
         app_id,
@@ -1030,7 +1054,7 @@ pub async fn queue_events(
     {
         return Ok(false);
     }
-    let hooks = active_webhooks(state, app_id).await?;
+    let hooks = active_webhooks(state, &mut *conn, app_id).await?;
     if hooks.is_empty() {
         return Ok(false);
     }
@@ -1937,6 +1961,59 @@ mod tests {
             assert_eq!(v.host, host, "{url}");
             assert!(v.addrs.is_empty(), "{url}");
         }
+    }
+
+    /// Regression for the `concurrent-lookup-upserts` 429 timeout (CI run
+    /// 45373563182): `queue_events` runs inside the transact's open tx, so a
+    /// cold webhook cache must be filled on that tx's connection. On a pool
+    /// whose only connection is the tx's, a second `state.pool` acquire can
+    /// never succeed (as when racing lookup upserts hold every other
+    /// connection waiting on this tx's row locks); this hangs on the old code
+    /// and returns at once on the fixed one.
+    #[tokio::test]
+    async fn queue_events_never_takes_a_second_pool_connection() {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://instant:instant@localhost:5432/instant".into());
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("connect postgres");
+        let state = AppState::new(crate::state::Config::from_env(), pool.clone());
+        let app_id = Uuid::new_v4();
+        assert!(
+            state.webhook_cache.get(&app_id).is_none(),
+            "cache starts cold"
+        );
+        let report = TxReport {
+            tx_id: 0,
+            created: vec![],
+            deleted: vec![],
+            touched: vec![],
+            id_written: vec![(Uuid::new_v4(), "things".into())],
+            id_merged: vec![],
+            id_retracted: vec![],
+            attrs_changed: false,
+            schema_changed: false,
+            requery_all: false,
+            changed_attrs: vec![],
+            rule_params: HashMap::new(),
+            resolved_lookups: HashMap::new(),
+        };
+        let mut dbtx = pool.begin().await.expect("begin");
+        let queued = tokio::time::timeout(
+            Duration::from_secs(10),
+            queue_events(&state, &mut dbtx, app_id, &AttrMap::default(), &report),
+        )
+        .await
+        .expect("queue_events waited for a second pool connection while holding the tx")
+        .expect("queue_events");
+        assert!(!queued, "an app without webhooks queues nothing");
+        assert!(
+            state.webhook_cache.get(&app_id).is_some(),
+            "cache filled from the tx"
+        );
+        dbtx.rollback().await.expect("rollback");
     }
 
     #[tokio::test]

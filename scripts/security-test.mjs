@@ -9,7 +9,7 @@
 //      TIMEOUT_NODE_URL: a node booted with INSTANT_HANDLE_RECEIVE_TIMEOUT_MS=1
 //        (the timeout section is skipped when unset)
 //      DATABASE_URL for the rules writes
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 
 const [appId, adminToken] = process.argv.slice(2);
 if (!appId || !adminToken) throw new Error("usage: node security-test.mjs <app-id> <admin-token>");
@@ -199,11 +199,45 @@ const attrId = (etype, label) => initOk.attrs.find((a) => a["forward-identity"][
 // ---------------------------------------------------------------------------
 // 5. per-op handler timeout
 if (TIMEOUT_NODE) {
+  // The node's budget is 1ms, but an `init` on a warm local pool is two
+  // short reads (apps, attrs) that can finish inside it (tokio rounds the
+  // deadline up to 1-2ms). The server then rightly answers init-ok and an
+  // error-only wait times out (CI run 45373563182). Make the overrun
+  // deterministic: hold ACCESS EXCLUSIVE on `apps`, init's first read, while
+  // the init is in flight. The socket opens before the lock is taken.
   const slow = connect("SLOW", TIMEOUT_NODE);
   await slow.open;
-  const err = await slow.expectErr({ op: "init", "app-id": appId });
-  assert(err.type === "operation-timed-out" && err.status === 500, "overrunning handlers answer operation-timed-out");
-  assert(err.message === "Operation timed out: handle-receive" && err.hint?.["timeout-ms"] === 1, "timeout error shape");
+  const lockApp = `sec-slow-lock-${uuid()}`;
+  const holder = spawn("psql", [DB, "-q", "-v", "ON_ERROR_STOP=1", "-f", "-"], {
+    env: { ...process.env, PGAPPNAME: lockApp },
+    stdio: ["pipe", "ignore", "ignore"],
+  });
+  const holderExit = new Promise((r) => holder.on("exit", r));
+  holder.stdin.end("BEGIN; LOCK TABLE apps IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(20); COMMIT;\n");
+  try {
+    const held = () =>
+      execSync(`psql "${DB}" -tA -f -`, {
+        input: `SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+                 WHERE l.relation = 'apps'::regclass AND l.mode = 'AccessExclusiveLock'
+                   AND l.granted AND a.application_name = '${lockApp}'`,
+      }).toString().trim() === "1";
+    for (let i = 0; !held(); i++) {
+      if (i >= 200) throw new Error("ASSERT FAILED: could not take the apps lock for the timeout probe");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const ceid = slow.send({ op: "init", "app-id": appId });
+    // any reply to this event, so an init-ok fails here with its op instead
+    // of as an 8s wait for an error frame
+    const reply = await slow.waitFor((m) => m["client-event-id"] === ceid);
+    assert(reply.op === "error", `an overrunning init is answered with an error (got ${reply.op})`);
+    assert(reply.type === "operation-timed-out" && reply.status === 500, "overrunning handlers answer operation-timed-out");
+    assert(reply.message === "Operation timed out: handle-receive" && reply.hint?.["timeout-ms"] === 1, "timeout error shape");
+  } finally {
+    // terminate, not kill psql: a backend in pg_sleep doesn't notice its
+    // client going away and would keep the lock
+    psql(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = '${lockApp}'`);
+    await holderExit;
+  }
   slow.close();
 } else {
   console.log("skip: TIMEOUT_NODE_URL unset");
