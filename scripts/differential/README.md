@@ -429,6 +429,16 @@ everything and checks coverage itself, as before.
     a different page shape or any other difference fails.
   - `add-query-exists` for a query the session removed (legacy's refresh
     re-registers it): the query is removed and asked again.
+  - a legacy refresh 500 caused by another session's cancelled shared
+    datalog computation (nightly seed 9 op 73; `legacyCancelledRefresh` in
+    lib.mjs, pinned by `cancelled-refresh.test.mjs`, which run.sh runs
+    first). Only legacy refresh errors with exactly the typeless "Yikes",
+    `sql-exception` connection-failure or `timeout` query-canceled shape are
+    excused, and only when rust's refresh errors equal legacy's remaining
+    ones, rust's affected session equals its fresh probes, and legacy's own
+    fresh probe explains every subscription that differs. Legacy then drops
+    the failed query from that session, so its later checkpoints are
+    ordinary stale results. Any rust refresh error still fails.
   - an explicit empty nested link in an impersonated admin query. Legacy's
     permission filter drops the nested form when it has no viewable rows,
     while this server answers `[]`; the probe runs for all three

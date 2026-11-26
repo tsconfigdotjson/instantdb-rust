@@ -65,6 +65,8 @@ echo "== legacy surface manifest =="
 node surface.mjs --check
 echo "== differential frame-wait self-test =="
 node wait-frames.test.mjs
+echo "== differential cancelled-refresh self-test =="
+node cancelled-refresh.test.mjs
 export COVERAGE_FILE="${COVERAGE_FILE:-$(pwd)/.coverage.jsonl}"
 rm -f "$COVERAGE_FILE"
 

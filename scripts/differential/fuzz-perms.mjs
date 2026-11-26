@@ -31,6 +31,7 @@ import {
   connect,
   describeAllowVerdict,
   DIVERGENCE_PREFIXES,
+  legacyCancelledRefresh,
   loadAllowlist,
   makeIdFactory,
   normalize,
@@ -454,6 +455,10 @@ function project(plan, q, result) {
 }
 
 const errView = (m) => ({ type: m.type, status: m.status });
+// the message of each folded refresh error, kept beside the compared
+// {type, status} entry: only legacyCancelledRefresh reads it, to tell legacy's
+// cancelled-shared-computation 500s from any other refresh error
+const refreshErrorMessage = new WeakMap();
 
 async function runOn(serverName, plan) {
   const { url, db, appId } = SERVERS[serverName];
@@ -609,7 +614,9 @@ async function runOn(serverName, plan) {
             if (subs[s].has(k)) subs[s].set(k, project(plan, c["instaql-query"], c["instaql-result"]));
           }
         } else if (m.op === "error" && m["original-event"]?.op === "refresh") {
-          refreshErrors[s].push(errView(m));
+          const e = errView(m);
+          refreshErrorMessage.set(e, m.message ?? null);
+          refreshErrors[s].push(e);
         }
       }
     }
@@ -942,6 +949,15 @@ for (let k = 0; k < n; k++) {
     console.log(`legacy served a stale result at op ${l.i} (${l.kind}); a fresh legacy session agreed with rust`);
     continue;
   }
+  // a legacy refresh 500 caused by another session's cancelled shared
+  // datalog computation (lib.mjs legacyCancelledRefresh, nightly seed 9 op
+  // 73); rust's errors still have to match and its sessions its fresh probes
+  if (legacyCancelledRefresh(l, r, legacyFresh[l?.i], rustFresh[r?.i], (e) => refreshErrorMessage.get(e), SESSIONS)) {
+    staleLegacy++;
+    const who = SESSIONS.filter((s) => canon(l.state[s].refreshErrors) !== canon(r.state[s].refreshErrors));
+    console.log(`legacy failed a refresh at op ${l.i} (checkpoint) on ${who.join(", ")} when another session's shared datalog computation was cancelled; rust's sessions matched their fresh probes`);
+    continue;
+  }
   if (legacyOmitsOnlyRustRows(l, r)) {
     staleLegacy++;
     console.log(`legacy omitted rows rust has at op ${l.i} (${l.kind}); legacy's view-rule cache missed the link`);
@@ -981,7 +997,11 @@ for (let k = 0; k < n; k++) {
         }
       }
       const le = l?.state?.[s]?.refreshErrors, re = r?.state?.[s]?.refreshErrors;
-      if (canon(le) !== canon(re)) console.error(`  ${s} refresh errors: legacy ${JSON.stringify(le)} rust ${JSON.stringify(re)}`);
+      if (canon(le) !== canon(re)) {
+        console.error(`  ${s} refresh errors: legacy ${JSON.stringify(le)} rust ${JSON.stringify(re)}`);
+        const msgs = (es) => JSON.stringify((es ?? []).map((e) => refreshErrorMessage.get(e) ?? null));
+        console.error(`    messages: legacy ${msgs(le)} rust ${msgs(re)}`);
+      }
     }
   } else {
     console.error(`  legacy: ${JSON.stringify(l)?.slice(0, 2500)}`);
