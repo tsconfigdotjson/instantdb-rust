@@ -977,3 +977,81 @@ export function describeAllowVerdict(verdict) {
   return lines;
 }
 
+
+// ---------------------------------------------------------------------------
+// legacy refresh failures caused by another session's cancelled computation
+//
+// Legacy runs one datalog computation per (app, datalog query) and hands the
+// same CompletableFuture to every session that asks for it while it runs
+// (reactive/store.clj swap-datalog-cache!). The computation runs under the
+// statement tracker and child-vfuture set of the session that started it.
+// When that session goes away (on-close cancels its pending handlers) or
+// times out, and it was the only registered watcher at that instant, legacy
+// cancels the in-flight SQL and child futures (cancel-in-progress-datalog-
+// query). A session that joined the same future meanwhile then fails its
+// *refresh* although it did nothing: the cancelled statement surfaces as a
+// typed `sql-exception` (connection-failure) or `timeout` (57014 query
+// canceled), and a cancelled child future / interrupted thread as an untyped
+// exception, which handle-uncaught-err answers with a typeless 500 "Yikes".
+// instaql-query-reactive! then removes the failed query from the session
+// (reactive/query.clj catch -> remove-query!), so that session never refreshes
+// it again: every later checkpoint shows it stale while a fresh legacy session
+// agrees with rust. Nightly fuzz-perms seed 9 op 73 (2026-11-25, run
+// 45620798435) caught the typeless flavour; the typed flavours reproduce
+// within a minute against the legacy image with stable subscribers and
+// sessions that open, add-query and disconnect while writes land.
+//
+// Only these exact (type, status, message) shapes, on a *refresh* error, can
+// be excused, and only by legacyCancelledRefresh below.
+export const LEGACY_CANCELLED_REFRESH_ERRORS = [
+  { type: null, status: 500, messagePrefix: "Yikes, something broke on our end!" },
+  { type: "sql-exception", status: 500, messagePrefix: "SQL Exception: connection-failure" },
+  { type: "timeout", status: 500, messagePrefix: "The query took too long to complete." },
+];
+export const isLegacyCancelledRefreshError = (err, message) =>
+  !!err &&
+  typeof message === "string" &&
+  LEGACY_CANCELLED_REFRESH_ERRORS.some(
+    (k) => (err.type ?? null) === k.type && err.status === k.status && message.startsWith(k.messagePrefix),
+  );
+
+// A checkpoint where the only difference is legacy refresh errors of the
+// shapes above (plus subscriptions legacy left stale), and rust provably
+// missed nothing. Every condition must hold:
+//   - rust's refresh errors for each session equal legacy's once the
+//     excusable legacy errors are dropped; rust's own errors are never
+//     dropped, so a rust 5xx / timeout / deadlock reply still fails;
+//   - for a session that got an excused legacy error, every one of rust's
+//     subscriptions equals rust's fresh probe of it (the refresh legacy lost
+//     reached the rust client);
+//   - every subscription where the two sessions differ is one legacy left
+//     stale: legacy's fresh probe and rust's fresh probe both equal rust's
+//     session (the legacyStale rule);
+//   - both sides hold the same subscriptions, and at least one excused error
+//     exists (otherwise this is not the shape this rule is for).
+// l / r: the checkpoint outcomes ({ i, kind, state: { [s]: { subs,
+// refreshErrors } } }); lf / rf: fresh probes ({ [s]: { [key]: answer } });
+// messageOf: the error frame's message for a refreshErrors entry.
+export function legacyCancelledRefresh(l, r, lf, rf, messageOf, sessions) {
+  if (!l || !r || l.i !== r.i || l.kind !== "checkpoint" || r.kind !== "checkpoint") return false;
+  const same = (a, b) => a !== undefined && b !== undefined && canon(a) === canon(b);
+  let excused = 0;
+  for (const s of sessions) {
+    const ls = l.state?.[s], rs = r.state?.[s];
+    if (!ls || !rs) return false;
+    const le = ls.refreshErrors ?? [], re = rs.refreshErrors ?? [];
+    const kept = le.filter((e) => !isLegacyCancelledRefreshError(e, messageOf(e)));
+    if (canon(kept) !== canon(re)) return false;
+    const crashed = kept.length !== le.length;
+    excused += le.length - kept.length;
+    const lkeys = Object.keys(ls.subs ?? {}).sort(), rkeys = Object.keys(rs.subs ?? {}).sort();
+    if (canon(lkeys) !== canon(rkeys)) return false;
+    for (const key of rkeys) {
+      const lv = ls.subs[key], rv = rs.subs[key];
+      if (crashed && !same(rf?.[s]?.[key], rv)) return false;
+      if (canon(lv) === canon(rv)) continue;
+      if (!(same(lf?.[s]?.[key], rv) && same(rf?.[s]?.[key], rv))) return false;
+    }
+  }
+  return excused > 0;
+}
