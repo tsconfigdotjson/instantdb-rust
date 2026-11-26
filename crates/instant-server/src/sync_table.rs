@@ -644,6 +644,35 @@ pub async fn handle_remove_sync(
     Ok(())
 }
 
+/// The logged triple changes of txs in `(after, latest]` on `attr_ids`, in
+/// the order they happened: by tx, then by `seq` within a tx. Legacy replays
+/// each WAL record's changes in WAL order, an update as `removed` (old)
+/// then `added` (new) (store.clj sync-query-changes-for-wal-record), and a
+/// client folds them in that order. `logged_at` can't order rows within a tx
+/// (it is the tx's start time on every row) and neither can physical order,
+/// so an update could reach the client added-then-removed and drop the value
+/// (issue #129).
+async fn changes_between(
+    pool: &sqlx::PgPool,
+    app_id: Uuid,
+    after: i64,
+    latest: i64,
+    attr_ids: &[Uuid],
+) -> std::result::Result<Vec<sqlx::postgres::PgRow>, sqlx::Error> {
+    sqlx::query(
+        "SELECT tx_id, entity_id, attr_id, value, created_at, action
+         FROM rust_tx_changes
+         WHERE app_id = $1 AND tx_id > $2 AND tx_id <= $3 AND attr_id = ANY($4)
+         ORDER BY tx_id ASC, seq ASC",
+    )
+    .bind(app_id)
+    .bind(after)
+    .bind(latest)
+    .bind(attr_ids)
+    .fetch_all(pool)
+    .await
+}
+
 /// Push sync-update-triples for all of a session's subs up to `latest`.
 /// Called from the invalidator on each tx notification.
 pub async fn push_updates(state: &AppState, session: &Arc<Session>, app_id: Uuid, latest: i64) {
@@ -663,19 +692,9 @@ pub async fn push_updates(state: &AppState, session: &Arc<Session>, app_id: Uuid
             continue;
         }
         let ea_ids = sub.attr_ids.clone();
-        let rows = sqlx::query(
-            "SELECT tx_id, entity_id, attr_id, value, created_at, action
-             FROM rust_tx_changes
-             WHERE app_id = $1 AND tx_id > $2 AND tx_id <= $3 AND attr_id = ANY($4)
-             ORDER BY tx_id ASC, logged_at ASC",
-        )
-        .bind(app_id)
-        .bind(sub.last_tx)
-        .bind(latest)
-        .bind(&ea_ids)
-        .fetch_all(&state.pool)
-        .await
-        .unwrap_or_default();
+        let rows = changes_between(&state.pool, app_id, sub.last_tx, latest, &ea_ids)
+            .await
+            .unwrap_or_default();
 
         let mut txes: Vec<Value> = vec![];
         let mut cur_tx: Option<i64> = None;
@@ -806,5 +825,53 @@ mod tests {
         assert_eq!(chunks[0][0]["tx-id"], 0);
         assert_eq!(chunks[1][0]["tx-id"], 100);
         assert_eq!(chunks[2][4]["tx-id"], 204);
+    }
+
+    /// Issue #129: an update's `removed` (old) and `added` (new) log rows
+    /// reach a sync client in that order, like legacy's WAL replay, even when
+    /// the table placed the added row physically first. Before, the read was
+    /// `ORDER BY tx_id, logged_at`, which leaves the order within a tx to the
+    /// scan, and the client folded the update as add-then-remove.
+    #[tokio::test]
+    async fn changes_replay_an_update_old_then_new_whatever_the_physical_order() {
+        use crate::test_support as ts;
+        let state = ts::bootstrapped_state().await;
+        let (app_id, items) = ts::items_app(&state).await;
+        let eid = Uuid::new_v4();
+        let created = ts::transact(
+            &state,
+            app_id,
+            json!([
+                ["add-triple", eid, items.id, eid],
+                ["add-triple", eid, items.rank, 11]
+            ]),
+        )
+        .await;
+        ts::scramble(&state.pool, app_id).await;
+        let updated =
+            ts::transact(&state, app_id, json!([["add-triple", eid, items.rank, 12]])).await;
+        ts::unscramble(&state.pool, app_id).await;
+        assert_eq!(
+            ts::physical_order(&state.pool, app_id, updated, items.rank).await,
+            vec![
+                ("added".to_string(), json!(12)),
+                ("removed".to_string(), json!(11))
+            ],
+            "precondition: the new value sits physically before the old one"
+        );
+        let got: Vec<(i64, String, Value)> =
+            changes_between(&state.pool, app_id, created, updated, &[items.rank])
+                .await
+                .expect("changes")
+                .iter()
+                .map(|r| (r.get("tx_id"), r.get("action"), r.get("value")))
+                .collect();
+        assert_eq!(
+            got,
+            vec![
+                (updated, "removed".to_string(), json!(11)),
+                (updated, "added".to_string(), json!(12)),
+            ]
+        );
     }
 }

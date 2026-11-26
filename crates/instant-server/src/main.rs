@@ -16,6 +16,8 @@ mod storage;
 mod storage_sweeper;
 mod streams;
 mod sync_table;
+#[cfg(test)]
+mod test_support;
 mod usage;
 mod webhooks;
 mod ws;

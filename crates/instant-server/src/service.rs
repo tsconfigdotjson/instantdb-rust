@@ -773,7 +773,25 @@ pub async fn ensure_server_tables(pool: &sqlx::PgPool) -> Result<()> {
            value jsonb NOT NULL,
            created_at bigint,
            action text NOT NULL,
-           logged_at timestamptz NOT NULL DEFAULT now())",
+           logged_at timestamptz NOT NULL DEFAULT now(),
+           seq bigint GENERATED ALWAYS AS IDENTITY)",
+    )
+    .execute(pool)
+    .await
+    .map_err(InstantError::from)?;
+    // `seq` is the change log's order (issue #129): readers replay a tx's
+    // rows `ORDER BY seq`, never by ctid, because Postgres places rows
+    // wherever the free-space map points (a later row can land on an earlier
+    // page). A sequence only ever hands one session increasing values, and a
+    // tx's rows are all written by its own session, so within a tx `seq` is
+    // the order the trigger statements ran in. Tables created before the
+    // column existed get it here: adding an identity column rewrites the
+    // table once (it only holds the last hour of changes) and numbers the
+    // existing rows; after that this is a no-op. Runs under the bootstrap
+    // advisory lock like the rest of this function.
+    sqlx::query(
+        "ALTER TABLE rust_tx_changes
+           ADD COLUMN IF NOT EXISTS seq bigint GENERATED ALWAYS AS IDENTITY",
     )
     .execute(pool)
     .await
@@ -804,13 +822,17 @@ pub async fn ensure_server_tables(pool: &sqlx::PgPool) -> Result<()> {
             FROM old_rows o;
           ELSIF TG_OP = 'UPDATE' THEN
             -- values only change on cardinality-one rows (unique per e/a), which
-            -- is how old and new rows pair up; flag-only updates log nothing
+            -- is how old and new rows pair up; flag-only updates log nothing.
+            -- Legacy's WAL :update is one record (old identity, new columns);
+            -- here it is a removed + added pair, and readers replay it by
+            -- seq. Two statements, not one UNION ALL, so every removed row
+            -- gets a lower seq than its added row by construction (issue #129).
             INSERT INTO rust_tx_changes (tx_id, app_id, entity_id, attr_id, value, created_at, action)
             SELECT txid_setting::bigint, o.app_id, o.entity_id, o.attr_id, o.value, o.created_at, 'removed'
             FROM old_rows o
             JOIN new_rows n ON n.app_id = o.app_id AND n.entity_id = o.entity_id AND n.attr_id = o.attr_id
-            WHERE n.ea AND n.value IS DISTINCT FROM o.value
-            UNION ALL
+            WHERE n.ea AND n.value IS DISTINCT FROM o.value;
+            INSERT INTO rust_tx_changes (tx_id, app_id, entity_id, attr_id, value, created_at, action)
             SELECT txid_setting::bigint, n.app_id, n.entity_id, n.attr_id, n.value, n.created_at, 'added'
             FROM old_rows o
             JOIN new_rows n ON n.app_id = o.app_id AND n.entity_id = o.entity_id AND n.attr_id = o.attr_id

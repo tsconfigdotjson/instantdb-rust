@@ -1025,6 +1025,38 @@ fn touch_entity(touched: &mut HashMap<String, HashSet<Uuid>>, etype: &str, eid: 
     touched.entry(etype.to_string()).or_default().insert(eid);
 }
 
+/// The tx's triple changes in the order they happened, as `{e, a, v, action}`
+/// (the history row's `changes`, which `payload_records` walks in reverse
+/// like legacy's `(reverse triple-changes)`). The triples trigger writes them
+/// inside this tx; `seq` orders them. Not ctid: physical placement follows
+/// the free-space map, so an update's added row can sit on an earlier page
+/// than its removed row, and the reverse walk then drops the attr from
+/// `before` (issue #129).
+async fn load_tx_changes(
+    conn: &mut sqlx::PgConnection,
+    app_id: Uuid,
+    tx_id: i64,
+) -> Result<Vec<Value>> {
+    Ok(sqlx::query(
+        "SELECT entity_id, attr_id, value, action FROM rust_tx_changes
+          WHERE app_id = $1 AND tx_id = $2 ORDER BY seq",
+    )
+    .bind(app_id)
+    .bind(tx_id)
+    .fetch_all(&mut *conn)
+    .await?
+    .iter()
+    .map(|r| {
+        json!({
+            "e": r.get::<Uuid, _>("entity_id"),
+            "a": r.get::<Uuid, _>("attr_id"),
+            "v": r.get::<Value, _>("value"),
+            "action": r.get::<String, _>("action"),
+        })
+    })
+    .collect())
+}
+
 /// Runs inside the transaction, after the steps and before commit (the
 /// stand-in for legacy's WAL matching, model/webhook.clj `webhook-matches?`):
 /// an event is queued for each active webhook whose namespaces had their id
@@ -1059,27 +1091,7 @@ pub async fn queue_events(
         return Ok(false);
     }
     let created: HashSet<Uuid> = report.created.iter().map(|(e, _)| *e).collect();
-    // the change log is written by the triples trigger inside this tx, so
-    // the rows are visible here in insertion order (the same physical order
-    // legacy's `(reverse triple-changes)` walk relies on)
-    let changes: Vec<Value> = sqlx::query(
-        "SELECT entity_id, attr_id, value, action FROM rust_tx_changes
-          WHERE app_id = $1 AND tx_id = $2 ORDER BY ctid",
-    )
-    .bind(app_id)
-    .bind(report.tx_id)
-    .fetch_all(&mut *conn)
-    .await?
-    .iter()
-    .map(|r| {
-        json!({
-            "e": r.get::<Uuid, _>("entity_id"),
-            "a": r.get::<Uuid, _>("attr_id"),
-            "v": r.get::<Value, _>("value"),
-            "action": r.get::<String, _>("action"),
-        })
-    })
-    .collect();
+    let changes = load_tx_changes(&mut *conn, app_id, report.tx_id).await?;
 
     // The same entity set legacy's update_ents / delete_ents triggers include:
     // every row changed by the tx (forward entity), plus the reverse entity of
@@ -2021,5 +2033,76 @@ mod tests {
         for url in ["not a url", "", "ftp://8.8.8.8/", "file:///etc/passwd"] {
             assert_eq!(refused(url, true).await, "Invalid URL.", "{url}");
         }
+    }
+
+    /// Issue #129: an update event's `before` keeps the attr's old value even
+    /// when the change log placed the new value's row physically before the
+    /// old one's (as the free-space map does on a busy table). Before, the
+    /// log was read `ORDER BY ctid`, so the reverse walk restored the old
+    /// value and then removed the attr: legacy sends `before.rank = 11`, this
+    /// server sent no `rank` at all.
+    #[tokio::test]
+    async fn update_before_keeps_the_old_value_whatever_the_physical_order() {
+        use crate::test_support as ts;
+        let state = ts::bootstrapped_state().await;
+        let (app_id, items) = ts::items_app(&state).await;
+        let webhook_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO webhooks (id, app_id, topics, id_attr_ids, actions, status, sink)
+             VALUES ($1, $2, $3, $4, $5::webhook_action[], 'active', $6)",
+        )
+        .bind(webhook_id)
+        .bind(app_id)
+        .bind(topics_of(&[items.id]))
+        .bind(vec![items.id])
+        .bind(vec!["create".to_string(), "update".into(), "delete".into()])
+        .bind(json!({"url": "https://example.com/hook"}))
+        .execute(&state.pool)
+        .await
+        .expect("insert webhook");
+        invalidate_cache(&state, app_id);
+        let eid = Uuid::new_v4();
+        ts::transact(
+            &state,
+            app_id,
+            json!([
+                ["add-triple", eid, items.id, eid],
+                ["add-triple", eid, items.rank, 11]
+            ]),
+        )
+        .await;
+        // a client-style update (the id triple with the new value), so the
+        // webhook matches an `update`
+        ts::scramble(&state.pool, app_id).await;
+        let tx_id = ts::transact(
+            &state,
+            app_id,
+            json!([
+                ["add-triple", eid, items.id, eid],
+                ["add-triple", eid, items.rank, 12]
+            ]),
+        )
+        .await;
+        ts::unscramble(&state.pool, app_id).await;
+        assert_eq!(
+            ts::physical_order(&state.pool, app_id, tx_id, items.rank).await,
+            vec![
+                ("added".to_string(), json!(12)),
+                ("removed".to_string(), json!(11))
+            ],
+            "precondition: the new value sits physically before the old one"
+        );
+        let webhook = get_by_id(&state, app_id, webhook_id)
+            .await
+            .expect("webhook");
+        let records = payload_records(&state, app_id, &webhook, Isn::of_tx(tx_id))
+            .await
+            .expect("payload")
+            .expect("the update queued a history row");
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0]["namespace"], "items");
+        assert_eq!(records[0]["action"], "update");
+        assert_eq!(records[0]["before"], json!({"id": eid, "rank": 11}));
+        assert_eq!(records[0]["after"], json!({"id": eid, "rank": 12}));
     }
 }

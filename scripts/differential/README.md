@@ -73,6 +73,14 @@ everything and checks coverage itself, as before.
   `ghcr.io/instantdb`.
 - `provision.sh` — creates the same app id + admin token in both servers'
   databases (both run the same legacy schema).
+- `scramble-tx-changes.sql` — a test-only trigger function that moves each
+  tx's `removed` rows in the rust server's change log (`rust_tx_changes`)
+  physically past its `added` rows. CI's differential legs attach it for
+  every app right after booting the rust server, so a reader that replays the
+  log by ctid / scan order instead of `seq` (webhook `before`, sync-table
+  pushes) diverges from legacy on every update instead of only on a busy
+  table (issue #129). The file's header has the `psql` line to attach it to a
+  local run's database.
 - `replay.mjs` — 38-step scenario across init, schemaless transacts, queries
   (nested/paginated/cursor round-trip/aggregate), typed-attr query breadth
   ($gt/$lt/$like/$ilike/$in/$not/$isNull/or/and, typed ordering, offset,

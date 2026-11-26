@@ -454,11 +454,24 @@ jobs:
           # same database, random pauses where add-query and refreshes
           # interleave: the subscription race fuzz (fuzz-race.mjs) runs here
           INSTANT_TRACE_REFRESH=1 INSTANT_CHAOS_DELAY_MS=30 PORT=8885 BASE_URL=http://localhost:8885 ./target/debug/instant-server > /tmp/rust-chaos-server.log 2>&1 &
+          booted=0
           for i in $(seq 1 60); do
-            curl -sf http://localhost:8888/health >/dev/null && curl -sf http://localhost:8885/health >/dev/null && exit 0
+            curl -sf http://localhost:8888/health >/dev/null && curl -sf http://localhost:8885/health >/dev/null && { booted=1; break; }
             sleep 1
           done
-          echo "rust server failed to boot"; cat /tmp/rust-server.log /tmp/rust-chaos-server.log; exit 1
+          if [ "$booted" != 1 ]; then
+            echo "rust server failed to boot"; cat /tmp/rust-server.log /tmp/rust-chaos-server.log; exit 1
+          fi
+          # Every leg runs with the tx change log in adversarial physical
+          # order (issue #129): each tx's `removed` rows are moved past its
+          # `added` rows, so a reader that replays rust_tx_changes by ctid or
+          # scan order instead of `seq` (webhook `before`, sync-table pushes)
+          # diverges from legacy on every update, not only on a busy table.
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q \
+            -f scripts/differential/scramble-tx-changes.sql \
+            -c "CREATE TRIGGER rust_test_scramble_tx_changes AFTER INSERT ON rust_tx_changes
+                REFERENCING NEW TABLE AS scrambled_new_rows
+                FOR EACH STATEMENT EXECUTE FUNCTION rust_test_scramble_tx_changes()"
       - name: Wait for legacy server stack
         run: |
           for i in $(seq 1 180); do
