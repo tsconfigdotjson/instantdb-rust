@@ -201,7 +201,8 @@ function errView(name, res, unordered = false) {
     const msgs = view.hint.errors.map((e) => e.message);
     view.messageMatchesErrors = view.message === PLAN_MSG + msgs.join(", ");
     view.hint = { ...view.hint, errors: [...view.hint.errors].sort((x, y) => (canon(x) < canon(y) ? -1 : 1)) };
-    view.message = PLAN_MSG + "<sorted-errors>";
+    // the same message, rebuilt from the errors in sorted order
+    view.message = PLAN_MSG + view.hint.errors.map((e) => e.message).join(", ");
   }
   return view;
 }
