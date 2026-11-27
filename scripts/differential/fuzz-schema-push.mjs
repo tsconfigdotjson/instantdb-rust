@@ -900,6 +900,11 @@ async function fixedPrefix() {
   d = pulledToDefs(pulled.schema);
   d.links.postsFoos = { forward: { on: "posts", has: "many", label: "foos" }, reverse: { on: "$foo", has: "many", label: "posts" } };
   await push("fixed/system-dollar-link", "dash", "apply", { schema: d, ...PLATFORM_OPTS });
+  // a required attr on a `$` namespace trips legacy's trigger (migration 92)
+  d = pulledToDefs(pulled.schema);
+  d.entities.$files ??= { attrs: {}, links: {} };
+  d.entities.$files.attrs.tagline = attrDef("string", { required: true });
+  await push("fixed/system-required", "superadmin", "apply", { schema: d, ...PLATFORM_OPTS });
   pulled = await pullBoth("fixed/pull-system");
   if (sys.length) {
     d = pulledToDefs(pulled.schema);

@@ -210,6 +210,24 @@ impl From<sqlx::Error> for InstantError {
                 }
                 _ => {}
             }
+            // legacy psql-throw! :raise-exception (util/exception.clj:753-775):
+            // the trigger that keeps required attrs off `$` namespaces
+            // (migration 92) has its own message, any other RAISE is a
+            // `sql-raise`
+            if db.code().as_deref() == Some("P0001") {
+                let raised = db.message();
+                if raised == "required_set_on_reserved_attrs" {
+                    return InstantError::new(
+                        "validation-failed",
+                        400,
+                        "You can't create a required system attribute. Make sure it's optional. \
+                         Check out the docs to learn more: \
+                         https://www.instantdb.com/docs/modeling-data#required-constraints",
+                        None,
+                    );
+                }
+                return InstantError::sql_raise(raised);
+            }
             // legacy default-psql-throw! (util/exception.clj:616-621): a
             // lock conflict is a 500 `sql-exception` named for its condition.
             // Transact retries these (service::run_transact), so a client
