@@ -753,12 +753,35 @@ pub async fn transact(
     };
     // eid -> etype for entities created in this tx (for null backfill)
     let mut created_etypes: HashMap<Uuid, String> = HashMap::new();
+    // what legacy feeds validate-required! (transaction.clj:608-616): the
+    // rows each op's statement returned. An add-triple that wrote nothing (a
+    // ref row that already exists) checks nothing.
+    let mut required_touched: Vec<(Uuid, String)> = vec![];
     // entities whose indexed nulls are already written
     let mut backfilled: HashSet<Uuid> = HashSet::new();
 
     for (op, group) in groups {
         match op {
             "add-attr" => {
+                // legacy insert-multi! (attr.clj:352-366) validates the whole
+                // batch before it writes: the reserved / `$` identities of
+                // every attr (validate-system-ident-names!), then
+                // validate-add-required! for every required attr; a duplicate
+                // identity only surfaces from the INSERT itself
+                for step in &group {
+                    if let TxStep::AddAttr { raw, .. } = step {
+                        crate::attr::validate_ident_names_input(app_id, raw)?;
+                    }
+                }
+                for step in &group {
+                    if let TxStep::AddAttr { attr, raw } = step {
+                        if attr.is_required {
+                            crate::attr::validate_add_required(&mut *conn, app_id, attr, raw)
+                                .await?;
+                        }
+                    }
+                }
+
                 for step in group {
                     let TxStep::AddAttr { attr, raw } = step else {
                         unreachable!()
@@ -781,11 +804,15 @@ pub async fn transact(
                             ));
                         }
                     }
-                    // legacy validate-add-required! (attr.clj:334-350)
-                    if attr.is_required {
-                        crate::attr::validate_add_required(&mut *conn, app_id, &attr, &raw).await?;
-                    }
-                    crate::attr::insert(&mut *conn, app_id, &attr).await?;
+                    // ...and only then the INSERT, which meets each row's
+                    // problems in turn: the on-delete cast, then the BEFORE
+                    // trigger refusing a required `$` attr (migration 92),
+                    // then the cardinality not-null constraint
+                    let trigger_first = attr.is_required
+                        && attr.etype.starts_with('$')
+                        && app_id != crate::system_catalog::SYSTEM_CATALOG_APP_ID;
+                    crate::attr::validate_link_values(&raw, !trigger_first)?;
+                    crate::attr::insert_from_step(&mut *conn, app_id, &attr, &raw).await?;
                     backfill_nulls_for_new_attr(&mut *conn, app_id, attrs, &attr).await?;
                     report.changed_attrs.push(attr.id);
                     attrs.insert(attr);
@@ -806,11 +833,12 @@ pub async fn transact(
                         continue;
                     };
                     if existing.is_system {
-                        return Err(InstantError::validation_failed(
-                            "attributes",
-                            "System attributes cannot be modified.",
-                            json!([]),
-                        ));
+                        // legacy update-multi! checks the step's own
+                        // identities, then runs an UPDATE scoped to this app,
+                        // which matches no row of a system attr (those belong
+                        // to the system catalog app): a no-op
+                        crate::attr::validate_ident_names_input(app_id, &patch)?;
+                        continue;
                     }
                     // legacy update-multi! only writes idents rows when the
                     // step carries an identity (ident-table-values), and
@@ -905,6 +933,11 @@ pub async fn transact(
                 if let Some(e) = id_lookup_refusal {
                     return Err(e);
                 }
+                for (eid, aid) in &outcome.written {
+                    if let Some(a) = attrs.get(aid) {
+                        required_touched.push((*eid, a.etype.clone()));
+                    }
+                }
                 for t in &resolved {
                     report.touched.push((t.entity_id, t.attr.etype.clone()));
                     if t.attr.label == "id"
@@ -961,6 +994,7 @@ pub async fn transact(
                     )
                     .await?;
                     report.touched.push((eid, attr.etype.clone()));
+                    required_touched.push((eid, attr.etype.clone()));
                     if attr.label == "id" {
                         id_merges.push((eid, attr.etype.clone()));
                     }
@@ -1042,6 +1076,7 @@ pub async fn transact(
                         _ => value,
                     };
                     report.touched.push((eid, attr.etype.clone()));
+                    required_touched.push((eid, attr.etype.clone()));
                     if attr.label == "id" {
                         report.id_retracted.push((eid, attr.etype.clone()));
                     }
@@ -1078,6 +1113,7 @@ pub async fn transact(
                 let expanded = expand_delete_cascade(&mut *conn, app_id, attrs, &seed).await?;
                 let referrers = referrers_of(&mut *conn, app_id, attrs, &expanded).await?;
                 delete_entities(&mut *conn, app_id, attrs, &expanded).await?;
+                required_touched.extend(referrers.iter().cloned());
                 report.touched.extend(referrers);
                 report.deleted.extend(expanded);
             }
@@ -1115,8 +1151,7 @@ pub async fn transact(
 
     report.created = created_etypes.into_iter().collect();
 
-    let touched = report.touched.clone();
-    validate_required(&mut *conn, app_id, attrs, &touched).await?;
+    validate_required(&mut *conn, app_id, attrs, &required_touched).await?;
     // legacy validate-update-required! (attr.clj:533-580, transaction.clj:627)
     crate::attr::validate_update_required(&mut *conn, app_id, attrs, &required_updates).await?;
     // legacy validate-system-* create guard (permissioned_transaction.clj:589-596)
@@ -1274,6 +1309,28 @@ async fn validate_modes(
     steps: &[TxStep],
     admin: bool,
 ) -> Result<()> {
+    if !steps.iter().any(|s| {
+        matches!(
+            s,
+            TxStep::AddTriple { mode, .. } | TxStep::DeepMergeTriple { mode, .. }
+                if *mode != WriteMode::Upsert
+        )
+    }) {
+        return Ok(());
+    }
+    // legacy reads etypes off `optimistic-attrs` (transaction.clj:652-666):
+    // the catalog plus the attrs this tx's add-attr steps create, so a write
+    // to an attr created in the same tx (the admin SDK's new labels) has its
+    // etype here and in the error's `input`
+    let mut optimistic = attrs.clone();
+    for s in steps {
+        if let TxStep::AddAttr { attr, .. } = s {
+            if optimistic.get(&attr.id).is_none() {
+                optimistic.insert(attr.clone());
+            }
+        }
+    }
+    let attrs = &optimistic;
     let moded: Vec<(&TxStep, &EidRef, &str, WriteMode)> = steps
         .iter()
         .filter_map(|s| match s {
@@ -1291,9 +1348,6 @@ async fn validate_modes(
             _ => None,
         })
         .collect();
-    if moded.is_empty() {
-        return Ok(());
-    }
     // uuid eids: any triple of the etype
     let mut by_etype: HashMap<&str, Vec<Uuid>> = HashMap::new();
     let mut lookups: Vec<(Uuid, &CanonicalValue)> = vec![];
@@ -1303,7 +1357,9 @@ async fn validate_modes(
             EidRef::Lookup(a, v) => lookups.push((*a, v)),
         }
     }
-    let mut existing: HashSet<(Uuid, String)> = HashSet::new();
+    // legacy keys what it found by entity id alone: an entity found under
+    // any etype a step asked about counts as existing for every step on it
+    let mut existing: HashSet<Uuid> = HashSet::new();
     for (etype, ids) in &by_etype {
         let attr_ids: Vec<Uuid> = attrs.attrs_of_etype(etype).map(|a| a.id).collect();
         if attr_ids.is_empty() {
@@ -1319,7 +1375,7 @@ async fn validate_modes(
         .fetch_all(&mut *conn)
         .await?;
         for r in rows {
-            existing.insert((r.get::<Uuid, _>("entity_id"), etype.to_string()));
+            existing.insert(r.get::<Uuid, _>("entity_id"));
         }
     }
     // lookups: an av triple with that value
@@ -1342,9 +1398,9 @@ async fn validate_modes(
             resolved_lookups.insert(key, row.get("entity_id"));
         }
     }
-    let exists = |eid: &EidRef, etype: &str| -> Option<Uuid> {
+    let exists = |eid: &EidRef, _etype: &str| -> Option<Uuid> {
         match eid {
-            EidRef::Id(id) => existing.contains(&(*id, etype.to_string())).then_some(*id),
+            EidRef::Id(id) => existing.contains(id).then_some(*id),
             EidRef::Lookup(a, v) => resolved_lookups.get(&(*a, v.clone())).copied(),
         }
     };

@@ -282,9 +282,21 @@ fn pg_detail_map(detail: &str) -> Option<HashMap<String, String>> {
         let vals = split_pg_list(vals);
         return Some(cols.into_iter().zip(vals).collect());
     }
-    let pos = detail.find("Failing row contains (")?;
-    let rest = &detail[pos + "Failing row contains (".len()..];
-    let rest = rest.rsplit_once(')').map(|(v, _)| v).unwrap_or(rest);
+    if !detail.contains("Failing row contains (") {
+        return None;
+    }
+    // Legacy reads the columns positionally between commas, keeping the
+    // first four and the last ten borders so commas inside the value don't
+    // shift the other columns. Postgres cuts each value of this detail to
+    // 64 bytes + "...", so a long string value arrives with an unbalanced
+    // quote: a quote-aware split would swallow the rest of the row into it.
+    let open = detail.find('(')?;
+    let close = detail.rfind(')')?;
+    let mut all = vec![open];
+    all.extend(detail.match_indices(',').map(|(i, _)| i));
+    all.push(close);
+    let mut borders: Vec<usize> = all.iter().take(4).copied().collect();
+    borders.extend(all.iter().skip(all.len().saturating_sub(10)).copied());
     let cols = [
         "app_id",
         "entity_id",
@@ -299,13 +311,15 @@ fn pg_detail_map(detail: &str) -> Option<HashMap<String, String>> {
         "created_at",
         "checked_data_type",
     ];
-    let vals = split_pg_list(rest);
-    Some(
-        cols.into_iter()
-            .zip(vals)
-            .map(|(k, v)| (k.to_string(), v))
-            .collect(),
-    )
+    let mut out = HashMap::new();
+    for (col, w) in cols.into_iter().zip(borders.windows(2)) {
+        let (start, end) = (w[0], w[1]);
+        if start >= end {
+            return None;
+        }
+        out.insert(col.to_string(), detail[start + 1..end].trim().to_string());
+    }
+    Some(out)
 }
 
 fn json_type_name(v: &Value) -> &'static str {
@@ -351,12 +365,11 @@ fn triple_check_error(
     let attr_id = m.get("attr_id").and_then(|s| Uuid::parse_str(s).ok());
     let attr = attr_id.and_then(|id| attrs.get(&id));
     let value_raw = m.get("value")?.clone();
+    // a value Postgres cut short is no longer JSON: legacy hands back the
+    // raw text (leading quote and trailing "..." included)
     let (value, truncated) = match serde_json::from_str::<Value>(&value_raw) {
         Ok(v) => (v, false),
-        Err(_) => (
-            Value::String(value_raw.trim().trim_matches('"').to_string()),
-            true,
-        ),
+        Err(_) => (Value::String(value_raw), true),
     };
     let name = attr.map(|a| format!("{}.{}", a.etype, a.label));
     let checked = m
@@ -508,12 +521,7 @@ pub fn translate_unique_violation(e: sqlx::Error, attrs: &AttrMap) -> InstantErr
                     }
                 }
             }
-            return InstantError::new(
-                "record-not-unique",
-                400,
-                "Record not unique",
-                Some(json!({"record-type": "triples"})),
-            );
+            return InstantError::record_not_unique_table(db.table());
         }
         if db.code().as_deref() == Some("23514") {
             if let Some(err) = triple_check_error(detail, attrs, constraint) {
@@ -583,6 +591,10 @@ impl InsertCols {
 pub struct InsertResult {
     pub created: HashSet<Uuid>,
     pub changed: HashSet<Uuid>,
+    /// the `(entity, attr)` rows the statements returned, i.e. actually
+    /// wrote: what legacy hands validate-required! (a duplicate ref row and a
+    /// no-op rewrite of a non-id value write nothing)
+    pub written: Vec<(Uuid, Uuid)>,
 }
 
 /// Insert a batch of add-triple writes. Returns the entities this statement
@@ -596,6 +608,7 @@ pub async fn insert_triples(
 ) -> Result<InsertResult> {
     let mut created: HashSet<Uuid> = HashSet::new();
     let mut changed: HashSet<Uuid> = HashSet::new();
+    let mut written: Vec<(Uuid, Uuid)> = vec![];
 
     // Split ea (cardinality-one upsert) from non-ea; dedupe ea keeping the last
     // write per (entity, attr).
@@ -669,6 +682,7 @@ pub async fn insert_triples(
         .map_err(|e| translate_unique_violation(e, attrs))?;
         for row in rows {
             let (eid, aid): (Uuid, Uuid) = (row.get("entity_id"), row.get("attr_id"));
+            written.push((eid, aid));
             if id_attr_ids.contains(&aid) {
                 if row.get::<bool, _>("inserted") {
                     created.insert(eid);
@@ -699,7 +713,7 @@ pub async fn insert_triples(
                  AS t(e, a, v, ea, eav, av, ave, vae, cdt)
             ORDER BY e, a, md5((v::jsonb)::text)
             ON CONFLICT (app_id, entity_id, attr_id, value_md5) DO NOTHING
-            RETURNING entity_id
+            RETURNING entity_id, attr_id
             "#,
         )
         .bind(app_id)
@@ -716,11 +730,17 @@ pub async fn insert_triples(
         .await
         .map_err(|e| translate_unique_violation(e, attrs))?;
         for row in rows {
-            changed.insert(row.get("entity_id"));
+            let (eid, aid): (Uuid, Uuid) = (row.get("entity_id"), row.get("attr_id"));
+            written.push((eid, aid));
+            changed.insert(eid);
         }
     }
 
-    Ok(InsertResult { created, changed })
+    Ok(InsertResult {
+        created,
+        changed,
+        written,
+    })
 }
 
 /// Back-fill `'null'::jsonb` rows for indexed blob attrs of newly created
@@ -1139,73 +1159,154 @@ pub async fn resolve_etypes_for_delete(
     Ok(etypes.into_iter().collect())
 }
 
-/// Check that every touched, still-existing entity has non-null values for all
-/// required attrs of its etype.
+/// Legacy `validate-required!` (triple.clj:155-233): for every touched
+/// entity whose etype has a required attr (a blob or a link, by its forward
+/// etype), every attr of that etype that is required or labelled `id` must
+/// have a non-null triple, unless the entity has no non-null triple on the
+/// etype's attrs at all (deleted, or never created). A lone link triple makes
+/// an entity alive, so linking from a missing entity reports its `id` too.
+/// Every missing (entity, attr) is reported, grouped per attr like legacy's
+/// message; the rows come in `(entity_id, attr_id)` order, the order legacy's
+/// DISTINCT sort hands them back in.
 pub async fn validate_required(
     conn: &mut PgConnection,
     app_id: Uuid,
     attrs: &AttrMap,
     touched: &[(Uuid, String)],
 ) -> Result<()> {
-    for (eid, etype) in touched {
-        let id_attr = match attrs.id_attr_of(etype) {
-            Some(a) => a,
-            None => continue,
-        };
-        // Entity may have been deleted later in the tx.
-        let exists = sqlx::query(
-            "SELECT 1 AS x FROM triples WHERE app_id = $1 AND entity_id = $2 AND attr_id = $3",
+    let with_required: HashSet<&str> = attrs
+        .iter()
+        .filter(|a| a.is_required)
+        .map(|a| a.etype.as_str())
+        .collect();
+    let mut seen = HashSet::new();
+    let (eids, etypes): (Vec<Uuid>, Vec<String>) = touched
+        .iter()
+        .filter(|(_, etype)| with_required.contains(etype.as_str()))
+        .filter(|pair| seen.insert((*pair).clone()))
+        .cloned()
+        .unzip();
+    if eids.is_empty() {
+        return Ok(());
+    }
+    let rows = sqlx::query(
+        r#"
+        WITH eid_etypes AS (
+          SELECT unnest($2::uuid[]) AS entity_id, unnest($3::text[]) AS etype
+        ), eid_attrs AS (
+          SELECT DISTINCT e.entity_id, a.id AS attr_id, a.etype, a.label, a.is_required
+          FROM eid_etypes e
+          JOIN attrs a ON (a.app_id = $1 OR a.app_id = $4) AND a.etype = e.etype
+        ), triples_cte AS (
+          SELECT DISTINCT t.entity_id, t.attr_id, a.etype
+          FROM triples t
+          JOIN eid_attrs a ON t.entity_id = a.entity_id AND t.attr_id = a.attr_id
+          WHERE t.app_id = $1 AND t.value <> 'null'::jsonb
         )
-        .bind(app_id)
-        .bind(eid)
-        .bind(id_attr.id)
-        .fetch_optional(&mut *conn)
-        .await?
-        .is_some();
-        if !exists {
-            continue;
-        }
-        for attr in attrs.attrs_of_etype(etype) {
-            if !attr.is_required || attr.label == "id" {
-                continue;
-            }
-            let ok = sqlx::query(
-                "SELECT 1 AS x FROM triples
-                 WHERE app_id = $1 AND entity_id = $2 AND attr_id = $3
-                   AND value != 'null'::jsonb",
-            )
-            .bind(app_id)
-            .bind(eid)
-            .bind(attr.id)
-            .fetch_optional(&mut *conn)
-            .await?
-            .is_some();
-            if !ok {
-                return Err(InstantError::new(
-                    "validation-failed",
-                    400,
-                    format!(
-                        "Missing required attribute `{}/{}`: {}",
-                        etype, attr.label, eid
-                    ),
-                    // legacy hint (triple.clj:227-235): the failing rows, no data-type
-                    Some(json!({"records": [{
-                        "entity_id": eid,
-                        "attr_id": attr.id,
-                        "etype": etype,
-                        "label": attr.label,
-                        "is_required": true,
-                    }]})),
-                ));
-            }
+        SELECT entity_id, attr_id, etype, label, is_required
+        FROM eid_attrs
+        WHERE (is_required OR label = 'id')
+          AND (entity_id, etype) IN (SELECT entity_id, etype FROM triples_cte)
+          AND (entity_id, attr_id) NOT IN (SELECT entity_id, attr_id FROM triples_cte)
+        ORDER BY entity_id, attr_id
+        "#,
+    )
+    .bind(app_id)
+    .bind(&eids)
+    .bind(&etypes)
+    .bind(crate::system_catalog::SYSTEM_CATALOG_APP_ID)
+    .fetch_all(&mut *conn)
+    .await?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let mut records = Vec::with_capacity(rows.len());
+    // (etype, label) groups in first-appearance order, like `group-by`
+    let mut groups: Vec<((String, String), Vec<Uuid>)> = vec![];
+    for row in &rows {
+        let entity_id: Uuid = row.get("entity_id");
+        let attr_id: Uuid = row.get("attr_id");
+        let etype: String = row.get("etype");
+        let label: String = row.get("label");
+        let is_required: Option<bool> = row.get("is_required");
+        records.push(json!({
+            "entity_id": entity_id,
+            "attr_id": attr_id,
+            "etype": etype,
+            "label": label,
+            "is_required": is_required,
+        }));
+        let key = (etype, label);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, eids)) => eids.push(entity_id),
+            None => groups.push((key, vec![entity_id])),
         }
     }
-    Ok(())
+    let message = groups
+        .iter()
+        .map(|((etype, label), eids)| {
+            if eids.len() == 1 {
+                format!("Missing required attribute `{etype}/{label}`: {}", eids[0])
+            } else {
+                let list: Vec<String> = eids.iter().map(Uuid::to_string).collect();
+                format!(
+                    "Missing required attributes `{etype}/{label}`: {}",
+                    list.join(", ")
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(". ");
+    // legacy hint (triple.clj:233): the failing rows, no data-type
+    Err(InstantError::new(
+        "validation-failed",
+        400,
+        message,
+        Some(json!({"records": records})),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failing_row_detail_is_read_positionally_like_legacy() {
+        let app = Uuid::new_v4();
+        let eid = Uuid::new_v4();
+        let aid = Uuid::new_v4();
+        // Postgres cut the value to 64 bytes + "...": an unbalanced quote,
+        // and a comma inside the value
+        let value = format!("\"x, {}...", "x".repeat(60));
+        let detail = format!(
+            "Failing row contains ({app}, {eid}, {aid}, {value}, 996bc5dc8e09604892334eb81137881b, t, f, f, f, f, 1795763167352, boolean, null)."
+        );
+        let m = pg_detail_map(&detail).unwrap();
+        assert_eq!(m["entity_id"], eid.to_string());
+        assert_eq!(m["attr_id"], aid.to_string());
+        assert_eq!(m["value"], value);
+        assert_eq!(m["ea"], "t");
+        assert_eq!(m["checked_data_type"], "boolean");
+        let mut attrs = AttrMap::default();
+        let mut attr = crate::attr::Attr::from_wire(&json!({
+            "id": aid,
+            "forward-identity": [Uuid::new_v4(), "posts", "published"],
+            "value-type": "blob",
+            "cardinality": "one",
+        }))
+        .unwrap();
+        attr.checked_data_type = Some(crate::attr::CheckedDataType::Boolean);
+        attrs.insert(attr);
+        let err = triple_check_error(&detail, &attrs, Some("valid_value_data_type")).unwrap();
+        assert_eq!(
+            err.message,
+            "Invalid value type for posts.published. Value must be a boolean."
+        );
+        let hint = err.hint.unwrap();
+        assert_eq!(hint["value"], json!(value));
+        assert_eq!(hint["checked-data-type"], json!("boolean"));
+        assert_eq!(hint["entity-id"], json!(eid));
+    }
 
     #[test]
     fn deep_merge_matches_legacy_jsonb_deep_merge() {

@@ -671,22 +671,105 @@ pub fn validate_ident_names(app_id: Uuid, attr: &Attr) -> Result<()> {
         .as_deref()
         .zip(attr.reverse_label.as_deref());
     for (etype, label) in std::iter::once(fwd).chain(rev) {
-        if system_catalog::is_reserved_ident(etype, label) {
-            let m = format!("{etype}.{label} is a system column and it already exists.");
+        if let Some(m) = ident_name_error(etype, label) {
             return Err(InstantError::validation_failed(
                 "attributes",
                 m.clone(),
                 json!([{"message": m}]),
             ));
         }
-        if etype.starts_with('$') && !system_catalog::is_editable_etype(etype) {
-            let m = format!("$ is reserved for system tables. You can't create {etype}");
-            return Err(InstantError::validation_failed(
+    }
+    Ok(())
+}
+
+fn ident_name_error(etype: &str, label: &str) -> Option<String> {
+    if system_catalog::is_reserved_ident(etype, label) {
+        return Some(format!(
+            "{etype}.{label} is a system column and it already exists."
+        ));
+    }
+    if etype.starts_with('$') && !system_catalog::is_editable_etype(etype) {
+        return Some(format!(
+            "$ is reserved for system tables. You can't create {etype}"
+        ));
+    }
+    None
+}
+
+/// Legacy `validate-system-ident-names!` (attr.clj:313-332) over the attr
+/// map an add-attr / update-attr step carries: only the identities present
+/// in the map are checked (an update-attr without them passes), and the
+/// error's `input` is that map.
+pub fn validate_ident_names_input(app_id: Uuid, input: &Value) -> Result<()> {
+    if app_id == system_catalog::SYSTEM_CATALOG_APP_ID {
+        return Ok(());
+    }
+    let name = |key: &str| {
+        let a = input.get(key)?.as_array()?;
+        if a.len() < 3 {
+            return None;
+        }
+        Some((a[1].as_str()?, a[2].as_str()?))
+    };
+    for (etype, label) in [name("forward-identity"), name("reverse-identity")]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(m) = ident_name_error(etype, label) {
+            return Err(InstantError::validation_failed_input(
                 "attributes",
-                m.clone(),
+                input.clone(),
                 json!([{"message": m}]),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Link values legacy only rejects in SQL: a ref add-attr without a
+/// cardinality hits the `attrs.cardinality` not-null constraint, and an
+/// `on-delete` / `on-delete-reverse` other than cascade fails the cast to the
+/// `attr_on_delete` enum (both a 500 `sql-exception` there). Checked where
+/// that SQL runs, after legacy's own validations, as a 400; before, this
+/// server stored a has-one link / dropped the cascade instead.
+///
+/// `check_cardinality`: an add-attr whose row has a cardinality to check
+/// (false for update-attr, which skips a nil cardinality, and for a row the
+/// `$`-namespace required trigger refuses first).
+pub fn validate_link_values(input: &Value, check_cardinality: bool) -> Result<()> {
+    if input.get("value-type").and_then(|v| v.as_str()) != Some("ref") {
+        return Ok(());
+    }
+    let name = |key: &str| {
+        let a = input.get(key)?.as_array()?;
+        Some(format!("{}->{}", a.get(1)?.as_str()?, a.get(2)?.as_str()?))
+    };
+    let fail = |m: String| {
+        Err(InstantError::validation_failed_input(
+            "attributes",
+            input.clone(),
+            json!([{"message": m}]),
+        ))
+    };
+    for (key, side) in [
+        ("on-delete", "forward-identity"),
+        ("on-delete-reverse", "reverse-identity"),
+    ] {
+        if let Some(Value::String(v)) = input.get(key) {
+            if v != "cascade" {
+                let n = name(side).unwrap_or_default();
+                return fail(format!(
+                    "{n}: Invalid onDelete {}. The only supported onDelete is 'cascade'.",
+                    json!(v)
+                ));
+            }
+        }
+    }
+    if check_cardinality && matches!(input.get("cardinality"), None | Some(Value::Null)) {
+        let n = name("forward-identity").unwrap_or_default();
+        return fail(format!(
+            "{n}: Missing link cardinality. A link's `has` must be 'one' or 'many'."
+        ));
     }
     Ok(())
 }
@@ -769,6 +852,29 @@ pub async fn validate_update_required(
 
 /// Insert one attr (attrs row + ident rows). Idempotent for identical re-inserts.
 pub async fn insert<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid, attr: &Attr) -> Result<()> {
+    insert_with_required(exec, app_id, attr, Some(attr.is_required)).await
+}
+
+/// Insert the attr of an add-attr step. Legacy stores the step's
+/// `required?` as given (attr-table-values), so a step without one leaves
+/// `is_required` NULL; reads coalesce it to false, but the raw column is what
+/// validate-required!'s error rows carry.
+pub async fn insert_from_step<'e, E: PgExecutor<'e>>(
+    exec: E,
+    app_id: Uuid,
+    attr: &Attr,
+    raw: &Value,
+) -> Result<()> {
+    let required = raw.get("required?").and_then(|v| v.as_bool());
+    insert_with_required(exec, app_id, attr, required).await
+}
+
+async fn insert_with_required<'e, E: PgExecutor<'e>>(
+    exec: E,
+    app_id: Uuid,
+    attr: &Attr,
+    required: Option<bool>,
+) -> Result<()> {
     validate_ident_names(app_id, attr)?;
     let res = sqlx::query(
         r#"
@@ -803,7 +909,7 @@ pub async fn insert<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid, attr: &Attr) -
     .bind(attr.cardinality.as_str())
     .bind(attr.is_unique)
     .bind(attr.is_indexed)
-    .bind(attr.is_required)
+    .bind(required)
     .bind(attr.checked_data_type.map(|c| c.as_str()))
     .bind(attr.on_delete_cascade)
     .bind(attr.on_delete_reverse_cascade)
@@ -870,14 +976,16 @@ pub async fn update<'e, E: PgExecutor<'e>>(
     if let Some(od) = patch.get("on-delete-reverse") {
         updated.on_delete_reverse_cascade = od.as_str() == Some("cascade");
     }
-    // legacy update-multi! runs validate-system-ident-names! (attr.clj:585)
-    validate_ident_names(app_id, &updated)?;
+    // legacy update-multi! runs validate-system-ident-names! on the update
+    // map (attr.clj:585)
+    validate_ident_names_input(app_id, patch)?;
+    validate_link_values(patch, false)?;
 
     sqlx::query(
         r#"
         WITH attr_up AS (
           UPDATE attrs SET value_type = $3, cardinality = $4, is_unique = $5, is_indexed = $6,
-                 is_required = $7,
+                 is_required = COALESCE($7, is_required),
                  on_delete = CASE WHEN $8 THEN 'cascade'::attr_on_delete END,
                  on_delete_reverse = CASE WHEN $9 THEN 'cascade'::attr_on_delete END,
                  etype = $10, label = $11, reverse_etype = $12, reverse_label = $13
@@ -901,7 +1009,9 @@ pub async fn update<'e, E: PgExecutor<'e>>(
     .bind(updated.cardinality.as_str())
     .bind(updated.is_unique)
     .bind(updated.is_indexed)
-    .bind(updated.is_required)
+    // legacy `not-null-or`: a step without `required?` keeps the stored
+    // value (NULL included)
+    .bind(patch.get("required?").and_then(|v| v.as_bool()))
     .bind(updated.on_delete_cascade)
     .bind(updated.on_delete_reverse_cascade)
     .bind(&updated.etype)
@@ -980,4 +1090,42 @@ pub async fn soft_delete<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid, attr: &At
     .execute(exec)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ident_names_are_checked_on_the_step_map() {
+        let app = Uuid::new_v4();
+        // an update-attr without identities passes (legacy's app-scoped
+        // UPDATE then matches no system attr row)
+        assert!(
+            validate_ident_names_input(app, &json!({"id": Uuid::new_v4(), "unique?": true}))
+                .is_ok()
+        );
+        let step = json!({
+            "id": Uuid::new_v4(),
+            "forward-identity": [Uuid::new_v4(), "$streams", "$files"],
+            "reverse-identity": [Uuid::new_v4(), "$files", "$stream"],
+            "cardinality": "many",
+        });
+        let err = validate_ident_names_input(app, &step).unwrap_err();
+        assert_eq!(
+            err.message,
+            "Validation failed for attributes: $streams.$files is a system column and it already exists."
+        );
+        assert_eq!(err.hint.as_ref().unwrap()["input"], step);
+        let dollar = json!({
+            "forward-identity": [Uuid::new_v4(), "posts", "foos"],
+            "reverse-identity": [Uuid::new_v4(), "$foo", "posts"],
+        });
+        let err = validate_ident_names_input(app, &dollar).unwrap_err();
+        assert_eq!(
+            err.message,
+            "Validation failed for attributes: $ is reserved for system tables. You can't create $foo"
+        );
+        assert!(validate_ident_names_input(system_catalog::SYSTEM_CATALOG_APP_ID, &dollar).is_ok());
+    }
 }

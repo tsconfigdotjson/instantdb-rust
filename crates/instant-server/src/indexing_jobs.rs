@@ -673,7 +673,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
             check_data_type_validate(state, job).await
         }
         ("check-data-type", "update-attr-start") => {
-            update_attr(
+            let matched = update_attr(
                 state,
                 job,
                 "checked_data_type = $3::checked_data_type, checking_data_type = true",
@@ -681,7 +681,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
                 cdt,
             )
             .await?;
-            Ok(Step::Next)
+            Ok(guarded(matched))
         }
         ("check-data-type", "update-triples") => set_checked_data_type_batch(state, job, cdt).await,
         ("check-data-type", "update-attr-done") => {
@@ -697,7 +697,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
         }
         // remove-data-type
         ("remove-data-type", "update-attr-start") => {
-            update_attr(
+            let matched = update_attr(
                 state,
                 job,
                 "checked_data_type = NULL, checking_data_type = true",
@@ -705,7 +705,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
                 None,
             )
             .await?;
-            Ok(Step::Next)
+            Ok(guarded(matched))
         }
         ("remove-data-type", "estimate-work") => estimate_work(state, job).await,
         ("remove-data-type", "update-triples") => {
@@ -724,8 +724,9 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
         }
         // index
         ("index", "update-attr-start") => {
-            let _ = update_attr(state, job, "is_indexed = true, indexing = true", "", None).await?;
-            Ok(Step::Next)
+            let matched =
+                update_attr(state, job, "is_indexed = true, indexing = true", "", None).await?;
+            Ok(guarded(matched))
         }
         ("index", "estimate-work") => estimate_work(state, job).await,
         ("index", "estimate-work-with-undefineds") => estimate_insert_nulls(state, job).await,
@@ -756,9 +757,9 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
         }
         // remove-index
         ("remove-index", "update-attr-start") => {
-            let _ =
+            let matched =
                 update_attr(state, job, "is_indexed = false, indexing = true", "", None).await?;
-            Ok(Step::Next)
+            Ok(guarded(matched))
         }
         ("remove-index", "estimate-work") => estimate_work(state, job).await,
         ("remove-index", "update-triples") => clear_flag_batch(state, job, "ave").await,
@@ -775,7 +776,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
         }
         // unique
         ("unique", "update-attr-start") => {
-            update_attr(
+            let matched = update_attr(
                 state,
                 job,
                 "is_unique = true, setting_unique = true",
@@ -783,7 +784,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
                 None,
             )
             .await?;
-            Ok(Step::Next)
+            Ok(guarded(matched))
         }
         ("unique", "estimate-work") => estimate_work(state, job).await,
         ("unique", "update-triples") => match set_flag_batch(state, job, "av").await {
@@ -806,7 +807,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
         }
         // remove-unique
         ("remove-unique", "update-attr-start") => {
-            update_attr(
+            let matched = update_attr(
                 state,
                 job,
                 "is_unique = false, setting_unique = true",
@@ -814,7 +815,7 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
                 None,
             )
             .await?;
-            Ok(Step::Next)
+            Ok(guarded(matched))
         }
         ("remove-unique", "estimate-work") => estimate_work(state, job).await,
         ("remove-unique", "update-triples") => clear_flag_batch(state, job, "av").await,
@@ -835,13 +836,13 @@ async fn run_stage(state: &Arc<AppState>, job: &Job, stage: &str) -> Result<Step
             required_validate(state, job).await
         }
         ("required", "update-attr") => {
-            let _ = update_attr(state, job, "is_required = true", "", None).await?;
-            Ok(Step::Next)
+            let matched = update_attr(state, job, "is_required = true", "", None).await?;
+            Ok(guarded(matched))
         }
         // remove-required
         ("remove-required", "update-attr") => {
-            let _ = update_attr(state, job, "is_required = false", "", None).await?;
-            Ok(Step::Next)
+            let matched = update_attr(state, job, "is_required = false", "", None).await?;
+            Ok(guarded(matched))
         }
         (t, s) => Err(InstantError::validation_failed(
             "indexing-job",
@@ -1008,8 +1009,11 @@ async fn update_attr(
     Ok(matched)
 }
 
-/// `update-attr-done` and the abort paths: a guard that no longer matches
-/// errors the job with `invalid-attr-state-error`.
+/// Every stage that is an attr update (legacy returns `update-attr!`'s
+/// result from each): an update that matched no row errors the job with
+/// `invalid-attr-state-error`. Besides a `-done` guard that no longer holds,
+/// that is a job on a system attr, whose row belongs to the system catalog
+/// app rather than the job's app.
 fn guarded(matched: bool) -> Step {
     if matched {
         Step::Next
@@ -1350,11 +1354,15 @@ async fn required_validate(state: &AppState, job: &Job) -> Result<Step> {
               AND ($4::bigint IS NULL OR (t.created_at, t.entity_id) > ($4::bigint, $5::uuid))
             ORDER BY t.created_at, t.entity_id LIMIT $6),
          bad AS (
-           SELECT i.entity_id FROM ids_to_check i
+           SELECT i.entity_id, i.created_at FROM ids_to_check i
             WHERE NOT EXISTS (SELECT 1 FROM triples a
                                WHERE a.app_id = $1 AND a.attr_id = $2 AND a.entity_id = i.entity_id
                                  AND a.value <> 'null'::jsonb))
-         SELECT (SELECT json_agg(s.entity_id) FROM (SELECT entity_id FROM bad LIMIT 10) s) AS invalid_ids,
+         -- legacy's index-hinted nested loop keeps ids_to_check's order, so its
+         -- sample is the first missing entities by (created_at, entity_id)
+         SELECT (SELECT json_agg(s.entity_id ORDER BY s.created_at, s.entity_id)
+                   FROM (SELECT entity_id, created_at FROM bad
+                          ORDER BY created_at, entity_id LIMIT 10) s) AS invalid_ids,
                 (SELECT count(*) FROM bad) AS invalid_count,
                 (SELECT count(*) FROM ids_to_check) AS work_completed,
                 (SELECT json_build_object('t', created_at, 'e', entity_id)

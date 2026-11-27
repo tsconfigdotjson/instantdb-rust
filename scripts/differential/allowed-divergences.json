@@ -1131,5 +1131,215 @@
     },
     "reason": "A malformed (non-UUID) refresh-token on socket init makes legacy hash nil through uuid-util/coerce and the uncaught exception becomes a generic 500. This server answers the same 400 record-not-found an unknown UUID token gets. A bad client string must not crash the server; no shipped client sends one. Differential fuzz-auth (authfuzz) pins the exact action and both statuses. docs/PARITY.md records the hardening.",
     "citation": "LEGACY/server/src/instant/model/app-user-refresh-token.clj:9-12; LEGACY/server/src/instant/util/http.clj:209-218; LEGACY/client/packages/core/src/Connection.ts init/error path"
+  },
+  {
+    "path": "^schemapush:.*/apply$",
+    "differs": [
+      "^\\.transaction\\.results$"
+    ],
+    "legacy": {
+      "transaction": {
+        "results": {
+          "$type": "object"
+        }
+      }
+    },
+    "rust": {
+      "transaction": {
+        "results": {
+          "$type": "object"
+        }
+      }
+    },
+    "reason": "`transaction.results` of a schema push apply is legacy's raw per-op SQL write report (`{add-attr: {attrs, idents, triples}, update-attr: [{count}]}`, the return values of attr-model/insert-multi! / update-multi!); this server answers `{}`. The transaction's keys, id type, app id and created_at are still compared. No client reads `results`: @instantdb/platform reads `steps` and `indexing-jobs` of the apply response and instant-cli only checks for an error. dash.mjs compares only the transaction's key set for the same reason.",
+    "citation": "LEGACY/server/src/instant/db/transaction.clj:577-614 (results); LEGACY/client/packages/platform/src/api.ts:1255-1295 (reads steps / indexing-jobs only)"
+  },
+  {
+    "path": "^schemapush:fixed/malformed/(schema-string|schema-array|entities-array|entity-string|attrs-string)/plan$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "status": 500,
+      "type": "unknown",
+      "message": "Something went wrong. Sorry about this!"
+    },
+    "rust": {
+      "status": 400,
+      "type": "param-malformed",
+      "message": {
+        "$regex": "^Malformed parameter: \\[\"body\" \"schema\"( \"entities\"( \"posts\"( \"attrs\")?)?)?\\]$"
+      },
+      "hint": {
+        "in": {
+          "$type": "array"
+        }
+      }
+    },
+    "reason": "A `schema` (or `entities`, an entity def or its `attrs`) that is not a map makes legacy's remove-system-namespaces throw (`update` / `filter-keys` on a string or vector), answered with a typeless 500. This server names the unreadable part as a 400 `param-malformed` (schema::malformed_defs) instead of reproducing the crash. @instantdb/platform only sends the JSON of an InstantSchemaDef, so a shipped client never hits either answer; a hand-written body gets a usable error here.",
+    "citation": "LEGACY/server/src/instant/model/schema.clj:519-555 (remove-system-namespaces); LEGACY/client/packages/platform/src/api.ts:927-954"
+  },
+  {
+    "path": "^schemapush:fixed/malformed/(links-array|link-string|link-forward-missing|link-label-number)/plan$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "status": 200,
+      "steps": [
+        [
+          "add-attr",
+          {
+            "value-type": "ref"
+          }
+        ]
+      ]
+    },
+    "rust": {
+      "status": 400,
+      "type": "param-malformed",
+      "message": {
+        "$regex": "^Malformed parameter: \\[\"body\" \"schema\" \"links\".*\\]$"
+      },
+      "hint": {
+        "in": {
+          "$type": "array"
+        }
+      }
+    },
+    "reason": "A link entry that is not a map, lacks `forward` / `reverse`, or has a non-string `on` / `label` is planned by legacy as an add-attr with nil (or numeric) identities, whose apply then fails in SQL. This server refuses the plan with a 400 `param-malformed` naming the part (schema::malformed_defs) rather than returning a plan that can never be applied. platform's link defs always carry string `on` / `label` on both sides.",
+    "citation": "LEGACY/server/src/instant/model/schema.clj:175-190 (defs->schema refs); LEGACY/client/packages/platform/src/api.ts:407-430"
+  },
+  {
+    "path": "^schemapush:(fixed/invalid-link/restrict|round/\\d+)/apply$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "status": 500,
+      "type": "sql-exception",
+      "message": "SQL Exception: invalid-text-representation",
+      "hint": {
+        "condition": "invalid-text-representation"
+      }
+    },
+    "rust": {
+      "status": 400,
+      "type": "validation-failed",
+      "message": {
+        "$regex": "^Validation failed for attributes: .*Invalid onDelete \"[^\"]*\"\\. The only supported onDelete is 'cascade'\\.$"
+      },
+      "hint": {
+        "data-type": "attributes"
+      }
+    },
+    "reason": "An `onDelete` string other than `cascade` is planned identically by both servers (the plan step carries it verbatim, compared strictly). Applying it, legacy casts it to the `attr_on_delete` enum and fails with a 500 `sql-exception`; this server refuses it at that same point of the transaction (after legacy's own attr validations, so an earlier validation error still wins on both) as a 400 `validation-failed` for `attributes` (attr::validate_link_values) instead of writing the link without the cascade the client asked for, which it did before. Both refuse the whole push and write nothing.",
+    "citation": "LEGACY/server/src/instant/db/model/attr.clj:236-237 (cast to attr_on_delete); LEGACY/server/resources/migrations/35_cascade_delete.up.sql"
+  },
+  {
+    "path": "^schemapush:(fixed/invalid-link/missing-has|round/\\d+)/apply$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "status": 500,
+      "type": "sql-exception",
+      "message": "SQL Exception: not-null-violation",
+      "hint": {
+        "condition": "not-null-violation",
+        "table": "attrs"
+      }
+    },
+    "rust": {
+      "status": 400,
+      "type": "validation-failed",
+      "message": {
+        "$regex": "^Validation failed for attributes: .*Missing link cardinality\\. A link's `has` must be 'one' or 'many'\\.$"
+      },
+      "hint": {
+        "data-type": "attributes"
+      }
+    },
+    "reason": "A new link whose `forward.has` is missing plans an add-attr with a null cardinality on both servers (compared strictly). Legacy's insert then hits the `attrs.cardinality` not-null constraint (500 `sql-exception`); this server refuses it at that same point of the transaction (after the batch's identity and required checks, which legacy runs first) as a 400 `validation-failed` for `attributes` (attr::validate_link_values) instead of silently creating a has-one link, which it did before. A missing `has` on an existing link stays a no-op on both (update-multi! skips a nil cardinality).",
+    "citation": "LEGACY/server/src/instant/model/schema.clj:181 ((keyword (:has forward))); LEGACY/server/src/instant/db/model/attr.clj:211-237"
+  },
+  {
+    "path": "^schemapush:fixed/invalid-link/unknown-has/apply$",
+    "differs": [
+      "^$"
+    ],
+    "legacy": {
+      "status": 200,
+      "new-schema": {
+        "refs": {
+          "[\"posts\" \"reviewer\" \"$users\" \"reviewed\"]": {
+            "cardinality": "few"
+          }
+        }
+      }
+    },
+    "rust": {
+      "status": 400,
+      "type": "validation-failed",
+      "message": {
+        "$regex": "^Validation failed for schema: .*Invalid link cardinality \"few\"\\. A link's `has` must be 'one' or 'many'\\."
+      },
+      "hint": {
+        "data-type": "schema",
+        "input": "plan"
+      }
+    },
+    "reason": "A `forward.has` other than one / many (`\"few\"`) is planned identically (the step carries `cardinality: \"few\"`, compared strictly). Legacy then stores `few` as the attr's cardinality: the app is left with a link no client understands (platform's `rels` table has no `few-*` entry). This server refuses the push (schema::apply_errors). It is the last probe of every seed because the two schemas differ afterwards; random rounds only plan such schemas.",
+    "citation": "LEGACY/server/src/instant/model/schema.clj:181; LEGACY/client/packages/platform/src/util.ts:21-26 (rels)"
+  },
+  {
+    "path": "^schemapush:(fixed/data-unique-array-1|round/\\d+/data-\\d+)$",
+    "differs": [
+      "^\\.message$",
+      "^\\.hint\\.value$"
+    ],
+    "legacy": {
+      "type": "record-not-unique",
+      "message": {
+        "$regex": "an entity already exists with `[^`]+` = \\[1$"
+      },
+      "hint": {
+        "value": "[1"
+      }
+    },
+    "rust": {
+      "type": "record-not-unique",
+      "message": {
+        "$regex": "an entity already exists with `[^`]+` = \\[1, 2\\]$"
+      },
+      "hint": {
+        "value": "[1, 2]"
+      }
+    },
+    "reason": "A duplicate JSON array on a unique attr: legacy reads the value out of Postgres's `Key (app_id, attr_id, json_null_to_null(value))=(...)` detail with parse-unique-detail, which splits on commas outside quotes and parentheses but not brackets, so `[1, 2]` comes back as `[1` in both the message and `hint.value`. This server parses the detail with brackets balanced and reports `[1, 2]`. Type, record type, attr id, etype and label are still compared; only the cut value differs, and clients only print the message.",
+    "citation": "LEGACY/server/src/instant/util/exception.clj:141-218 (parse-unique-detail-column!), :278-286"
+  },
+  {
+    "path": "^schemapush:(fixed/data-too-large|round/\\d+/data-\\d+)$",
+    "differs": [
+      "^\\.hint\\.checked-data-type$"
+    ],
+    "legacy": {
+      "type": "validation-failed",
+      "message": {
+        "$regex": "^Value is too large for an? (unique|indexed) attribute\\.$"
+      },
+      "hint": {
+        "checked-data-type": "null"
+      }
+    },
+    "rust": {
+      "type": "validation-failed",
+      "hint": {
+        "checked-data-type": null
+      }
+    },
+    "reason": "An oversized value on an indexed / unique attr without a checked type: legacy copies the failing row's `checked_data_type` column text out of Postgres's \"Failing row contains (...)\" detail, where SQL NULL prints as `null`, so its hint carries the string \"null\". This server reports JSON null for a missing checked type. The message, value, attr / entity ids and `value-too-large?` are still compared.",
+    "citation": "LEGACY/server/src/instant/util/exception.clj:588-614 (extract-triple-from-constraint), :651-700"
   }
 ]
