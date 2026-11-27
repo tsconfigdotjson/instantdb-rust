@@ -282,9 +282,21 @@ fn pg_detail_map(detail: &str) -> Option<HashMap<String, String>> {
         let vals = split_pg_list(vals);
         return Some(cols.into_iter().zip(vals).collect());
     }
-    let pos = detail.find("Failing row contains (")?;
-    let rest = &detail[pos + "Failing row contains (".len()..];
-    let rest = rest.rsplit_once(')').map(|(v, _)| v).unwrap_or(rest);
+    if !detail.contains("Failing row contains (") {
+        return None;
+    }
+    // Legacy reads the columns positionally between commas, keeping the
+    // first four and the last ten borders so commas inside the value don't
+    // shift the other columns. Postgres cuts each value of this detail to
+    // 64 bytes + "...", so a long string value arrives with an unbalanced
+    // quote: a quote-aware split would swallow the rest of the row into it.
+    let open = detail.find('(')?;
+    let close = detail.rfind(')')?;
+    let mut all = vec![open];
+    all.extend(detail.match_indices(',').map(|(i, _)| i));
+    all.push(close);
+    let mut borders: Vec<usize> = all.iter().take(4).copied().collect();
+    borders.extend(all.iter().skip(all.len().saturating_sub(10)).copied());
     let cols = [
         "app_id",
         "entity_id",
@@ -299,13 +311,15 @@ fn pg_detail_map(detail: &str) -> Option<HashMap<String, String>> {
         "created_at",
         "checked_data_type",
     ];
-    let vals = split_pg_list(rest);
-    Some(
-        cols.into_iter()
-            .zip(vals)
-            .map(|(k, v)| (k.to_string(), v))
-            .collect(),
-    )
+    let mut out = HashMap::new();
+    for (col, w) in cols.into_iter().zip(borders.windows(2)) {
+        let (start, end) = (w[0], w[1]);
+        if start >= end {
+            return None;
+        }
+        out.insert(col.to_string(), detail[start + 1..end].trim().to_string());
+    }
+    Some(out)
 }
 
 fn json_type_name(v: &Value) -> &'static str {
@@ -351,12 +365,11 @@ fn triple_check_error(
     let attr_id = m.get("attr_id").and_then(|s| Uuid::parse_str(s).ok());
     let attr = attr_id.and_then(|id| attrs.get(&id));
     let value_raw = m.get("value")?.clone();
+    // a value Postgres cut short is no longer JSON: legacy hands back the
+    // raw text (leading quote and trailing "..." included)
     let (value, truncated) = match serde_json::from_str::<Value>(&value_raw) {
         Ok(v) => (v, false),
-        Err(_) => (
-            Value::String(value_raw.trim().trim_matches('"').to_string()),
-            true,
-        ),
+        Err(_) => (Value::String(value_raw), true),
     };
     let name = attr.map(|a| format!("{}.{}", a.etype, a.label));
     let checked = m
@@ -1206,6 +1219,44 @@ pub async fn validate_required(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failing_row_detail_is_read_positionally_like_legacy() {
+        let app = Uuid::new_v4();
+        let eid = Uuid::new_v4();
+        let aid = Uuid::new_v4();
+        // Postgres cut the value to 64 bytes + "...": an unbalanced quote,
+        // and a comma inside the value
+        let value = format!("\"x, {}...", "x".repeat(60));
+        let detail = format!(
+            "Failing row contains ({app}, {eid}, {aid}, {value}, 996bc5dc8e09604892334eb81137881b, t, f, f, f, f, 1795763167352, boolean, null)."
+        );
+        let m = pg_detail_map(&detail).unwrap();
+        assert_eq!(m["entity_id"], eid.to_string());
+        assert_eq!(m["attr_id"], aid.to_string());
+        assert_eq!(m["value"], value);
+        assert_eq!(m["ea"], "t");
+        assert_eq!(m["checked_data_type"], "boolean");
+        let mut attrs = AttrMap::default();
+        let mut attr = crate::attr::Attr::from_wire(&json!({
+            "id": aid,
+            "forward-identity": [Uuid::new_v4(), "posts", "published"],
+            "value-type": "blob",
+            "cardinality": "one",
+        }))
+        .unwrap();
+        attr.checked_data_type = Some(crate::attr::CheckedDataType::Boolean);
+        attrs.insert(attr);
+        let err = triple_check_error(&detail, &attrs, Some("valid_value_data_type")).unwrap();
+        assert_eq!(
+            err.message,
+            "Invalid value type for posts.published. Value must be a boolean."
+        );
+        let hint = err.hint.unwrap();
+        assert_eq!(hint["value"], json!(value));
+        assert_eq!(hint["checked-data-type"], json!("boolean"));
+        assert_eq!(hint["entity-id"], json!(eid));
+    }
 
     #[test]
     fn deep_merge_matches_legacy_jsonb_deep_merge() {
