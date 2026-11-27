@@ -1227,14 +1227,13 @@
       "status": 400,
       "type": "validation-failed",
       "message": {
-        "$regex": "^Validation failed for schema: .*Invalid onDelete \"[^\"]*\"\\. The only supported onDelete is 'cascade'\\."
+        "$regex": "^Validation failed for attributes: .*Invalid onDelete \"[^\"]*\"\\. The only supported onDelete is 'cascade'\\.$"
       },
       "hint": {
-        "data-type": "schema",
-        "input": "plan"
+        "data-type": "attributes"
       }
     },
-    "reason": "An `onDelete` string other than `cascade` is planned identically by both servers (the plan step carries it verbatim, compared strictly). Applying it, legacy casts it to the `attr_on_delete` enum and fails with a 500 `sql-exception`; this server refuses it up front as a 400 `validation-failed` in the plan-errors shape (schema::apply_errors) instead of writing the link without the cascade the client asked for, which it did before. Both refuse the whole push and write nothing.",
+    "reason": "An `onDelete` string other than `cascade` is planned identically by both servers (the plan step carries it verbatim, compared strictly). Applying it, legacy casts it to the `attr_on_delete` enum and fails with a 500 `sql-exception`; this server refuses it at that same point of the transaction (after legacy's own attr validations, so an earlier validation error still wins on both) as a 400 `validation-failed` for `attributes` (attr::validate_link_values) instead of writing the link without the cascade the client asked for, which it did before. Both refuse the whole push and write nothing.",
     "citation": "LEGACY/server/src/instant/db/model/attr.clj:236-237 (cast to attr_on_delete); LEGACY/server/resources/migrations/35_cascade_delete.up.sql"
   },
   {
@@ -1255,14 +1254,13 @@
       "status": 400,
       "type": "validation-failed",
       "message": {
-        "$regex": "^Validation failed for schema: .*Missing link cardinality\\. A link's `has` must be 'one' or 'many'\\."
+        "$regex": "^Validation failed for attributes: .*Missing link cardinality\\. A link's `has` must be 'one' or 'many'\\.$"
       },
       "hint": {
-        "data-type": "schema",
-        "input": "plan"
+        "data-type": "attributes"
       }
     },
-    "reason": "A new link whose `forward.has` is missing plans an add-attr with a null cardinality on both servers (compared strictly). Legacy's insert then hits the `attrs.cardinality` not-null constraint (500 `sql-exception`); this server refuses it as a 400 `validation-failed` (schema::apply_errors) instead of silently creating a has-one link, which it did before. A missing `has` on an existing link stays a no-op on both (update-multi! skips a nil cardinality).",
+    "reason": "A new link whose `forward.has` is missing plans an add-attr with a null cardinality on both servers (compared strictly). Legacy's insert then hits the `attrs.cardinality` not-null constraint (500 `sql-exception`); this server refuses it at that same point of the transaction (after the batch's identity and required checks, which legacy runs first) as a 400 `validation-failed` for `attributes` (attr::validate_link_values) instead of silently creating a has-one link, which it did before. A missing `has` on an existing link stays a no-op on both (update-multi! skips a nil cardinality).",
     "citation": "LEGACY/server/src/instant/model/schema.clj:181 ((keyword (:has forward))); LEGACY/server/src/instant/db/model/attr.clj:211-237"
   },
   {

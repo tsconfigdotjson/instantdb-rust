@@ -726,6 +726,50 @@ pub fn validate_ident_names_input(app_id: Uuid, input: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Link values legacy only rejects in SQL: a ref add-attr without a
+/// cardinality hits the `attrs.cardinality` not-null constraint, and an
+/// `on-delete` / `on-delete-reverse` other than cascade fails the cast to the
+/// `attr_on_delete` enum (both a 500 `sql-exception` there). Checked where
+/// that SQL runs, after legacy's own validations, as a 400; before, this
+/// server stored a has-one link / dropped the cascade instead.
+pub fn validate_link_values(input: &Value, is_add: bool) -> Result<()> {
+    if input.get("value-type").and_then(|v| v.as_str()) != Some("ref") {
+        return Ok(());
+    }
+    let name = |key: &str| {
+        let a = input.get(key)?.as_array()?;
+        Some(format!("{}->{}", a.get(1)?.as_str()?, a.get(2)?.as_str()?))
+    };
+    let fail = |m: String| {
+        Err(InstantError::validation_failed_input(
+            "attributes",
+            input.clone(),
+            json!([{"message": m}]),
+        ))
+    };
+    if is_add && matches!(input.get("cardinality"), None | Some(Value::Null)) {
+        let n = name("forward-identity").unwrap_or_default();
+        return fail(format!(
+            "{n}: Missing link cardinality. A link's `has` must be 'one' or 'many'."
+        ));
+    }
+    for (key, side) in [
+        ("on-delete", "forward-identity"),
+        ("on-delete-reverse", "reverse-identity"),
+    ] {
+        if let Some(Value::String(v)) = input.get(key) {
+            if v != "cascade" {
+                let n = name(side).unwrap_or_default();
+                return fail(format!(
+                    "{n}: Invalid onDelete {}. The only supported onDelete is 'cascade'.",
+                    json!(v)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Legacy `validate-add-required!` (attr.clj:334-350): a new required attr
 /// on a namespace that already has entities is refused up front.
 pub async fn validate_add_required<'e, E: PgExecutor<'e>>(
@@ -931,6 +975,7 @@ pub async fn update<'e, E: PgExecutor<'e>>(
     // legacy update-multi! runs validate-system-ident-names! on the update
     // map (attr.clj:585)
     validate_ident_names_input(app_id, patch)?;
+    validate_link_values(patch, false)?;
 
     sqlx::query(
         r#"

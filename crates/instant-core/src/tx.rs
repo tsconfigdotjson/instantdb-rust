@@ -777,6 +777,13 @@ pub async fn transact(
                         }
                     }
                 }
+                // ...and only then the INSERT, where a link without a
+                // cardinality / an unknown onDelete fails
+                for step in &group {
+                    if let TxStep::AddAttr { raw, .. } = step {
+                        crate::attr::validate_link_values(raw, true)?;
+                    }
+                }
                 for step in group {
                     let TxStep::AddAttr { attr, raw } = step else {
                         unreachable!()

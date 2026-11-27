@@ -504,29 +504,12 @@ pub fn malformed_defs(defs: &Value) -> Option<(Vec<String>, Value)> {
     None
 }
 
-fn invalid_cardinality_message((etype, label): &(String, String), v: Option<&Value>) -> String {
-    match v {
-        None | Some(Value::Null) => format!(
-            "{etype}->{label}: Missing link cardinality. A link's `has` must be 'one' or 'many'."
-        ),
-        Some(v) => format!(
-            "{etype}->{label}: Invalid link cardinality {v}. A link's `has` must be 'one' or 'many'."
-        ),
-    }
-}
-
-fn invalid_on_delete_message((etype, label): &(String, String), v: &Value) -> String {
-    format!("{etype}->{label}: Invalid onDelete {v}. The only supported onDelete is 'cascade'.")
-}
-
-/// Values a plan can carry from the client's link defs that no attr can
-/// hold: a `has` other than one / many (missing on a new link) and an
-/// `onDelete` other than cascade. Checked when a plan is applied, in the
-/// plan-errors shape. Legacy plans them the same way but then writes them:
-/// an unknown `has` is stored as the attr's cardinality (the app is left
-/// with a link whose cardinality no client understands), while a missing
-/// `has` or an unknown `onDelete` fails in SQL with a 500 `sql-exception`
-/// (not-null-violation / invalid-text-representation).
+/// A link `has` other than one / many (`"few"`), which a plan carries
+/// verbatim, refused when the plan is applied (plan-errors shape). Legacy
+/// stores it as the attr's cardinality, leaving a link no client
+/// understands. A missing `has` and an unknown `onDelete` are refused by the
+/// transaction itself, at the point legacy's SQL fails on them
+/// (attr::validate_link_values).
 pub fn apply_errors(steps: &[Value]) -> Vec<Value> {
     let mut errors = vec![];
     for step in steps {
@@ -538,32 +521,14 @@ pub fn apply_errors(steps: &[Value]) -> Vec<Value> {
         if str_of(&attr, "value-type") != Some("ref") {
             continue;
         }
-        let (fwd_name, rev_name) = step_names(&attr);
-        let card = attr.get("cardinality");
-        let card_ok = match card {
-            Some(Value::String(c)) => c == "one" || c == "many",
-            // update-multi! skips a nil cardinality (the attr keeps its own)
-            None | Some(Value::Null) => op == "update-attr",
-            _ => false,
-        };
-        if !card_ok {
-            if let Some(n) = &fwd_name {
-                errors.push(
-                    json!({"in": ["schema"], "message": invalid_cardinality_message(n, card)}),
-                );
-            }
-        }
-        for (key, name) in [("on-delete", &fwd_name), ("on-delete-reverse", &rev_name)] {
-            match attr.get(key) {
-                None | Some(Value::Null) => {}
-                Some(Value::String(s)) if s == "cascade" => {}
-                Some(v) => {
-                    if let Some(n) = name {
-                        errors.push(
-                            json!({"in": ["schema"], "message": invalid_on_delete_message(n, v)}),
-                        );
-                    }
-                }
+        let (fwd_name, _) = step_names(&attr);
+        if let (Some(Value::String(c)), Some((etype, label))) = (attr.get("cardinality"), &fwd_name)
+        {
+            if c != "one" && c != "many" {
+                errors.push(json!({"in": ["schema"], "message": format!(
+                    "{etype}->{label}: Invalid link cardinality {}. A link's `has` must be 'one' or 'many'.",
+                    json!(c)
+                )}));
             }
         }
     }
@@ -1273,21 +1238,26 @@ mod tests {
             .collect();
         assert_eq!(
             messages,
-            vec![
-                "tags->posts: Invalid onDelete \"restrict\". The only supported onDelete is 'cascade'.",
-                "posts->author: Invalid link cardinality \"few\". A link's `has` must be 'one' or 'many'.",
-            ]
+            vec!["posts->author: Invalid link cardinality \"few\". A link's `has` must be 'one' or 'many'."]
         );
-        // a new link without `has` has no cardinality to store
-        let missing = json!(["add-attr", {
+        // the transaction refuses the others where legacy's SQL fails
+        let restrict = &steps[0][1];
+        let err = crate::attr::validate_link_values(restrict, false).unwrap_err();
+        assert_eq!(
+            err.message,
+            "Validation failed for attributes: tags->posts: Invalid onDelete \"restrict\". The only supported onDelete is 'cascade'."
+        );
+        // a null cardinality is skipped by update-attr, refused by add-attr
+        let missing = json!({
             "value-type": "ref",
             "forward-identity": [Uuid::new_v4(), "a", "b"],
             "reverse-identity": [Uuid::new_v4(), "c", "d"],
             "cardinality": null,
-        }]);
+        });
+        assert!(crate::attr::validate_link_values(&missing, false).is_ok());
         assert_eq!(
-            apply_errors(&[missing])[0]["message"],
-            json!("a->b: Missing link cardinality. A link's `has` must be 'one' or 'many'.")
+            crate::attr::validate_link_values(&missing, true).unwrap_err().message,
+            "Validation failed for attributes: a->b: Missing link cardinality. A link's `has` must be 'one' or 'many'."
         );
     }
 
