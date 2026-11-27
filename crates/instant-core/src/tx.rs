@@ -759,8 +759,26 @@ pub async fn transact(
     for (op, group) in groups {
         match op {
             "add-attr" => {
+                // legacy insert-multi! (attr.clj:352-366) validates the whole
+                // batch before it writes: the reserved / `$` identities of
+                // every attr (validate-system-ident-names!), then
+                // validate-add-required! for every required attr; a duplicate
+                // identity only surfaces from the INSERT itself
+                for step in &group {
+                    if let TxStep::AddAttr { raw, .. } = step {
+                        crate::attr::validate_ident_names_input(app_id, raw)?;
+                    }
+                }
+                for step in &group {
+                    if let TxStep::AddAttr { attr, raw } = step {
+                        if attr.is_required {
+                            crate::attr::validate_add_required(&mut *conn, app_id, attr, raw)
+                                .await?;
+                        }
+                    }
+                }
                 for step in group {
-                    let TxStep::AddAttr { attr, raw } = step else {
+                    let TxStep::AddAttr { attr, raw: _ } = step else {
                         unreachable!()
                     };
                     // A second attr under an existing forward name trips
@@ -780,10 +798,6 @@ pub async fn transact(
                                 })),
                             ));
                         }
-                    }
-                    // legacy validate-add-required! (attr.clj:334-350)
-                    if attr.is_required {
-                        crate::attr::validate_add_required(&mut *conn, app_id, &attr, &raw).await?;
                     }
                     crate::attr::insert(&mut *conn, app_id, &attr).await?;
                     backfill_nulls_for_new_attr(&mut *conn, app_id, attrs, &attr).await?;
@@ -806,11 +820,12 @@ pub async fn transact(
                         continue;
                     };
                     if existing.is_system {
-                        return Err(InstantError::validation_failed(
-                            "attributes",
-                            "System attributes cannot be modified.",
-                            json!([]),
-                        ));
+                        // legacy update-multi! checks the step's own
+                        // identities, then runs an UPDATE scoped to this app,
+                        // which matches no row of a system attr (those belong
+                        // to the system catalog app): a no-op
+                        crate::attr::validate_ident_names_input(app_id, &patch)?;
+                        continue;
                     }
                     // legacy update-multi! only writes idents rows when the
                     // step carries an identity (ident-table-values), and

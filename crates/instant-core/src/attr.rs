@@ -671,19 +671,54 @@ pub fn validate_ident_names(app_id: Uuid, attr: &Attr) -> Result<()> {
         .as_deref()
         .zip(attr.reverse_label.as_deref());
     for (etype, label) in std::iter::once(fwd).chain(rev) {
-        if system_catalog::is_reserved_ident(etype, label) {
-            let m = format!("{etype}.{label} is a system column and it already exists.");
+        if let Some(m) = ident_name_error(etype, label) {
             return Err(InstantError::validation_failed(
                 "attributes",
                 m.clone(),
                 json!([{"message": m}]),
             ));
         }
-        if etype.starts_with('$') && !system_catalog::is_editable_etype(etype) {
-            let m = format!("$ is reserved for system tables. You can't create {etype}");
-            return Err(InstantError::validation_failed(
+    }
+    Ok(())
+}
+
+fn ident_name_error(etype: &str, label: &str) -> Option<String> {
+    if system_catalog::is_reserved_ident(etype, label) {
+        return Some(format!(
+            "{etype}.{label} is a system column and it already exists."
+        ));
+    }
+    if etype.starts_with('$') && !system_catalog::is_editable_etype(etype) {
+        return Some(format!(
+            "$ is reserved for system tables. You can't create {etype}"
+        ));
+    }
+    None
+}
+
+/// Legacy `validate-system-ident-names!` (attr.clj:313-332) over the attr
+/// map an add-attr / update-attr step carries: only the identities present
+/// in the map are checked (an update-attr without them passes), and the
+/// error's `input` is that map.
+pub fn validate_ident_names_input(app_id: Uuid, input: &Value) -> Result<()> {
+    if app_id == system_catalog::SYSTEM_CATALOG_APP_ID {
+        return Ok(());
+    }
+    let name = |key: &str| {
+        let a = input.get(key)?.as_array()?;
+        if a.len() < 3 {
+            return None;
+        }
+        Some((a[1].as_str()?, a[2].as_str()?))
+    };
+    for (etype, label) in [name("forward-identity"), name("reverse-identity")]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(m) = ident_name_error(etype, label) {
+            return Err(InstantError::validation_failed_input(
                 "attributes",
-                m.clone(),
+                input.clone(),
                 json!([{"message": m}]),
             ));
         }
@@ -870,8 +905,9 @@ pub async fn update<'e, E: PgExecutor<'e>>(
     if let Some(od) = patch.get("on-delete-reverse") {
         updated.on_delete_reverse_cascade = od.as_str() == Some("cascade");
     }
-    // legacy update-multi! runs validate-system-ident-names! (attr.clj:585)
-    validate_ident_names(app_id, &updated)?;
+    // legacy update-multi! runs validate-system-ident-names! on the update
+    // map (attr.clj:585)
+    validate_ident_names_input(app_id, patch)?;
 
     sqlx::query(
         r#"
@@ -980,4 +1016,42 @@ pub async fn soft_delete<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid, attr: &At
     .execute(exec)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ident_names_are_checked_on_the_step_map() {
+        let app = Uuid::new_v4();
+        // an update-attr without identities passes (legacy's app-scoped
+        // UPDATE then matches no system attr row)
+        assert!(
+            validate_ident_names_input(app, &json!({"id": Uuid::new_v4(), "unique?": true}))
+                .is_ok()
+        );
+        let step = json!({
+            "id": Uuid::new_v4(),
+            "forward-identity": [Uuid::new_v4(), "$streams", "$files"],
+            "reverse-identity": [Uuid::new_v4(), "$files", "$stream"],
+            "cardinality": "many",
+        });
+        let err = validate_ident_names_input(app, &step).unwrap_err();
+        assert_eq!(
+            err.message,
+            "Validation failed for attributes: $streams.$files is a system column and it already exists."
+        );
+        assert_eq!(err.hint.as_ref().unwrap()["input"], step);
+        let dollar = json!({
+            "forward-identity": [Uuid::new_v4(), "posts", "foos"],
+            "reverse-identity": [Uuid::new_v4(), "$foo", "posts"],
+        });
+        let err = validate_ident_names_input(app, &dollar).unwrap_err();
+        assert_eq!(
+            err.message,
+            "Validation failed for attributes: $ is reserved for system tables. You can't create $foo"
+        );
+        assert!(validate_ident_names_input(system_catalog::SYSTEM_CATALOG_APP_ID, &dollar).is_ok());
+    }
 }

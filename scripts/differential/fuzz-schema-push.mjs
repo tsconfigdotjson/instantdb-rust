@@ -564,9 +564,17 @@ function collide(defs) {
 
 function systemMutation(defs) {
   const k = rand();
-  if (k < 0.25) {
+  if (k < 0.2) {
     defs.entities.$foo = { attrs: { bar: attrDef("string", { required: false }) }, links: {} };
     return "system custom-$-namespace";
+  }
+  if (k < 0.3 && userNs(defs).length) {
+    const from = pick(userNs(defs));
+    defs.links[`${from}Dollar${Math.floor(rand() * 100)}`] = {
+      forward: { on: from, has: "many", label: freeLabel(LINK_LABELS, labelsOn(defs, from)) },
+      reverse: { on: pick(["$foo", "$magicCodes"]), has: "many", label: from },
+    };
+    return "system link-to-$-namespace";
   }
   if (k < 0.45 && defs.entities.$users?.attrs?.email) {
     defs.entities.$users.attrs.email = attrDef(pick(["string", "number"]), { unique: chance(0.5), indexed: chance(0.5), required: chance(0.5) });
@@ -887,6 +895,11 @@ async function fixedPrefix() {
   const sys = Object.entries(d.links).filter(([, l]) => l.forward.on.startsWith("$") && l.reverse.on.startsWith("$"));
   for (const [name, l] of sys) d.links[name] = { forward: { on: l.forward.on, has: l.forward.has, label: l.forward.label }, reverse: { on: l.reverse.on, has: l.reverse.has, label: l.reverse.label } };
   await push("fixed/system", "superadmin", "apply", { schema: d, ...PLATFORM_OPTS });
+  // a link onto a custom `$` namespace is not a catalog link, so it is
+  // planned; applying it hits the reserved-namespace check
+  d = pulledToDefs(pulled.schema);
+  d.links.postsFoos = { forward: { on: "posts", has: "many", label: "foos" }, reverse: { on: "$foo", has: "many", label: "posts" } };
+  await push("fixed/system-dollar-link", "dash", "apply", { schema: d, ...PLATFORM_OPTS });
   pulled = await pullBoth("fixed/pull-system");
   if (sys.length) {
     d = pulledToDefs(pulled.schema);
