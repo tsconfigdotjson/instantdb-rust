@@ -123,6 +123,28 @@ impl InstantError {
         Self::new("param-malformed", 400, message, None)
     }
 
+    /// Legacy `throw-record-not-unique!` for a unique violation it has no
+    /// richer message for (util/exception.clj:278-286, :630-631): the record
+    /// type is the violated table's `kw-table-name` (dasherized, singular),
+    /// e.g. a cardinality-one link flip colliding on `ea_index` is
+    /// "Record not unique: triple".
+    pub fn record_not_unique_table(table: Option<&str>) -> Self {
+        let table = table.unwrap_or("unknown").replace('_', "-");
+        let kind = if let Some(stem) = table.strip_suffix("ies") {
+            format!("{stem}y")
+        } else if let Some(stem) = table.strip_suffix('s') {
+            stem.to_string()
+        } else {
+            table
+        };
+        Self::new(
+            "record-not-unique",
+            400,
+            format!("Record not unique: {kind}"),
+            Some(json!({"record-type": kind})),
+        )
+    }
+
     /// Errors legacy surfaces as Postgres RAISEs (util/exception.clj:770-775):
     /// type `sql-raise`, status 400, message "Raised Exception: ...", hint
     /// carrying the raised text as `constraint`.
@@ -189,12 +211,7 @@ impl From<sqlx::Error> for InstantError {
             if db.code().as_deref() == Some("23505") {
                 // Unique violations are translated by callers that know the attr;
                 // this is the generic fallback.
-                return InstantError::new(
-                    "record-not-unique",
-                    400,
-                    "Record not unique",
-                    Some(json!({"record-type": "triples", "constraint": db.constraint()})),
-                );
+                return InstantError::record_not_unique_table(db.table());
             }
             // legacy psql-throw! (util/exception.clj): a statement cancelled
             // by the statement timeout, and an idle-in-transaction kill
@@ -259,3 +276,27 @@ fn tx_conflict_condition(code: Option<&str>) -> Option<&'static str> {
 }
 
 pub type Result<T> = std::result::Result<T, InstantError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_not_unique_names_the_singular_table_like_legacy() {
+        let e = InstantError::record_not_unique_table(Some("triples"));
+        assert_eq!(e.message, "Record not unique: triple");
+        assert_eq!(e.hint, Some(json!({"record-type": "triple"})));
+        assert_eq!(
+            InstantError::record_not_unique_table(Some("app_admin_tokens")).message,
+            "Record not unique: app-admin-token"
+        );
+        assert_eq!(
+            InstantError::record_not_unique_table(Some("app_email_verification_queries")).message,
+            "Record not unique: app-email-verification-query"
+        );
+        assert_eq!(
+            InstantError::record_not_unique_table(None).message,
+            "Record not unique: unknown"
+        );
+    }
+}

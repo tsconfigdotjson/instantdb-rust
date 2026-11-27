@@ -732,7 +732,11 @@ pub fn validate_ident_names_input(app_id: Uuid, input: &Value) -> Result<()> {
 /// `attr_on_delete` enum (both a 500 `sql-exception` there). Checked where
 /// that SQL runs, after legacy's own validations, as a 400; before, this
 /// server stored a has-one link / dropped the cascade instead.
-pub fn validate_link_values(input: &Value, is_add: bool) -> Result<()> {
+///
+/// `check_cardinality`: an add-attr whose row has a cardinality to check
+/// (false for update-attr, which skips a nil cardinality, and for a row the
+/// `$`-namespace required trigger refuses first).
+pub fn validate_link_values(input: &Value, check_cardinality: bool) -> Result<()> {
     if input.get("value-type").and_then(|v| v.as_str()) != Some("ref") {
         return Ok(());
     }
@@ -747,12 +751,6 @@ pub fn validate_link_values(input: &Value, is_add: bool) -> Result<()> {
             json!([{"message": m}]),
         ))
     };
-    if is_add && matches!(input.get("cardinality"), None | Some(Value::Null)) {
-        let n = name("forward-identity").unwrap_or_default();
-        return fail(format!(
-            "{n}: Missing link cardinality. A link's `has` must be 'one' or 'many'."
-        ));
-    }
     for (key, side) in [
         ("on-delete", "forward-identity"),
         ("on-delete-reverse", "reverse-identity"),
@@ -766,6 +764,12 @@ pub fn validate_link_values(input: &Value, is_add: bool) -> Result<()> {
                 ));
             }
         }
+    }
+    if check_cardinality && matches!(input.get("cardinality"), None | Some(Value::Null)) {
+        let n = name("forward-identity").unwrap_or_default();
+        return fail(format!(
+            "{n}: Missing link cardinality. A link's `has` must be 'one' or 'many'."
+        ));
     }
     Ok(())
 }

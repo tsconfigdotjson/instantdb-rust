@@ -521,12 +521,7 @@ pub fn translate_unique_violation(e: sqlx::Error, attrs: &AttrMap) -> InstantErr
                     }
                 }
             }
-            return InstantError::new(
-                "record-not-unique",
-                400,
-                "Record not unique",
-                Some(json!({"record-type": "triples"})),
-            );
+            return InstantError::record_not_unique_table(db.table());
         }
         if db.code().as_deref() == Some("23514") {
             if let Some(err) = triple_check_error(detail, attrs, constraint) {

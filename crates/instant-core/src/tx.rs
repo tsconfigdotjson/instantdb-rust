@@ -777,13 +777,7 @@ pub async fn transact(
                         }
                     }
                 }
-                // ...and only then the INSERT, where a link without a
-                // cardinality / an unknown onDelete fails
-                for step in &group {
-                    if let TxStep::AddAttr { raw, .. } = step {
-                        crate::attr::validate_link_values(raw, true)?;
-                    }
-                }
+
                 for step in group {
                     let TxStep::AddAttr { attr, raw } = step else {
                         unreachable!()
@@ -806,6 +800,14 @@ pub async fn transact(
                             ));
                         }
                     }
+                    // ...and only then the INSERT, which meets each row's
+                    // problems in turn: the on-delete cast, then the BEFORE
+                    // trigger refusing a required `$` attr (migration 92),
+                    // then the cardinality not-null constraint
+                    let trigger_first = attr.is_required
+                        && attr.etype.starts_with('$')
+                        && app_id != crate::system_catalog::SYSTEM_CATALOG_APP_ID;
+                    crate::attr::validate_link_values(&raw, !trigger_first)?;
                     crate::attr::insert_from_step(&mut *conn, app_id, &attr, &raw).await?;
                     backfill_nulls_for_new_attr(&mut *conn, app_id, attrs, &attr).await?;
                     report.changed_attrs.push(attr.id);

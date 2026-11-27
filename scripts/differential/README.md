@@ -670,12 +670,20 @@ everything and checks coverage itself, as before.
   collisions (backwards link, duplicate reverse ident, link over an attr,
   attr over a link, cascade on a `many` side), reserved and custom `$`
   attrs and namespaces, exact system links, unknown `has` / `onDelete`
-  values, and shuffled client key order. `check_types` and
+  values, and shuffled client key order. Most rounds send a subset of the
+  pulled schema (at most five entities, five attrs each and five links, so
+  with up to three mutations every map stays within eight keys: the planner
+  never deletes, so whatever a client omits is left alone); 15% send the
+  whole schema, and a request with a map past eight keys is only planned,
+  never applied, because legacy then plans in Clojure hash order and an
+  apply with several failing steps would meet a different one first. `check_types` and
   `supports_background_updates` vary and the route alternates between dash
   and superadmin; plan only, plan then apply, or apply directly. Seeded
   `/admin/transact` writes (update / create / link / unlink / delete, with
-  duplicates, nulls, wrong-typed, oversized and new-label values) run
-  between rounds so the indexing jobs a plan creates meet real data, and now
+  duplicates, nulls, wrong-typed, oversized and new-label values, one attr
+  per write because legacy inserts a write's triples sorted by
+  `(entity_id, attr_id)`, so which of several invalid values it reports
+  follows server-chosen attr ids) run between rounds so the indexing jobs a plan creates meet real data, and now
   and then an attr is deleted or renamed through `schema/steps/apply` (the
   CLI's path), so plans meet renamed and soft-deleted attrs. A fixed prefix
   per seed covers a realistic first push (pulled system namespaces plus user

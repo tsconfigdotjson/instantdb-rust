@@ -367,6 +367,27 @@ function largeMaps(defs) {
   return false;
 }
 
+// A client's schema may name only part of what the app has (the planner never
+// deletes, so whatever it omits is left alone). Most rounds send a subset of
+// at most five entities, five attrs per entity and five links, so with up to
+// three mutations every map stays within array-map size and the steps keep
+// the client's order; a full-schema round past eight keys is only planned.
+function subsetDefs(defs) {
+  const pickKeys = (o, n) => {
+    const keys = Object.keys(o ?? {});
+    if (keys.length <= n) return keys;
+    const keep = new Set(shuffle(keys).slice(0, n));
+    return keys.filter((k) => keep.has(k));
+  };
+  const entities = {};
+  for (const e of pickKeys(defs.entities, 5)) {
+    const def = defs.entities[e];
+    entities[e] = { ...def, attrs: Object.fromEntries(pickKeys(def.attrs, 5).map((l) => [l, def.attrs[l]])) };
+  }
+  const links = Object.fromEntries(pickKeys(defs.links, 5).map((k) => [k, defs.links[k]]));
+  return { ...defs, entities, links };
+}
+
 // a `has` the server stores verbatim on apply (legacy) / refuses (rust): such
 // plans are only planned in random rounds, never applied (see the suffix)
 function hasUnknownCardinality(defs) {
@@ -644,10 +665,16 @@ function dataSteps(schema) {
     const [ns, attrs] = pick(blobs);
     const pool = (entities[ns] ??= []);
     const eid = pool.length < 8 && (pool.length === 0 || chance(0.35)) ? (pool.push(mk()), pool[pool.length - 1]) : pick(pool);
-    const labels = shuffle(Object.keys(attrs).filter((l) => l !== "id")).slice(0, 1 + Math.floor(rand() * 3));
+    // One attr per write: legacy inserts a write's triples sorted by
+    // (entity_id, attr_id, value_md5), so when several of them are invalid
+    // the one it reports follows server-chosen attr ids.
+    const labels = Object.keys(attrs).filter((l) => l !== "id");
     const vals = {};
-    for (const l of labels) vals[l] = valueFor(attrs[l]["checked-data-type"] ?? pick(TYPES));
-    if (chance(0.04)) vals[freeLabel(ATTR_LABELS, new Set(Object.keys(attrs)))] = pick(VALUES.string);
+    if (!labels.length || chance(0.04)) vals[freeLabel(ATTR_LABELS, new Set(Object.keys(attrs)))] = pick(VALUES.string);
+    else {
+      const l = pick(labels);
+      vals[l] = valueFor(attrs[l]["checked-data-type"] ?? pick(TYPES));
+    }
     return [[chance(0.2) ? "create" : "update", ns, eid, vals]];
   }
   if (refs.length && k < 0.85) {
@@ -833,6 +860,18 @@ async function fixedPrefix() {
   d.entities.tags.attrs.name.config.unique = false;
   d.links.postsTags.forward.required = true;
   await push("fixed/jobs", "dash", "apply", { schema: d, ...PLATFORM_OPTS });
+  // 3b. an untyped unique attr: a duplicate array value (legacy cuts the
+  // value in its message at the array's comma) and an oversized value
+  // (legacy echoes the row's NULL checked_data_type as the string "null")
+  pulled = await pullBoth("fixed/pull-jobs-pre-uniq");
+  d = pulledToDefs(pulled.schema);
+  d.entities.uniq = { attrs: { v: attrDef("json", { unique: true, required: false }) }, links: {} };
+  await push("fixed/uniq", "dash", "apply", { schema: d, check_types: true, supports_background_updates: false });
+  const u = (entities.uniq = [mk(), mk()]);
+  await writeData("fixed/data-unique-array-0", [["update", "uniq", u[0], { v: [1, 2] }]]);
+  await writeData("fixed/data-unique-array-1", [["update", "uniq", u[1], { v: [1, 2] }]]);
+  await writeData("fixed/data-too-large", [["update", "uniq", u[1], { v: "x".repeat(9000) }]]);
+
   // 4. the same flips without background updates (update-attr steps) and
   // with check_types off
   pulled = await pullBoth("fixed/pull-jobs");
@@ -956,7 +995,8 @@ async function main() {
       }
       if (chance(0.08)) await cliStep(`round/${round}`, lastPull?.schema);
       const pulled = await pullBoth(`round/${round}/pull`);
-      const defs = pulledToDefs(pulled.schema);
+      const full = chance(0.15);
+      const defs = full ? pulledToDefs(pulled.schema) : subsetDefs(pulledToDefs(pulled.schema));
       const muts = [];
       const n = 1 + Math.floor(rand() * 3);
       for (let i = 0; i < n; i++) muts.push(mutate(defs));
@@ -968,9 +1008,11 @@ async function main() {
         ...(chance(0.2) ? { overwrite: false } : {}),
       };
       const route = chance(0.6) ? "superadmin" : "dash";
-      console.log(`round ${round}: ${route} ${muts.join("; ")} (check_types=${body.check_types} bg=${body.supports_background_updates})`);
+      console.log(`round ${round}: ${route}${full ? " full" : ""} ${muts.join("; ")} (check_types=${body.check_types} bg=${body.supports_background_updates})`);
       const k = rand();
-      const noApply = hasUnknownCardinality(defs);
+      // past eight keys legacy plans in hash order, so which of several
+      // failing steps an apply meets first is not the client's order either
+      const noApply = hasUnknownCardinality(defs) || largeMaps(defs);
       if (k < 0.3 || noApply) {
         await push(`round/${round}`, route, "plan", body);
       } else if (k < 0.85) {

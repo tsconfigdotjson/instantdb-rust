@@ -1291,5 +1291,55 @@
     },
     "reason": "A `forward.has` other than one / many (`\"few\"`) is planned identically (the step carries `cardinality: \"few\"`, compared strictly). Legacy then stores `few` as the attr's cardinality: the app is left with a link no client understands (platform's `rels` table has no `few-*` entry). This server refuses the push (schema::apply_errors). It is the last probe of every seed because the two schemas differ afterwards; random rounds only plan such schemas.",
     "citation": "LEGACY/server/src/instant/model/schema.clj:181; LEGACY/client/packages/platform/src/util.ts:21-26 (rels)"
+  },
+  {
+    "path": "^schemapush:(fixed/data-unique-array-1|round/\\d+/data-\\d+)$",
+    "differs": [
+      "^\\.message$",
+      "^\\.hint\\.value$"
+    ],
+    "legacy": {
+      "type": "record-not-unique",
+      "message": {
+        "$regex": "an entity already exists with `[^`]+` = \\[1$"
+      },
+      "hint": {
+        "value": "[1"
+      }
+    },
+    "rust": {
+      "type": "record-not-unique",
+      "message": {
+        "$regex": "an entity already exists with `[^`]+` = \\[1, 2\\]$"
+      },
+      "hint": {
+        "value": "[1, 2]"
+      }
+    },
+    "reason": "A duplicate JSON array on a unique attr: legacy reads the value out of Postgres's `Key (app_id, attr_id, json_null_to_null(value))=(...)` detail with parse-unique-detail, which splits on commas outside quotes and parentheses but not brackets, so `[1, 2]` comes back as `[1` in both the message and `hint.value`. This server parses the detail with brackets balanced and reports `[1, 2]`. Type, record type, attr id, etype and label are still compared; only the cut value differs, and clients only print the message.",
+    "citation": "LEGACY/server/src/instant/util/exception.clj:141-218 (parse-unique-detail-column!), :278-286"
+  },
+  {
+    "path": "^schemapush:(fixed/data-too-large|round/\\d+/data-\\d+)$",
+    "differs": [
+      "^\\.hint\\.checked-data-type$"
+    ],
+    "legacy": {
+      "type": "validation-failed",
+      "message": {
+        "$regex": "^Value is too large for an? (unique|indexed) attribute\\.$"
+      },
+      "hint": {
+        "checked-data-type": "null"
+      }
+    },
+    "rust": {
+      "type": "validation-failed",
+      "hint": {
+        "checked-data-type": null
+      }
+    },
+    "reason": "An oversized value on an indexed / unique attr without a checked type: legacy copies the failing row's `checked_data_type` column text out of Postgres's \"Failing row contains (...)\" detail, where SQL NULL prints as `null`, so its hint carries the string \"null\". This server reports JSON null for a missing checked type. The message, value, attr / entity ids and `value-too-large?` are still compared.",
+    "citation": "LEGACY/server/src/instant/util/exception.clj:588-614 (extract-triple-from-constraint), :651-700"
   }
 ]
