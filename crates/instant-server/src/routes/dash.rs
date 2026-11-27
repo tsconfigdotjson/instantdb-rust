@@ -438,8 +438,28 @@ pub(crate) struct Plan {
     pub(crate) wire: Value,
 }
 
+/// Plan-level validation failure (`ex/assert-valid! :schema :plan errors`).
+fn schema_validation_error(errors: Vec<Value>) -> InstantError {
+    let msgs: Vec<&str> = errors
+        .iter()
+        .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+        .collect();
+    InstantError::new(
+        "validation-failed",
+        400,
+        format!("Validation failed for schema: {}", msgs.join(", ")),
+        Some(json!({"data-type": "schema", "input": "plan", "errors": errors})),
+    )
+}
+
 pub(crate) async fn plan(state: &AppState, app_id: Uuid, body: &Value) -> Result<Plan> {
     let client_defs = body.get("schema").cloned().unwrap_or(Value::Null);
+    // legacy answers an unreadable schema shape with a typeless 500 or a plan
+    // whose apply fails in SQL (schema::malformed_defs); name the part instead
+    if let Some((path, original)) = schema::malformed_defs(&client_defs) {
+        let path: Vec<&str> = path.iter().map(String::as_str).collect();
+        return Err(param_malformed(&path, original));
+    }
     let opts = schema::PlanOpts {
         check_types: truthy(body.get("check_types")),
         background_updates: truthy(body.get("supports_background_updates")),
@@ -450,16 +470,7 @@ pub(crate) async fn plan(state: &AppState, app_id: Uuid, body: &Value) -> Result
     let steps = schema::schemas_to_ops(opts, &current_schema, &new_schema);
     let errors = schema::plan_errors(&current_attrs, &steps);
     if !errors.is_empty() {
-        let msgs: Vec<&str> = errors
-            .iter()
-            .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
-            .collect();
-        return Err(InstantError::new(
-            "validation-failed",
-            400,
-            format!("Validation failed for schema: {}", msgs.join(", ")),
-            Some(json!({"data-type": "schema", "input": "plan", "errors": errors})),
-        ));
+        return Err(schema_validation_error(errors));
     }
     Ok(Plan {
         wire: json!({
@@ -470,6 +481,30 @@ pub(crate) async fn plan(state: &AppState, app_id: Uuid, body: &Value) -> Result
         }),
         steps,
     })
+}
+
+/// Apply a plan's steps. A link `has` / `onDelete` that no attr can hold is
+/// refused here (schema::apply_errors) instead of being written.
+async fn apply_plan(state: &Arc<AppState>, app_id: Uuid, plan: Plan) -> Result<(Value, Value)> {
+    let errors = schema::apply_errors(&plan.steps);
+    if !errors.is_empty() {
+        return Err(schema_validation_error(errors));
+    }
+    let applied = apply_steps(state, app_id, plan.steps, false).await?;
+    Ok((plan.wire, applied))
+}
+
+/// `POST .../schema/push/apply` (dash and superadmin): plan + apply, the
+/// plan's keys merged with the apply result's.
+pub(crate) async fn push_apply(state: &Arc<AppState>, app_id: Uuid, body: &Value) -> Result<Value> {
+    let plan = plan(state, app_id, body).await?;
+    let (mut out, applied) = apply_plan(state, app_id, plan).await?;
+    if let (Some(o), Some(a)) = (out.as_object_mut(), applied.as_object()) {
+        for (k, v) in a {
+            o.insert(k.clone(), v.clone());
+        }
+    }
+    Ok(out)
 }
 
 fn truthy(v: Option<&Value>) -> bool {
@@ -500,7 +535,7 @@ pub(crate) async fn plan_and_apply(
     body: &Value,
 ) -> Result<Value> {
     let plan = plan(state, app_id, body).await?;
-    apply_steps(state, app_id, plan.steps, false).await
+    Ok(apply_plan(state, app_id, plan).await?.1)
 }
 
 /// POST /dash/apps/:app_id/schema/push/apply — plan + apply in one call.
@@ -513,15 +548,7 @@ pub async fn schema_push_apply(
     let r = async {
         let app = dash_authed(&state, &headers, &app_id, Scope::AppsWrite).await?;
         let body = parse_body(&body)?;
-        let plan = plan(&state, app.id, &body).await?;
-        let applied = apply_steps(&state, app.id, plan.steps, false).await?;
-        let mut out = plan.wire;
-        if let (Some(o), Some(a)) = (out.as_object_mut(), applied.as_object()) {
-            for (k, v) in a {
-                o.insert(k.clone(), v.clone());
-            }
-        }
-        Ok(out)
+        push_apply(&state, app.id, &body).await
     }
     .await;
     json_or_err(r)

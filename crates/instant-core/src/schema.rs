@@ -3,13 +3,100 @@
 //! client-defs → schema conversion, schema diffing into tx-steps, and the
 //! plan-level validation errors.
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ops::Index;
 
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
-use crate::attr::{Attr, AttrMap, Cardinality, CheckedDataType, ValueType};
+use crate::attr::{Attr, AttrMap, CheckedDataType, ValueType};
 use crate::system_catalog;
+
+/// A map that iterates in insertion order with ordered-tree lookups. Legacy
+/// parses the client's schema into Clojure array-maps, which keep the JSON
+/// key order, and plans by walking them: a plan's steps follow the order the
+/// client wrote its entities, attrs and links in (for maps of up to eight
+/// keys; past that Clojure switches to hash maps, whose order is arbitrary).
+#[derive(Debug, Clone)]
+pub struct OrderedMap<K: Ord + Clone, V> {
+    map: BTreeMap<K, V>,
+    order: Vec<K>,
+}
+
+impl<K: Ord + Clone, V> Default for OrderedMap<K, V> {
+    fn default() -> Self {
+        OrderedMap {
+            map: BTreeMap::new(),
+            order: Vec::new(),
+        }
+    }
+}
+
+impl<K: Ord + Clone, V> OrderedMap<K, V> {
+    /// Insert or replace; a replaced key keeps its first position (what
+    /// `assoc` does to an existing key of a Clojure array-map).
+    pub fn insert(&mut self, k: K, v: V) {
+        if self.map.insert(k.clone(), v).is_none() {
+            self.order.push(k);
+        }
+    }
+
+    pub fn get<Q: Ord + ?Sized>(&self, k: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+    {
+        self.map.get(k)
+    }
+
+    pub fn contains_key<Q: Ord + ?Sized>(&self, k: &Q) -> bool
+    where
+        K: Borrow<Q>,
+    {
+        self.map.contains_key(k)
+    }
+
+    pub fn entry_or_default(&mut self, k: K) -> &mut V
+    where
+        V: Default,
+    {
+        if !self.map.contains_key(&k) {
+            self.order.push(k.clone());
+        }
+        self.map.entry(k).or_default()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> + '_ {
+        self.order.iter().map(move |k| (k, &self.map[k]))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &K> + '_ {
+        self.order.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+}
+
+impl<K, V, Q> Index<&Q> for OrderedMap<K, V>
+where
+    K: Ord + Clone + Borrow<Q>,
+    Q: Ord + ?Sized,
+{
+    type Output = V;
+    fn index(&self, k: &Q) -> &V {
+        &self.map[k]
+    }
+}
+
+impl<'a, K: Ord + Clone, V> IntoIterator for &'a OrderedMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = Box<dyn Iterator<Item = (&'a K, &'a V)> + 'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
+}
 
 /// One attribute as the planner sees it (either an existing attr or one
 /// described by client schema defs). `wire` is the JSON map the legacy
@@ -18,7 +105,10 @@ use crate::system_catalog;
 pub struct SchemaAttr {
     pub id: Option<Uuid>,
     pub value_type: ValueType,
-    pub cardinality: Cardinality,
+    /// `"one"` / `"many"` for stored attrs. For a link from client defs it is
+    /// legacy's `(keyword (:has forward))`: whatever string the client sent
+    /// (`"few"` included), or null when `has` is missing or not a string.
+    pub cardinality: Value,
     pub fwd_etype: String,
     pub fwd_label: String,
     pub rev_etype: Option<String>,
@@ -27,8 +117,11 @@ pub struct SchemaAttr {
     pub index: bool,
     pub required: bool,
     pub checked_data_type: Option<CheckedDataType>,
-    pub on_delete_cascade: bool,
-    pub on_delete_reverse_cascade: bool,
+    /// `on-delete` / `on-delete-reverse`: `"cascade"` or none for stored
+    /// attrs; for client links legacy's `(some-> onDelete keyword)`, i.e. any
+    /// string the client sent (validated only when the plan is applied).
+    pub on_delete: Option<String>,
+    pub on_delete_reverse: Option<String>,
     pub is_system: bool,
     pub wire: Value,
 }
@@ -44,7 +137,7 @@ impl SchemaAttr {
         SchemaAttr {
             id: Some(attr.id),
             value_type: attr.value_type,
-            cardinality: attr.cardinality,
+            cardinality: json!(attr.cardinality.as_str()),
             fwd_etype: attr.etype.clone(),
             fwd_label: attr.label.clone(),
             rev_etype: attr.reverse_etype.clone(),
@@ -53,8 +146,10 @@ impl SchemaAttr {
             index: attr.is_indexed,
             required: attr.is_required,
             checked_data_type: attr.checked_data_type,
-            on_delete_cascade: attr.on_delete_cascade,
-            on_delete_reverse_cascade: attr.on_delete_reverse_cascade,
+            on_delete: attr.on_delete_cascade.then(|| "cascade".to_string()),
+            on_delete_reverse: attr
+                .on_delete_reverse_cascade
+                .then(|| "cascade".to_string()),
             is_system: attr.is_system,
             wire,
         }
@@ -75,8 +170,8 @@ impl SchemaAttr {
 /// `{blobs: {etype: {label: attr}}, refs: {[fwd-etype fwd-label rev-etype rev-label]: attr}}`
 #[derive(Debug, Clone, Default)]
 pub struct Schema {
-    pub blobs: BTreeMap<String, BTreeMap<String, SchemaAttr>>,
-    pub refs: BTreeMap<[String; 4], SchemaAttr>,
+    pub blobs: OrderedMap<String, OrderedMap<String, SchemaAttr>>,
+    pub refs: OrderedMap<[String; 4], SchemaAttr>,
 }
 
 /// Legacy serializes the vector keys of the refs map with Clojure `str`:
@@ -151,8 +246,7 @@ pub fn attrs_to_schema(attrs: &AttrMap) -> Schema {
             ValueType::Blob => {
                 schema
                     .blobs
-                    .entry(attr.etype.clone())
-                    .or_default()
+                    .entry_or_default(attr.etype.clone())
                     .insert(attr.label.clone(), sa);
             }
         }
@@ -174,7 +268,7 @@ pub fn defs_to_schema(defs: &Value) -> Schema {
         for (etype, def) in entities {
             let is_system = etype.starts_with('$');
             let catalog = if is_system { "system" } else { "user" };
-            let mut out = BTreeMap::new();
+            let mut out = OrderedMap::default();
             if let Some(attrs) = def.get("attrs").and_then(|a| a.as_object()) {
                 for (label, adef) in attrs {
                     if is_hidden(is_system, etype, label) {
@@ -209,7 +303,7 @@ pub fn defs_to_schema(defs: &Value) -> Schema {
                         SchemaAttr {
                             id: None,
                             value_type: ValueType::Blob,
-                            cardinality: Cardinality::One,
+                            cardinality: json!("one"),
                             fwd_etype: etype.clone(),
                             fwd_label: label.clone(),
                             rev_etype: None,
@@ -218,8 +312,8 @@ pub fn defs_to_schema(defs: &Value) -> Schema {
                             index,
                             required,
                             checked_data_type,
-                            on_delete_cascade: false,
-                            on_delete_reverse_cascade: false,
+                            on_delete: None,
+                            on_delete_reverse: None,
                             is_system,
                             wire,
                         },
@@ -241,10 +335,9 @@ pub fn defs_to_schema(defs: &Value) -> Schema {
             let rev_label = str_of(&rev, "label").unwrap_or_default().to_string();
             let on_delete = str_of(&fwd, "onDelete").map(|s| s.to_string());
             let on_delete_reverse = str_of(&rev, "onDelete").map(|s| s.to_string());
-            let cardinality = match str_of(&fwd, "has") {
-                Some("many") => Cardinality::Many,
-                _ => Cardinality::One,
-            };
+            // (keyword (:has forward)): any string is kept as is, anything
+            // else becomes nil
+            let cardinality = str_of(&fwd, "has").map_or(Value::Null, |h| json!(h));
             let unique = str_of(&rev, "has") == Some("one");
             let required = fwd.get("required") == Some(&Value::Bool(true));
             let wire = json!({
@@ -255,7 +348,7 @@ pub fn defs_to_schema(defs: &Value) -> Schema {
                 "on-delete-reverse": on_delete_reverse,
                 "forward-identity": [null, fwd_on, fwd_label],
                 "reverse-identity": [null, rev_on, rev_label],
-                "cardinality": cardinality.as_str(),
+                "cardinality": cardinality,
                 "unique?": unique,
                 "required?": required,
             });
@@ -278,8 +371,8 @@ pub fn defs_to_schema(defs: &Value) -> Schema {
                     index: false,
                     required,
                     checked_data_type: None,
-                    on_delete_cascade: on_delete.as_deref() == Some("cascade"),
-                    on_delete_reverse_cascade: on_delete_reverse.as_deref() == Some("cascade"),
+                    on_delete,
+                    on_delete_reverse,
                     is_system: false,
                     wire,
                 },
@@ -306,7 +399,12 @@ pub fn remove_system_namespaces(defs: &Value) -> Value {
             v
         })
         .collect();
-    let system_links: HashSet<Value> = system_catalog::all_attrs()
+    // schema.clj system-catalog-links: a link is dropped only when the
+    // client's link map *equals* a catalog link's `{forward {on has label}
+    // reverse {on has label}}`. A pulled schema writes `onDelete: "cascade"`
+    // on $usersLinkedPrimaryUser, so that link is not dropped: it stays in
+    // `new-schema` and is diffed against the stored system attr.
+    let system_links: Vec<Value> = system_catalog::all_attrs()
         .iter()
         .filter(|a| a.value_type == ValueType::Ref)
         .map(|a| {
@@ -325,23 +423,140 @@ pub fn remove_system_namespaces(defs: &Value) -> Value {
         }
     }
     if let Some(links) = out.get_mut("links").and_then(|l| l.as_object_mut()) {
-        links.retain(|_, link| {
-            let key = json!({
-                "forward": {
-                    "on": link.get("forward").and_then(|f| f.get("on")),
-                    "has": link.get("forward").and_then(|f| f.get("has")),
-                    "label": link.get("forward").and_then(|f| f.get("label")),
-                },
-                "reverse": {
-                    "on": link.get("reverse").and_then(|f| f.get("on")),
-                    "has": link.get("reverse").and_then(|f| f.get("has")),
-                    "label": link.get("reverse").and_then(|f| f.get("label")),
-                },
-            });
-            !system_links.contains(&key)
-        });
+        links.retain(|_, link| !system_links.iter().any(|sys| sys == link));
     }
     out
+}
+
+/// A client schema whose shape the planner cannot read, as the
+/// `param-malformed` path and offending value. Legacy answers these with a
+/// typeless 500 (a non-map `schema`, `entities`, entity or `attrs` throws in
+/// remove-system-namespaces) or plans a link with nil identities whose apply
+/// then fails in SQL (a non-map link / `forward` / `reverse`, a missing or
+/// non-string `on` / `label`). Null stands for "absent" everywhere, as in
+/// legacy; an attr def that is not a map is read as an empty one (legacy
+/// does the same).
+pub fn malformed_defs(defs: &Value) -> Option<(Vec<String>, Value)> {
+    fn path(parts: &[&str]) -> Vec<String> {
+        ["body", "schema"]
+            .iter()
+            .chain(parts.iter())
+            .map(|s| s.to_string())
+            .collect()
+    }
+    let defs = match defs {
+        Value::Null => return None,
+        Value::Object(m) => m,
+        other => return Some((path(&[]), other.clone())),
+    };
+    match defs.get("entities") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(entities)) => {
+            for (etype, def) in entities {
+                match def {
+                    Value::Null => {}
+                    Value::Object(d) => match d.get("attrs") {
+                        None | Some(Value::Null) | Some(Value::Object(_)) => {}
+                        Some(other) => {
+                            return Some((path(&["entities", etype, "attrs"]), other.clone()))
+                        }
+                    },
+                    other => return Some((path(&["entities", etype]), other.clone())),
+                }
+            }
+        }
+        Some(other) => return Some((path(&["entities"]), other.clone())),
+    }
+    match defs.get("links") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(links)) => {
+            for (name, link) in links {
+                let Value::Object(link) = link else {
+                    return Some((path(&["links", name]), link.clone()));
+                };
+                for side in ["forward", "reverse"] {
+                    let v = link.get(side).cloned().unwrap_or(Value::Null);
+                    let Value::Object(side_map) = &v else {
+                        return Some((path(&["links", name, side]), v));
+                    };
+                    for key in ["on", "label"] {
+                        let k = side_map.get(key).cloned().unwrap_or(Value::Null);
+                        if !k.is_string() {
+                            return Some((path(&["links", name, side, key]), k));
+                        }
+                    }
+                }
+            }
+        }
+        Some(other) => return Some((path(&["links"]), other.clone())),
+    }
+    None
+}
+
+fn invalid_cardinality_message((etype, label): &(String, String), v: Option<&Value>) -> String {
+    match v {
+        None | Some(Value::Null) => format!(
+            "{etype}->{label}: Missing link cardinality. A link's `has` must be 'one' or 'many'."
+        ),
+        Some(v) => format!(
+            "{etype}->{label}: Invalid link cardinality {v}. A link's `has` must be 'one' or 'many'."
+        ),
+    }
+}
+
+fn invalid_on_delete_message((etype, label): &(String, String), v: &Value) -> String {
+    format!("{etype}->{label}: Invalid onDelete {v}. The only supported onDelete is 'cascade'.")
+}
+
+/// Values a plan can carry from the client's link defs that no attr can
+/// hold: a `has` other than one / many (missing on a new link) and an
+/// `onDelete` other than cascade. Checked when a plan is applied, in the
+/// plan-errors shape. Legacy plans them the same way but then writes them:
+/// an unknown `has` is stored as the attr's cardinality (the app is left
+/// with a link whose cardinality no client understands), while a missing
+/// `has` or an unknown `onDelete` fails in SQL with a 500 `sql-exception`
+/// (not-null-violation / invalid-text-representation).
+pub fn apply_errors(steps: &[Value]) -> Vec<Value> {
+    let mut errors = vec![];
+    for step in steps {
+        let op = step.get(0).and_then(|v| v.as_str()).unwrap_or_default();
+        if op != "add-attr" && op != "update-attr" {
+            continue;
+        }
+        let attr = step.get(1).cloned().unwrap_or(Value::Null);
+        if str_of(&attr, "value-type") != Some("ref") {
+            continue;
+        }
+        let (fwd_name, rev_name) = step_names(&attr);
+        let card = attr.get("cardinality");
+        let card_ok = match card {
+            Some(Value::String(c)) => c == "one" || c == "many",
+            // update-multi! skips a nil cardinality (the attr keeps its own)
+            None | Some(Value::Null) => op == "update-attr",
+            _ => false,
+        };
+        if !card_ok {
+            if let Some(n) = &fwd_name {
+                errors.push(
+                    json!({"in": ["schema"], "message": invalid_cardinality_message(n, card)}),
+                );
+            }
+        }
+        for (key, name) in [("on-delete", &fwd_name), ("on-delete-reverse", &rev_name)] {
+            match attr.get(key) {
+                None | Some(Value::Null) => {}
+                Some(Value::String(s)) if s == "cascade" => {}
+                Some(v) => {
+                    if let Some(n) = name {
+                        errors.push(
+                            json!({"in": ["schema"], "message": invalid_on_delete_message(n, v)}),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    errors
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -465,20 +680,20 @@ pub fn schemas_to_ops(opts: PlanOpts, current: &Schema, new: &Schema) -> Vec<Val
                 "id": Uuid::new_v4(),
                 "forward-identity": [Uuid::new_v4(), key[0], key[1]],
                 "reverse-identity": [Uuid::new_v4(), key[2], key[3]],
-                "cardinality": new_attr.cardinality.as_str(),
+                "cardinality": new_attr.cardinality,
                 "unique?": new_attr.unique,
                 "index?": new_attr.index,
                 "required?": new_attr.required,
-                "on-delete": new_attr.on_delete_cascade.then_some("cascade"),
-                "on-delete-reverse": new_attr.on_delete_reverse_cascade.then_some("cascade"),
+                "on-delete": new_attr.on_delete,
+                "on-delete-reverse": new_attr.on_delete_reverse,
             }]));
             continue;
         };
         let changed_required = new_attr.required != cur.required;
         let changed_updatable = new_attr.cardinality != cur.cardinality
             || new_attr.unique != cur.unique
-            || new_attr.on_delete_cascade != cur.on_delete_cascade
-            || new_attr.on_delete_reverse_cascade != cur.on_delete_reverse_cascade;
+            || new_attr.on_delete != cur.on_delete
+            || new_attr.on_delete_reverse != cur.on_delete_reverse;
         if !changed_required && !changed_updatable {
             continue;
         }
@@ -498,12 +713,12 @@ pub fn schemas_to_ops(opts: PlanOpts, current: &Schema, new: &Schema) -> Vec<Val
                 "id": cur.id,
                 "forward-identity": cur.wire.get("forward-identity").cloned().unwrap_or(Value::Null),
                 "reverse-identity": cur.wire.get("reverse-identity").cloned().unwrap_or(Value::Null),
-                "cardinality": new_attr.cardinality.as_str(),
+                "cardinality": new_attr.cardinality,
                 "unique?": new_attr.unique,
                 "index?": new_attr.index,
                 "required?": new_attr.required,
-                "on-delete": new_attr.on_delete_cascade.then_some("cascade"),
-                "on-delete-reverse": new_attr.on_delete_reverse_cascade.then_some("cascade"),
+                "on-delete": new_attr.on_delete,
+                "on-delete-reverse": new_attr.on_delete_reverse,
             }]));
         }
     }
@@ -650,6 +865,7 @@ pub fn job_serial_key(op: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attr::Cardinality;
 
     fn attr(etype: &str, label: &str, unique: bool) -> Attr {
         Attr {
@@ -908,5 +1124,180 @@ mod tests {
         assert!(out["entities"]["$users"]["attrs"].get("nickname").is_some());
         assert!(out["links"].get("postsAuthor").is_some());
         assert!(out["links"].get("systemLink").is_none());
+    }
+
+    #[test]
+    fn remove_system_namespaces_keeps_system_links_with_extra_keys() {
+        let sys_link = system_catalog::all_attrs()
+            .into_iter()
+            .find(|a| a.value_type == ValueType::Ref)
+            .unwrap();
+        let fwd = json!({"on": sys_link.etype, "has": sys_link.cardinality.as_str(), "label": sys_link.label});
+        let rev = json!({"on": sys_link.reverse_etype, "has": if sys_link.is_unique {"one"} else {"many"}, "label": sys_link.reverse_label});
+        let mut fwd_cascade = fwd.clone();
+        fwd_cascade["onDelete"] = json!("cascade");
+        let defs = json!({"links": {
+            // a pulled schema's $usersLinkedPrimaryUser carries onDelete
+            "withOnDelete": {"forward": fwd_cascade, "reverse": rev},
+            "withExtraKey": {"forward": fwd, "reverse": rev, "extra": 1},
+            "exact": {"reverse": rev, "forward": fwd},
+        }});
+        let out = remove_system_namespaces(&defs);
+        assert!(out["links"].get("withOnDelete").is_some());
+        assert!(out["links"].get("withExtraKey").is_some());
+        assert!(out["links"].get("exact").is_none());
+    }
+
+    fn step_idents(steps: &[Value]) -> Vec<String> {
+        steps
+            .iter()
+            .map(|s| {
+                let a = &s[1];
+                format!(
+                    "{} {}.{}",
+                    s[0].as_str().unwrap(),
+                    a["forward-identity"][1].as_str().unwrap(),
+                    a["forward-identity"][2].as_str().unwrap()
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plan_follows_client_key_order() {
+        let current = attrs_to_schema(&attr_map(vec![]));
+        let defs = json!({
+            "entities": {
+                "zebras": {"attrs": {"stripes": {"valueType": "number"}, "age": {"valueType": "number"}}},
+                "apes": {"attrs": {"name": {"valueType": "string"}}},
+            },
+            "links": {
+                "zLink": {
+                    "forward": {"on": "zebras", "has": "one", "label": "keeper"},
+                    "reverse": {"on": "apes", "has": "many", "label": "zebras"},
+                },
+                "aLink": {
+                    "forward": {"on": "apes", "has": "many", "label": "friends"},
+                    "reverse": {"on": "zebras", "has": "many", "label": "apeFriends"},
+                },
+            },
+        });
+        let new = defs_to_schema(&defs);
+        let steps = schemas_to_ops(PlanOpts::default(), &current, &new);
+        assert_eq!(
+            step_idents(&steps),
+            vec![
+                "add-attr zebras.id",
+                "add-attr apes.id",
+                "add-attr zebras.stripes",
+                "add-attr zebras.age",
+                "add-attr apes.name",
+                "add-attr zebras.keeper",
+                "add-attr apes.friends",
+            ]
+        );
+        let keys: Vec<&String> = new.blobs.keys().collect();
+        assert_eq!(keys, vec!["zebras", "apes"]);
+    }
+
+    #[test]
+    fn plan_keeps_raw_link_cardinality_and_on_delete() {
+        let existing = attr_map(vec![link(("posts", "tags"), ("tags", "posts"), true)]);
+        let current = attrs_to_schema(&existing);
+        let defs = json!({"links": {
+            "postsTags": {
+                "forward": {"on": "posts", "label": "tags"},
+                "reverse": {"on": "tags", "has": "many", "label": "posts", "onDelete": "restrict"},
+            },
+            "postsAuthor": {
+                "forward": {"on": "posts", "has": "few", "label": "author"},
+                "reverse": {"on": "users", "has": "many", "label": "posts"},
+            },
+        }});
+        let new = defs_to_schema(&defs);
+        let steps = schemas_to_ops(
+            PlanOpts {
+                check_types: true,
+                background_updates: true,
+            },
+            &current,
+            &new,
+        );
+        assert_eq!(
+            step_idents(&steps),
+            vec!["update-attr posts.tags", "add-attr posts.author"]
+        );
+        assert_eq!(steps[0][1]["cardinality"], Value::Null);
+        assert_eq!(steps[0][1]["on-delete-reverse"], json!("restrict"));
+        assert_eq!(steps[1][1]["cardinality"], json!("few"));
+        assert_eq!(
+            new.to_wire()["refs"][r#"["posts" "author" "users" "posts"]"#]["cardinality"],
+            json!("few")
+        );
+        let errors = apply_errors(&steps);
+        let messages: Vec<&str> = errors
+            .iter()
+            .map(|e| e["message"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                "tags->posts: Invalid onDelete \"restrict\". The only supported onDelete is 'cascade'.",
+                "posts->author: Invalid link cardinality \"few\". A link's `has` must be 'one' or 'many'.",
+            ]
+        );
+        // a new link without `has` has no cardinality to store
+        let missing = json!(["add-attr", {
+            "value-type": "ref",
+            "forward-identity": [Uuid::new_v4(), "a", "b"],
+            "reverse-identity": [Uuid::new_v4(), "c", "d"],
+            "cardinality": null,
+        }]);
+        assert_eq!(
+            apply_errors(&[missing])[0]["message"],
+            json!("a->b: Missing link cardinality. A link's `has` must be 'one' or 'many'.")
+        );
+    }
+
+    #[test]
+    fn malformed_defs_names_the_unreadable_part() {
+        let path = |v: Value| malformed_defs(&v).map(|(p, _)| p.join("."));
+        assert_eq!(path(json!(null)), None);
+        assert_eq!(path(json!({})), None);
+        assert_eq!(path(json!({"entities": null, "links": null})), None);
+        assert_eq!(
+            path(
+                json!({"entities": {"a": null, "b": {"attrs": null}, "c": {"attrs": {"x": "str"}}}})
+            ),
+            None
+        );
+        assert_eq!(path(json!("x")), Some("body.schema".into()));
+        assert_eq!(
+            path(json!({"entities": [1]})),
+            Some("body.schema.entities".into())
+        );
+        assert_eq!(
+            path(json!({"entities": {"p": "str"}})),
+            Some("body.schema.entities.p".into())
+        );
+        assert_eq!(
+            path(json!({"entities": {"p": {"attrs": []}}})),
+            Some("body.schema.entities.p.attrs".into())
+        );
+        assert_eq!(path(json!({"links": []})), Some("body.schema.links".into()));
+        assert_eq!(
+            path(json!({"links": {"l": "x"}})),
+            Some("body.schema.links.l".into())
+        );
+        assert_eq!(
+            path(json!({"links": {"l": {"reverse": {"on": "a", "label": "b"}}}})),
+            Some("body.schema.links.l.forward".into())
+        );
+        assert_eq!(
+            path(
+                json!({"links": {"l": {"forward": {"on": "a", "label": "b"}, "reverse": {"on": "c", "label": 3}}}})
+            ),
+            Some("body.schema.links.l.reverse.label".into())
+        );
     }
 }

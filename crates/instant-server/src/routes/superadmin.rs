@@ -831,16 +831,7 @@ pub async fn schema_apply(
         )
         .await?;
         let body = parse_body(&body)?;
-        let id = app_uuid(&app);
-        let plan = crate::routes::dash::plan(&state, id, &body).await?;
-        let applied = crate::routes::dash::apply_steps(&state, id, plan.steps, false).await?;
-        let mut out = plan.wire;
-        if let (Some(o), Some(a)) = (out.as_object_mut(), applied.as_object()) {
-            for (k, v) in a {
-                o.insert(k.clone(), v.clone());
-            }
-        }
-        Ok(out)
+        crate::routes::dash::push_apply(&state, app_uuid(&app), &body).await
     }
     .await;
     json_or_err(r)

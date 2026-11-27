@@ -35,7 +35,11 @@ legs: the two PR seeds land on the first two legs and the seven nightly seeds
 spread one per leg, so no leg gets a new job. The auth-flow seeds also ride
 the replay leg (three PR seeds, ten nightly): they are cheap HTTP/socket round
 trips behind a generated setup, so they add no leg to the inventory while still
-getting their own seed list (`FUZZ_AUTH_SEEDS` / `FUZZ_AUTH_ROUNDS`). The other
+getting their own seed list (`FUZZ_AUTH_SEEDS` / `FUZZ_AUTH_ROUNDS`). The
+schema-push planner seeds (`schemapush`) ride the four perms legs through
+`LAYER_SHARDS schemapush:k/4`: one PR seed on each of perms-1/2 and two
+nightly seeds per perms leg run together (`FUZZ_SCHEMAPUSH_JOBS`), since a
+perms leg's single PR seed leaves it shorter than the seed legs. The other
 seven legs
 each carry one schema-evolution seed (~2 minutes at PR depth; the nightly's 12
 seeds spread over the same 7 shards, two at a time with `FUZZ_SCHEMA_JOBS`)
@@ -646,6 +650,67 @@ everything and checks coverage itself, as before.
   `node fuzz-auth.mjs <app> <app> <token> [seed] [rounds]`; seeds 501-503 at
   30 rounds per PR (`FUZZ_AUTH_SEEDS` / `FUZZ_AUTH_ROUNDS`), 10 seeds at 80
   nightly through `run_seeded_layer` on the replay leg.
+- `fuzz-schema-push.mjs` — seeded **server-side schema planner**: the
+  `POST /dash/apps/:id/schema/push/{plan,apply}` routes and their
+  `/superadmin` twins, which `@instantdb/platform`'s `schemaPush` /
+  `planSchemaPush` call with the JSON of an `InstantSchemaDef` plus
+  `check_types: true, supports_background_updates: true` (instant-cli itself
+  diffs client-side and sends `schema/steps/apply`; dash.mjs step 11 / 38
+  cover a few fixed schemas). Every round pulls the schema back and turns it
+  into client defs the way platform's `apiSchemaToInstantSchemaDef` does (an
+  `i.string()` / `i.number()` / ... attr def per attr, `required: true`
+  unless optional, links with `required` / `onDelete` only when set, the
+  system namespaces and their links included), then mutates them:
+  namespaces added (with or without attrs) / dropped, attrs added / dropped /
+  renamed / retyped over string, number, boolean, date, json and bad
+  valueTypes, unique / indexed / required flips on populated and empty
+  attrs, truthy non-boolean config values, links added / dropped / renamed /
+  changed over every `has` pair, `required` and `onDelete`, plan-error
+  collisions (backwards link, duplicate reverse ident, link over an attr,
+  attr over a link, cascade on a `many` side), reserved and custom `$`
+  attrs and namespaces, exact system links, unknown `has` / `onDelete`
+  values, and shuffled client key order. `check_types` and
+  `supports_background_updates` vary and the route alternates between dash
+  and superadmin; plan only, plan then apply, or apply directly. Seeded
+  `/admin/transact` writes (update / create / link / unlink / delete, with
+  duplicates, nulls, wrong-typed, oversized and new-label values) run
+  between rounds so the indexing jobs a plan creates meet real data, and now
+  and then an attr is deleted or renamed through `schema/steps/apply` (the
+  CLI's path), so plans meet renamed and soft-deleted attrs. A fixed prefix
+  per seed covers a realistic first push (pulled system namespaces plus user
+  entities and links), data that breaks every job kind (duplicates under
+  `unique`, a missing / null value under `required`, a string under a
+  number check, an unparseable date, an oversized value under an index), the
+  same flips without background updates and with `check_types` off, every
+  plan error, the invalid link values, nine malformed schema shapes, the
+  system-namespace cases (custom `$foo`, reserved `$users.email`, custom
+  `$users` attrs, exact and extra-key catalog links) and one schema written
+  in two key orders. Compared per round: the plan's status, full error
+  envelope and `new-schema` / `current-schema` / `current-attrs` (whole attr
+  maps) / steps; the apply result (`transaction`, steps with job ids,
+  `indexing-jobs`); the settled jobs (type, status, stage, error, invalid
+  triple samples with their fixed entity ids, error data); the pulled schema
+  and attrs; every write's status / error envelope. Only server-chosen values
+  are normalized: an attr / ident id becomes the name of the attr it belongs
+  to on that server (`attr:posts.slug`, `fwd:posts.slug`), a new attr's id
+  `<uuid>`, plus job / group / tx ids and timestamps. Steps are compared in
+  order whenever every entity / attr / link map of the request has at most
+  eight keys (legacy keeps the client's key order in Clojure array-maps and
+  plans by walking them); past eight keys the order is Clojure hash order, so
+  those requests compare the sorted step list plus each attr's own step
+  order, and plan errors as a set. The first unallowed difference stops the
+  seed. Its documented divergences are the `schemapush:` entries of
+  `allowed-divergences.json` (legacy's raw `transaction.results`, the 500 /
+  unappliable plans legacy answers malformed shapes with, and the unknown
+  `has` / `onDelete` / missing `has` values legacy writes or fails on in
+  SQL), each exercised by every seed's fixed part; the unknown-`has` apply,
+  after which the two schemas differ, is the last probe of each seed and is
+  only planned in random rounds. A seed fails unless it saw an errored job,
+  a completed job, a refused plan and an in-order step comparison.
+  `node fuzz-schema-push.mjs <app> <app> <token> [seed] [rounds]`; seeds
+  601-602 at 20 rounds per PR (`FUZZ_SCHEMAPUSH_SEEDS` /
+  `FUZZ_SCHEMAPUSH_ROUNDS`), 8 seeds at 60 nightly, two at a time
+  (`FUZZ_SCHEMAPUSH_JOBS`), on the perms legs.
 - `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):
   seeded bursts of unawaited transacts and add-queries of order/limit pages
   (a transact then a subscription to the page it changes, as an infinite
@@ -793,7 +858,7 @@ everything and checks coverage itself, as before.
 ## Allowlists
 
 `allowed-divergences.json` (replay, dash, storage, rule-wheres, ref-topics,
-fuzz-perms, fuzz-schema, fuzz-presence, sync-fuzz and stream-fuzz layers, keyed by `path`)
+fuzz-perms, fuzz-schema, fuzz-presence, sync-fuzz, stream-fuzz and schema-push layers, keyed by `path`)
 and `errors-allowed.json` (error matrix, keyed by `probe`) share one
 strict entry format, checked by `loadAllowlist` / `allowDivergence` in
 `lib.mjs`. An entry allows one documented difference, not whatever else later
@@ -821,7 +886,10 @@ shows up at the same path:
   `presence:<probe>/<session>`, `presence:final/<session>` and
   `presence:<checkpoint>`; sync-fuzz paths `syncfuzz:<op-name>` (including
   `syncfuzz:final`); stream-fuzz paths `streamfuzz:<op-name>` (including
-  `streamfuzz:final`); errors-allowed.json uses probe names.
+  `streamfuzz:final`); schema-push paths `schemapush:fixed/<probe>/<op>`
+  and `schemapush:round/<n>/<op>` (`plan`, `apply`, `jobs`, `pull`,
+  `data-<i>`, `cli-delete` / `cli-rename`); errors-allowed.json uses probe
+  names.
 - `differs` (required): anchored regexes over sub-paths of the compared value.
   Object keys and array indexes join with dots, as in the log's "first
   differing sub-path": `.status`, `.hint.debug-uri`, `.0.status`; `^$` is
