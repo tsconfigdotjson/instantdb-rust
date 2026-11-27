@@ -497,6 +497,100 @@ async fn deleting_a_link_target_revalidates_required_referrers() {
         .unwrap();
 }
 
+/// triple.clj validate-required!: every missing (entity, attr) is reported,
+/// required links included, and a lone link triple makes an entity alive,
+/// so linking from an entity that was never created reports its `id` too.
+#[tokio::test]
+async fn required_validation_reports_every_missing_attr_like_legacy() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (notes_id, notes_handle, notes_body, notes_owner, owners_id) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    transact_json(
+        &pool,
+        app,
+        json!([
+            blob(owners_id, "owners", "id", true, false, json!({})),
+            blob(notes_id, "notes", "id", true, false, json!({})),
+            blob(
+                notes_handle,
+                "notes",
+                "handle",
+                false,
+                false,
+                json!({"required?": true})
+            ),
+            blob(notes_body, "notes", "body", false, false, json!({})),
+            link(
+                notes_owner,
+                "notes",
+                "owner",
+                "owners",
+                "notes",
+                json!({"required?": true})
+            ),
+        ]),
+    )
+    .await
+    .unwrap();
+    let (n, o, ghost) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    // a note with neither its required handle nor its required owner link
+    let err = transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", n, notes_id, n],
+            ["add-triple", n, notes_body, "x"]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.error_type, "validation-failed");
+    let records = err.hint.as_ref().unwrap()["records"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let mut labels: Vec<&str> = records
+        .iter()
+        .map(|r| r["label"].as_str().unwrap())
+        .collect();
+    labels.sort();
+    assert_eq!(labels, vec!["handle", "owner"]);
+    let mut parts: Vec<&str> = err.message.split(". ").collect();
+    parts.sort();
+    assert_eq!(
+        parts,
+        vec![
+            format!("Missing required attribute `notes/handle`: {n}"),
+            format!("Missing required attribute `notes/owner`: {n}"),
+        ]
+    );
+    // linking from a note that was never created: its id is missing too
+    transact_json(&pool, app, json!([["add-triple", o, owners_id, o]]))
+        .await
+        .unwrap();
+    let err = transact_json(&pool, app, json!([["add-triple", ghost, notes_owner, o]]))
+        .await
+        .unwrap_err();
+    let records = err.hint.as_ref().unwrap()["records"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let mut labels: Vec<&str> = records
+        .iter()
+        .map(|r| r["label"].as_str().unwrap())
+        .collect();
+    labels.sort();
+    assert_eq!(labels, vec!["handle", "id"]);
+    let id_row = records.iter().find(|r| r["label"] == "id").unwrap();
+    assert_eq!(id_row["is_required"], Value::Null);
+}
+
 /// permissioned_transaction.clj:72-79: stream-backed file paths are locked
 /// for everyone, admins included.
 #[tokio::test]

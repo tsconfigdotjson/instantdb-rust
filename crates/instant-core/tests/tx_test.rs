@@ -735,6 +735,47 @@ async fn create_and_update_modes() {
 /// into one message (in step order, with the offending steps as `input`),
 /// lookups are checked as written, and steps earlier in the same tx do not
 /// change the verdict.
+/// legacy validate-mode reads etypes off `optimistic-attrs`: a create-mode
+/// write to an attr the same tx creates (the admin SDK's new labels) is
+/// checked and echoed with its etype like the others.
+#[tokio::test]
+async fn mode_prepass_sees_attrs_created_in_the_same_tx() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let (schema, ids) = todo_schema_steps();
+    transact_json(&pool, app, schema).await.unwrap();
+    let e1 = Uuid::new_v4();
+    transact_json(&pool, app, json!([["add-triple", e1, ids.todos_id, e1]]))
+        .await
+        .unwrap();
+    let new_attr = Uuid::new_v4();
+    let err = transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-attr", {
+                "id": new_attr,
+                "forward-identity": [Uuid::new_v4(), "todos", "fresh"],
+                "value-type": "blob",
+                "cardinality": "one",
+                "unique?": false,
+                "index?": false,
+            }],
+            ["add-triple", e1, ids.todos_id, e1, {"mode": "create"}],
+            ["add-triple", e1, new_attr, "v", {"mode": "create"}]
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.message,
+        format!("Validation failed for tx-step: Creating entities that exist: {e1}, {e1}")
+    );
+    let input = err.hint.as_ref().unwrap()["input"].clone();
+    assert_eq!(input[1]["aid"], json!(new_attr));
+    assert_eq!(input[1]["etype"], json!("todos"));
+}
+
 #[tokio::test]
 async fn mode_prepass_matches_legacy() {
     let pool = pool().await;

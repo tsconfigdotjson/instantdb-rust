@@ -1289,6 +1289,28 @@ async fn validate_modes(
     steps: &[TxStep],
     admin: bool,
 ) -> Result<()> {
+    if !steps.iter().any(|s| {
+        matches!(
+            s,
+            TxStep::AddTriple { mode, .. } | TxStep::DeepMergeTriple { mode, .. }
+                if *mode != WriteMode::Upsert
+        )
+    }) {
+        return Ok(());
+    }
+    // legacy reads etypes off `optimistic-attrs` (transaction.clj:652-666):
+    // the catalog plus the attrs this tx's add-attr steps create, so a write
+    // to an attr created in the same tx (the admin SDK's new labels) has its
+    // etype here and in the error's `input`
+    let mut optimistic = attrs.clone();
+    for s in steps {
+        if let TxStep::AddAttr { attr, .. } = s {
+            if optimistic.get(&attr.id).is_none() {
+                optimistic.insert(attr.clone());
+            }
+        }
+    }
+    let attrs = &optimistic;
     let moded: Vec<(&TxStep, &EidRef, &str, WriteMode)> = steps
         .iter()
         .filter_map(|s| match s {
@@ -1306,9 +1328,6 @@ async fn validate_modes(
             _ => None,
         })
         .collect();
-    if moded.is_empty() {
-        return Ok(());
-    }
     // uuid eids: any triple of the etype
     let mut by_etype: HashMap<&str, Vec<Uuid>> = HashMap::new();
     let mut lookups: Vec<(Uuid, &CanonicalValue)> = vec![];
@@ -1318,7 +1337,9 @@ async fn validate_modes(
             EidRef::Lookup(a, v) => lookups.push((*a, v)),
         }
     }
-    let mut existing: HashSet<(Uuid, String)> = HashSet::new();
+    // legacy keys what it found by entity id alone: an entity found under
+    // any etype a step asked about counts as existing for every step on it
+    let mut existing: HashSet<Uuid> = HashSet::new();
     for (etype, ids) in &by_etype {
         let attr_ids: Vec<Uuid> = attrs.attrs_of_etype(etype).map(|a| a.id).collect();
         if attr_ids.is_empty() {
@@ -1334,7 +1355,7 @@ async fn validate_modes(
         .fetch_all(&mut *conn)
         .await?;
         for r in rows {
-            existing.insert((r.get::<Uuid, _>("entity_id"), etype.to_string()));
+            existing.insert(r.get::<Uuid, _>("entity_id"));
         }
     }
     // lookups: an av triple with that value
@@ -1357,9 +1378,9 @@ async fn validate_modes(
             resolved_lookups.insert(key, row.get("entity_id"));
         }
     }
-    let exists = |eid: &EidRef, etype: &str| -> Option<Uuid> {
+    let exists = |eid: &EidRef, _etype: &str| -> Option<Uuid> {
         match eid {
-            EidRef::Id(id) => existing.contains(&(*id, etype.to_string())).then_some(*id),
+            EidRef::Id(id) => existing.contains(id).then_some(*id),
             EidRef::Lookup(a, v) => resolved_lookups.get(&(*a, v.clone())).copied(),
         }
     };
