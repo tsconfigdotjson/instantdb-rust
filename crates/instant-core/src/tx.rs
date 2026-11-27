@@ -778,7 +778,7 @@ pub async fn transact(
                     }
                 }
                 for step in group {
-                    let TxStep::AddAttr { attr, raw: _ } = step else {
+                    let TxStep::AddAttr { attr, raw } = step else {
                         unreachable!()
                     };
                     // A second attr under an existing forward name trips
@@ -799,7 +799,7 @@ pub async fn transact(
                             ));
                         }
                     }
-                    crate::attr::insert(&mut *conn, app_id, &attr).await?;
+                    crate::attr::insert_from_step(&mut *conn, app_id, &attr, &raw).await?;
                     backfill_nulls_for_new_attr(&mut *conn, app_id, attrs, &attr).await?;
                     report.changed_attrs.push(attr.id);
                     attrs.insert(attr);

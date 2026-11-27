@@ -804,6 +804,29 @@ pub async fn validate_update_required(
 
 /// Insert one attr (attrs row + ident rows). Idempotent for identical re-inserts.
 pub async fn insert<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid, attr: &Attr) -> Result<()> {
+    insert_with_required(exec, app_id, attr, Some(attr.is_required)).await
+}
+
+/// Insert the attr of an add-attr step. Legacy stores the step's
+/// `required?` as given (attr-table-values), so a step without one leaves
+/// `is_required` NULL; reads coalesce it to false, but the raw column is what
+/// validate-required!'s error rows carry.
+pub async fn insert_from_step<'e, E: PgExecutor<'e>>(
+    exec: E,
+    app_id: Uuid,
+    attr: &Attr,
+    raw: &Value,
+) -> Result<()> {
+    let required = raw.get("required?").and_then(|v| v.as_bool());
+    insert_with_required(exec, app_id, attr, required).await
+}
+
+async fn insert_with_required<'e, E: PgExecutor<'e>>(
+    exec: E,
+    app_id: Uuid,
+    attr: &Attr,
+    required: Option<bool>,
+) -> Result<()> {
     validate_ident_names(app_id, attr)?;
     let res = sqlx::query(
         r#"
@@ -838,7 +861,7 @@ pub async fn insert<'e, E: PgExecutor<'e>>(exec: E, app_id: Uuid, attr: &Attr) -
     .bind(attr.cardinality.as_str())
     .bind(attr.is_unique)
     .bind(attr.is_indexed)
-    .bind(attr.is_required)
+    .bind(required)
     .bind(attr.checked_data_type.map(|c| c.as_str()))
     .bind(attr.on_delete_cascade)
     .bind(attr.on_delete_reverse_cascade)
@@ -913,7 +936,7 @@ pub async fn update<'e, E: PgExecutor<'e>>(
         r#"
         WITH attr_up AS (
           UPDATE attrs SET value_type = $3, cardinality = $4, is_unique = $5, is_indexed = $6,
-                 is_required = $7,
+                 is_required = COALESCE($7, is_required),
                  on_delete = CASE WHEN $8 THEN 'cascade'::attr_on_delete END,
                  on_delete_reverse = CASE WHEN $9 THEN 'cascade'::attr_on_delete END,
                  etype = $10, label = $11, reverse_etype = $12, reverse_label = $13
@@ -937,7 +960,9 @@ pub async fn update<'e, E: PgExecutor<'e>>(
     .bind(updated.cardinality.as_str())
     .bind(updated.is_unique)
     .bind(updated.is_indexed)
-    .bind(updated.is_required)
+    // legacy `not-null-or`: a step without `required?` keeps the stored
+    // value (NULL included)
+    .bind(patch.get("required?").and_then(|v| v.as_bool()))
     .bind(updated.on_delete_cascade)
     .bind(updated.on_delete_reverse_cascade)
     .bind(&updated.etype)
