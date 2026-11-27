@@ -1354,11 +1354,15 @@ async fn required_validate(state: &AppState, job: &Job) -> Result<Step> {
               AND ($4::bigint IS NULL OR (t.created_at, t.entity_id) > ($4::bigint, $5::uuid))
             ORDER BY t.created_at, t.entity_id LIMIT $6),
          bad AS (
-           SELECT i.entity_id FROM ids_to_check i
+           SELECT i.entity_id, i.created_at FROM ids_to_check i
             WHERE NOT EXISTS (SELECT 1 FROM triples a
                                WHERE a.app_id = $1 AND a.attr_id = $2 AND a.entity_id = i.entity_id
                                  AND a.value <> 'null'::jsonb))
-         SELECT (SELECT json_agg(s.entity_id) FROM (SELECT entity_id FROM bad LIMIT 10) s) AS invalid_ids,
+         -- legacy's index-hinted nested loop keeps ids_to_check's order, so its
+         -- sample is the first missing entities by (created_at, entity_id)
+         SELECT (SELECT json_agg(s.entity_id ORDER BY s.created_at, s.entity_id)
+                   FROM (SELECT entity_id, created_at FROM bad
+                          ORDER BY created_at, entity_id LIMIT 10) s) AS invalid_ids,
                 (SELECT count(*) FROM bad) AS invalid_count,
                 (SELECT count(*) FROM ids_to_check) AS work_completed,
                 (SELECT json_build_object('t', created_at, 'e', entity_id)
