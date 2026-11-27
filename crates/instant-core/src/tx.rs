@@ -753,6 +753,10 @@ pub async fn transact(
     };
     // eid -> etype for entities created in this tx (for null backfill)
     let mut created_etypes: HashMap<Uuid, String> = HashMap::new();
+    // what legacy feeds validate-required! (transaction.clj:608-616): the
+    // rows each op's statement returned. An add-triple that wrote nothing (a
+    // ref row that already exists) checks nothing.
+    let mut required_touched: Vec<(Uuid, String)> = vec![];
     // entities whose indexed nulls are already written
     let mut backfilled: HashSet<Uuid> = HashSet::new();
 
@@ -929,6 +933,11 @@ pub async fn transact(
                 if let Some(e) = id_lookup_refusal {
                     return Err(e);
                 }
+                for (eid, aid) in &outcome.written {
+                    if let Some(a) = attrs.get(aid) {
+                        required_touched.push((*eid, a.etype.clone()));
+                    }
+                }
                 for t in &resolved {
                     report.touched.push((t.entity_id, t.attr.etype.clone()));
                     if t.attr.label == "id"
@@ -985,6 +994,7 @@ pub async fn transact(
                     )
                     .await?;
                     report.touched.push((eid, attr.etype.clone()));
+                    required_touched.push((eid, attr.etype.clone()));
                     if attr.label == "id" {
                         id_merges.push((eid, attr.etype.clone()));
                     }
@@ -1066,6 +1076,7 @@ pub async fn transact(
                         _ => value,
                     };
                     report.touched.push((eid, attr.etype.clone()));
+                    required_touched.push((eid, attr.etype.clone()));
                     if attr.label == "id" {
                         report.id_retracted.push((eid, attr.etype.clone()));
                     }
@@ -1102,6 +1113,7 @@ pub async fn transact(
                 let expanded = expand_delete_cascade(&mut *conn, app_id, attrs, &seed).await?;
                 let referrers = referrers_of(&mut *conn, app_id, attrs, &expanded).await?;
                 delete_entities(&mut *conn, app_id, attrs, &expanded).await?;
+                required_touched.extend(referrers.iter().cloned());
                 report.touched.extend(referrers);
                 report.deleted.extend(expanded);
             }
@@ -1139,8 +1151,7 @@ pub async fn transact(
 
     report.created = created_etypes.into_iter().collect();
 
-    let touched = report.touched.clone();
-    validate_required(&mut *conn, app_id, attrs, &touched).await?;
+    validate_required(&mut *conn, app_id, attrs, &required_touched).await?;
     // legacy validate-update-required! (attr.clj:533-580, transaction.clj:627)
     crate::attr::validate_update_required(&mut *conn, app_id, attrs, &required_updates).await?;
     // legacy validate-system-* create guard (permissioned_transaction.clj:589-596)

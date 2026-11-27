@@ -591,6 +591,10 @@ impl InsertCols {
 pub struct InsertResult {
     pub created: HashSet<Uuid>,
     pub changed: HashSet<Uuid>,
+    /// the `(entity, attr)` rows the statements returned, i.e. actually
+    /// wrote: what legacy hands validate-required! (a duplicate ref row and a
+    /// no-op rewrite of a non-id value write nothing)
+    pub written: Vec<(Uuid, Uuid)>,
 }
 
 /// Insert a batch of add-triple writes. Returns the entities this statement
@@ -604,6 +608,7 @@ pub async fn insert_triples(
 ) -> Result<InsertResult> {
     let mut created: HashSet<Uuid> = HashSet::new();
     let mut changed: HashSet<Uuid> = HashSet::new();
+    let mut written: Vec<(Uuid, Uuid)> = vec![];
 
     // Split ea (cardinality-one upsert) from non-ea; dedupe ea keeping the last
     // write per (entity, attr).
@@ -677,6 +682,7 @@ pub async fn insert_triples(
         .map_err(|e| translate_unique_violation(e, attrs))?;
         for row in rows {
             let (eid, aid): (Uuid, Uuid) = (row.get("entity_id"), row.get("attr_id"));
+            written.push((eid, aid));
             if id_attr_ids.contains(&aid) {
                 if row.get::<bool, _>("inserted") {
                     created.insert(eid);
@@ -707,7 +713,7 @@ pub async fn insert_triples(
                  AS t(e, a, v, ea, eav, av, ave, vae, cdt)
             ORDER BY e, a, md5((v::jsonb)::text)
             ON CONFLICT (app_id, entity_id, attr_id, value_md5) DO NOTHING
-            RETURNING entity_id
+            RETURNING entity_id, attr_id
             "#,
         )
         .bind(app_id)
@@ -724,11 +730,17 @@ pub async fn insert_triples(
         .await
         .map_err(|e| translate_unique_violation(e, attrs))?;
         for row in rows {
-            changed.insert(row.get("entity_id"));
+            let (eid, aid): (Uuid, Uuid) = (row.get("entity_id"), row.get("attr_id"));
+            written.push((eid, aid));
+            changed.insert(eid);
         }
     }
 
-    Ok(InsertResult { created, changed })
+    Ok(InsertResult {
+        created,
+        changed,
+        written,
+    })
 }
 
 /// Back-fill `'null'::jsonb` rows for indexed blob attrs of newly created

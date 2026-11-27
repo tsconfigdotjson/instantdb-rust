@@ -589,6 +589,49 @@ async fn required_validation_reports_every_missing_attr_like_legacy() {
     assert_eq!(labels, vec!["handle", "id"]);
     let id_row = records.iter().find(|r| r["label"] == "id").unwrap();
     assert_eq!(id_row["is_required"], Value::Null);
+
+    // only rows a statement actually wrote are checked: re-adding a link
+    // that already exists writes nothing, so a ghost entity whose namespace
+    // gained a required attr afterwards is not checked by it
+    let (cards_id, cards_name, cards_owner) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    transact_json(
+        &pool,
+        app,
+        json!([
+            blob(cards_id, "cards", "id", true, false, json!({})),
+            blob(cards_name, "cards", "name", false, false, json!({})),
+            link(cards_owner, "cards", "owner", "owners", "cards", json!({})),
+        ]),
+    )
+    .await
+    .unwrap();
+    let (ghost2, o2) = (Uuid::new_v4(), Uuid::new_v4());
+    transact_json(&pool, app, json!([["add-triple", ghost2, cards_owner, o]]))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE attrs SET is_required = true WHERE id = $1")
+        .bind(cards_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    transact_json(&pool, app, json!([["add-triple", ghost2, cards_owner, o]]))
+        .await
+        .unwrap();
+    transact_json(&pool, app, json!([["add-triple", o2, owners_id, o2]]))
+        .await
+        .unwrap();
+    let err = transact_json(&pool, app, json!([["add-triple", ghost2, cards_owner, o2]]))
+        .await
+        .unwrap_err();
+    let mut parts: Vec<&str> = err.message.split(". ").collect();
+    parts.sort();
+    assert_eq!(
+        parts,
+        vec![
+            format!("Missing required attribute `cards/id`: {ghost2}"),
+            format!("Missing required attribute `cards/name`: {ghost2}"),
+        ]
+    );
 }
 
 /// permissioned_transaction.clj:72-79: stream-backed file paths are locked
