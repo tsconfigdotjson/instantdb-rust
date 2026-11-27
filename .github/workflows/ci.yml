@@ -354,9 +354,10 @@ jobs:
           # work because it ran seeds 7 and 17 back to back.
           #
           # The schema-push planner seeds ride the perms legs (one PR seed on
-          # each of perms-1/2, two nightly seeds per perms leg run together):
-          # a perms leg's ~180s PR seed leaves it below the ~206-287s seed
-          # legs, so the planner seeds add no leg and no critical-path time.
+          # each of perms-1/2/3, three nightly seeds per perms leg run
+          # together): a planner seed is seconds of work and a perms leg's
+          # ~180s PR seed leaves it below the seed legs, so they add no leg
+          # and no critical-path time.
           - leg: perms-1
             layers: perms schemapush
             shard: 1/4
@@ -593,12 +594,13 @@ jobs:
           FUZZ_AUTH_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '501 502 503 504 505 506 507 508 509 510' || '501 502 503' }}
           FUZZ_AUTH_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '80' || '30' }}
           FUZZ_AUTH_JOBS: "1"
-          # server-side schema planner (push/plan + push/apply): two cheap
-          # seeds per PR on perms-1/2, eight nightly (two per perms leg, run
-          # together) at three times the rounds.
-          FUZZ_SCHEMAPUSH_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '601 602 603 604 605 606 607 608' || '601 602' }}
-          FUZZ_SCHEMAPUSH_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '60' || '20' }}
-          FUZZ_SCHEMAPUSH_JOBS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '2' || '1' }}
+          # server-side schema planner (push/plan + push/apply): a seed is
+          # ~3s of harness work at 20 rounds (run 45965397810), so three PR
+          # seeds at 30 rounds ride perms-1/2/3 and the nightly's twelve run
+          # three at a time per perms leg at 100 rounds.
+          FUZZ_SCHEMAPUSH_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '601 602 603 604 605 606 607 608 609 610 611 612' || '601 602 603' }}
+          FUZZ_SCHEMAPUSH_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '100' || '30' }}
+          FUZZ_SCHEMAPUSH_JOBS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '3' || '1' }}
           FUZZ_RACE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '1 2 3 4 5 6 7 8 9 10' || '1 2 3' }}
           RACE_URL: http://localhost:8885
         run: KEEP=1 ./scripts/differential/run.sh

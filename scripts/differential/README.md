@@ -37,9 +37,10 @@ the replay leg (three PR seeds, ten nightly): they are cheap HTTP/socket round
 trips behind a generated setup, so they add no leg to the inventory while still
 getting their own seed list (`FUZZ_AUTH_SEEDS` / `FUZZ_AUTH_ROUNDS`). The
 schema-push planner seeds (`schemapush`) ride the four perms legs through
-`LAYER_SHARDS schemapush:k/4`: one PR seed on each of perms-1/2 and two
-nightly seeds per perms leg run together (`FUZZ_SCHEMAPUSH_JOBS`), since a
-perms leg's single PR seed leaves it shorter than the seed legs. The other
+`LAYER_SHARDS schemapush:k/4`: one PR seed on each of perms-1/2/3 and three
+nightly seeds per perms leg run together (`FUZZ_SCHEMAPUSH_JOBS`); a planner
+seed is seconds of work and a perms leg's single PR seed leaves it shorter
+than the seed legs. The other
 seven legs
 each carry one schema-evolution seed (~2 minutes at PR depth; the nightly's 12
 seeds spread over the same 7 shards, two at a time with `FUZZ_SCHEMA_JOBS`)
@@ -710,9 +711,9 @@ everything and checks coverage itself, as before.
   only planned in random rounds. A seed fails unless it saw an errored job,
   a completed job, a refused plan and an in-order step comparison.
   `node fuzz-schema-push.mjs <app> <app> <token> [seed] [rounds]`; seeds
-  601-602 at 20 rounds per PR (`FUZZ_SCHEMAPUSH_SEEDS` /
-  `FUZZ_SCHEMAPUSH_ROUNDS`), 8 seeds at 60 nightly, two at a time
-  (`FUZZ_SCHEMAPUSH_JOBS`), on the perms legs.
+  601-603 at 30 rounds per PR (`FUZZ_SCHEMAPUSH_SEEDS` /
+  `FUZZ_SCHEMAPUSH_ROUNDS`), 12 seeds at 100 nightly, three at a time
+  (`FUZZ_SCHEMAPUSH_JOBS`), on the perms legs (a seed is seconds of work).
 - `fuzz-race.mjs` — **rust-only** subscription race invariants (issue #51):
   seeded bursts of unawaited transacts and add-queries of order/limit pages
   (a transact then a subscription to the page it changes, as an infinite

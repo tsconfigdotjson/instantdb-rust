@@ -217,7 +217,7 @@ seeded_seed() {
     streamfuzz) node fuzz-streams.mjs "$app" "$app" "$token" "$seed" "${FUZZ_STREAMS_ROUNDS:-30}" ;;
     webhookfuzz) node fuzz-webhooks.mjs "$app" "$app" "$token" "$seed" "${FUZZ_WEBHOOKS_ROUNDS:-18}" ;;
     authfuzz) node fuzz-auth.mjs "$app" "$app" "$token" "$seed" "${FUZZ_AUTH_ROUNDS:-40}" ;;
-    schemapush) node fuzz-schema-push.mjs "$app" "$app" "$token" "$seed" "${FUZZ_SCHEMAPUSH_ROUNDS:-20}" ;;
+    schemapush) node fuzz-schema-push.mjs "$app" "$app" "$token" "$seed" "${FUZZ_SCHEMAPUSH_ROUNDS:-30}" ;;
     *) echo "unknown seeded layer: $layer"; return 1 ;;
   esac
 }
@@ -316,7 +316,7 @@ run_seeded_layer authfuzz "${FUZZ_AUTH_JOBS:-1}" $AUTH_SEEDS
 # supports_background_updates values, interleaved data writes so the indexing
 # jobs run against real data (fuzz-schema-push.mjs). The plan steps, error
 # envelopes, apply results, settled jobs and pulled schema are compared.
-SCHEMAPUSH_SEEDS="${FUZZ_SCHEMAPUSH_SEEDS:-601 602}"
+SCHEMAPUSH_SEEDS="${FUZZ_SCHEMAPUSH_SEEDS:-601 602 603}"
 run_seeded_layer schemapush "${FUZZ_SCHEMAPUSH_JOBS:-1}" $SCHEMAPUSH_SEEDS
 # subscription race fuzz (issue #51): rust-only invariants for queries
 # registered while transactions are in flight, against a rust server booted
@@ -332,7 +332,7 @@ for SEED in ${FUZZ_RACE_SEEDS:-1 2 3}; do
 done
 if [ -n "$FUZZ_FAILED" ]; then
   echo "FUZZ FAILED for seeds:$FUZZ_FAILED"
-  echo "  (rerun a fuzz seed with FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60}, a presence seed with FUZZ_PRESENCE_SEEDS=<seed> FUZZ_PRESENCE_ROUNDS=${FUZZ_PRESENCE_ROUNDS:-100}, a schema seed with FUZZ_SCHEMA_SEEDS=<seed> FUZZ_SCHEMA_ROUNDS=${FUZZ_SCHEMA_ROUNDS:-200}, a storage seed with FUZZ_STORAGE_SEEDS=<seed> FUZZ_STORAGE_ROUNDS=${FUZZ_STORAGE_ROUNDS:-80}, a sync seed with FUZZ_SYNC_SEEDS=<seed> FUZZ_SYNC_ROUNDS=${FUZZ_SYNC_ROUNDS:-60}, a stream seed with FUZZ_STREAMS_SEEDS=<seed> FUZZ_STREAMS_ROUNDS=${FUZZ_STREAMS_ROUNDS:-30}, a webhook seed with FUZZ_WEBHOOKS_SEEDS=<seed> FUZZ_WEBHOOKS_ROUNDS=${FUZZ_WEBHOOKS_ROUNDS:-18}, an auth seed with FUZZ_AUTH_SEEDS=<seed> FUZZ_AUTH_ROUNDS=${FUZZ_AUTH_ROUNDS:-40}, a schema-push seed with FUZZ_SCHEMAPUSH_SEEDS=<seed> FUZZ_SCHEMAPUSH_ROUNDS=${FUZZ_SCHEMAPUSH_ROUNDS:-20}; LAYERS narrows the run)"
+  echo "  (rerun a fuzz seed with FUZZ_SEEDS=<seed> FUZZ_ROUNDS=${FUZZ_ROUNDS:-60}, a presence seed with FUZZ_PRESENCE_SEEDS=<seed> FUZZ_PRESENCE_ROUNDS=${FUZZ_PRESENCE_ROUNDS:-100}, a schema seed with FUZZ_SCHEMA_SEEDS=<seed> FUZZ_SCHEMA_ROUNDS=${FUZZ_SCHEMA_ROUNDS:-200}, a storage seed with FUZZ_STORAGE_SEEDS=<seed> FUZZ_STORAGE_ROUNDS=${FUZZ_STORAGE_ROUNDS:-80}, a sync seed with FUZZ_SYNC_SEEDS=<seed> FUZZ_SYNC_ROUNDS=${FUZZ_SYNC_ROUNDS:-60}, a stream seed with FUZZ_STREAMS_SEEDS=<seed> FUZZ_STREAMS_ROUNDS=${FUZZ_STREAMS_ROUNDS:-30}, a webhook seed with FUZZ_WEBHOOKS_SEEDS=<seed> FUZZ_WEBHOOKS_ROUNDS=${FUZZ_WEBHOOKS_ROUNDS:-18}, an auth seed with FUZZ_AUTH_SEEDS=<seed> FUZZ_AUTH_ROUNDS=${FUZZ_AUTH_ROUNDS:-40}, a schema-push seed with FUZZ_SCHEMAPUSH_SEEDS=<seed> FUZZ_SCHEMAPUSH_ROUNDS=${FUZZ_SCHEMAPUSH_ROUNDS:-30}; LAYERS narrows the run)"
   FAILED_LAYERS="$FAILED_LAYERS fuzz"
 fi
 
