@@ -676,7 +676,16 @@ everything and checks coverage itself, as before.
   never deletes, so whatever a client omits is left alone); 15% send the
   whole schema, and a request with a map past eight keys is only planned,
   never applied, because legacy then plans in Clojure hash order and an
-  apply with several failing steps would meet a different one first. `check_types` and
+  apply with several failing steps would meet a different one first. For
+  the same reason a round that applies makes a single change (plan-only
+  rounds make up to three): legacy reports the first of two independent
+  failures in the order its queries return them. And when a unique rewrite
+  (an update-attr making an attr or link unique) fails, Postgres names
+  whichever duplicate its UPDATE meets first; if the servers name different
+  values for the same attr, the layer reads each server's data through
+  `/admin/query` and accepts the pair only when both values really are
+  duplicated there and the duplicates are the same on both (counted as
+  `duplicateChoices` in the seed's stats). `check_types` and
   `supports_background_updates` vary and the route alternates between dash
   and superadmin; plan only, plan then apply, or apply directly. Seeded
   `/admin/transact` writes (update / create / link / unlink / delete, with

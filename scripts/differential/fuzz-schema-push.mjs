@@ -719,6 +719,57 @@ async function settleJobs(name, groupId) {
   return last;
 }
 
+// Values that more than one entity holds for an attr, as canonical JSON, read
+// through /admin/query on one server (links: targets with several sources).
+async function duplicateValues(name, attrSym) {
+  const a = (lastPullBy[name]?.attrs ?? []).find((x) => `attr:${attrKey(x)}` === attrSym);
+  if (!a) return null;
+  const [, fe, fl] = a["forward-identity"];
+  const isRef = a["value-type"] === "ref";
+  const res = await call(name, "POST", `/admin/query?app_id=:app`, { query: { [fe]: isRef ? { [fl]: {} } : {} } });
+  if (res.status !== 200) return null;
+  const counts = new Map();
+  for (const row of res.body?.[fe] ?? []) {
+    const vals = isRef ? [].concat(row[fl] ?? []).map((t) => t?.id ?? t) : [row[fl]];
+    for (const v of vals) {
+      if (v === undefined || v === null) continue;
+      const key = canon(v);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  return [...counts].filter(([, c]) => c > 1).map(([key]) => key).sort();
+}
+
+// A unique rewrite (an update-attr making an attr / link unique) fails on
+// whichever duplicate its UPDATE meets first, which follows each database's
+// physical row order. When the two servers name different values for the same
+// attr, both must be values that really are duplicated there, and the
+// duplicates must be the same on both; then the value is compared as
+// <duplicated value>. Any other difference still fails.
+async function sameDuplicate(views) {
+  const { legacy: l, rust: r } = views;
+  if (l?.type !== "record-not-unique" || r?.type !== "record-not-unique") return false;
+  if (l.hint?.["record-type"] !== "triple" || l.hint?.["attr-id"] !== r.hint?.["attr-id"]) return false;
+  if (l.hint?.value === r.hint?.value) return false;
+  const parse = (v) => {
+    try {
+      return canon(JSON.parse(v));
+    } catch {
+      return null;
+    }
+  };
+  const [dl, dr] = [await duplicateValues("legacy", l.hint["attr-id"]), await duplicateValues("rust", r.hint["attr-id"])];
+  if (!dl || !dr || canon(dl) !== canon(dr)) return false;
+  if (!dl.includes(parse(l.hint.value)) || !dr.includes(parse(r.hint.value))) return false;
+  for (const v of [l, r]) {
+    const cut = v.message.lastIndexOf(" = ");
+    v.message = (cut >= 0 ? v.message.slice(0, cut) : v.message) + " = <duplicated value>";
+    v.hint = { ...v.hint, value: "<duplicated value>" };
+  }
+  stats.duplicateChoices = (stats.duplicateChoices ?? 0) + 1;
+  return true;
+}
+
 // route: "dash" | "superadmin"; op: "plan" | "apply"
 async function push(label, route, op, body) {
   const unordered = largeMaps(body?.schema);
@@ -732,6 +783,7 @@ async function push(label, route, op, body) {
     else stats.exactOrder++;
   } else if (op === "plan") stats.planErrors++;
   else stats.applyErrors++;
+  if (op === "apply") await sameDuplicate(views);
   compare(`${label}/${op}`, views, body);
   if (op === "apply" && res.legacy.status === 200 && res.rust.status === 200) {
     for (const n of NAMES) learnSteps(n, res[n].body.steps);
@@ -997,8 +1049,13 @@ async function main() {
       const pulled = await pullBoth(`round/${round}/pull`);
       const full = chance(0.15);
       const defs = full ? pulledToDefs(pulled.schema) : subsetDefs(pulledToDefs(pulled.schema));
+      // the action is chosen first: a round that applies makes one change, so
+      // two independent failures (two required flips, an invalid link next
+      // to a required `$` attr) never race for which one is reported, an
+      // order legacy takes from its query plans rather than the request
+      const k = rand();
       const muts = [];
-      const n = 1 + Math.floor(rand() * 3);
+      const n = k < 0.3 ? 1 + Math.floor(rand() * 3) : 1;
       for (let i = 0; i < n; i++) muts.push(mutate(defs));
       if (chance(0.5)) shuffleKeys(defs);
       const body = {
@@ -1009,7 +1066,6 @@ async function main() {
       };
       const route = chance(0.6) ? "superadmin" : "dash";
       console.log(`round ${round}: ${route}${full ? " full" : ""} ${muts.join("; ")} (check_types=${body.check_types} bg=${body.supports_background_updates})`);
-      const k = rand();
       // past eight keys legacy plans in hash order, so which of several
       // failing steps an apply meets first is not the client's order either
       const noApply = hasUnknownCardinality(defs) || largeMaps(defs);
