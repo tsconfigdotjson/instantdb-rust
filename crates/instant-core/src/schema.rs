@@ -418,7 +418,18 @@ pub fn remove_system_namespaces(defs: &Value) -> Value {
     if let Some(entities) = out.get_mut("entities").and_then(|e| e.as_object_mut()) {
         for (etype, def) in entities.iter_mut() {
             if let Some(attrs) = def.get_mut("attrs").and_then(|a| a.as_object_mut()) {
-                attrs.retain(|label, _| !reserved.contains(&(etype.clone(), label.clone())));
+                // ucoll/filter-keys `dissoc!`s each reserved key from a
+                // transient array-map, which moves the map's last entry into
+                // the hole: the remaining attrs (and so the plan's steps)
+                // come out in that order. swap_remove does the same.
+                let drop: Vec<String> = attrs
+                    .keys()
+                    .filter(|label| reserved.contains(&(etype.clone(), (*label).clone())))
+                    .cloned()
+                    .collect();
+                for label in drop {
+                    attrs.swap_remove(&label);
+                }
             }
         }
     }
@@ -1124,6 +1135,27 @@ mod tests {
         assert!(out["entities"]["$users"]["attrs"].get("nickname").is_some());
         assert!(out["links"].get("postsAuthor").is_some());
         assert!(out["links"].get("systemLink").is_none());
+    }
+
+    #[test]
+    fn remove_system_namespaces_reorders_like_a_transient_dissoc() {
+        let a = json!({"valueType": "string"});
+        let defs = json!({"entities": {
+            "$files": {"attrs": {"a": a, "url": a, "b": a, "c": a}},
+            "$users": {"attrs": {"email": a, "x": a, "y": a, "z": a}},
+        }});
+        let out = remove_system_namespaces(&defs);
+        let keys = |e: &str| -> Vec<String> {
+            out["entities"][e]["attrs"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect()
+        };
+        // legacy: (dissoc! url) moves the last entry, c, into url's slot
+        assert_eq!(keys("$files"), vec!["a", "c", "b"]);
+        assert_eq!(keys("$users"), vec!["z", "x", "y"]);
     }
 
     #[test]
