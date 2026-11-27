@@ -195,6 +195,13 @@ function errView(name, res, unordered = false) {
   };
   if (typeof b["<non-json>"] === "string") view.body = b["<non-json>"];
   view.message = norm(name, view.message);
+  // validate-required! lists the missing (entity, attr) rows in
+  // (entity_id, attr_id) order and words the message from them; attr ids are
+  // server-chosen, so compare the rows and the message parts as sets
+  if (Array.isArray(view.hint?.records) && typeof view.message === "string" && view.message.startsWith("Missing required attribute")) {
+    view.hint = { ...view.hint, records: sortCanon(view.hint.records) };
+    view.message = view.message.split(/\. (?=Missing required attribute)/).sort().join(". ");
+  }
   // plan errors follow the step order, which is the client's key order only
   // up to eight keys per map (see the header)
   if (unordered && view.hint?.["data-type"] === "schema" && Array.isArray(view.hint.errors)) {

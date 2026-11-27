@@ -698,7 +698,9 @@ everything and checks coverage itself, as before.
   eight keys (legacy keeps the client's key order in Clojure array-maps and
   plans by walking them); past eight keys the order is Clojure hash order, so
   those requests compare the sorted step list plus each attr's own step
-  order, and plan errors as a set. The first unallowed difference stops the
+  order, and plan errors as a set. A "Missing required attribute" error
+  lists its rows in `(entity_id, attr_id)` order, and attr ids are
+  server-chosen, so its records and message parts are compared as sets. The first unallowed difference stops the
   seed. Its documented divergences are the `schemapush:` entries of
   `allowed-divergences.json` (legacy's raw `transaction.results`, the 500 /
   unappliable plans legacy answers malformed shapes with, and the unknown
