@@ -604,6 +604,41 @@ mod tests {
     }
 
     #[test]
+    fn card_many_attr_row_change_does_not_stale_an_entity_fetch() {
+        // fuzz-schema seed 42: legacy's entity fetch is `[:ea ?e attr-ids]`
+        // with `ea-ids-for-etype` (cardinality-one attrs only), so an attrs
+        // row change on a card-many attr (its first inferred type, an index
+        // flip) is a `[_ #{attr} _]` topic no `{etype: {}}` subscription
+        // matches, even after the add-attr schema refresh extended the
+        // fetch. A session only learns those attr updates through some other
+        // refresh (the add-attr's every-session refresh, if it read the
+        // catalog after the write landed): timing, on both servers.
+        let mut fx = fixture();
+        let e1 = Uuid::new_v4();
+        let forms = parse_query(&json!({"todos": {}})).unwrap();
+        let mut qt = query_topics(
+            &fx.attrs,
+            &forms,
+            &result(vec![("todos", vec![node(e1, "todos")])]),
+        );
+        let mut many = attr("todos", "nums", ValueType::Blob, None);
+        many.cardinality = Cardinality::Many;
+        let many_id = many.id;
+        fx.attrs.insert(many);
+        qt.extend_entity_fetch_attrs(&fx.attrs);
+        assert!(!TxTopics::default()
+            .with_attr_wildcards([many_id])
+            .matches(&qt));
+        assert!(!tx(&[(e1, many_id, json!(1))]).matches(&qt));
+        // a query that mentions the attr does match its row change
+        let forms = parse_query(&json!({"todos": {"$": {"where": {"nums": 1}}}})).unwrap();
+        let qt = query_topics(&fx.attrs, &forms, &result(vec![("todos", vec![])]));
+        assert!(TxTopics::default()
+            .with_attr_wildcards([many_id])
+            .matches(&qt));
+    }
+
+    #[test]
     fn where_eq_narrows_by_value() {
         let fx = fixture();
         let e1 = Uuid::new_v4();
