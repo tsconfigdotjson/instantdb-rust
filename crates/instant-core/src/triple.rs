@@ -781,6 +781,14 @@ pub async fn backfill_indexed_nulls(
         FROM UNNEST($2::uuid[], $3::uuid[], $4::text[], $5::bool[], $6::bool[],
                     $7::bool[], $8::bool[], $9::bool[], $10::text[])
              AS t(e, a, v, ea, eav, av, ave, vae, cdt)
+        -- legacy indexed-null-triples skips an attr the statement writes a
+        -- value for, or that already has a triple; this runs after the op
+        -- group's inserts, so one NOT EXISTS covers both. The ea conflict
+        -- target alone misses cardinality-many attrs (ea = false), which
+        -- left a stray null next to the written values.
+        WHERE NOT EXISTS (
+          SELECT 1 FROM triples x
+           WHERE x.app_id = $1 AND x.entity_id = t.e AND x.attr_id = t.a)
         ORDER BY e, a
         ON CONFLICT (app_id, entity_id, attr_id) WHERE ea DO NOTHING
         "#,

@@ -1029,3 +1029,73 @@ async fn system_catalog_writes_blocked() {
     .unwrap_err();
     assert_eq!(err.error_type, "validation-failed");
 }
+
+async fn inferred_types_of(pool: &sqlx::PgPool, app: Uuid, attr: Uuid) -> Option<u32> {
+    attrs_of(pool, app).await.get(&attr).unwrap().inferred_types
+}
+
+/// fuzz-schema seed 42 (nightly): `sch.dynMany` is a cardinality-many,
+/// number-checked blob attr whose first values arrive as two add-triples per
+/// entity in one tx. The tx must OR `number` into its `inferred_types` and
+/// report the attr row as changed (so attr caches drop and refreshes carry
+/// the new catalog); a later tx writing only numbers again is a no-op. The
+/// entity is new, so it also pins the indexed-null backfill: no `null` row
+/// next to the written card-many values.
+#[tokio::test]
+async fn cardinality_many_writes_record_inferred_types() {
+    let pool = pool().await;
+    let app = mk_app(&pool).await;
+    let id_attr = Uuid::new_v4();
+    let many = Uuid::new_v4();
+    transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-attr", {"id": id_attr, "forward-identity": [Uuid::new_v4(), "sch", "id"],
+              "value-type": "blob", "cardinality": "one", "unique?": true, "index?": true}],
+            ["add-attr", {"id": many, "forward-identity": [Uuid::new_v4(), "sch", "dynMany"],
+              "value-type": "blob", "cardinality": "many", "unique?": false, "index?": true,
+              "checked-data-type": "number"}]
+        ]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(inferred_types_of(&pool, app, many).await, None);
+
+    let e = Uuid::new_v4();
+    let report = transact_json(
+        &pool,
+        app,
+        json!([
+            ["add-triple", e, id_attr, e],
+            ["add-triple", e, many, 0],
+            ["add-triple", e, many, 10]
+        ]),
+    )
+    .await
+    .unwrap();
+    assert!(report.attrs_changed);
+    assert!(report.changed_attrs.contains(&many));
+    assert_eq!(
+        inferred_types_of(&pool, app, many).await,
+        Some(instant_core::attr::INFERRED_NUMBER)
+    );
+    // exactly the two written values: legacy indexed-null-triples skips an
+    // attr the creating statement writes, card-many included (no stray null)
+    let values: Vec<_> = entity_triples(&pool, app, e)
+        .await
+        .into_iter()
+        .filter(|(l, _)| l == "sch.dynMany")
+        .collect();
+    assert_eq!(values.len(), 2);
+
+    // the bit is already set: no attr row change, nothing to refresh
+    let report = transact_json(&pool, app, json!([["add-triple", e, many, 7]]))
+        .await
+        .unwrap();
+    assert!(!report.changed_attrs.contains(&many));
+    assert_eq!(
+        inferred_types_of(&pool, app, many).await,
+        Some(instant_core::attr::INFERRED_NUMBER)
+    );
+}

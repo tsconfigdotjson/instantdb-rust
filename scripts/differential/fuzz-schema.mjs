@@ -846,18 +846,28 @@ const outcomePath = (op, fallbackIndex) => {
 // rust's session holds and what rust's own fresh probe sees. A stale rust
 // session, a different refresh-error list or any other field still fails.
 const same = (a, b) => a !== undefined && b !== undefined && canon(a) === canon(b);
-function legacyStaleState(l, r) {
+// `masked` lists the `${session}:${attr}` inferred-types fields the refresh
+// timing rule below already excused; they are nulled in the session states
+// and in both fresh probes alike, so the two rules compose.
+function maskInferredTypes(attrs, keys) {
+  if (!attrs || !keys.length) return attrs;
+  const out = { ...attrs };
+  for (const k of keys) if (out[k]) out[k] = { ...out[k], [INFERRED]: null };
+  return out;
+}
+function legacyStaleState(l, r, masked = []) {
   if (!l || !r || l.i !== r.i) return false;
   if (!["checkpoint", "final-state"].includes(l.kind) || l.kind !== r.kind) return false;
   const lf = legacy.freshCheckpoints[l.i];
   const rf = rust.freshCheckpoints[r.i];
   let stale = false;
   for (const s of SESSIONS) {
-    const la = l.state?.[s]?.attrs;
-    const ra = r.state?.[s]?.attrs;
+    const keys = masked.filter((m) => m.startsWith(`${s}:`)).map((m) => m.slice(s.length + 1));
+    const la = maskInferredTypes(l.state?.[s]?.attrs, keys);
+    const ra = maskInferredTypes(r.state?.[s]?.attrs, keys);
     if (canon(la) !== canon(ra)) {
       stale = true;
-      if (!same(lf?.[s]?.attrs, ra) || !same(rf?.[s]?.attrs, ra)) return false;
+      if (!same(maskInferredTypes(lf?.[s]?.attrs, keys), ra) || !same(maskInferredTypes(rf?.[s]?.attrs, keys), ra)) return false;
     }
     const ls = l.state?.[s]?.subs ?? {};
     const rs = r.state?.[s]?.subs ?? {};
@@ -872,34 +882,55 @@ function legacyStaleState(l, r) {
 }
 let staleLegacy = 0;
 
-// `schowner.id` is written by the seed-link-target transact right after the
-// schema transact creates it. Legacy infers the type from the write, but the
-// attrs refresh its sessions receive can be computed before or after that
-// write lands (the schema insert refreshes every session, while the later
-// inferred-types attr update reaches only sessions whose queries mention the
-// attr). The same seed therefore observes null or ["string"] at setup and
-// subscriptions, on either server, depending on refresh timing (seed 33 under
-// #80, seed 34 nightly). Allow only that one attr's inferred-types field when
-// exactly one side is null and the other is an observed type list; every
-// other attr, field and session still has to match.
-const INFERRED_RACE_PATH = ["schowner.id", "inferred-types"];
+// An attr's first inferred type reaches a session only through a refresh
+// that reads the catalog after the first write landed. Legacy refreshes every
+// session for the attr insert (schema-changes-require-refreshing-sessions?),
+// but the later inferred-types attrs-row update is a `[_ #{attr} _]` topic
+// that only matches queries whose topics name the attr. For these attrs no
+// subscription the layer holds ever does, so whether a session shows null or
+// the type depends on whether the insert's refresh was computed before or
+// after the next write committed, on either server:
+//   - `schowner.id`: written by the seed-link-target transact right after the
+//     schema transact; no query of the layer touches `schowner` (seed 33 under
+//     #80, seed 34 nightly);
+//   - `sch.dynMany`: cardinality many, so it is not in the `{sch: {}}` entity
+//     fetch (legacy ea-ids-for-etype is card-one only), and its first numbers
+//     follow "add many attr" immediately (seed 42 nightly: rust null, legacy
+//     ["number"]; seed 35: legacy null, rust ["number"]). Its "many index
+//     off" flip is an attrs-row update with the same reach, so the session
+//     keeps whatever the insert refresh delivered.
+// Mask only that field, only when exactly one side is null and the other an
+// observed type list, and only when both servers recorded the type: their
+// fresh-session probes at this checkpoint carry the same non-null list and it
+// includes every observed type. A server that failed to record the type still
+// fails; every other attr, field and session still has to match.
+const INFERRED_RACE_ATTRS = ["schowner.id", "sch.dynMany"];
+const INFERRED = "inferred-types";
 function inferredTypeRaceView(op, lv, rv) {
   if (!["checkpoint", "final-state"].includes(op?.kind ?? lv?.kind)) return null;
+  if (!lv || !rv || lv.i !== rv.i) return null;
+  const lf = legacy.freshCheckpoints[lv.i];
+  const rf = rust.freshCheckpoints[rv.i];
   const left = JSON.parse(JSON.stringify(lv));
   const right = JSON.parse(JSON.stringify(rv));
-  let masked = 0;
+  const masked = [];
   for (const s of SESSIONS) {
     const attrs = [left.state?.[s]?.attrs, right.state?.[s]?.attrs];
-    const values = attrs.map((a) => a?.[INFERRED_RACE_PATH[0]]?.[INFERRED_RACE_PATH[1]]);
-    if (values.some((v) => v === undefined)) continue;
-    const [la, ra] = values;
-    if ((la === null && Array.isArray(ra)) || (Array.isArray(la) && ra === null)) {
-      attrs[0][INFERRED_RACE_PATH[0]][INFERRED_RACE_PATH[1]] = null;
-      attrs[1][INFERRED_RACE_PATH[0]][INFERRED_RACE_PATH[1]] = null;
-      masked++;
+    for (const key of INFERRED_RACE_ATTRS) {
+      const values = attrs.map((a) => a?.[key]?.[INFERRED]);
+      if (values.some((v) => v === undefined)) continue;
+      const [la, ra] = values;
+      const observed = la === null && Array.isArray(ra) ? ra : Array.isArray(la) && ra === null ? la : null;
+      if (!observed) continue;
+      const fl = lf?.[s]?.attrs?.[key]?.[INFERRED];
+      const fr = rf?.[s]?.attrs?.[key]?.[INFERRED];
+      if (!Array.isArray(fl) || canon(fl) !== canon(fr) || !observed.every((t) => fl.includes(t))) continue;
+      attrs[0][key][INFERRED] = null;
+      attrs[1][key][INFERRED] = null;
+      masked.push(`${s}:${key}`);
     }
   }
-  return masked ? { left, right } : null;
+  return masked.length ? { left, right, masked } : null;
 }
 let inferredTypeRace = 0;
 
@@ -939,10 +970,10 @@ for (let k = 0; k < n; k++) {
   const race = inferredTypeRaceView(op, l, r);
   if (race && canon(race.left) === canon(race.right)) {
     inferredTypeRace++;
-    console.log(`${p}: schowner.id inferred-types landed on only one side (refresh timing); compared every other field`);
+    console.log(`${p}: inferred-types of ${race.masked.join(", ")} landed on only one side (refresh timing; both servers recorded it); compared every other field`);
     continue;
   }
-  if (legacyStaleState(l, r)) {
+  if (legacyStaleState(l, r, race?.masked ?? [])) {
     staleLegacy++;
     console.log(`legacy session state was stale at ${p}; a fresh legacy probe agreed with rust`);
     continue;

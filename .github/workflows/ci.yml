@@ -312,12 +312,12 @@ jobs:
   #   fuzzschema ~120s PR / ~190s nightly, presence ~130-155s, storage
   #   ~70s PR / ~140s nightly, perms ~180s PR / ~450s nightly, fuzz
   #   ~5-15s, race ~33s, conflicts ~25-60s.
-  # Seven seed legs take one PR fuzzschema seed each (nightly 12 split
-  # 2/2/2/2/2/1/1 by SHARD 7). Presence is split four ways via
-  # LAYER_SHARDS (three nightly seeds per leg, run concurrently with
+  # Seven seed legs take one PR fuzzschema seed each (seeds-1 two, run
+  # concurrently; nightly 12 split 2/2/2/2/2/1/1 by SHARD 7). Presence is
+  # split four ways via LAYER_SHARDS (three nightly seeds per leg, run concurrently with
   # FUZZ_PRESENCE_JOBS), placed on seeds-2/3/4/7; race and conflicts stay on
   # seeds-1/5/6, the legs without presence. Schema seeds on the two-seed legs
-  # run concurrently (FUZZ_SCHEMA_JOBS=2 at nightly depth), so no leg stacks
+  # run concurrently (FUZZ_SCHEMA_JOBS=2), so no leg stacks
   # two serial schema seeds behind a presence seed. Webhook event-production
   # seeds share the same SHARD 7, so PR seeds land on seeds-1/2 and nightly
   # seeds one per leg (~20s each), adding no new leg.
@@ -561,12 +561,16 @@ jobs:
           # 31 caught inferred-types lag when a newly added indexed attr was
           # written right after its add-attr; 33/34/36/37/41 are the nightly
           # seeds that caught multi-conflict unique values and the legacy
-          # refresh re-register race.
-          FUZZ_SCHEMA_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '31 32 33 34 35 36 37 38 39 40 41 42' || '31 32 33 34 36 37 41' }}
+          # refresh re-register race. 42 (nightly) caught a card-many attr's
+          # first inferred type landing on only one server's sessions (refresh
+          # timing, see docs/PARITY.md); as the 8th PR seed it shares seeds-1
+          # with 31 and runs concurrently with it (FUZZ_SCHEMA_JOBS=2).
+          FUZZ_SCHEMA_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '31 32 33 34 35 36 37 38 39 40 41 42' || '31 32 33 34 36 37 41 42' }}
           FUZZ_SCHEMA_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '350' || '200' }}
-          # the nightly puts two schema seeds on five of the seven legs; run
-          # them together instead of serialising ~370s behind each other.
-          FUZZ_SCHEMA_JOBS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '2' || '1' }}
+          # the nightly puts two schema seeds on five of the seven legs (a PR
+          # run on seeds-1); run them together instead of serialising them
+          # (~370s nightly, ~240s PR) behind each other.
+          FUZZ_SCHEMA_JOBS: '2'
           FUZZ_STORAGE_SEEDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '201 202 203 204 205 206 207 208 209 210' || '201 202 203' }}
           FUZZ_STORAGE_ROUNDS: ${{ (github.event_name == 'schedule' || inputs.nightly) && '160' || '80' }}
           # storage seeds wait on uploads / downloads; four at a time keeps

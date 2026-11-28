@@ -386,22 +386,27 @@ everything and checks coverage itself, as before.
   A query removed while a legacy refresh is recomputing it can be
   re-registered by the refresh, so a later add-query answers
   `add-query-exists`; that is the same legacy race fuzz-perms handles, so
-  the layer removes the stray query and asks again. `schowner.id` is written
-  immediately after the schema transact that creates it, and the attrs
-  refresh a session receives can be computed before or after that write
-  lands (the schema insert refreshes every session, while the later
-  inferred-types attr update only reaches sessions whose queries mention the
-  attr). The same seed therefore observes `null` or `["string"]` for its
-  inferred-types at setup/subscriptions depending on timing (seed 33 under
-  #80, seed 34 nightly), so that one field is masked only when exactly one
-  side is `null` and the other is an observed type list; every other attr,
+  the layer removes the stray query and asks again. An attr's first
+  inferred type reaches a session only through a refresh that reads the
+  catalog after the first write landed: the attr insert refreshes every
+  session, but the later inferred-types attrs-row update (and any flag flip)
+  only reaches sessions whose query topics name the attr. Two attrs are
+  never named by any subscription the layer holds and are written right after
+  their add-attr: `schowner.id` (seed-link targets; seed 33 under #80, seed
+  34 nightly) and the cardinality-many `sch.dynMany` (not in the `{sch: {}}`
+  entity fetch, which legacy limits to card-one attrs; seed 42 nightly saw
+  rust `null` / legacy `["number"]`, seed 35 the reverse). Their
+  inferred-types field is masked only when exactly one side is `null`, the
+  other is an observed type list, and both servers' fresh-session probes at
+  that checkpoint carry the same non-null list containing it (so a server
+  that never recorded the type still fails); every other attr,
   field and session still has to match. Admin-gated schema
   mutations run on the admin session; inline add-attr and data transacts use
   both sessions. Raw `update-attr` checked-type changes are no-ops in legacy
   and here (they go through indexing jobs instead), and the layer pins that
   instead of applying a type unchecked.
   `node fuzz-schema.mjs <app> <app> <token> [seed] [rounds]`; seeds 31-32 at
-  200 rounds per PR plus the nightly regression seeds 33, 34, 36, 37 and 41
+  200 rounds per PR plus the nightly regression seeds 33, 34, 36, 37, 41 and 42
   (`FUZZ_SCHEMA_SEEDS` / `FUZZ_SCHEMA_ROUNDS`), 12 seeds at 350 nightly,
   two at a time with `FUZZ_SCHEMA_JOBS` when a leg carries two.
 - `fuzz-perms.mjs` — the same grammar under **generated permission rules**
