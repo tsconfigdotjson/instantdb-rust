@@ -1038,7 +1038,9 @@ async fn inferred_types_of(pool: &sqlx::PgPool, app: Uuid, attr: Uuid) -> Option
 /// number-checked blob attr whose first values arrive as two add-triples per
 /// entity in one tx. The tx must OR `number` into its `inferred_types` and
 /// report the attr row as changed (so attr caches drop and refreshes carry
-/// the new catalog); a later tx writing only numbers again is a no-op.
+/// the new catalog); a later tx writing only numbers again is a no-op. The
+/// entity is new, so it also pins the indexed-null backfill: no `null` row
+/// next to the written card-many values.
 #[tokio::test]
 async fn cardinality_many_writes_record_inferred_types() {
     let pool = pool().await;
@@ -1078,6 +1080,8 @@ async fn cardinality_many_writes_record_inferred_types() {
         inferred_types_of(&pool, app, many).await,
         Some(instant_core::attr::INFERRED_NUMBER)
     );
+    // exactly the two written values: legacy indexed-null-triples skips an
+    // attr the creating statement writes, card-many included (no stray null)
     let values: Vec<_> = entity_triples(&pool, app, e)
         .await
         .into_iter()
